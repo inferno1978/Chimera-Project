@@ -1,0 +1,13 @@
+out/
+docs/
+.git/
+.github/
+.idea/
+.vscode/
+*.md
+!src/http/ui/*.md
+src/http/ui/node_modules/
+docs/node_modules/
+.env
+.task/
+vendor/

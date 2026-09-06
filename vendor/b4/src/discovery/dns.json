@@ -1,0 +1,250 @@
+[
+    {
+        "match": [
+            "instagram.com",
+            "facebook.com",
+            "whatsapp.com",
+            "fb.com",
+            "messenger.com",
+            "meta.com",
+            "fbcdn.net",
+            "fbsbx.com",
+            "whatsapp.net",
+            "cdninstagram.com",
+            "facebook.net"
+        ],
+        "geoip": [
+            "facebook"
+        ],
+        "geosite": [
+            "meta"
+        ]
+    },
+    {
+        "match": [
+            "youtube.com",
+            "youtu.be",
+            "googlevideo.com",
+            "ytimg.com",
+            "ggpht.com",
+            "youtube.*"
+        ],
+        "geosite": [
+            "youtube"
+        ]
+    },
+    {
+        "match": [
+            "twitter.com",
+            "x.com",
+            "twimg.com",
+            "t.co",
+            "tweetdeck.com",
+            "pscp.tv",
+            "periscope.tv"
+        ],
+        "geoip": [
+            "twitter"
+        ],
+        "geosite": [
+            "x"
+        ]
+    },
+    {
+        "match": [
+            "telegram.org",
+            "t.me",
+            "telegram.me",
+            "telesco.pe",
+            "tdesktop.com",
+            "telegra.ph"
+        ],
+        "geoip": [
+            "telegram"
+        ],
+        "geosite": [
+            "telegram"
+        ]
+    },
+    {
+        "match": [
+            "discord.com",
+            "discordapp.com",
+            "discord.gg",
+            "discordapp.net",
+            "discord.media",
+            "discordcdn.com"
+        ],
+        "geosite": [
+            "discord"
+        ]
+    },
+    {
+        "match": [
+            "tiktok.*",
+            "tiktokv.com",
+            "tiktokcdn.com",
+            "musical.ly",
+            "tiktokcdn-us.com"
+        ],
+        "geosite": [
+            "tiktok"
+        ]
+    },
+    {
+        "match": [
+            "netflix.*",
+            "nflxvideo.net",
+            "nflximg.net",
+            "nflxso.net",
+            "nflxext.com"
+        ],
+        "geoip": [
+            "netflix"
+        ],
+        "geosite": [
+            "netflix"
+        ]
+    },
+    {
+        "match": [
+            "spotify.com",
+            "spotifycdn.com",
+            "scdn.co",
+            "spoti.fi",
+            "spotify.net"
+        ],
+        "geosite": [
+            "spotify"
+        ]
+    },
+    {
+        "match": [
+            "twitch.tv",
+            "twitchcdn.net",
+            "twitchsvc.net",
+            "jtvnw.net"
+        ],
+        "geosite": [
+            "twitch"
+        ]
+    },
+    {
+        "match": [
+            "google.*",
+            "googleapis.com",
+            "gstatic.com",
+            "googleusercontent.com",
+            "googlesyndication.com",
+            "googleadservices.com",
+            "googletagmanager.com",
+            "doubleclick.net"
+        ],
+        "geoip": [
+            "google"
+        ],
+        "geosite": [
+            "google"
+        ]
+    },
+    {
+        "match": [
+            "proton.me",
+            "protonmail.com",
+            "protonmail.ch",
+            "protonvpn.com",
+            "pm.me"
+        ],
+        "geosite": [
+            "protonmail"
+        ]
+    },
+    {
+        "match": [
+            "signal.org",
+            "signal.art",
+            "whispersystems.org"
+        ],
+        "geosite": [
+            "signal"
+        ]
+    },
+    {
+        "match": [
+            "linkedin.com",
+            "licdn.com",
+            "linkedin.cn"
+        ],
+        "geosite": [
+            "linkedin"
+        ]
+    },
+    {
+        "match": [
+            "reddit.com",
+            "redd.it",
+            "redditstatic.com",
+            "redditmedia.com",
+            "redditspace.com"
+        ],
+        "geosite": [
+            "reddit"
+        ]
+    },
+    {
+        "match": [
+            "soundcloud.com",
+            "sndcdn.com"
+        ],
+        "geosite": [
+            "soundcloud"
+        ]
+    },
+    {
+        "match": [
+            "vimeo.com",
+            "vimeocdn.com"
+        ],
+        "geosite": [
+            "vimeo"
+        ]
+    },
+    {
+        "match": [
+            "zoom.us",
+            "zoom.com",
+            "zoomgov.com"
+        ],
+        "geosite": [
+            "zoom"
+        ]
+    },
+    {
+        "match": [
+            "dropbox.com",
+            "dropboxstatic.com",
+            "dropboxusercontent.com"
+        ],
+        "geosite": [
+            "dropbox"
+        ]
+    },
+    {
+        "match": [
+            "rutracker.org",
+            "rutracker.net"
+        ],
+        "geosite": [
+            "rutracker"
+        ]
+    },
+    {
+        "match": [
+            "pornhub.com",
+            "phncdn.com"
+        ],
+        "geosite": [
+            "pornhub"
+        ]
+    }
+]

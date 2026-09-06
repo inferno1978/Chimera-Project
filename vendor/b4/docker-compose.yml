@@ -1,0 +1,12 @@
+services:
+  b4:
+    image: lavrushin/b4:latest
+    container_name: b4
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_MODULE
+    volumes:
+      - ./config:/etc/b4
+    restart: unless-stopped

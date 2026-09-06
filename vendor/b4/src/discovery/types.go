@@ -1,0 +1,253 @@
+package discovery
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	"github.com/daniellavrushin/b4/config"
+	"github.com/daniellavrushin/b4/nfq"
+)
+
+type CheckStatus string
+
+const (
+	CheckStatusPending  CheckStatus = "pending"
+	CheckStatusRunning  CheckStatus = "running"
+	CheckStatusComplete CheckStatus = "complete"
+	CheckStatusFailed   CheckStatus = "failed"
+	CheckStatusCanceled CheckStatus = "canceled"
+)
+
+type DiscoveryPhase string
+
+const (
+	PhaseBaseline    DiscoveryPhase = "baseline"
+	PhaseStrategy    DiscoveryPhase = "strategy_detection"
+	PhaseOptimize    DiscoveryPhase = "optimization"
+	PhaseCombination DiscoveryPhase = "combination"
+	PhaseDNS         DiscoveryPhase = "dns_detection"
+	PhaseCached      DiscoveryPhase = "cached"
+	PhaseConfirm     DiscoveryPhase = "confirmation"
+)
+
+type StrategyFamily string
+
+const (
+	FamilyNone        StrategyFamily = "none"
+	FamilyTCPFrag     StrategyFamily = "tcp_frag"
+	FamilyTLSRec      StrategyFamily = "tls_record"
+	FamilyOOB         StrategyFamily = "oob"
+	FamilyIPFrag      StrategyFamily = "ip_frag"
+	FamilyFakeSNI     StrategyFamily = "fake_sni"
+	FamilySACK        StrategyFamily = "sack"
+	FamilySynFake     StrategyFamily = "syn_fake"
+	FamilyDesync      StrategyFamily = "desync"
+	FamilyWindow      StrategyFamily = "window"
+	FamilyDelay       StrategyFamily = "delay"
+	FamilyMutation    StrategyFamily = "mutation"
+	FamilyDisorder    StrategyFamily = "disorder"
+	FamilyOverlap     StrategyFamily = "overlap"
+	FamilyExtSplit    StrategyFamily = "extsplit"
+	FamilyFirstByte   StrategyFamily = "firstbyte"
+	FamilyCombo       StrategyFamily = "combo"
+	FamilyHybrid      StrategyFamily = "hybrid"
+	FamilyIncoming    StrategyFamily = "incoming"
+	FamilyTCPMD5      StrategyFamily = "tcpmd5"
+	FamilyAltAddress  StrategyFamily = "alt_address"
+	FamilyDNSRedirect StrategyFamily = "dns_redirect"
+)
+
+type Outcome string
+
+const (
+	OutcomeFound              Outcome = "found"
+	OutcomeWorksWithoutBypass Outcome = "works_without_bypass"
+	OutcomeAddressBlocked     Outcome = "address_blocked"
+	OutcomeNotFound           Outcome = "not_found"
+)
+
+const (
+	SourceWeb      = "web"
+	SourceWatchdog = "watchdog"
+	SourceMCP      = "mcp"
+)
+
+type CheckResult struct {
+	ContentSize int64             `json:"content_size,omitempty"`
+	Domain      string            `json:"domain"`
+	Status      CheckStatus       `json:"status"`
+	Duration    time.Duration     `json:"duration"`
+	Speed       float64           `json:"speed"`
+	BytesRead   int64             `json:"bytes_read"`
+	Error       string            `json:"error,omitempty"`
+	Timestamp   time.Time         `json:"timestamp"`
+	StatusCode  int               `json:"status_code"`
+	FinalHost   string            `json:"final_host,omitempty"`
+	UsedIP      string            `json:"used_ip,omitempty"`
+	Set         *config.SetConfig `json:"set"`
+}
+
+type DomainInput struct {
+	Domain   string `json:"domain"`
+	CheckURL string `json:"check_url"`
+}
+
+type CheckSuite struct {
+	Id                     string                            `json:"id"`
+	Status                 CheckStatus                       `json:"status"`
+	StartTime              time.Time                         `json:"start_time"`
+	EndTime                time.Time                         `json:"end_time"`
+	TotalChecks            int                               `json:"total_checks"`
+	CompletedChecks        int                               `json:"completed_checks"`
+	SuccessfulChecks       int                               `json:"successful_checks"`
+	FailedChecks           int                               `json:"failed_checks"`
+	DomainDiscoveryResults map[string]*DomainDiscoveryResult `json:"domain_discovery_results,omitempty"`
+	StrategyGroups         []StrategyGroup                   `json:"strategy_groups,omitempty"`
+	CheckURL               string                            `json:"check_url"`
+	Domain                 string                            `json:"domain"`
+	Domains                []DomainInput                     `json:"domains,omitempty"`
+	CurrentDomain          string                            `json:"current_domain,omitempty"`
+	CurrentPhase           DiscoveryPhase                    `json:"current_phase,omitempty"`
+	Source                 string                            `json:"source,omitempty"`
+	mu                     sync.RWMutex                      `json:"-"`
+	cancel                 chan struct{}                     `json:"-"`
+}
+
+type DomainPresetResult struct {
+	PresetName   string            `json:"preset_name"`
+	Family       StrategyFamily    `json:"family,omitempty"`
+	Phase        DiscoveryPhase    `json:"phase,omitempty"`
+	Priority     int               `json:"priority,omitempty"`
+	Status       CheckStatus       `json:"status"`
+	Duration     time.Duration     `json:"duration"`
+	Speed        float64           `json:"speed"`
+	BytesRead    int64             `json:"bytes_read"`
+	Error        string            `json:"error,omitempty"`
+	StatusCode   int               `json:"status_code"`
+	Confirmed    int               `json:"confirmed,omitempty"`
+	ConfirmTries int               `json:"confirm_tries,omitempty"`
+	Set          *config.SetConfig `json:"set,omitempty"`
+}
+
+type StrategyGroup struct {
+	WinnerPreset string            `json:"winner_preset"`
+	Family       StrategyFamily    `json:"family"`
+	Domains      []string          `json:"domains"`
+	Set          *config.SetConfig `json:"set,omitempty"`
+	MedianSpeed  float64           `json:"median_speed,omitempty"`
+}
+
+type DomainDiscoveryResult struct {
+	Domain        string                         `json:"domain"`
+	Url           string                         `json:"url"`
+	BestPreset    string                         `json:"best_preset"`
+	BestSpeed     float64                        `json:"best_speed"`
+	BestSuccess   bool                           `json:"best_success"`
+	Results       map[string]*DomainPresetResult `json:"results"`
+	BaselineSpeed float64                        `json:"baseline_speed,omitempty"`
+	BaselineWorks bool                           `json:"baseline_works,omitempty"`
+	Confirmed     int                            `json:"confirmed,omitempty"`
+	ConfirmTries  int                            `json:"confirm_tries,omitempty"`
+	FinalHost     string                         `json:"final_host,omitempty"`
+	DNSResult     *DNSDiscoveryResult            `json:"dns_result,omitempty"`
+	Outcome       Outcome                        `json:"outcome,omitempty"`
+	Unconfirmed   bool                           `json:"unconfirmed,omitempty"`
+}
+
+func (dr *DomainDiscoveryResult) refreshOutcome(finished bool) {
+	switch {
+	case dr.BaselineWorks:
+		dr.Outcome = OutcomeWorksWithoutBypass
+	case dr.BestSuccess && dr.BestPreset != "" && dr.BestPreset != presetNoBypass:
+		dr.Outcome = OutcomeFound
+	case dr.DNSResult.addressBlocked():
+		dr.Outcome = OutcomeAddressBlocked
+	case finished:
+		dr.Outcome = OutcomeNotFound
+	default:
+		dr.Outcome = ""
+	}
+	dr.Unconfirmed = dr.Outcome == OutcomeFound && (dr.ConfirmTries == 0 || dr.Confirmed < dr.ConfirmTries)
+}
+
+type ConfigPreset struct {
+	Name         string           `json:"name"`
+	Description  string           `json:"description"`
+	Family       StrategyFamily   `json:"family"`
+	Phase        DiscoveryPhase   `json:"phase"`
+	Config       config.SetConfig `json:"config"`
+	Priority     int              `json:"priority"`
+	FixedPayload bool             `json:"-"`
+}
+
+type DNSProbeResult struct {
+	Server     string        `json:"server"`
+	Fragmented bool          `json:"fragmented"`
+	ResolvedIP string        `json:"resolved_ip"`
+	ExpectedIP string        `json:"expected_ip"`
+	IsPoisoned bool          `json:"is_poisoned"`
+	Works      bool          `json:"works"`
+	Latency    time.Duration `json:"latency"`
+}
+
+type DNSDiscoveryResult struct {
+	IsPoisoned       bool             `json:"is_poisoned"`
+	TransportBlocked bool             `json:"transport_blocked,omitempty"`
+	ExpectedIPs      []string         `json:"expected_ips,omitempty"`
+	BestServer       string           `json:"best_server,omitempty"`
+	BestDoHURL       string           `json:"best_doh_url,omitempty"`
+	NeedsFragment    bool             `json:"needs_fragment"`
+	ReferenceServes  bool             `json:"reference_serves,omitempty"`
+	SystemServes     bool             `json:"system_serves,omitempty"`
+	ProbeResults     []DNSProbeResult `json:"probe_results,omitempty"`
+	AlternativeIPs   []string         `json:"alternative_ips,omitempty"`
+	AltScan          *AltScanSummary  `json:"alt_scan,omitempty"`
+}
+
+func (r *DNSDiscoveryResult) addressBlocked() bool {
+	return r != nil && r.TransportBlocked && len(r.AlternativeIPs) == 0
+}
+
+type PayloadTestResult struct {
+	Speed   float64 `json:"speed"`
+	Payload int     `json:"payload"`
+	Works   bool    `json:"works"`
+}
+
+type DiscoverySuite struct {
+	*CheckSuite
+	networkBaseline float64
+	optimalTTL      uint8
+
+	ctx       context.Context
+	ctxCancel context.CancelFunc
+
+	pool          *nfq.Pool
+	cfg           *config.Config
+	domainResults map[string]*DomainDiscoveryResult
+
+	workingPayloads []PayloadTestResult
+	bestPayload     int
+	bestPayloadFile string
+
+	customPayloads []CustomPayload
+
+	dnsResults      map[string]*DNSDiscoveryResult
+	discoveredDNS   config.DNSConfig
+	skipDNS         bool
+	skipCache       bool
+	validationTries int
+	tlsVersion      string // "auto", "tls12", "tls13"
+	ipVersion       string // "auto", "ipv4", "ipv6"
+	flowMark        uint
+
+	discoveryCache *DiscoveryCache
+	plainSets      map[string]*config.SetConfig
+}
+
+type CustomPayload struct {
+	Name     string `json:"name"`
+	Filepath string `json:"filepath"`
+	Data     []byte `json:"-"`
+}

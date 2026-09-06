@@ -1,0 +1,1664 @@
+package tables
+
+import (
+	"fmt"
+	"net"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/daniellavrushin/b4/config"
+)
+
+func testCfgPtr(cfg *config.Config) *atomic.Pointer[config.Config] {
+	p := &atomic.Pointer[config.Config]{}
+	p.Store(cfg)
+	return p
+}
+
+func TestIPTablesManager_BuildNFQSpec(t *testing.T) {
+	cfg := config.NewConfig()
+	manager := NewIPTablesManager(&cfg, false)
+
+	t.Run("single thread", func(t *testing.T) {
+		spec := manager.buildNFQSpec(100, 1)
+
+		expected := []string{"-j", "NFQUEUE", "--queue-num", "100", "--queue-bypass"}
+		if len(spec) != len(expected) {
+			t.Fatalf("expected %d elements, got %d", len(expected), len(spec))
+		}
+		for i, v := range expected {
+			if spec[i] != v {
+				t.Errorf("spec[%d] = %q, want %q", i, spec[i], v)
+			}
+		}
+	})
+
+	t.Run("multiple threads", func(t *testing.T) {
+		spec := manager.buildNFQSpec(100, 4)
+
+		expected := []string{"-j", "NFQUEUE", "--queue-balance", "100:103", "--queue-bypass"}
+		if len(spec) != len(expected) {
+			t.Fatalf("expected %d elements, got %d", len(expected), len(spec))
+		}
+		for i, v := range expected {
+			if spec[i] != v {
+				t.Errorf("spec[%d] = %q, want %q", i, spec[i], v)
+			}
+		}
+	})
+
+	t.Run("queue balance range calculation", func(t *testing.T) {
+		spec := manager.buildNFQSpec(537, 8)
+
+		// Should be 537:544 (537 + 8 - 1 = 544)
+		if spec[3] != "537:544" {
+			t.Errorf("expected queue-balance 537:544, got %s", spec[3])
+		}
+	})
+}
+
+func TestNFTablesManager_BuildNFQueueAction(t *testing.T) {
+	t.Run("single thread", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.Queue.StartNum = 100
+		cfg.Queue.Threads = 1
+		manager := NewNFTablesManager(&cfg)
+
+		action := manager.buildNFQueueAction()
+		expected := "queue num 100 bypass"
+		if action != expected {
+			t.Errorf("got %q, want %q", action, expected)
+		}
+	})
+
+	t.Run("multiple threads", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.Queue.StartNum = 100
+		cfg.Queue.Threads = 4
+		manager := NewNFTablesManager(&cfg)
+
+		action := manager.buildNFQueueAction()
+		expected := "queue num 100-103 bypass"
+		if action != expected {
+			t.Errorf("got %q, want %q", action, expected)
+		}
+	})
+}
+
+func TestNewIPTablesManager(t *testing.T) {
+	cfg := config.NewConfig()
+
+	t.Run("standard", func(t *testing.T) {
+		manager := NewIPTablesManager(&cfg, false)
+		if manager == nil {
+			t.Fatal("expected non-nil manager")
+		}
+		if manager.cfg != &cfg {
+			t.Error("manager.cfg not set correctly")
+		}
+		if manager.useLegacy {
+			t.Error("useLegacy should be false")
+		}
+	})
+
+	t.Run("legacy", func(t *testing.T) {
+		manager := NewIPTablesManager(&cfg, true)
+		if manager == nil {
+			t.Fatal("expected non-nil manager")
+		}
+		if !manager.useLegacy {
+			t.Error("useLegacy should be true")
+		}
+	})
+}
+
+func TestIPTablesManager_BinaryNames(t *testing.T) {
+	cfg := config.NewConfig()
+
+	t.Run("standard binaries", func(t *testing.T) {
+		manager := NewIPTablesManager(&cfg, false)
+		if manager.iptablesBin() != backendIPTables {
+			t.Errorf("expected iptables, got %s", manager.iptablesBin())
+		}
+		if manager.ip6tablesBin() != backendIP6Tables {
+			t.Errorf("expected ip6tables, got %s", manager.ip6tablesBin())
+		}
+	})
+
+	t.Run("legacy binaries", func(t *testing.T) {
+		manager := NewIPTablesManager(&cfg, true)
+		if manager.iptablesBin() != backendIPTablesLegacy {
+			t.Errorf("expected iptables-legacy, got %s", manager.iptablesBin())
+		}
+		if manager.ip6tablesBin() != backendIP6TablesLegacy {
+			t.Errorf("expected ip6tables-legacy, got %s", manager.ip6tablesBin())
+		}
+	})
+}
+
+func TestNewNFTablesManager(t *testing.T) {
+	cfg := config.NewConfig()
+	manager := NewNFTablesManager(&cfg)
+
+	if manager == nil {
+		t.Fatal("expected non-nil manager")
+	}
+	if manager.cfg != &cfg {
+		t.Error("manager.cfg not set correctly")
+	}
+}
+
+func TestNewMonitor(t *testing.T) {
+	t.Run("default interval", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.System.Tables.MonitorInterval = 0 // Will use fallback
+
+		monitor := NewMonitor(testCfgPtr(&cfg))
+
+		if monitor == nil {
+			t.Fatal("expected non-nil monitor")
+		}
+		if monitor.interval < 1e9 { // 1 second in nanoseconds
+			t.Error("interval should be at least 1 second")
+		}
+	})
+
+	t.Run("custom interval", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.System.Tables.MonitorInterval = 30
+
+		monitor := NewMonitor(testCfgPtr(&cfg))
+
+		if monitor.interval.Seconds() != 30 {
+			t.Errorf("expected 30s interval, got %v", monitor.interval)
+		}
+	})
+}
+
+func TestManifest_Apply_Empty(t *testing.T) {
+	m := Manifest{}
+	err := m.Apply()
+	if err != nil {
+		t.Errorf("empty manifest should apply without error: %v", err)
+	}
+}
+
+func TestSysctlSetting(t *testing.T) {
+	// Just test struct creation - actual apply/revert requires root
+	s := SysctlSetting{
+		Name:    "net.test.setting",
+		Desired: "1",
+		Revert:  "0",
+	}
+
+	if s.Name != "net.test.setting" {
+		t.Error("Name not set")
+	}
+	if s.Desired != "1" {
+		t.Error("Desired not set")
+	}
+	if s.Revert != "0" {
+		t.Error("Revert not set")
+	}
+}
+
+func TestRule_Struct(t *testing.T) {
+
+	r := Rule{
+		IPT:   "iptables",
+		Table: "mangle",
+		Chain: "B4",
+		Spec:  []string{"-p", "tcp", "--dport", "443"},
+	}
+
+	if r.IPT != "iptables" {
+		t.Error("IPT not set")
+	}
+	if r.Table != "mangle" {
+		t.Error("Table not set")
+	}
+	if r.Chain != "B4" {
+		t.Error("Chain not set")
+	}
+	if len(r.Spec) != 4 {
+		t.Error("Spec not set correctly")
+	}
+}
+
+func TestChain_Struct(t *testing.T) {
+
+	c := Chain{
+		IPT:   "iptables",
+		Table: "mangle",
+		Name:  "B4",
+	}
+
+	if c.IPT != "iptables" {
+		t.Error("IPT not set")
+	}
+	if c.Table != "mangle" {
+		t.Error("Table not set")
+	}
+	if c.Name != "B4" {
+		t.Error("Name not set")
+	}
+}
+
+func TestAddRules_SkipSetup(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.System.Tables.SkipSetup = true
+
+	err := AddRules(&cfg)
+	if err != nil {
+		t.Errorf("AddRules with SkipSetup should return nil: %v", err)
+	}
+}
+
+func TestClearRules_SkipSetup(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.System.Tables.SkipSetup = true
+
+	err := ClearRules(&cfg)
+	if err != nil {
+		t.Errorf("ClearRules with SkipSetup should return nil: %v", err)
+	}
+}
+
+func TestMonitor_StartStop_Disabled(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.System.Tables.SkipSetup = true
+
+	monitor := NewMonitor(testCfgPtr(&cfg))
+
+	// Should not panic or block
+	monitor.Start()
+	monitor.Stop()
+}
+
+func TestMonitor_StartStop_IntervalZero(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.System.Tables.MonitorInterval = 0
+
+	monitor := NewMonitor(testCfgPtr(&cfg))
+
+	// interval <= 0 disables monitor
+	monitor.Start()
+	monitor.Stop()
+}
+
+func TestHasBinary(t *testing.T) {
+	// "sh" should exist on any unix system
+	if !hasBinary("sh") {
+		t.Error("sh should be found")
+	}
+
+	// Non-existent binary
+	if hasBinary("nonexistent_binary_xyz123") {
+		t.Error("nonexistent binary should not be found")
+	}
+}
+
+func TestNFTablesConstants(t *testing.T) {
+	if nftTableName != "b4_mangle" {
+		t.Errorf("nftTableName = %q, want b4_mangle", nftTableName)
+	}
+	if nftChainName != "b4_chain" {
+		t.Errorf("nftChainName = %q, want b4_chain", nftChainName)
+	}
+}
+
+func TestIPTablesManager_BuildManifest_NoIPTables(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.Queue.IPv4Enabled = false
+	cfg.Queue.IPv6Enabled = false
+
+	manager := NewIPTablesManager(&cfg, false)
+	_, err := manager.buildManifest()
+
+	if err == nil {
+		t.Error("expected error when no iptables binaries enabled")
+	}
+}
+
+func TestLoadSysctlSnapshot_NoFile(t *testing.T) {
+	// Temporarily change path to non-existent file
+	origPath := sysctlSnapPath
+	sysctlSnapPath = "/tmp/nonexistent_test_snapshot.json"
+	defer func() { sysctlSnapPath = origPath }()
+
+	snap := loadSysctlSnapshot()
+	if snap == nil {
+		t.Error("should return empty map, not nil")
+	}
+	if len(snap) != 0 {
+		t.Error("should return empty map for non-existent file")
+	}
+}
+
+func TestDetectFirewallBackend_ConfigOverride(t *testing.T) {
+	t.Run("force nftables", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.System.Tables.Engine = backendNFTables
+		if got := detectFirewallBackend(&cfg); got != backendNFTables {
+			t.Errorf("expected nftables, got %s", got)
+		}
+	})
+
+	t.Run("force nft shorthand", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.System.Tables.Engine = "nft"
+		if got := detectFirewallBackend(&cfg); got != backendNFTables {
+			t.Errorf("expected nftables, got %s", got)
+		}
+	})
+
+	t.Run("force iptables", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.System.Tables.Engine = backendIPTables
+		if got := detectFirewallBackend(&cfg); got != backendIPTables {
+			t.Errorf("expected iptables, got %s", got)
+		}
+	})
+
+	t.Run("force iptables-legacy", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.System.Tables.Engine = backendIPTablesLegacy
+		if got := detectFirewallBackend(&cfg); got != backendIPTablesLegacy {
+			t.Errorf("expected iptables-legacy, got %s", got)
+		}
+	})
+
+	t.Run("case insensitive", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.System.Tables.Engine = "NFTables"
+		if got := detectFirewallBackend(&cfg); got != "nftables" {
+			t.Errorf("expected nftables, got %s", got)
+		}
+	})
+
+	t.Run("unknown value falls through to auto-detect", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.System.Tables.Engine = "bogus"
+		// Should not return "bogus" - falls through to auto-detection
+		got := detectFirewallBackend(&cfg)
+		if got == "bogus" {
+			t.Error("unknown engine value should not be returned as-is")
+		}
+	})
+
+	t.Run("empty string means auto-detect", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.System.Tables.Engine = ""
+		// Should not panic, should return some valid backend
+		got := detectFirewallBackend(&cfg)
+		if got != backendNFTables && got != backendIPTables && got != backendIPTablesLegacy {
+			t.Errorf("unexpected backend: %s", got)
+		}
+	})
+}
+
+func TestChunkPorts(t *testing.T) {
+	t.Run("small list", func(t *testing.T) {
+		ports := []string{"80", "443", "8080"}
+		chunks := chunkPorts(ports, 15)
+		if len(chunks) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(chunks))
+		}
+		if len(chunks[0]) != 3 {
+			t.Errorf("expected 3 ports in chunk, got %d", len(chunks[0]))
+		}
+	})
+
+	t.Run("exact boundary", func(t *testing.T) {
+		ports := make([]string, 15)
+		for i := range ports {
+			ports[i] = "80"
+		}
+		chunks := chunkPorts(ports, 15)
+		if len(chunks) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(chunks))
+		}
+	})
+
+	t.Run("split into multiple chunks", func(t *testing.T) {
+		ports := make([]string, 20)
+		for i := range ports {
+			ports[i] = "80"
+		}
+		chunks := chunkPorts(ports, 15)
+		if len(chunks) != 2 {
+			t.Fatalf("expected 2 chunks, got %d", len(chunks))
+		}
+		if len(chunks[0]) != 15 {
+			t.Errorf("first chunk should have 15 ports, got %d", len(chunks[0]))
+		}
+		if len(chunks[1]) != 5 {
+			t.Errorf("second chunk should have 5 ports, got %d", len(chunks[1]))
+		}
+	})
+
+	t.Run("empty list", func(t *testing.T) {
+		chunks := chunkPorts([]string{}, 15)
+		if len(chunks) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(chunks))
+		}
+		if len(chunks[0]) != 0 {
+			t.Errorf("chunk should be empty, got %d", len(chunks[0]))
+		}
+	})
+}
+
+func TestRouteSanitizeSetID(t *testing.T) {
+	t.Run("alphanumeric passthrough", func(t *testing.T) {
+		result := routeSanitizeSetID("mySet1")
+		if len(result) == 0 {
+			t.Fatal("expected non-empty result")
+		}
+		if result[:6] != "myset1" {
+			t.Errorf("expected prefix 'myset1', got %q", result)
+		}
+	})
+
+	t.Run("special chars stripped", func(t *testing.T) {
+		result := routeSanitizeSetID("my-Set!@#2")
+		if len(result) == 0 {
+			t.Fatal("expected non-empty result")
+		}
+		for _, c := range result {
+			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+				t.Errorf("unexpected char %c in sanitized ID", c)
+			}
+		}
+	})
+
+	t.Run("empty input returns default with suffix", func(t *testing.T) {
+		result := routeSanitizeSetID("")
+		if len(result) == 0 {
+			t.Fatal("expected non-empty result")
+		}
+		if result[:7] != "default" {
+			t.Errorf("expected 'default' prefix, got %q", result)
+		}
+	})
+
+	t.Run("truncated to 20 chars", func(t *testing.T) {
+		result := routeSanitizeSetID("abcdefghijklmnopqrstuvwxyz0123456789")
+		if len(result) > 20 {
+			t.Errorf("expected max 20 chars, got %d: %q", len(result), result)
+		}
+	})
+
+	t.Run("deterministic", func(t *testing.T) {
+		a := routeSanitizeSetID("test_set")
+		b := routeSanitizeSetID("test_set")
+		if a != b {
+			t.Errorf("expected deterministic output, got %q and %q", a, b)
+		}
+	})
+
+	t.Run("different inputs produce different outputs", func(t *testing.T) {
+		a := routeSanitizeSetID("set_a")
+		b := routeSanitizeSetID("set_b")
+		if a == b {
+			t.Errorf("expected different outputs for different inputs, both got %q", a)
+		}
+	})
+}
+
+func TestRouteBuildSetNames(t *testing.T) {
+	v4, v6 := routeBuildSetNames("test")
+	if v4 == "" || v6 == "" {
+		t.Fatal("expected non-empty set names")
+	}
+	if v4[len(v4)-3:] != "_v4" {
+		t.Errorf("v4 set should end with '_v4', got %q", v4)
+	}
+	if v6[len(v6)-3:] != "_v6" {
+		t.Errorf("v6 set should end with '_v6', got %q", v6)
+	}
+	if v4[:4] != "b4r_" {
+		t.Errorf("v4 set should start with 'b4r_', got %q", v4)
+	}
+}
+
+func TestRouteBuildChainNames(t *testing.T) {
+	pre, out, nat := routeBuildChainNames("test")
+	if pre == "" || out == "" || nat == "" {
+		t.Fatal("expected non-empty chain names")
+	}
+	if pre[len(pre)-4:] != "_pre" {
+		t.Errorf("pre chain should end with '_pre', got %q", pre)
+	}
+	if out[len(out)-4:] != "_out" {
+		t.Errorf("out chain should end with '_out', got %q", out)
+	}
+	if nat[len(nat)-4:] != "_nat" {
+		t.Errorf("nat chain should end with '_nat', got %q", nat)
+	}
+}
+
+func TestRouteBuildNamesFitKernelLimits(t *testing.T) {
+	setIDs := []string{
+		"d642060b-ff59-4ae1-9f3b-8c1d0e7a4b22",
+		"11111111-1111-1111-1111-111111111111",
+		"abcdefghijklmnopqrstuvwxyz0123456789",
+		strings.Repeat("z", 200),
+		"tmdb",
+		"",
+	}
+	for _, id := range setIDs {
+		pre, out, nat := routeBuildChainNames(id)
+		quic := routeBuildQUICChainName(id)
+		for _, name := range []string{pre, out, nat, quic} {
+			if len(name) > routeMaxChainNameLen {
+				t.Errorf("chain name %q for set %q is %d chars, iptables rejects anything over %d",
+					name, id, len(name), routeMaxChainNameLen)
+			}
+		}
+
+		v4, v6 := routeBuildSetNames(id)
+		for _, name := range []string{v4, v6} {
+			if len(name) > routeMaxIPSetNameLen {
+				t.Errorf("ipset name %q for set %q is %d chars, ipset rejects anything over %d",
+					name, id, len(name), routeMaxIPSetNameLen)
+			}
+		}
+	}
+}
+
+func TestRouteNormalizedSources(t *testing.T) {
+	t.Run("nil input", func(t *testing.T) {
+		result := routeNormalizedSources(nil)
+		if result != nil {
+			t.Errorf("expected nil, got %v", result)
+		}
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		result := routeNormalizedSources([]string{})
+		if result != nil {
+			t.Errorf("expected nil, got %v", result)
+		}
+	})
+
+	t.Run("deduplication", func(t *testing.T) {
+		result := routeNormalizedSources([]string{"eth0", "eth1", "eth0"})
+		if len(result) != 2 {
+			t.Fatalf("expected 2, got %d: %v", len(result), result)
+		}
+	})
+
+	t.Run("sorted output", func(t *testing.T) {
+		result := routeNormalizedSources([]string{"wlan0", "eth0", "br0"})
+		if result[0] != "br0" || result[1] != "eth0" || result[2] != "wlan0" {
+			t.Errorf("expected sorted, got %v", result)
+		}
+	})
+
+	t.Run("whitespace trimmed", func(t *testing.T) {
+		result := routeNormalizedSources([]string{" eth0 ", "", "  "})
+		if len(result) != 1 || result[0] != "eth0" {
+			t.Errorf("expected [eth0], got %v", result)
+		}
+	})
+}
+
+func TestRouteQueueBypassMark(t *testing.T) {
+	t.Run("nil config", func(t *testing.T) {
+		if got := routeQueueBypassMark(nil); got != 0x8000 {
+			t.Errorf("expected 0x8000, got 0x%x", got)
+		}
+	})
+
+	t.Run("zero mark uses default", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.Queue.Mark = 0
+		if got := routeQueueBypassMark(&cfg); got != 0x8000 {
+			t.Errorf("expected 0x8000, got 0x%x", got)
+		}
+	})
+
+	t.Run("custom mark", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.Queue.Mark = 0x1234
+		if got := routeQueueBypassMark(&cfg); got != 0x1234 {
+			t.Errorf("expected 0x1234, got 0x%x", got)
+		}
+	})
+}
+
+func TestRouteCollectEntries(t *testing.T) {
+	t.Run("nil set", func(t *testing.T) {
+		v4, v6 := routeCollectEntries(nil)
+		if v4 != nil || v6 != nil {
+			t.Error("expected nil for nil set")
+		}
+	})
+
+	t.Run("empty IPs", func(t *testing.T) {
+		set := &config.SetConfig{}
+		v4, v6 := routeCollectEntries(set)
+		if v4 != nil || v6 != nil {
+			t.Error("expected nil for empty IPs")
+		}
+	})
+
+	t.Run("IPv4 addresses", func(t *testing.T) {
+		set := &config.SetConfig{}
+		set.Targets.IpsToMatch = []string{"1.2.3.4", "5.6.7.8"}
+		v4, v6 := routeCollectEntries(set)
+		if len(v4) != 2 {
+			t.Errorf("expected 2 v4, got %d", len(v4))
+		}
+		if len(v6) != 0 {
+			t.Errorf("expected 0 v6, got %d", len(v6))
+		}
+	})
+
+	t.Run("IPv6 addresses", func(t *testing.T) {
+		set := &config.SetConfig{}
+		set.Targets.IpsToMatch = []string{"2001:db8::1", "fe80::1"}
+		v4, v6 := routeCollectEntries(set)
+		if len(v4) != 0 {
+			t.Errorf("expected 0 v4, got %d", len(v4))
+		}
+		if len(v6) != 2 {
+			t.Errorf("expected 2 v6, got %d", len(v6))
+		}
+	})
+
+	t.Run("CIDR notation", func(t *testing.T) {
+		set := &config.SetConfig{}
+		set.Targets.IpsToMatch = []string{"10.0.0.0/24", "2001:db8::/32"}
+		v4, v6 := routeCollectEntries(set)
+		if len(v4) != 1 {
+			t.Errorf("expected 1 v4, got %d", len(v4))
+		}
+		if len(v6) != 1 {
+			t.Errorf("expected 1 v6, got %d", len(v6))
+		}
+	})
+
+	t.Run("deduplication", func(t *testing.T) {
+		set := &config.SetConfig{}
+		set.Targets.IpsToMatch = []string{"1.2.3.4", "1.2.3.4", "1.2.3.4"}
+		v4, _ := routeCollectEntries(set)
+		if len(v4) != 1 {
+			t.Errorf("expected 1 deduplicated, got %d", len(v4))
+		}
+	})
+
+	t.Run("invalid entries skipped", func(t *testing.T) {
+		set := &config.SetConfig{}
+		set.Targets.IpsToMatch = []string{"not-an-ip", "", "  ", "1.2.3.4"}
+		v4, v6 := routeCollectEntries(set)
+		if len(v4) != 1 {
+			t.Errorf("expected 1 v4, got %d", len(v4))
+		}
+		if len(v6) != 0 {
+			t.Errorf("expected 0 v6, got %d", len(v6))
+		}
+	})
+
+	t.Run("mixed v4 and v6", func(t *testing.T) {
+		set := &config.SetConfig{}
+		set.Targets.IpsToMatch = []string{"1.2.3.4", "2001:db8::1", "10.0.0.1"}
+		v4, v6 := routeCollectEntries(set)
+		if len(v4) != 2 {
+			t.Errorf("expected 2 v4, got %d", len(v4))
+		}
+		if len(v6) != 1 {
+			t.Errorf("expected 1 v6, got %d", len(v6))
+		}
+	})
+}
+
+func TestRoutingRulesPresent(t *testing.T) {
+	origCache := routeRuleCache
+	defer func() { routeRuleCache = origCache }()
+
+	t.Run("nil config", func(t *testing.T) {
+		if !RoutingRulesPresent(nil) {
+			t.Error("expected true for nil config")
+		}
+	})
+
+	t.Run("empty cache means nothing to verify", func(t *testing.T) {
+		routeRuleCache = make(map[string]routeState)
+		cfg := config.NewConfig()
+		if !RoutingRulesPresent(&cfg) {
+			t.Error("expected true when no routing rules are cached")
+		}
+	})
+}
+
+func TestRoutingLearnIP(t *testing.T) {
+	origCache := routeRuleCache
+	origLearn := routeLearnLast
+	defer func() {
+		routeRuleCache = origCache
+		routeLearnLast = origLearn
+	}()
+
+	newSet := func(mode string) *config.SetConfig {
+		s := &config.SetConfig{Id: "s1"}
+		s.Routing.Enabled = true
+		s.Routing.Mode = mode
+		s.Routing.EgressInterface = "wg0"
+		return s
+	}
+
+	t.Run("block mode is skipped", func(t *testing.T) {
+		routeRuleCache = make(map[string]routeState)
+		routeLearnLast = make(map[string]time.Time)
+		cfg := config.NewConfig()
+		RoutingLearnIP(&cfg, newSet(config.RoutingModeBlock), net.ParseIP("1.2.3.4"))
+		if len(routeLearnLast) != 0 {
+			t.Error("block-mode set must not be learned into the routing ipset")
+		}
+	})
+
+	t.Run("set with no installed rule is a no-op", func(t *testing.T) {
+		routeRuleCache = make(map[string]routeState)
+		routeLearnLast = make(map[string]time.Time)
+		cfg := config.NewConfig()
+		RoutingLearnIP(&cfg, newSet(config.RoutingModeInterface), net.ParseIP("1.2.3.4"))
+		if len(routeLearnLast) != 0 {
+			t.Error("set absent from routeRuleCache should be a no-op")
+		}
+	})
+
+	t.Run("nil args are safe", func(t *testing.T) {
+		RoutingLearnIP(nil, nil, nil)
+	})
+}
+
+func TestRoutingLearnHost(t *testing.T) {
+	origCache := routeRuleCache
+	origHosts := routeLearnedHosts
+	origResolved := routeHostResolvedAt
+	defer func() {
+		routeRuleCache = origCache
+		routeLearnedHosts = origHosts
+		routeHostResolvedAt = origResolved
+	}()
+
+	newSet := func() *config.SetConfig {
+		s := &config.SetConfig{Id: "s1"}
+		s.Routing.Enabled = true
+		s.Routing.Mode = config.RoutingModeProxy
+		s.Targets.SNIDomains = []string{"ipinfo.io"}
+		return s
+	}
+
+	reset := func() {
+		routeRuleCache = map[string]routeState{"s1": {mode: config.RoutingModeProxy}}
+		routeLearnedHosts = make(map[string]map[string]time.Time)
+		routeHostResolvedAt = make(map[string]time.Time)
+	}
+
+	t.Run("set with no installed rule is a no-op", func(t *testing.T) {
+		reset()
+		routeRuleCache = make(map[string]routeState)
+		cfg := config.NewConfig()
+		RoutingLearnHost(&cfg, newSet(), "cdn.test.invalid")
+		if len(routeLearnedHosts) != 0 {
+			t.Error("set absent from routeRuleCache should be a no-op")
+		}
+	})
+
+	t.Run("configured domain is not relearned", func(t *testing.T) {
+		reset()
+		cfg := config.NewConfig()
+		RoutingLearnHost(&cfg, newSet(), "IPinfo.IO")
+		if len(routeLearnedHosts) != 0 {
+			t.Error("a domain already in Targets.SNIDomains is covered by pre-resolve")
+		}
+	})
+
+	t.Run("block mode and domain-only are skipped", func(t *testing.T) {
+		reset()
+		cfg := config.NewConfig()
+
+		blockSet := newSet()
+		blockSet.Routing.Mode = config.RoutingModeBlock
+		RoutingLearnHost(&cfg, blockSet, "cdn.test.invalid")
+
+		domainOnly := newSet()
+		domainOnly.Targets.DomainOnly = true
+		RoutingLearnHost(&cfg, domainOnly, "cdn.test.invalid")
+
+		if len(routeLearnedHosts) != 0 {
+			t.Errorf("block-mode and domain-only sets must not learn hosts, got %v", routeLearnedHosts)
+		}
+	})
+
+	t.Run("an IP literal is not a hostname", func(t *testing.T) {
+		reset()
+		cfg := config.NewConfig()
+		RoutingLearnHost(&cfg, newSet(), "1.2.3.4")
+		if len(routeLearnedHosts) != 0 {
+			t.Error("an IP literal must not be queued for resolution")
+		}
+	})
+
+	t.Run("nil args are safe", func(t *testing.T) {
+		RoutingLearnHost(nil, nil, "")
+	})
+}
+
+func TestBuildRouteStateTracksUpstreamUDP(t *testing.T) {
+	cfg := config.NewConfig()
+
+	newSet := func(udp bool) *config.SetConfig {
+		s := &config.SetConfig{Id: "s1"}
+		s.Routing.Enabled = true
+		s.Routing.Mode = config.RoutingModeProxy
+		s.Routing.Upstream.Host = "192.168.1.1"
+		s.Routing.Upstream.Port = 8480
+		s.Routing.Upstream.UDP = udp
+		return s
+	}
+
+	withUDP := buildRouteState(&cfg, newSet(true))
+	withoutUDP := buildRouteState(&cfg, newSet(false))
+
+	if routeStateEqual(withUDP, withoutUDP) {
+		t.Error("toggling upstream.udp must change the rule state, otherwise the UDP tproxy rules are never rebuilt and keep diverting to a port with no listener")
+	}
+
+	if withUDP.quicReject {
+		t.Error("tunnelled UDP must not also be rejected")
+	}
+	if !withoutUDP.quicReject {
+		t.Error("a TCP-only upstream must reject QUIC so clients fall back to TCP instead of bypassing the proxy")
+	}
+
+	refs := routeStateChains(withoutUDP)
+	found := false
+	for _, r := range refs {
+		if r.chain == withoutUDP.chainQUIC && r.table == "filter" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the quic reject chain must be watched by the monitor, got %+v", refs)
+	}
+	for _, r := range routeStateChains(withUDP) {
+		if r.table == "filter" {
+			t.Errorf("no quic chain should be watched when UDP is tunnelled, got %s", r.chain)
+		}
+	}
+}
+
+func TestQUICRejectOnlyForProxyMode(t *testing.T) {
+	cfg := config.NewConfig()
+
+	mtws := &config.SetConfig{Id: "s2"}
+	mtws.Routing.Enabled = true
+	mtws.Routing.Mode = config.RoutingModeMTProtoWS
+	mtws.Routing.Upstream.Port = 8480
+
+	if buildRouteState(&cfg, mtws).quicReject {
+		t.Error("mtproto-ws carries TCP only and has no upstream to fall back to; rejecting QUIC there would break unrelated UDP")
+	}
+
+	iface := &config.SetConfig{Id: "s3"}
+	iface.Routing.Enabled = true
+	iface.Routing.Mode = config.RoutingModeInterface
+	iface.Routing.EgressInterface = "wg0"
+
+	if buildRouteState(&cfg, iface).quicReject {
+		t.Error("interface mode routes UDP fine and must not reject QUIC")
+	}
+}
+
+func TestRouteAddResolvedIPs(t *testing.T) {
+	origCache := routeRuleCache
+	origEngine := routeEngine
+	defer func() {
+		routeRuleCache = origCache
+		routeEngine = origEngine
+	}()
+
+	set := &config.SetConfig{Id: "s1"}
+	set.Routing.Enabled = true
+	set.Routing.Mode = config.RoutingModeProxy
+	cfg := config.NewConfig()
+	ips := []net.IP{net.ParseIP("1.2.3.4")}
+
+	t.Run("a set removed during the lookup is not resurrected", func(t *testing.T) {
+		routeRuleCache = make(map[string]routeState)
+		routeEngine = nil
+		routeAddResolvedIPs(&cfg, set, ips)
+		if len(routeRuleCache) != 0 {
+			t.Error("addresses for an uninstalled set must be dropped, not used to install it")
+		}
+	})
+
+	t.Run("no backend is a no-op", func(t *testing.T) {
+		routeRuleCache = map[string]routeState{"s1": {mode: config.RoutingModeProxy}}
+		routeEngine = nil
+		routeAddResolvedIPs(&cfg, set, ips)
+	})
+
+	t.Run("nil and empty args are safe", func(t *testing.T) {
+		routeAddResolvedIPs(nil, nil, nil)
+		routeAddResolvedIPs(&cfg, set, nil)
+	})
+}
+
+func TestRouteResolveTargets(t *testing.T) {
+	origHosts := routeLearnedHosts
+	defer func() { routeLearnedHosts = origHosts }()
+
+	routeLearnedHosts = map[string]map[string]time.Time{
+		"s1": {
+			"website-cdn.assets.ipinfo.io": time.Now(),
+			"ipinfo.io":                    time.Now(),
+		},
+	}
+
+	set := &config.SetConfig{Id: "s1"}
+	set.Targets.SNIDomains = []string{"ipinfo.io", " IPinfo.IO ", ""}
+
+	got := routeResolveTargets(set)
+
+	seen := make(map[string]int)
+	for _, d := range got {
+		seen[d]++
+	}
+	if seen["ipinfo.io"] != 1 {
+		t.Errorf("configured domain must appear exactly once normalized, got %v", got)
+	}
+	if seen["website-cdn.assets.ipinfo.io"] != 1 {
+		t.Errorf("learned suffix match must be resolved too, got %v", got)
+	}
+	if len(got) != 2 {
+		t.Errorf("expected 2 resolve targets, got %v", got)
+	}
+}
+
+func TestRouteResolveIDs(t *testing.T) {
+	origCache := routeRuleCache
+	origAuto := routeIfaceAuto
+	defer func() {
+		routeRuleCache = origCache
+		routeIfaceAuto = origAuto
+	}()
+
+	t.Run("explicit mark and table", func(t *testing.T) {
+		routeRuleCache = make(map[string]routeState)
+		routeIfaceAuto = make(map[string]routeState)
+
+		cfg := config.NewConfig()
+		set := &config.SetConfig{}
+		set.Routing.FWMark = 0x100
+		set.Routing.Table = 200
+		set.Routing.EgressInterface = "eth0"
+
+		mark, table := routeResolveIDs(&cfg, set)
+		if mark != 0x100 || table != 200 {
+			t.Errorf("expected mark=0x100 table=200, got mark=0x%x table=%d", mark, table)
+		}
+	})
+
+	t.Run("auto allocation deterministic per interface", func(t *testing.T) {
+		routeRuleCache = make(map[string]routeState)
+		routeIfaceAuto = make(map[string]routeState)
+
+		cfg := config.NewConfig()
+		set := &config.SetConfig{}
+		set.Routing.EgressInterface = "wg0"
+
+		mark1, table1 := routeResolveIDs(&cfg, set)
+		if mark1 == 0 || table1 == 0 {
+			t.Fatalf("expected non-zero, got mark=0x%x table=%d", mark1, table1)
+		}
+
+		routeRuleCache = make(map[string]routeState)
+		routeIfaceAuto = make(map[string]routeState)
+		mark2, table2 := routeResolveIDs(&cfg, set)
+		if mark1 != mark2 || table1 != table2 {
+			t.Errorf("expected deterministic: mark1=0x%x mark2=0x%x table1=%d table2=%d", mark1, mark2, table1, table2)
+		}
+	})
+
+	t.Run("reuses cached iface auto", func(t *testing.T) {
+		routeRuleCache = make(map[string]routeState)
+		routeIfaceAuto = map[string]routeState{
+			routeIfaceAutoKey("tun0", "", false): {mark: 0x555, table: 150},
+		}
+
+		cfg := config.NewConfig()
+		set := &config.SetConfig{}
+		set.Routing.EgressInterface = "tun0"
+
+		mark, table := routeResolveIDs(&cfg, set)
+		if mark != 0x555 || table != 150 {
+			t.Errorf("expected cached mark=0x555 table=150, got mark=0x%x table=%d", mark, table)
+		}
+	})
+
+	t.Run("different interfaces get different IDs", func(t *testing.T) {
+		routeRuleCache = make(map[string]routeState)
+		routeIfaceAuto = make(map[string]routeState)
+
+		cfg := config.NewConfig()
+		setA := &config.SetConfig{}
+		setA.Routing.EgressInterface = "eth0"
+		setB := &config.SetConfig{}
+		setB.Routing.EgressInterface = "wg0"
+
+		markA, tableA := routeResolveIDs(&cfg, setA)
+		markB, tableB := routeResolveIDs(&cfg, setB)
+		if markA == markB {
+			t.Errorf("expected different marks, both got 0x%x", markA)
+		}
+		if tableA == tableB {
+			t.Errorf("expected different tables, both got %d", tableA)
+		}
+	})
+}
+
+func TestRouteAddIPsToSets(t *testing.T) {
+	t.Run("classifies v4 and v6", func(t *testing.T) {
+		var v4calls, v6calls [][]string
+		mock := &mockRouteBackend{
+			addElementsFn: func(setName string, ips []string, ttl int) {
+				if setName == "set_v4" {
+					v4calls = append(v4calls, ips)
+				} else {
+					v6calls = append(v6calls, ips)
+				}
+			},
+		}
+		st := routeState{setV4: "set_v4", setV6: "set_v6"}
+		ips := []net.IP{
+			net.ParseIP("1.2.3.4"),
+			net.ParseIP("2001:db8::1"),
+			net.ParseIP("5.6.7.8"),
+		}
+		routeAddIPsToSets(mock, st, 3600, ips, true, true)
+		if len(v4calls) != 1 || len(v4calls[0]) != 2 {
+			t.Errorf("expected 2 v4 IPs in 1 call, got %v", v4calls)
+		}
+		if len(v6calls) != 1 || len(v6calls[0]) != 1 {
+			t.Errorf("expected 1 v6 IP in 1 call, got %v", v6calls)
+		}
+	})
+
+	t.Run("skips v4 when disabled", func(t *testing.T) {
+		calls := 0
+		mock := &mockRouteBackend{
+			addElementsFn: func(setName string, ips []string, ttl int) { calls++ },
+		}
+		st := routeState{setV4: "set_v4", setV6: "set_v6"}
+		ips := []net.IP{net.ParseIP("1.2.3.4")}
+		routeAddIPsToSets(mock, st, 3600, ips, false, true)
+		if calls != 0 {
+			t.Errorf("expected 0 calls when v4 disabled, got %d", calls)
+		}
+	})
+
+	t.Run("deduplicates IPs", func(t *testing.T) {
+		var gotIPs []string
+		mock := &mockRouteBackend{
+			addElementsFn: func(setName string, ips []string, ttl int) { gotIPs = ips },
+		}
+		st := routeState{setV4: "set_v4", setV6: "set_v6"}
+		ips := []net.IP{
+			net.ParseIP("1.2.3.4"),
+			net.ParseIP("1.2.3.4"),
+			net.ParseIP("1.2.3.4"),
+		}
+		routeAddIPsToSets(mock, st, 3600, ips, true, true)
+		if len(gotIPs) != 1 {
+			t.Errorf("expected 1 deduplicated IP, got %d", len(gotIPs))
+		}
+	})
+}
+
+func TestRouteAddIPsToSets_StaticNoTTL(t *testing.T) {
+	var gotTTL int
+	mock := &mockRouteBackend{
+		addElementsFn: func(setName string, ips []string, ttl int) { gotTTL = ttl },
+	}
+	st := routeState{setV4: "set_v4", setV6: "set_v6"}
+	ips := []net.IP{net.ParseIP("1.2.3.4")}
+	routeAddIPsToSets(mock, st, 0, ips, true, true)
+	if gotTTL != 0 {
+		t.Errorf("expected TTL 0 for static IPs, got %d", gotTTL)
+	}
+}
+
+func TestRoutePeriodicReResolve_SkipsWhenEmpty(t *testing.T) {
+	routeMu.Lock()
+	oldCache := routeRuleCache
+	routeRuleCache = make(map[string]routeState)
+	routeMu.Unlock()
+	defer func() {
+		routeMu.Lock()
+		routeRuleCache = oldCache
+		routeMu.Unlock()
+	}()
+
+	cfg := &config.Config{}
+	RoutingPeriodicReResolve(cfg)
+}
+
+func TestRoutePeriodicReResolve_PerSetScheduling(t *testing.T) {
+	routeMu.Lock()
+	oldCache := routeRuleCache
+	oldResolve := routeLastReResolve
+	routeRuleCache = map[string]routeState{
+		"set-short": {setV4: "sv4_short"},
+		"set-long":  {setV4: "sv4_long"},
+	}
+	shortInitial := time.Now().Add(-10 * time.Minute)
+	longInitial := time.Now().Add(time.Hour)
+	routeLastReResolve = map[string]time.Time{
+		"set-short": shortInitial,
+		"set-long":  longInitial,
+	}
+	routeMu.Unlock()
+	defer func() {
+		routeMu.Lock()
+		routeRuleCache = oldCache
+		routeLastReResolve = oldResolve
+		routeMu.Unlock()
+	}()
+
+	cfg := &config.Config{
+		Sets: []*config.SetConfig{
+			{
+				Id:      "set-short",
+				Enabled: true,
+				Routing: config.RoutingConfig{
+					Enabled:         true,
+					EgressInterface: "wg0",
+					IPTTLSeconds:    600,
+				},
+				Targets: config.TargetsConfig{
+					SNIDomains: []string{"short.invalid"},
+				},
+			},
+			{
+				Id:      "set-long",
+				Enabled: true,
+				Routing: config.RoutingConfig{
+					Enabled:         true,
+					EgressInterface: "wg0",
+					IPTTLSeconds:    86400,
+				},
+				Targets: config.TargetsConfig{
+					SNIDomains: []string{"long.invalid"},
+				},
+			},
+		},
+	}
+
+	RoutingPeriodicReResolve(cfg)
+
+	routeMu.Lock()
+	shortUpdated := !routeLastReResolve["set-short"].Equal(shortInitial)
+	longUpdated := !routeLastReResolve["set-long"].Equal(longInitial)
+	routeMu.Unlock()
+
+	if !shortUpdated {
+		t.Error("set-short should have been scheduled for re-resolve (its interval elapsed)")
+	}
+	if longUpdated {
+		t.Error("set-long should NOT have been re-resolved (its interval has not elapsed)")
+	}
+}
+
+func TestDiscoveryQueueAction(t *testing.T) {
+	t.Run("single thread", func(t *testing.T) {
+		action := discoveryQueueAction(200, 1)
+		if len(action) != 3 {
+			t.Fatalf("expected 3 elements, got %d", len(action))
+		}
+		if action[0] != "--queue-num" || action[1] != "200" || action[2] != "--queue-bypass" {
+			t.Errorf("unexpected action: %v", action)
+		}
+	})
+
+	t.Run("multiple threads", func(t *testing.T) {
+		action := discoveryQueueAction(200, 4)
+		if len(action) != 3 {
+			t.Fatalf("expected 3 elements, got %d", len(action))
+		}
+		if action[0] != "--queue-balance" || action[1] != "200:203" || action[2] != "--queue-bypass" {
+			t.Errorf("unexpected action: %v", action)
+		}
+	})
+}
+
+func TestDiscoveryIptBackend_BinaryNames(t *testing.T) {
+	t.Run("standard", func(t *testing.T) {
+		b := &discoveryIptBackend{legacy: false}
+		if b.ipt4() != backendIPTables {
+			t.Errorf("expected %s, got %s", backendIPTables, b.ipt4())
+		}
+		if b.ipt6() != backendIP6Tables {
+			t.Errorf("expected %s, got %s", backendIP6Tables, b.ipt6())
+		}
+		if b.name() != backendIPTables {
+			t.Errorf("expected %s, got %s", backendIPTables, b.name())
+		}
+	})
+
+	t.Run("legacy", func(t *testing.T) {
+		b := &discoveryIptBackend{legacy: true}
+		if b.ipt4() != backendIPTablesLegacy {
+			t.Errorf("expected %s, got %s", backendIPTablesLegacy, b.ipt4())
+		}
+		if b.ipt6() != backendIP6TablesLegacy {
+			t.Errorf("expected %s, got %s", backendIP6TablesLegacy, b.ipt6())
+		}
+	})
+}
+
+func TestDiscoveryNftBackend_Name(t *testing.T) {
+	b := &discoveryNftBackend{}
+	if b.name() != backendNFTables {
+		t.Errorf("expected %s, got %s", backendNFTables, b.name())
+	}
+}
+
+func TestDiscoveryConstants(t *testing.T) {
+	if discoveryChainIPT != "B4_DISCOVERY" {
+		t.Errorf("discoveryChainIPT = %q, want B4_DISCOVERY", discoveryChainIPT)
+	}
+	if discoveryChainNFT != "b4_discovery" {
+		t.Errorf("discoveryChainNFT = %q, want b4_discovery", discoveryChainNFT)
+	}
+}
+
+type mockRouteJump struct {
+	baseChain, targetChain string
+	isMangle, atTop        bool
+}
+
+type mockInjectedMarkRule struct {
+	chain, setName  string
+	v6              bool
+	mark, queueMark uint32
+	sources         []config.DeviceMatch
+}
+
+type mockRouterGuard struct {
+	chain, setName string
+	v6             bool
+	mark           uint32
+}
+
+type mockRouteBackend struct {
+	guards        []mockRouterGuard
+	guardOK       *bool
+	addElementsFn func(setName string, ips []string, ttlSec int)
+	delElementsFn func(setName string, ips []string)
+	setOps        []string
+	bypass        map[string][]uint32
+	chainOps      map[string][]string
+	jumps         []mockRouteJump
+	deletedJumps  []mockRouteJump
+	injected      []mockInjectedMarkRule
+	masq          []mockNATRule
+	snat          []mockNATRule
+}
+
+type mockNATRule struct {
+	chain   string
+	setName string
+	mark    uint32
+	iface   string
+	srcIP   string
+	v6      bool
+}
+
+func (m *mockRouteBackend) recordOp(chain, op string) {
+	if m.chainOps == nil {
+		m.chainOps = map[string][]string{}
+	}
+	m.chainOps[chain] = append(m.chainOps[chain], op)
+}
+
+func (m *mockRouteBackend) name() string                                  { return "mock" }
+func (m *mockRouteBackend) available() bool                               { return true }
+func (m *mockRouteBackend) ensureBase() error                             { return nil }
+func (m *mockRouteBackend) ensureIPSet(name string, v6 bool) error        { return nil }
+func (m *mockRouteBackend) ensureChain(chain string, isMangle bool) error { return nil }
+func (m *mockRouteBackend) flushChain(chain string, isMangle bool)        {}
+func (m *mockRouteBackend) deleteChain(chain string, isMangle bool)       {}
+func (m *mockRouteBackend) snapshotChainRules(chain string, isMangle bool) routeChainSnapshot {
+	return routeChainSnapshot{chain: chain, isMangle: isMangle}
+}
+func (m *mockRouteBackend) dropChainRules(snap routeChainSnapshot) {}
+func (m *mockRouteBackend) addBypassRule(chain string, mark uint32) {
+	if m.bypass == nil {
+		m.bypass = map[string][]uint32{}
+	}
+	m.bypass[chain] = append(m.bypass[chain], mark)
+	m.recordOp(chain, fmt.Sprintf("bypass 0x%x", mark))
+}
+func (m *mockRouteBackend) addMarkRule(chain string, v6 bool, setName string, mark uint32, sourceIface string, tagHostConntrack bool) {
+	m.recordOp(chain, fmt.Sprintf("mark 0x%x", mark))
+}
+func (m *mockRouteBackend) addEgressLoopGuard(chain, iface string, ipv4, ipv6 bool) bool {
+	m.recordOp(chain, "loop-guard "+iface)
+	return true
+}
+func (m *mockRouteBackend) addMarkFallbackRule(chain string, v6 bool, setName string, mark uint32, sourceIface string) {
+	m.recordOp(chain, "fallback")
+}
+func (m *mockRouteBackend) sharesFamilies() bool { return false }
+func (m *mockRouteBackend) addMarkRestoreRule(chain string, v6 bool, sourceIface string, mark uint32) {
+	m.recordOp(chain, "restore")
+}
+func (m *mockRouteBackend) addInjectedMarkRule(chain string, v6 bool, setName string, mark, queueMark uint32, sources []config.DeviceMatch) {
+	m.injected = append(m.injected, mockInjectedMarkRule{chain: chain, setName: setName, v6: v6, mark: mark, queueMark: queueMark, sources: sources})
+	m.recordOp(chain, fmt.Sprintf("injected 0x%x", mark))
+}
+func (m *mockRouteBackend) ensureJumpRule(baseChain, targetChain string, isMangle bool, atTop bool) {
+	m.jumps = append(m.jumps, mockRouteJump{baseChain: baseChain, targetChain: targetChain, isMangle: isMangle, atTop: atTop})
+}
+func (m *mockRouteBackend) deleteJumpRules(baseChain, targetChain string, isMangle bool) {
+	m.deletedJumps = append(m.deletedJumps, mockRouteJump{baseChain: baseChain, targetChain: targetChain, isMangle: isMangle})
+}
+
+func (m *mockRouteBackend) hasJump(baseChain, targetChain string) bool {
+	for _, j := range m.jumps {
+		if j.baseChain == baseChain && j.targetChain == targetChain {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *mockRouteBackend) hasDeletedJump(baseChain, targetChain string) bool {
+	for _, j := range m.deletedJumps {
+		if j.baseChain == baseChain && j.targetChain == targetChain {
+			return true
+		}
+	}
+	return false
+}
+func (m *mockRouteBackend) jumpPrepends(bool) bool { return false }
+func (m *mockRouteBackend) addClaimedBypassRule(chain string, own uint32) {
+	m.recordOp(chain, fmt.Sprintf("claimed-bypass 0x%x", own))
+}
+func (m *mockRouteBackend) addRouterTrafficGuard(chain string, v6 bool, setName string, mark uint32) bool {
+	m.guards = append(m.guards, mockRouterGuard{chain: chain, v6: v6, setName: setName, mark: mark})
+	m.recordOp(chain, "router-traffic-guard")
+	return m.guardOK == nil || *m.guardOK
+}
+func (m *mockRouteBackend) addMasqueradeRule(chain string, mark uint32, iface string, v6 bool) {
+	m.masq = append(m.masq, mockNATRule{chain: chain, mark: mark, iface: iface, v6: v6})
+}
+func (m *mockRouteBackend) addSNATRule(chain, setName, iface, srcIP string, mark uint32, v6 bool) {
+	m.snat = append(m.snat, mockNATRule{chain: chain, setName: setName, mark: mark, iface: iface, srcIP: srcIP, v6: v6})
+}
+func (m *mockRouteBackend) flushIPSet(name string)   {}
+func (m *mockRouteBackend) destroyIPSet(name string) {}
+func (m *mockRouteBackend) clearAll()                {}
+func (m *mockRouteBackend) addElements(setName string, ips []string, ttlSec int) {
+	m.setOps = append(m.setOps, "add "+setName)
+	if m.addElementsFn != nil {
+		m.addElementsFn(setName, ips, ttlSec)
+	}
+}
+func (m *mockRouteBackend) delElements(setName string, ips []string) {
+	m.setOps = append(m.setOps, "del "+setName)
+	if m.delElementsFn != nil {
+		m.delElementsFn(setName, ips)
+	}
+}
+
+func TestMonitor_BackendPropagation(t *testing.T) {
+	t.Run("auto-detect backend stored", func(t *testing.T) {
+		cfg := config.NewConfig()
+		monitor := NewMonitor(testCfgPtr(&cfg))
+		// Backend should be one of the valid values
+		if monitor.backend != "nftables" && monitor.backend != "iptables" && monitor.backend != backendIPTablesLegacy {
+			t.Errorf("unexpected backend in monitor: %s", monitor.backend)
+		}
+	})
+
+	t.Run("config engine override propagates to monitor", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.System.Tables.Engine = backendIPTables
+		monitor := NewMonitor(testCfgPtr(&cfg))
+		if monitor.backend != backendIPTables {
+			t.Errorf("expected %s, got %s", backendIPTables, monitor.backend)
+		}
+	})
+
+	t.Run("legacy engine override propagates to monitor", func(t *testing.T) {
+		cfg := config.NewConfig()
+		cfg.System.Tables.Engine = backendIPTablesLegacy
+		monitor := NewMonitor(testCfgPtr(&cfg))
+		if monitor.backend != backendIPTablesLegacy {
+			t.Errorf("expected %s, got %s", backendIPTablesLegacy, monitor.backend)
+		}
+	})
+}
+
+func gateCfg(enabled, wisb bool, devices ...config.Device) *config.Config {
+	cfg := config.NewConfig()
+	cfg.Queue.Devices.Enabled = enabled
+	cfg.Queue.Devices.WhiteIsBlack = wisb
+	cfg.Queue.Devices.Devices = devices
+	return &cfg
+}
+
+func TestRouteDeviceGateFor(t *testing.T) {
+	wl := config.Device{MAC: "aa:bb:cc:dd:ee:ff", Selected: true}
+	manual := config.Device{MAC: "02:b4:ac:10:0c:03", IP: "172.16.12.3", Selected: true, IsManual: true}
+
+	t.Run("disabled is inactive", func(t *testing.T) {
+		g := routeDeviceGateFor(gateCfg(false, false, wl))
+		if g.enabled || g.isWhitelist() || g.isBlacklist() {
+			t.Errorf("expected inactive gate, got %+v", g)
+		}
+	})
+
+	t.Run("enabled but no selection is inactive", func(t *testing.T) {
+		g := routeDeviceGateFor(gateCfg(true, false))
+		if g.enabled {
+			t.Errorf("expected inactive gate with no selected devices, got %+v", g)
+		}
+	})
+
+	t.Run("whitelist normalizes and uppercases", func(t *testing.T) {
+		g := routeDeviceGateFor(gateCfg(true, false, wl))
+		if !g.isWhitelist() || g.isBlacklist() {
+			t.Fatalf("expected whitelist gate, got %+v", g)
+		}
+		if len(g.matches) != 1 || g.matches[0].MAC != "AA:BB:CC:DD:EE:FF" {
+			t.Errorf("expected normalized MAC, got %v", g.matches)
+		}
+	})
+
+	t.Run("blacklist mode", func(t *testing.T) {
+		g := routeDeviceGateFor(gateCfg(true, true, wl))
+		if !g.isBlacklist() || g.isWhitelist() {
+			t.Errorf("expected blacklist gate, got %+v", g)
+		}
+	})
+
+	t.Run("manual device with an IP matches by address", func(t *testing.T) {
+		g := routeDeviceGateFor(gateCfg(true, false, manual))
+		if !g.isWhitelist() {
+			t.Fatalf("expected whitelist gate for a selected manual device, got %+v", g)
+		}
+		if len(g.matches) != 1 || !g.matches[0].IsIP() || g.matches[0].IP != "172.16.12.3" {
+			t.Errorf("expected a single ip matcher for 172.16.12.3, got %+v", g.matches)
+		}
+		if g.matches[0].MAC != "" {
+			t.Errorf("manual device must never produce a mac matcher, got %q", g.matches[0].MAC)
+		}
+	})
+
+	t.Run("manual device without an IP is unusable", func(t *testing.T) {
+		g := routeDeviceGateFor(gateCfg(true, false, config.Device{MAC: "02:b4:ac:10:0c:04", Selected: true, IsManual: true}))
+		if g.enabled {
+			t.Errorf("manual device without an IP must not activate the routing gate, got %+v", g)
+		}
+	})
+}
+
+func TestRouteDeviceGateKey(t *testing.T) {
+	a := config.Device{MAC: "aa:bb:cc:dd:ee:ff", Selected: true}
+	b := config.Device{MAC: "11:22:33:44:55:66", Selected: true}
+
+	if k := routeDeviceGateFor(gateCfg(false, false, a)).key(); k != "" {
+		t.Errorf("disabled gate must have empty key, got %q", k)
+	}
+
+	k1 := routeDeviceGateFor(gateCfg(true, false, a, b)).key()
+	k2 := routeDeviceGateFor(gateCfg(true, false, b, a)).key()
+	if k1 != k2 {
+		t.Errorf("key must be order-independent: %q vs %q", k1, k2)
+	}
+
+	if wlKey, blKey := routeDeviceGateFor(gateCfg(true, false, a)).key(), routeDeviceGateFor(gateCfg(true, true, a)).key(); wlKey == blKey {
+		t.Errorf("whitelist and blacklist keys must differ, both %q", wlKey)
+	}
+}
+
+func macSet(g routeDeviceGate) map[string]bool {
+	out := make(map[string]bool, len(g.matches))
+	for _, m := range g.matches {
+		if m.MAC != "" {
+			out[m.MAC] = true
+		}
+	}
+	return out
+}
+
+func ipSet(g routeDeviceGate) map[string]bool {
+	out := make(map[string]bool, len(g.matches))
+	for _, m := range g.matches {
+		if m.IsIP() {
+			out[m.IP] = true
+		}
+	}
+	return out
+}
+
+func TestRouteSetDeviceGate(t *testing.T) {
+	const a, b, c = "AA:AA:AA:AA:AA:AA", "BB:BB:BB:BB:BB:BB", "CC:CC:CC:CC:CC:CC"
+	setWith := func(macs ...string) *config.SetConfig {
+		s := &config.SetConfig{Id: "s", Name: "S"}
+		s.Routing.Mode = config.RoutingModeMTProtoWS
+		s.Targets.SourceDevices = macs
+		return s
+	}
+
+	t.Run("no per-set falls back to global", func(t *testing.T) {
+		g := routeSetDeviceGate(gateCfg(true, false, config.Device{MAC: a, Selected: true}), setWith())
+		if !g.isWhitelist() || !macSet(g)[a] || len(g.matches) != 1 {
+			t.Errorf("expected global whitelist {a}, got %+v", g)
+		}
+	})
+
+	t.Run("per-set only when global disabled", func(t *testing.T) {
+		g := routeSetDeviceGate(gateCfg(false, false), setWith(a, b))
+		if !g.isWhitelist() || !macSet(g)[a] || !macSet(g)[b] || len(g.matches) != 2 {
+			t.Errorf("expected per-set whitelist {a,b}, got %+v", g)
+		}
+	})
+
+	t.Run("global whitelist intersects per-set", func(t *testing.T) {
+		cfg := gateCfg(true, false, config.Device{MAC: a, Selected: true}, config.Device{MAC: b, Selected: true})
+		g := routeSetDeviceGate(cfg, setWith(b, c))
+		if !g.isWhitelist() || len(g.matches) != 1 || !macSet(g)[b] {
+			t.Errorf("expected intersection {b}, got %+v", g)
+		}
+	})
+
+	t.Run("global blacklist subtracts from per-set", func(t *testing.T) {
+		cfg := gateCfg(true, true, config.Device{MAC: a, Selected: true})
+		g := routeSetDeviceGate(cfg, setWith(a, b))
+		if !g.isWhitelist() || len(g.matches) != 1 || !macSet(g)[b] {
+			t.Errorf("expected per-set minus blacklist {b}, got %+v", g)
+		}
+	})
+
+	t.Run("empty intersection denies all but stays active", func(t *testing.T) {
+		cfg := gateCfg(true, false, config.Device{MAC: a, Selected: true})
+		g := routeSetDeviceGate(cfg, setWith(b))
+		if !g.enabled || len(g.matches) != 0 {
+			t.Errorf("expected active deny-all gate, got %+v", g)
+		}
+		if g.key() == "" {
+			t.Error("deny-all gate must have a non-empty key distinct from disabled")
+		}
+	})
+
+	setExcluding := func(macs ...string) *config.SetConfig {
+		s := setWith(macs...)
+		s.Targets.SourceDevicesExclude = true
+		return s
+	}
+
+	t.Run("exclude becomes blacklist when global disabled", func(t *testing.T) {
+		g := routeSetDeviceGate(gateCfg(false, false), setExcluding(a, b))
+		if !g.isBlacklist() || !macSet(g)[a] || !macSet(g)[b] || len(g.matches) != 2 {
+			t.Errorf("expected per-set blacklist {a,b}, got %+v", g)
+		}
+	})
+
+	t.Run("exclude subtracts from global whitelist", func(t *testing.T) {
+		cfg := gateCfg(true, false, config.Device{MAC: a, Selected: true}, config.Device{MAC: b, Selected: true})
+		g := routeSetDeviceGate(cfg, setExcluding(b))
+		if !g.isWhitelist() || len(g.matches) != 1 || !macSet(g)[a] {
+			t.Errorf("expected whitelist {a}, got %+v", g)
+		}
+	})
+
+	t.Run("exclude unions with global blacklist", func(t *testing.T) {
+		cfg := gateCfg(true, true, config.Device{MAC: a, Selected: true})
+		g := routeSetDeviceGate(cfg, setExcluding(b))
+		if !g.isBlacklist() || len(g.matches) != 2 || !macSet(g)[a] || !macSet(g)[b] {
+			t.Errorf("expected blacklist {a,b}, got %+v", g)
+		}
+	})
+
+	t.Run("exclude key differs from whitelist key", func(t *testing.T) {
+		wl := routeSetDeviceGate(gateCfg(false, false), setWith(a))
+		bl := routeSetDeviceGate(gateCfg(false, false), setExcluding(a))
+		if wl.key() == bl.key() {
+			t.Errorf("whitelist and exclude gates must produce different keys, both %q", wl.key())
+		}
+	})
+}
+
+func TestBuildRouteStateDeviceKeyInvalidatesCache(t *testing.T) {
+	set := &config.SetConfig{Id: "tg", Name: "TG"}
+	set.Routing.Mode = config.RoutingModeMTProtoWS
+
+	dev := config.Device{MAC: "aa:bb:cc:dd:ee:ff", Selected: true}
+
+	base := buildRouteState(gateCfg(false, false), set)
+	whitelisted := buildRouteState(gateCfg(true, false, dev), set)
+
+	if base.deviceKey == whitelisted.deviceKey {
+		t.Fatalf("device key must change when whitelist is enabled: %q", base.deviceKey)
+	}
+	if routeStateEqual(base, whitelisted) {
+		t.Error("routeStateEqual must report difference so routing rules rebuild when devices change")
+	}
+
+	perSet := &config.SetConfig{Id: "tg", Name: "TG"}
+	perSet.Routing.Mode = config.RoutingModeMTProtoWS
+	perSet.Targets.SourceDevices = []string{"11:22:33:44:55:66"}
+	scoped := buildRouteState(gateCfg(false, false), perSet)
+	if base.deviceKey == scoped.deviceKey {
+		t.Errorf("per-set source devices must change device key: %q", scoped.deviceKey)
+	}
+}
