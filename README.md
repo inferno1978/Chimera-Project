@@ -157,7 +157,7 @@ Chimera-Project/
 │   └── OWN_DOH_FAQ.md          #   Собственные DoH-резолверы в сетах b4 (миграция с Cloudflare)
 ├── vendor/
 │   └── b4/                      #   Исходники b4 v1.81.0 (апстрим DanielLavrushin/b4): src, installer, toolkit
-│       └── set-artifacts/       #   Готовые сеты: 6 артефактных пар Fat+Heavy (NNM, GitHub, XHamster, XVideos, Meta, YT-Nocookie; 4 пары добавлены 06.09) + vps-prodcdn/ (8 сетов VPS cdn-vps — Heavy-схема с эскалацией всем сетам, DNS не тронут, этап 1) + верификации (MCP-кейсы); dns-блоки роутерных = свои DoH (см. OWN_DOH_FAQ)
+│       └── set-artifacts/       #   Готовые сеты: 6 артефактных пар Fat+Heavy (NNM, GitHub, XHamster, XVideos, Meta, YT-Nocookie; 4 пары добавлены 06.09) + vps-prodcdn/ (8 сетов VPS cdn-vps — Heavy-схема с эскалацией всем сетам, DNS не тронут, этап 1) + vps-vpn/ (8 сетов VPS vpn-node — то же, вторая нода) + верификации (MCP-кейсы); dns-блоки роутерных = свои DoH (см. OWN_DOH_FAQ)
 ├── LICENSE
 └── chimera/
     ├── __init__.py
