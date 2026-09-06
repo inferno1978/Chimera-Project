@@ -255,9 +255,9 @@
       "dns": {
         "enabled": true,
         "target_dns": "",
-        "doh_url": "https://1.1.1.1/dns-query",
+        "doh_url": "https://chimeraprodcdn.online:30443/dns-query",
         "fragment_query": false,
-        "strict": false
+        "strict": true
       },
       "routing": {
         "enabled": false,
@@ -293,5 +293,22 @@
         "size": 0
       }
     }
-  ]
+  ],
+  "_meta": {
+    "dns_migration": "2026-09-06: DoH Cloudflare 1.1.1.1 -> собственные резолверы (уход от РКН-риска блокировки CF). Основной: chimeraprodcdn.online:30443. Резерв при DNS-фейловере: GitHub-Heavy-v1 (эскалация, doh_url https://chimeravpn.online:30443/dns-query). strict=true: без фолбэка в кэш/оригинальный апстрим (fail-closed).",
+    "servers": [
+      {
+        "host": "chimeraprodcdn.online",
+        "ip": "138.124.255.238",
+        "role": "primary",
+        "cert": "Let's Encrypt, до 2026-10-30"
+      },
+      {
+        "host": "chimeravpn.online",
+        "ip": "91.224.87.154",
+        "role": "backup",
+        "cert": "Let's Encrypt, до 2026-11-27"
+      }
+    ]
+  }
 }
