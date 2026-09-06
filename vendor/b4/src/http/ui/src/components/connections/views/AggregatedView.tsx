@@ -1,0 +1,313 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Box, Fab, Tooltip, useMediaQuery } from "@mui/material";
+import { StartIcon, StopIcon } from "@b4.icons";
+import { colors, theme } from "@design";
+import { useConnectionGroups, type EnrichedGroup } from "@hooks/useConnectionGroups";
+import {
+  AGG_SORT_STORAGE_KEY,
+  loadSortState,
+  matchesConnectionFilter,
+  parseConnectionFilter,
+  saveSortState,
+} from "@utils";
+import { SortDirection } from "@common/SortableTableCell";
+import { AggregatedControlBar, TimeWindow } from "./AggregatedControlBar";
+import { DeviceSidebar } from "./DeviceSidebar";
+import { AGG_SORT_COLUMNS, AggSortColumn, GroupList } from "./GroupList";
+import { DetailPane } from "./DetailPane";
+import { useTranslation } from "react-i18next";
+
+interface Props {
+  lines: string[];
+  deviceMap: Record<string, string>;
+  ipToMac: Record<string, string>;
+  paused: boolean;
+  onTogglePause: () => void;
+  showAll: boolean;
+  onShowAllChange: (v: boolean) => void;
+  onReset: () => void;
+  filter: string;
+  onFilterChange: (v: string) => void;
+  enrichingIps: Set<string>;
+  onAddDomain: (domain: string) => void;
+  onAddIp: (ip: string) => void;
+  onEnrichAsn: (ip: string) => void;
+  onDeleteAsn: (asnId: string) => void;
+}
+
+const getGroupFieldValue = (g: EnrichedGroup, field: string): string => {
+  switch (field) {
+    case "asn":
+      return g.asnName?.toLowerCase() || "";
+    case "alias":
+    case "device":
+      return `${g.deviceName || ""} ${g.mac || ""}`.toLowerCase();
+    case "domain":
+      return g.domain.toLowerCase();
+    case "destination":
+      return g.destIp.toLowerCase();
+    case "protocol":
+      return g.protocol.toLowerCase();
+    case "tls":
+      return g.tls.toLowerCase();
+    case "flags":
+      return g.flags.toLowerCase();
+    case "set":
+      return `${g.hostSet || ""} ${g.ipSet || ""}`.toLowerCase();
+    default:
+      return "";
+  }
+};
+
+const getGroupSearchableValues = (g: EnrichedGroup): (string | null)[] => [
+  g.domain,
+  g.destIp,
+  g.asnName,
+  g.hostSet,
+  g.ipSet,
+  g.deviceName,
+  g.mac,
+  g.protocol,
+  g.tls,
+  g.flags,
+];
+
+const loadAggSort = (): { column: AggSortColumn | null; direction: SortDirection } => {
+  const { column, direction } = loadSortState(AGG_SORT_STORAGE_KEY);
+  if (column && direction && (AGG_SORT_COLUMNS as readonly string[]).includes(column)) {
+    return { column: column as AggSortColumn, direction };
+  }
+  return { column: null, direction: null };
+};
+
+export const AggregatedView = ({
+  lines,
+  deviceMap,
+  ipToMac,
+  paused,
+  onTogglePause,
+  showAll,
+  onShowAllChange,
+  onReset,
+  filter,
+  onFilterChange,
+  enrichingIps,
+  onAddDomain,
+  onAddIp,
+  onEnrichAsn,
+  onDeleteAsn,
+}: Props) => {
+  const { t } = useTranslation();
+  const [window, setWindow] = useState<TimeWindow>(60);
+  const [unmatchedOnly, setUnmatchedOnly] = useState(false);
+  const [selectedMac, setSelectedMac] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const isCompact = useMediaQuery(theme.breakpoints.down("md"));
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    if (globalThis.matchMedia("(max-width: 899.95px)").matches) {
+      return true;
+    }
+    return localStorage.getItem("b4_connections_sidebar_collapsed") === "1";
+  });
+  const [sortColumn, setSortColumn] = useState<AggSortColumn | null>(
+    () => loadAggSort().column,
+  );
+  const [sortDirection, setSortDirection] = useState<SortDirection>(
+    () => loadAggSort().direction,
+  );
+
+  useEffect(() => {
+    if (isCompact) {
+      setSidebarCollapsed(true);
+    }
+  }, [isCompact]);
+
+  useEffect(() => {
+    if (isCompact) {
+      return;
+    }
+    localStorage.setItem("b4_connections_sidebar_collapsed", sidebarCollapsed ? "1" : "0");
+  }, [sidebarCollapsed, isCompact]);
+
+  useEffect(() => {
+    saveSortState(sortColumn, sortDirection, AGG_SORT_STORAGE_KEY);
+  }, [sortColumn, sortDirection]);
+
+  const handleSort = useCallback((column: AggSortColumn) => {
+    setSortColumn((prevColumn) => {
+      if (prevColumn === column) {
+        setSortDirection((prevDir) => {
+          if (prevDir === "asc") return "desc";
+          if (prevDir === "desc") {
+            setSortColumn(null);
+            return null;
+          }
+          return "asc";
+        });
+        return prevColumn;
+      }
+      setSortDirection("asc");
+      return column;
+    });
+  }, []);
+
+  const state = useConnectionGroups(lines, deviceMap, paused, ipToMac);
+
+  const dataLatest = useMemo(() => {
+    let latest = 0;
+    for (const g of state.groups) if (g.lastSeen > latest) latest = g.lastSeen;
+    for (const d of state.devices) if (d.lastSeen > latest) latest = d.lastSeen;
+    return latest;
+  }, [state.groups, state.devices]);
+
+  const anchorRef = useRef({ data: 0, wall: 0 });
+  if (anchorRef.current.data !== dataLatest) {
+    anchorRef.current = { data: dataLatest, wall: Date.now() };
+  }
+
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    const update = () => {
+      const a = anchorRef.current;
+      setNow(a.data === 0 ? 0 : a.data + (Date.now() - a.wall));
+    };
+    update();
+    const id = globalThis.setInterval(update, 1000);
+    return () => globalThis.clearInterval(id);
+  }, []);
+
+  const filteredGroups = useMemo(() => {
+    const cutoff = window === 0 || now === 0 ? 0 : now - window * 1000;
+    const parsedFilter = parseConnectionFilter(filter);
+    return state.groups.filter((g) => {
+      if (cutoff > 0 && g.lastSeen < cutoff) return false;
+      if (unmatchedOnly && (g.hostSet || g.ipSet)) return false;
+      if (!showAll && !g.domain) return false;
+      if (selectedMac !== null && g.mac !== selectedMac) return false;
+      if (
+        parsedFilter &&
+        !matchesConnectionFilter(
+          parsedFilter,
+          (field) => getGroupFieldValue(g, field),
+          getGroupSearchableValues(g),
+        )
+      )
+        return false;
+      return true;
+    });
+  }, [state.groups, window, unmatchedOnly, showAll, selectedMac, filter, now]);
+
+  const sortedGroups = useMemo(() => {
+    const arr = [...filteredGroups];
+    if (!sortColumn || !sortDirection) {
+      return arr.sort((a, b) => b.lastSeen - a.lastSeen || b.packets - a.packets);
+    }
+    const dir = sortDirection === "asc" ? 1 : -1;
+    if (sortColumn === "packets" || sortColumn === "seen") {
+      const pick = (g: EnrichedGroup) =>
+        sortColumn === "packets" ? g.packets : g.lastSeen;
+      return arr.sort(
+        (a, b) => (pick(a) - pick(b)) * dir || b.lastSeen - a.lastSeen,
+      );
+    }
+    const field = sortColumn === "source" ? "device" : sortColumn;
+    const keyed = arr.map((g) => ({ g, k: getGroupFieldValue(g, field) }));
+    keyed.sort(
+      (a, b) => a.k.localeCompare(b.k) * dir || b.g.lastSeen - a.g.lastSeen,
+    );
+    return keyed.map((e) => e.g);
+  }, [filteredGroups, sortColumn, sortDirection]);
+
+  const selectedGroup = useMemo(
+    () => (selectedKey ? state.groups.find((g) => g.key === selectedKey) ?? null : null),
+    [selectedKey, state.groups],
+  );
+
+  const visibleDevices = useMemo(() => {
+    const cutoff = window === 0 || now === 0 ? 0 : now - window * 1000;
+    return state.devices.filter((d) => cutoff === 0 || d.lastSeen >= cutoff);
+  }, [state.devices, window, now]);
+
+  return (
+    <Box sx={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <AggregatedControlBar
+        filter={filter}
+        onFilterChange={onFilterChange}
+        window={window}
+        onWindowChange={setWindow}
+        unmatchedOnly={unmatchedOnly}
+        onUnmatchedOnlyChange={setUnmatchedOnly}
+        showAll={showAll}
+        onShowAllChange={onShowAllChange}
+        onReset={onReset}
+      />
+
+      <Box sx={{ flex: 1, display: "flex", overflow: "hidden", position: "relative" }}>
+        <DeviceSidebar
+          devices={visibleDevices}
+          selectedMac={selectedMac}
+          onSelect={setSelectedMac}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
+        />
+        <GroupList
+          groups={sortedGroups}
+          now={now}
+          selectedKey={selectedKey}
+          onSelect={(k) => setSelectedKey(k === selectedKey ? null : k)}
+          onAddDomain={onAddDomain}
+          onAddIp={onAddIp}
+          onEnrichAsn={onEnrichAsn}
+          enrichingIps={enrichingIps}
+          sortColumn={sortColumn}
+          sortDirection={sortDirection}
+          onSort={handleSort}
+        />
+        {selectedGroup && (
+          <Box
+            sx={{
+              display: "flex",
+              position: "absolute",
+              top: 0,
+              right: 0,
+              bottom: 0,
+              zIndex: 3,
+              height: "100%",
+              boxShadow: "-8px 0 24px rgba(0,0,0,0.5)",
+            }}
+          >
+            <DetailPane
+              group={selectedGroup}
+              onClose={() => setSelectedKey(null)}
+              onAddDomain={onAddDomain}
+              onAddIp={onAddIp}
+              onEnrichAsn={onEnrichAsn}
+              onDeleteAsn={onDeleteAsn}
+              enrichingIps={enrichingIps}
+            />
+          </Box>
+        )}
+
+        <Tooltip
+          title={paused ? t("connections.page.resumeStreaming") : t("connections.page.pauseStreaming")}
+          placement="left"
+        >
+          <Fab
+            size="small"
+            onClick={onTogglePause}
+            sx={{
+              position: "absolute",
+              bottom: 16,
+              right: 16,
+              bgcolor: paused ? colors.secondary : colors.border.strong,
+              color: colors.background.default,
+              "&:hover": { bgcolor: paused ? colors.secondary : colors.border.default },
+            }}
+          >
+            {paused ? <StartIcon /> : <StopIcon />}
+          </Fab>
+        </Tooltip>
+      </Box>
+    </Box>
+  );
+};

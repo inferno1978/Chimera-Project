@@ -374,6 +374,14 @@ chimera/
     ├── _vendor/          (вендорные модули)
     │   └── dpi_detector/
     └── *.py              (143 файла, см. группы выше)
+
+vendor/                   (вендор внешних проектов — вне python-пакета)
+└── b4/                   (исходники b4 v1.80.4, апстрим DanielLavrushin/b4)
+    ├── src/              (Go-исходники: 561 файл, 248 тестов — engine,
+    │                      nfq/tun/tproxy, discovery, mcp-сервер в src/http)
+    ├── installer/        (установщик ОС-пакетов)
+    ├── toolkit/          (утилиты)
+    └── set-artifacts/    (готовые сеты: GitHub-Fat-v1.json + верификация)
 ```
 
 ## Паттерн доступа к ядру

@@ -126,6 +126,7 @@ sudo python3 main.py
 | [`AI_ACCESS_TG_FAQ.md`](docs/faq/AI_ACCESS_TG_FAQ.md) | ИИ-агент на роутере + разблокировка Telegram — MCP/REST-доступ к b4: включение MCP-сервера, токен, три пути доступа (LAN/WAN/nginx front), firewall-правила с Source IP и персистенцией, роли «пользователь vs ИИ», живой кейс разблокировки ТГ (мост mtproto-ws, дороги: WS-edge / CF-пул Flowseal / socat / CF Worker, почему Discovery бессилен при IP-блоке), встроенные защиты b4, сравнение с VLESS-туннелями, автобан и Q&A |
 | [`RU_NODE_CASCADE_FAQ.md`](docs/faq/RU_NODE_CASCADE_FAQ.md) | Выбор RU-ноды для каскада — цензурный аудит входной ноды: четыре цензора на пути (реестр оператора / ТСПУ-антитуннель / фильтры аплинка / v6-плечо), три оси профиля, два живых кейса (лицензированный оператор vs «офшорная полка» с РФ-транзитом), чек-лист аудита в 7 шагов, матрица «профиль → роль», живые и режущиеся хостеры плеча entry→exit, ловушки интерпретации детектора, Q&A |
 | [`DPI_BYPASS_FAQ.md`](docs/faq/DPI_BYPASS_FAQ.md) | DPI Bypass (b4) — обход ТСПУ для YouTube и любых заблокированных ресурсов: почему b4, а не fragment/WARP, ТСПУ-ярусы (почему дома строже, чем на VPS), установка на entry VPS, пресеты, Discovery, импорт сетов, Web UI и nginx front, CRUD сетов, health check, решение проблем |
+| [`GITHUB_BYPASS_FAQ.md`](docs/faq/GITHUB_BYPASS_FAQ.md) | GitHub Bypass (b4) — обход частичных блокировок GitHub (РКН и исходники): диагностика трёх режимов блока (SNI-фильтр / троттлинг / DNS-отравление), артефакты зондов на CDN-корнях, архитектура сета GitHub-Fat-v1 (combo + timestamp-фейк + DoH + эскалация на Heavy), три слоя таргетов (19 суффиксов + geosite:github на 64 домена + 87 CIDR из api.github.com/meta), установка тремя способами (MCP/Web UI/TUI), watchdog-верификация, тонкая настройка, честные ограничения (IP-душение лечится только routing→upstream) |
 
 ## 🗂️ Структура проекта
 
@@ -148,7 +149,11 @@ Chimera-Project/
 │   ├── AGH_FAQ.md               #   AdGuard Home — DNS-сервер с фильтрацией
 │   ├── AI_ACCESS_TG_FAQ.md     #   ИИ-агент на роутере + разблокировка ТГ (MCP/REST)
 │   ├── RU_NODE_CASCADE_FAQ.md  #   Выбор RU-ноды для каскада (цензурный аудит)
-│   └── DPI_BYPASS_FAQ.md        #   DPI Bypass (b4) — обход ТСПУ (YouTube и любые сайты)
+│   ├── DPI_BYPASS_FAQ.md        #   DPI Bypass (b4) — обход ТСПУ (YouTube и любые сайты)
+│   └── GITHUB_BYPASS_FAQ.md     #   GitHub Bypass (b4) — частичные блокировки GitHub (сет GitHub-Fat-v1)
+├── vendor/
+│   └── b4/                      #   Исходники b4 v1.80.4 (апстрим DanielLavrushin/b4): src, installer, toolkit
+│       └── set-artifacts/       #   Готовые сеты: GitHub-Fat-v1.json + верификация (watchdog/MCP-кейс)
 ├── LICENSE
 └── chimera/
     ├── __init__.py
