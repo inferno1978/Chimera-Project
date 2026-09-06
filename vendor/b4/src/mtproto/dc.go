@@ -1,0 +1,319 @@
+package mtproto
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/daniellavrushin/b4/log"
+)
+
+var dcAddressesV4 = map[int]string{
+	1:   "149.154.175.50:443",
+	2:   "149.154.167.51:443",
+	3:   "149.154.175.100:443",
+	4:   "149.154.167.91:443",
+	5:   "149.154.171.5:443",
+	203: "91.105.192.100:443",
+}
+
+var dcAddressesV6 = map[int]string{
+	1: "[2001:b28:f23d:f001::a]:443",
+	2: "[2001:67c:04e8:f002::a]:443",
+	3: "[2001:b28:f23d:f003::a]:443",
+	4: "[2001:67c:04e8:f004::a]:443",
+	5: "[2001:b28:f23f:f005::a]:443",
+}
+
+type dcNet struct {
+	net *net.IPNet
+	dc  int
+}
+
+func mustParseDCNets(pairs [][2]interface{}) []dcNet {
+	out := make([]dcNet, 0, len(pairs))
+	for _, p := range pairs {
+		cidr, _ := p[0].(string)
+		dc, _ := p[1].(int)
+		_, n, err := net.ParseCIDR(cidr)
+		if err != nil || n == nil {
+			continue
+		}
+		out = append(out, dcNet{net: n, dc: dc})
+	}
+	return out
+}
+
+// dcExtraV4 are addresses a range would otherwise label wrongly. 149.154.167.0/24
+// is DC2's block but Telegram also answers on .43 and .92 there as DC4, and
+// neither appears in getProxyConfig, so without these the range hands a DC4
+// session the kws2 hostname and Cloudflare relays it to DC2.
+var dcExtraV4 = map[string]int{
+	"149.154.167.43": 4,
+	"149.154.167.92": 4,
+}
+
+// A range is a guess where an address is a fact, so a range that covers two data
+// centers is worse than no range at all: the CF-proxy route builds kws<dc>.<domain>
+// from it, and Cloudflare then relays the session to whichever data center that
+// name points at. 149.154.175.0/24 is deliberately absent for exactly this reason -
+// DC1 (.50 .53 .55 .58) and DC3 (.100) share it, and only the .48/28 sub-block is
+// separable. 91.108.4.0/22 is narrowed to /24 because 91.108.5-7 answer nothing.
+var dcRangesV4 = mustParseDCNets([][2]interface{}{
+	{"91.108.4.0/24", 4},
+	{"91.108.56.0/24", 5},
+	{"149.154.161.0/24", 2},
+	{"149.154.165.0/24", 4},
+	{"149.154.166.0/24", 4},
+	{"149.154.167.0/24", 2},
+	{"149.154.170.0/24", 5},
+	{"149.154.171.0/24", 5},
+	{"149.154.175.48/28", 1},
+})
+
+var dcRangesV6 = mustParseDCNets([][2]interface{}{
+	{"2001:67c:4e8:f002::/64", 2},
+	{"2001:67c:4e8:f004::/64", 4},
+})
+
+func dcForIPRange(ip net.IP) (int, bool) {
+	if ip == nil {
+		return 0, false
+	}
+	if ip.To4() != nil {
+		for _, e := range dcRangesV4 {
+			if e.net.Contains(ip) {
+				return e.dc, true
+			}
+		}
+		return 0, false
+	}
+	for _, e := range dcRangesV6 {
+		if e.net.Contains(ip) {
+			return e.dc, true
+		}
+	}
+	return 0, false
+}
+
+var (
+	dcRuntimeMu sync.RWMutex
+	dcRuntime   = map[int][]string{}
+)
+
+const (
+	officialProxyConfigURL = "https://core.telegram.org/getProxyConfig"
+	DefaultDCFallbackURL   = "https://proxy.b4core.app/telegram/getProxyConfig"
+)
+
+func DirectAddresses() map[int]string {
+	out := make(map[int]string, len(dcAddressesV4))
+	for k, v := range dcAddressesV4 {
+		out[k] = v
+	}
+	return out
+}
+
+func DirectAddressesV6() map[int]string {
+	out := make(map[int]string, len(dcAddressesV6))
+	for k, v := range dcAddressesV6 {
+		out[k] = v
+	}
+	return out
+}
+
+func DCSnapshot() map[int]string {
+	dcRuntimeMu.RLock()
+	defer dcRuntimeMu.RUnlock()
+	out := make(map[int]string, len(dcRuntime))
+	for k, v := range dcRuntime {
+		if len(v) > 0 {
+			out[k] = v[0]
+		}
+	}
+	return out
+}
+
+func DCSnapshotAll() map[int][]string {
+	dcRuntimeMu.RLock()
+	defer dcRuntimeMu.RUnlock()
+	out := make(map[int][]string, len(dcRuntime))
+	for k, v := range dcRuntime {
+		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
+
+func dcForIP(ip net.IP) (int, bool) {
+	if ip == nil {
+		return 0, false
+	}
+	target := ip.String()
+
+	dcRuntimeMu.RLock()
+	for dc, addrs := range dcRuntime {
+		for _, a := range addrs {
+			host, _, err := net.SplitHostPort(a)
+			if err != nil {
+				host = a
+			}
+			if host == target {
+				dcRuntimeMu.RUnlock()
+				return dc, true
+			}
+		}
+	}
+	dcRuntimeMu.RUnlock()
+
+	if dc, ok := dcExtraV4[target]; ok {
+		return dc, true
+	}
+
+	for dc, a := range dcAddressesV4 {
+		if host, _, err := net.SplitHostPort(a); err == nil && host == target {
+			return dc, true
+		}
+	}
+	for dc, a := range dcAddressesV6 {
+		if host, _, err := net.SplitHostPort(a); err == nil && host == target {
+			return dc, true
+		}
+	}
+	return 0, false
+}
+
+func RefreshDCs(fallbackEnabled bool, fallbackURL string) error {
+	urls := []string{officialProxyConfigURL}
+	if fallbackEnabled {
+		if fallbackURL == "" {
+			fallbackURL = DefaultDCFallbackURL
+		}
+		urls = append(urls, fallbackURL)
+	}
+	cli := &http.Client{Timeout: 3 * time.Second}
+	var body []byte
+	var lastErr error
+	for _, u := range urls {
+		req, err := http.NewRequest("GET", u, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp, err := cli.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("%s: %w", u, err)
+			continue
+		}
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("%s: status %d", u, resp.StatusCode)
+			continue
+		}
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("%s: %w", u, err)
+			continue
+		}
+		lastErr = nil
+		break
+	}
+	if body == nil {
+		return lastErr
+	}
+	next := map[int][]string{}
+	total := 0
+	sc := bufio.NewScanner(strings.NewReader(string(body)))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, "proxy_for ") {
+			continue
+		}
+		line = strings.TrimSuffix(line, ";")
+		f := strings.Fields(line)
+		if len(f) != 3 {
+			continue
+		}
+		id, err := strconv.Atoi(f[1])
+		if err != nil {
+			continue
+		}
+		if id < 0 {
+			id = -id
+		}
+		if _, _, err := net.SplitHostPort(f[2]); err != nil {
+			continue
+		}
+		dup := false
+		for _, existing := range next[id] {
+			if existing == f[2] {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue
+		}
+		next[id] = append(next[id], f[2])
+		total++
+	}
+	if len(next) == 0 {
+		return fmt.Errorf("no proxy_for entries parsed")
+	}
+	dcRuntimeMu.Lock()
+	dcRuntime = next
+	dcRuntimeMu.Unlock()
+	log.Infof("MTProto DC list refreshed: %d DCs, %d addresses", len(next), total)
+	return nil
+}
+
+func ResolveDC(dc int, preferV6 bool, relay string) (string, error) {
+	addrs, err := ResolveDCAll(dc, preferV6, relay)
+	if err != nil {
+		return "", err
+	}
+	return addrs[0], nil
+}
+
+func ResolveDCAll(dc int, preferV6 bool, relay string) ([]string, error) {
+	absDC := dc
+	if absDC < 0 {
+		absDC = -absDC
+	}
+
+	if relay != "" {
+		host, portStr, err := net.SplitHostPort(relay)
+		if err != nil {
+			return []string{relay}, nil
+		}
+		basePort, err := strconv.Atoi(portStr)
+		if err != nil {
+			return []string{relay}, nil
+		}
+		portDC := absDC
+		if portDC == 203 {
+			portDC = 2
+		}
+		return []string{net.JoinHostPort(host, strconv.Itoa(basePort+portDC-1))}, nil
+	}
+
+	var out []string
+	if preferV6 {
+		if addr, ok := dcAddressesV6[absDC]; ok {
+			out = append(out, addr)
+		}
+	}
+	if addr, ok := dcAddressesV4[absDC]; ok {
+		out = append(out, addr)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("unknown DC %d", absDC)
+	}
+	return out, nil
+}

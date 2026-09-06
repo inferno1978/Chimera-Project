@@ -1,0 +1,283 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g., 1.0.0)"
+        required: true
+        default: "1.0.0"
+      draft:
+        description: "Create as draft release?"
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: "Mark as pre-release?"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  VERSION: ${{ inputs.version }}
+  BINARY_NAME: b4
+
+jobs:
+  build-ui:
+    name: Build UI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.18.2
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: "pnpm"
+          cache-dependency-path: |
+            ./src/http/ui/pnpm-lock.yaml
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: src/go.mod
+          cache-dependency-path: src/go.sum
+
+      - name: Generate UI defaults
+        working-directory: src
+        run: go run tools/gendefaults.go
+
+      - name: Build web UI
+        working-directory: src/http/ui
+        run: |
+          pnpm install --frozen-lockfile
+          VITE_APP_VERSION="$VERSION" pnpm build
+
+      - name: Upload UI artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-build
+          path: src/http/ui/dist
+          retention-days: 1
+
+  test:
+    name: Run Tests
+    needs: build-ui
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: src/go.mod
+          cache-dependency-path: src/go.sum
+
+      - name: Download UI artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: ui-build
+          path: src/http/ui/dist
+
+      - name: Run tests
+        working-directory: src
+        run: go test ./...
+
+  build-linux:
+    name: Build Linux ${{ matrix.arch }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          [
+            386,
+            amd64,
+            arm64,
+            armv5,
+            armv6,
+            armv7,
+            loong64,
+            mips,
+            mipsle,
+            mips_softfloat,
+            mipsle_softfloat,
+            mips64,
+            mips64le,
+            ppc64,
+            ppc64le,
+            riscv64,
+            s390x,
+          ]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: src/go.mod
+          cache-dependency-path: src/go.sum
+
+      - name: Download UI artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: ui-build
+          path: src/http/ui/dist
+
+      - name: Build using Makefile
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          make linux-${ARCH} VERSION="$VERSION"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.BINARY_NAME }}-linux-${{ matrix.arch }}
+          path: out/assets/*
+          retention-days: 1
+
+  release:
+    name: Create Release
+    needs: [build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ${{ env.BINARY_NAME }}-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate release files
+        working-directory: release-assets
+        run: |
+          # Combine all individual checksums
+          echo "=== SHA256 Checksums ===" > checksums.txt
+          cat *.sha256 >> checksums.txt
+          echo "" >> checksums.txt
+
+          # Generate combined checksum files
+          sha256sum *.tar.gz > SHA256SUMS
+
+          # Display what we're releasing
+          echo "📦 Release artifacts:"
+          ls -la
+
+      - name: Read Changelog
+        id: read_changelog
+        run: |
+          echo "Extracting latest changelog entry..."
+          CHANGELOG=$(awk '/^## \[/{if (found++) exit} found {print}' changelog.md)
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          body: ${{ steps.read_changelog.outputs.changelog }}
+          files: |
+            release-assets/*.tar.gz
+            release-assets/*.tar.gz.sha256
+            release-assets/SHA256SUMS
+            release-assets/checksums.txt
+          generate_release_notes: true
+
+  sourceforge:
+    name: Mirror to SourceForge
+    needs: release
+    if: ${{ !inputs.draft }}
+    uses: ./.github/workflows/sourceforge-mirror.yml
+    with:
+      tags: v${{ inputs.version }}
+    secrets: inherit
+
+  docker:
+    name: Docker Image
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine tags
+        id: tags
+        env:
+          REPO: ${{ github.repository }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          REPO_LOWER=$(echo "$REPO" | tr '[:upper:]' '[:lower:]')
+          TAGS="lavrushin/b4:${VERSION}"
+          TAGS="${TAGS},ghcr.io/${REPO_LOWER}:${VERSION}"
+          if [ "$PRERELEASE" != "true" ]; then
+            TAGS="${TAGS},lavrushin/b4:latest"
+            TAGS="${TAGS},ghcr.io/${REPO_LOWER}:latest"
+          fi
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6
+          push: true
+          build-args: |
+            VERSION=${{ env.VERSION }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  cleanup:
+    name: Cleanup old artifacts
+    needs: [release, docker, sourceforge]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Delete artifacts
+        uses: geekyeggo/delete-artifact@v6
+        with:
+          name: ${{ env.BINARY_NAME }}-*
+          failOnError: false

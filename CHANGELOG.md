@@ -2,6 +2,59 @@
 
 ---
 
+## FEAT(vendor/b4): сет GitHub-Fat-v1 + исходники b4 в репо + FAQ по обходу GitHub — 6 сентября 2026
+
+**Кейс:** РКН начал ограничивать скачивание исходников с GitHub.
+По прямому распоряжению пользователя — подключение к домашнему
+роутеру (b4 v1.80.4) по MCP и сборка «самого жирного» сета.
+
+**Что сделано:**
+- **vendor/b4/** — исходники b4 v1.80.4 (апстрим
+  github.com/DanielLavrushin/b4) вендорены в репо: `src/` (561
+  go-файл, 248 тестов), `installer/`, `toolkit/`, Makefile,
+  install.sh, докер, лицензия (апстримная — прав не нарушаем);
+  без 12 МБ `.git` и 16 МБ docusaurus-сайта. Ранее в репо были
+  только интеграционные модули (youtube_b4, dpi_bypass) — самих
+  исходников b4 не было.
+- **vendor/b4/set-artifacts/GitHub-Fat-v1.json** — готовый к
+  импорту сет (id вычищен) + JSON верификации кейса.
+- **Сет на роутере (MCP, applied live):** `GitHub-Fat-v1`
+  (позиция 1) — три слоя таргетов: 19 sni-суффиксов +
+  `geosite:github` (64 записи: S3-бакеты релиз-ассетов, 20
+  Azure-блобов Actions, npm, Copilot) + 87 CIDR из официального
+  `api.github.com/meta` (web/api/git/pages/copilot, v4+v6 — ловит
+  соединения без SNI). Стратегия — зеркало боевого Youtube-Fat-v1
+  (тот же ТСПУ): combo-фрагментация + timestamp-фейк SNI
+  (sni_type 8, decrease 600000) + seg2delay 20/60 + RST-защита +
+  DNS через DoH 1.1.1.1 + эскалация на `GitHub-Heavy-v1`
+  (tcp-стратегия, авто-переключение при адаптации ТСПУ).
+- **Discovery-разведка:** github.com 694 КБ/с / raw 373 / codeload
+  253 (в момент замера жёсткого блока не было — сет
+  профилактический). Разгаданы артефакты зондов: «троттлинг 4-5
+  КБ/с» на objects/release-assets — на деле 425 байт S3-XML на
+  корневом пути зонда (крошечное тело = крошечная «скорость»);
+  ошибки raw/codeload — непринятие междоменных редиректов.
+  Урок: выводы о блоке делать только сравнением baseline vs
+  through_b4 + реальными запросами, не одним зондом.
+- **Живая верификация:** watchdog `github.com → matched_set=
+  GitHub-Fat-v1, healthy, 71 КБ/с`; raw — matched+queued;
+  baseline == through_b4 (сет ничего не ломает); сеты пережили
+  рестарт демона (uptime 9м, конфиг персистентен); rst_dropped=114
+  (RST-защита отсеивает поддельные сбросы).
+- **docs/faq/GITHUB_BYPASS_FAQ.md** — полный FAQ: диагностика трёх
+  режимов блока, архитектура сета, установка тремя способами
+  (MCP / Web UI / TUI), watchdog-верификация, тонкая настройка,
+  честные ограничения (IP-душение пакетными трюками не лечится —
+  только routing→upstream, предусмотрено в сете).
+
+**Смежное:** README (таблица FAQ + дерево проекта), артефакты
+в download/ (b4-set_GitHub-Fat-v1.json + b4-github-set-
+verification.json). MCP-инструменты: 19 шт (b4_manage_set,
+b4_edit_set_targets, b4_set_config_value, b4_find_bypass_strategy,
+b4_test_domain_now, b4_watchdog, b4_metrics…).
+
+---
+
 ## FIX(subscription_multinode): fake-ip-range6 убран из генератора — откат вчерашнего пина /126 — 6 сентября 2026
 
 **Что исправлено:** вчерашняя правка (замена мёртвого
