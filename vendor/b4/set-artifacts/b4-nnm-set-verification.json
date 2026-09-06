@@ -1,0 +1,53 @@
+{
+  "case": "NNM-Club (nnmclub.to) — SNI-блок за Cloudflare + DNS-отравление",
+  "date": "2026-09-06",
+  "b4_version": "1.81.0",
+  "block_diagnostics": {
+    "baseline_mode": "TLS_RST / TLS_DROP (активный сброс/дроп в TLS-хандшейке, ТСПУ по SNI)",
+    "works_without_b4": false,
+    "dns_poisoned_per_discovery": true,
+    "site_hosting": "Cloudflare (NS bart/lola.ns.cloudflare.com; A 104.21.95.93/172.67.144.20, AAAA 2606:4700:3034::ac43:9014/2606:4700:3030::6815:5f5d)"
+  },
+  "satellite_recon": {
+    "alive": [
+      "nnmclub.to (главный)",
+      "www.nnmclub.to",
+      "api.nnmclub.to (те же CF-IP)",
+      "mail.nnmclub.to (MX)"
+    ],
+    "dead_parked": [
+      "nnm-club.cc (9 байт octet-stream)",
+      "nnm-club.info (пусто)",
+      "nnm-club.name (302 на рекламу)",
+      "nnm-club.to / nnmclub.me / nnm-club.ru / nnmclub.ru / nnm-club.ws / nnm-club.net / nnmclub.xyz (парковки/пусто)"
+    ],
+    "cert_san": "nnmclub.to, *.nnmclub.to",
+    "suffix_coverage": "запись sni_domains: nnmclub.to покрывает все поддомены (www/api/mail)"
+  },
+  "discovery": {
+    "winner_preset": "desync-fin-ttl6-c2",
+    "family": "desync",
+    "confirmed": 3,
+    "best_kb_per_sec": 1050.0,
+    "phases": "cached (37) -> strategy_detection (39) -> optimization (232)"
+  },
+  "set": {
+    "name": "NNM-Fat-v1",
+    "position": 1,
+    "strategy": "fragmentation.strategy=tcp + tcp.desync mode=ack ttl=7 count=2 + faking pastseq (sni_type 2)",
+    "targets": "sni: nnmclub.to (суффикс); ip: 9 записей (CF-края v4+v6, discovery + DoH-снимок)",
+    "dns": "enabled, DoH https://1.1.1.1/dns-query, strict=false",
+    "rst_protection": "enabled (ttl_tolerance 3)",
+    "escalate": "NNM-Heavy-v1 (tcp, пустой, ждёт как цель эскалации)"
+  },
+  "live_verification": {
+    "test_domain_now": "baseline=FAIL (TLS_DROP) / through_b4=OK 101.6 KB/s",
+    "watchdog_first_check": "healthy, 89.0 KB/s, 0 consecutive_failures, interval 300s",
+    "coverage": "nnmclub.to exact + api.nnmclub.to covered (relation=covered, via manual)"
+  },
+  "notes": [
+    "Пользовательский discovery-прогон на 1.80.x нашёл стратегию, но сет не заработал: в 1.80.x apply мог создать сет, не соответствующий найденному (починено в 1.81.0), и без dns.enabled/DoH браузер продолжал получать отравленные ответы.",
+    "CF-края ротируются: 5 IP-записей из DoH-снимка устареют со временем — основной матчинг по SNI-суффиксу не страдает.",
+    "Домашний IP и токены в артефакты не входят."
+  ]
+}
