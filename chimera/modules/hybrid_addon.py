@@ -1074,6 +1074,17 @@ def do_rollback() -> None:
         backup_path = Path(state["backup_path"])
         owner_mode = state.get("config_owner_mode")
 
+        # v80 (rollback-order): СНАЧАЛА глушим mita, ПОТОМ поднимаем Xray.
+        # mita в момент отката слушает бывший VLESS-порт (TCP) и порт+1 (UDP) —
+        # если рестартовать Xray до её остановки, восстановленный vless-инбаунд
+        # не сможет забиндиться на занятый порт: xray падает, systemd крутится
+        # в restart-backoff (is-active = "activating"), и rollback рапортует
+        # «Служба xray НЕ активна» при живом конфиге. Живой кейс 07.09.
+        run(["systemctl", "stop", "mita"])
+        run(["systemctl", "disable", "mita"])
+        c_green("Mieru (mita) остановлен и снят с автозагрузки.")
+        time.sleep(1)  # ядру нужно время закрыть listen-сокеты mita
+
         if backup_path.exists():
             shutil.copy2(backup_path, xray_config_path)
             if owner_mode:
@@ -1083,13 +1094,12 @@ def do_rollback() -> None:
                          f"(старый state-файл?) — проверь руками: "
                          f"ls -la '{xray_config_path}' и сравни с другими файлами в той же папке.")
             c_green(f"config.json восстановлен из {backup_path}")
-            restart_service("xray")
+            if not restart_service("xray"):
+                c_yellow("Xray не поднялся сразу после отката — смотри journalctl -u xray -n 30. "
+                         "Если это остаточный конфликт портов, повтори: "
+                         "sudo systemctl restart xray.")
         else:
             c_red(f"Бэкап {backup_path} не найден — config.json НЕ восстановлен, проверь руками.")
-
-        run(["systemctl", "stop", "mita"])
-        run(["systemctl", "disable", "mita"])
-        c_green("Mieru (mita) остановлен и снят с автозагрузки.")
 
         # v49: закрытие портов через port_registry (tagged-правила)
         closed_reg = False
