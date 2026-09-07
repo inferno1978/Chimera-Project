@@ -2,6 +2,47 @@
 
 ---
 
+## FIX(mieru/hybrid-addon): rollback поднимал Xray до остановки mita — порт оставался занят, xray уходил в «activating» (v80) — 7 сентября 2026
+
+**Кейс:** юзер откатывал Mieru Hybrid Addon на боевой ноде
+(transport=both, TCP 443 / UDP 8443). config.json восстановился,
+но rollback рапортовал «Служба xray НЕ активна после restart
+(статус: 'activating')» — нода сидела без входа, лечилось
+перегенерацией конфига (пункт 5b) вручную.
+
+**Диагноз:** порядок операций в `do_rollback()`: (1) restore
+config.json → (2) `restart xray` → (3) только потом `stop mita`.
+В момент (2) mita ещё слушает TCP 443 — восстановленный
+vless-инбаунд не может забиндиться, xray падает, systemd крутится
+в restart-backoff (`is-active` = `activating`). Внутренний ретрай
+`restart_service()` (v57) бессмысленен: mita останавливается
+только после его возврата; start-rate-limit сбрасывается, но порт
+остаётся занятым до конца rollback — потому «активации» и не
+происходило, пока юзер не вмешался.
+
+**Что сделано:**
+- `modules/hybrid_addon.py`, `do_rollback()`: порядок обращён —
+  сначала `systemctl stop mita` + `disable` + пауза 1 с (ядро
+  закрывает listen-сокеты), затем restore config.json и
+  `restart_service("xray")`. Принцип «остановить того, кто держит
+  порт → поднять того, кто его занимает» исключает конфликт
+  портов по построению.
+- Ветка «Xray не поднялся»: явная подсказка (`journalctl -u xray`
+  + ручной `systemctl restart xray`) вместо молчаливого
+  игнорирования результата рестарта.
+- Тесты (+2, сьют 58 OK): `TestDoRollbackOrder` — по журналу
+  вызовов верифицирует, что stop/disable mita происходят ДО
+  copy2-реставрации конфига и ДО restart xray (port_registry
+  застабирован через sys.modules).
+
+**Совместимость:** CLI/меню-обёртки не менялись, state-формат не
+менялся. На старых версиях сценарий «activating» после отката
+лечится повторным `systemctl restart xray` — mita к этому моменту
+уже остановлена самим откатом. FAQ (MIERU_FAQ.md §9) дополнил
+живым кейсом и рецептом.
+
+---
+
 ## FIX(tui/port-hopping): O(N^2)-«зависание» включения Port Hopping — bulk-регистрация диапазона в реестре портов (v79) — 6 сентября 2026
 
 **Кейс:** юзер включал Port Hopping из TUI (PH → 1 →

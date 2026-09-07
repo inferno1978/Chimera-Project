@@ -597,5 +597,80 @@ class TestCaptureRestoreOwnerMode(unittest.TestCase):
             _restore_owner_mode(path, {"uid": 0, "gid": 0, "mode": 0o644})
 
 
+class TestDoRollbackOrder(unittest.TestCase):
+    """v80 (rollback-order): do_rollback() обязан глушить mita ДО
+    восстановления config.json и рестарта Xray. Иначе восстановленный
+    vless-инбаунд биндится на порт, который mita ещё держит: xray падает,
+    systemd крутится в restart-backoff, is-active отвечает «activating»
+    (живой кейс 07.09)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _run_rollback(self):
+        """Прогоняет do_rollback() на моках, возвращает журнал вызовов."""
+        import types
+        from chimera.modules import hybrid_addon
+
+        calls = []
+
+        class _Res:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        stub_pr = types.ModuleType("chimera.modules.port_registry")
+        stub_pr.ufw_close_port = lambda *a, **kw: None
+        stub_pr.port_unregister = lambda *a, **kw: None
+        stub_pr.SERVICE_HYBRID_ADDON = "hybrid_addon"
+
+        state = {
+            "xray_config_path": str(self._tmpdir / "config.json"),
+            "backup_path": str(self._tmpdir / "config.json.bak"),
+            "config_owner_mode": {"uid": 0, "gid": 0, "mode": 0o644},
+            "tcp_port": 443,
+            "udp_port": 8443,
+        }
+        Path(state["backup_path"]).write_text("{}")  # бэкап «существует»
+
+        with patch.dict(sys.modules, {"chimera.modules.port_registry": stub_pr}):
+            with patch.object(hybrid_addon, "load_state", return_value=state), \
+                 patch("shutil.copy2",
+                       side_effect=lambda s, d: calls.append(("copy2", str(d)))), \
+                 patch.object(hybrid_addon, "restart_service",
+                              side_effect=lambda name: calls.append(("restart", name)) or True), \
+                 patch.object(hybrid_addon, "run",
+                              side_effect=lambda cmd, **kw: calls.append(("run", tuple(cmd))) or _Res()), \
+                 patch.object(hybrid_addon, "STATE_FILE", self._tmpdir / "state.json"), \
+                 patch.object(hybrid_addon, "_restore_owner_mode", lambda *a, **kw: None), \
+                 patch.object(hybrid_addon, "_log", lambda *a, **kw: None):
+                hybrid_addon.do_rollback()
+        return calls
+
+    def test_mita_stopped_before_config_restore_and_xray_restart(self):
+        calls = self._run_rollback()
+        stop_i = next(i for i, c in enumerate(calls)
+                      if c[0] == "run" and c[1][:2] == ("systemctl", "stop"))
+        copy_i = next(i for i, c in enumerate(calls) if c[0] == "copy2")
+        restart_i = next(i for i, c in enumerate(calls) if c[0] == "restart")
+        self.assertLess(stop_i, copy_i,
+                        "mita должна быть остановлена ДО восстановления config.json")
+        self.assertLess(stop_i, restart_i,
+                        "mita должна быть остановлена ДО рестарта Xray (порт!)")
+
+    def test_mita_disabled_once_before_restart(self):
+        calls = self._run_rollback()
+        disables = [i for i, c in enumerate(calls)
+                    if c[0] == "run" and c[1][:2] == ("systemctl", "disable")]
+        restart_i = next(i for i, c in enumerate(calls) if c[0] == "restart")
+        self.assertEqual(len(disables), 1, "systemctl disable mita — ровно один вызов")
+        self.assertLess(disables[0], restart_i)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
