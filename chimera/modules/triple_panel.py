@@ -347,6 +347,141 @@ def _extract_front(tar_path: Path, dest: Path) -> bool:
         _err(f"Распаковка фронта: {e}")
         return False
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  v82: SSE-ШИМ (фронт-патч поверх апстримного app.js)
+#  Апстрим общается с бэкендом по WebSocket (только метрики). У нас SSE —
+#  шим подменяет window.WebSocket классом поверх EventSource, поэтому
+#  app.js не меняется и «WS-точка» в шапке живой. Плюс live-обновления
+#  таблицы юзеров и логов (сверх WS-контракта апстрима).
+# ══════════════════════════════════════════════════════════════════════════════
+_SSE_SHIM_JS = """/* Chimera Triple Panel - SSE live-updates (port v82).
+ * Upstream app.js talks to the backend via WebSocket (metrics only:
+ * msg.type === 'metrics'). The Chimera backend is stdlib - no WS;
+ * instead it serves /api/events (text/event-stream). This shim replaces
+ * window.WebSocket with a class backed by a shared EventSource:
+ *   - SSE event 'metrics' -> ws.onmessage({data}) - upstream contract;
+ *   - SSE event 'users'   -> loadUsers() (live user table);
+ *   - SSE event 'log'     -> loadLogs() when the logs page is open.
+ * index.html loads this file BEFORE app.js. If SSE is unavailable
+ * everything degrades silently (upstream 5s reconnect is harmless).
+ */
+(function () {
+  'use strict';
+  if (typeof window.EventSource === 'undefined') { return; }
+
+  var shared = null, wired = false, latest = null;
+  var lastUsers = 0, lastLogs = 0;
+
+  function bus() {
+    if (!shared) {
+      var base = (typeof BASE_PATH !== 'undefined') ? BASE_PATH : '';
+      shared = new EventSource(base + '/api/events');
+    }
+    return shared;
+  }
+
+  function wire() {
+    if (wired) { return; }
+    wired = true;
+    var es = bus();
+    es.addEventListener('open', function () {
+      var dot = document.getElementById('ws-dot');
+      if (dot) { dot.className = 'status-dot connected'; }
+      if (latest && typeof latest.onopen === 'function') {
+        try { latest.onopen(); } catch (e) {}
+      }
+    });
+    es.addEventListener('metrics', function (ev) {
+      if (latest && typeof latest.onmessage === 'function') {
+        try { latest.onmessage({ data: ev.data }); } catch (e) {}
+      }
+    });
+    es.addEventListener('error', function () {
+      var dot = document.getElementById('ws-dot');
+      if (dot) { dot.className = 'status-dot error'; }
+      /* EventSource reconnects by itself; the upstream 5s reconnect loop
+       * is harmless - new SSEWebSocket instances just update `latest`. */
+      if (latest && typeof latest.onclose === 'function') {
+        try { latest.onclose(); } catch (e) {}
+      }
+    });
+    /* live updates beyond the upstream WS contract */
+    es.addEventListener('users', function () {
+      var now = Date.now();
+      if (now - lastUsers < 1000) { return; }
+      lastUsers = now;
+      if (typeof loadUsers === 'function') {
+        try { loadUsers(); } catch (e) {}
+      }
+    });
+    es.addEventListener('log', function () {
+      var now = Date.now();
+      if (now - lastLogs < 2000) { return; }
+      lastLogs = now;
+      try {
+        if (typeof state !== 'undefined' && state &&
+            state.currentPage === 'logs' &&
+            typeof loadLogs === 'function') {
+          loadLogs(currentLogService);
+        }
+      } catch (e) {}
+    });
+  }
+
+  function SSEWebSocket() {
+    var self = this;
+    this.readyState = 0;
+    this.onopen = null; this.onclose = null;
+    this.onmessage = null; this.onerror = null;
+    latest = self;
+    wire();
+  }
+  SSEWebSocket.prototype.close = function () {
+    /* the shared EventSource stays alive (no refcount needed) */
+  };
+  SSEWebSocket.prototype.send = function () { /* not supported */ };
+
+  window.WebSocket = SSEWebSocket;
+
+  /* hook live updates as soon as app.js has executed (BASE_PATH is
+   * declared inside app.js, so it is read lazily inside bus()) */
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { wire(); });
+  } else {
+    wire();
+  }
+})();
+"""
+
+def _inject_sse_shim(www_dir: Path) -> bool:
+    """v82: пишет triple-sse.js и вставляет его в index.html ДО app.js.
+
+    Идемпотентно: повторная установка/обновление фронта не дублирует тег.
+    Возвращает True если шим на месте.
+    """
+    try:
+        shim = www_dir / "triple-sse.js"
+        shim.write_text(_SSE_SHIM_JS, encoding="utf-8")
+        idx = www_dir / "index.html"
+        if not idx.exists():
+            return False
+        html = idx.read_text(encoding="utf-8")
+        if "triple-sse.js" in html:
+            return True  # уже вживлён
+        tag = '<script src="triple-sse.js"></script>\n'
+        marker = re.search(
+            r"<script[^>]*src=[\"'][^\"']*app\.js[\"'][^>]*>\s*</script>",
+            html)
+        if marker:
+            html = html[:marker.start()] + tag + html[marker.start():]
+        else:
+            html = html.replace("</head>", tag + "</head>")
+        idx.write_text(html, encoding="utf-8")
+        return True
+    except Exception as e:
+        _err(f"SSE-шим: {e}")
+        return False
+
 def _fetch_front(version: str, quiet: bool = False) -> bool:
     """Скачивает и вендорит фронт версии version → _WWW_DIR (atomic swap)."""
     from chimera.modules.download_manager import fetch_package
@@ -369,6 +504,8 @@ def _fetch_front(version: str, quiet: bool = False) -> bool:
         tar_path.unlink(missing_ok=True)
     except Exception:
         pass
+    # v82: SSE-шим поверх EventSource (подменяет WS апстрима во фронте)
+    _inject_sse_shim(_WWW_DIR)
     return _WWW_DIR.exists() and (_WWW_DIR / "index.html").exists()
 
 # ══════════════════════════════════════════════════════════════════════════════
