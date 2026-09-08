@@ -19,10 +19,12 @@ triple_panel_state.json) — наружу панель экспонируетс�
     GET    /api/me                   — кто в сессии
     GET    /api/users                — unified-таблица юзеров
     POST   /api/users                — создать (VLESS + sync contract v4.25)
-    PUT    /api/users/:id            — expiry/quota/protocols
+    PUT    /api/users/:id            — v82: password (ротация протоколов) +
+                                        email/username (rename через мост) +
+                                        expiry/quota/protocols
     DELETE /api/users/:id            — удалить (везде: VLESS+naive+mieru+TTL+лимит)
     GET    /api/config               — панельные настройки (без секретов)
-    POST   /api/config               — language (остальное — v2)
+    POST   /api/config               — language
     GET    /api/status               — версии + статус сервисов тройки
     GET    /api/apply-status         — исход последнего apply (фронт поллит)
     GET    /api/password/generate    — генератор пароля
@@ -31,10 +33,31 @@ triple_panel_state.json) — наружу панель экспонируетс�
                                         subscription.py: base64 / base64_safe /
                                         singbox / clash) + Subscription-Userinfo
 
-НЕ реализовано в v1 (фронт получит 501 с внятным текстом): смена портов
-протоколов из UI, cascade/warp-настройки, федерация, backup import/export,
-WS live-обновления (фронт деградирует на REST-поллинг, reconnect безвреден).
-Все эти операции остаются в TUI-модулях Химеры (10/11/7, раздел 1 W 8).
+v82 (SSE + настройки сервера):
+    GET    /api/events               — SSE-стрим live-событий: metrics (контракт
+                                        WS апстрима), users, status, log.
+                                        Шим triple-sse.js (вживляется во фронт
+                                        при установке) подменяет WebSocket
+                                        апстрима на EventSource — app.js не
+                                        меняется, WS-«точка» живой.
+    GET    /api/logs/:service        — журналы: naive|caddy, mieru, hy2|hysteria
+                                        (journalctl), panel (кольцо лога)
+    POST   /api/settings/naive-port  — смена порта caddy-naive (port_registry:
+                                        конфликт-чек + перерегистрация + ufw;
+                                        rebuild + restart + откат при ошибке)
+    POST   /api/settings/mieru-ports — смена диапазона портов mita
+    GET/POST /api/settings/cascade{,/status,/reset} — каскад Naive-leg
+                                        (upstream в Caddyfile, формат
+                                        https://user:pass@host:port);
+                                        Mieru-relay (Variant B) в Chimera не
+                                        применяется — честно отражено в ответе
+    GET/POST /api/settings/warp{,/status,/reset}    — WARP через warp.py
+                                        (full/selective/runet; режим из TUI
+                                        сохраняется; WARP<->каскад
+                                        взаимоисключающи — как BUG-150 апстрима)
+
+НЕ реализовано (фронт получит 501 с внятным текстом): федерация, backup
+import/export, hy2-настройки из UI (per-user Hy2 — отдельный проект), WS.
 
 ДЕЛЕГИРУЕМЫЕ ПРИМИТИВЫ:
     rest_api.py        — _get_users/_save_users/_sync_* (юзер-мост v4.25)
@@ -49,9 +72,11 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import queue
 import re
 import secrets
 import sys
+import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -86,11 +111,23 @@ def _load_state() -> dict:
     except Exception:
         return {}
 
+_SSE_LOG_RING: list = []       # v82: последние строки лога (для /api/logs/panel)
+_SSE_LOG_RING_MAX = 200
+
 def _log(level: str, msg: str) -> None:
+    line = (f"{time.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"[TRIPLE-WEB][{level}] {msg}")
     try:
         with open(_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} "
-                    f"[TRIPLE-WEB][{level}] {msg}\n")
+            f.write(line + "\n")
+    except Exception:
+        pass
+    # v82: кольцо для /api/logs/panel + live-событие 'log' (SSE)
+    try:
+        _SSE_LOG_RING.append(line)
+        if len(_SSE_LOG_RING) > _SSE_LOG_RING_MAX:
+            del _SSE_LOG_RING[:-_SSE_LOG_RING_MAX]
+        _sse_publish("log", {"line": line})
     except Exception:
         pass
 
@@ -400,10 +437,12 @@ def _delete_panel_user(email: str) -> "tuple[int, dict]":
     return 200, {"status": "deleted", "id": email}
 
 def _update_panel_user(email: str, payload: dict) -> "tuple[int, dict]":
-    """PUT /api/users/:id — expiry / квота / чекбоксы протоколов.
+    """PUT /api/users/:id — v82: password (ротация протоколов), email/username
+    (rename через юзер-мост v4.25), expiry / квота / чекбоксы протоколов.
 
-    Пароль протоколов в v1 не редактируется (генерируется sync-контрактом;
-    ротация = v2 через отдельный эндпоинт).
+    Один пароль юзера применяется в оба протокола (модель апстрима);
+    при создании пароль генерит мост — здесь только ротация. uuid не
+    меняется, поэтому подписка/токен переживают смену email.
     """
     from chimera.modules import rest_api as ra
     try:
@@ -418,7 +457,94 @@ def _update_panel_user(email: str, payload: dict) -> "tuple[int, dict]":
                  "name": target.get("name", "")}
     changed = []
 
-    # expiry
+    # 1) Ротация пароля протоколов (naive + mieru, один пароль на юзера)
+    new_password = payload.get("password")
+    if isinstance(new_password, str) and new_password.strip():
+        pw = new_password.strip()
+        if len(pw) < 8:
+            return 400, {"error": "password must be at least 8 chars"}
+        applied = []
+        try:
+            from chimera.modules.naiveproxy import set_password_full as _ns
+            if _ns(user_dict, pw):
+                applied.append("naive")
+        except Exception as e:
+            _log("WARN", f"naive set_password: {e}")
+        try:
+            from chimera.modules.mieru import set_password_full as _ms
+            if _ms(user_dict, pw):
+                applied.append("mieru")
+        except Exception as e:
+            _log("WARN", f"mieru set_password: {e}")
+        if not applied:
+            return 409, {"error": "no protocol accounts to rotate"}
+        changed.append("password")
+
+    # 2) Смена email/username — rename через мост (TTL и квоты переносятся
+    #    на новый email, uuid не меняется — подписка/токен остаются)
+    new_email = (payload.get("email") or "").strip()
+    new_name = (payload.get("username") or "").strip()
+    old_email, old_name = email, (target.get("name") or "")
+    email_renamed = bool(new_email) and new_email != old_email
+    name_renamed = bool(new_name) and new_name != old_name
+    if email_renamed or name_renamed:
+        if email_renamed:
+            if not _EMAIL_RE.match(new_email):
+                return 400, {"error": "valid email required"}
+            if any(u.get("email") == new_email and u is not target
+                   for u in users):
+                return 409, {"error": "Email already in use"}
+        final_email = new_email or old_email
+        final_name = new_name or (
+            final_email.split("@")[0] if "@" in final_email else final_email)
+        old_user = dict(user_dict)
+        new_user = {"uuid": target.get("uuid", ""), "email": final_email,
+                    "name": final_name}
+        for u in users:
+            if u is target:
+                u["email"] = final_email
+                u["name"] = final_name
+        ra._save_users(users)
+        try:
+            from chimera.modules.triple_panel import _core_module
+            core = _core_module()
+            core._users_apply_to_config(users)
+        except Exception as e:
+            _log("WARN", f"_users_apply_to_config: {e}")
+        try:
+            ra._sync_rename_user(old_name or old_email, final_name,
+                                 old_user, new_user)
+        except Exception as e:
+            _log("WARN", f"_sync_rename_user: {e}")
+        # TTL/квоты ключуются по email — переносим за юзером
+        try:
+            from chimera.modules.ttl_users import (
+                _ttl_load, _ttl_set, _ttl_remove)
+            row = (_ttl_load() or {}).get(old_email)
+            if row:
+                _ttl_remove(old_email)
+                _ttl_set(final_email, max(1, int(row.get("days", 1) or 1)))
+        except Exception as e:
+            _log("WARN", f"ttl transfer: {e}")
+        try:
+            from chimera.modules.subscription import _load_traffic_limits
+            from chimera.modules.user_lifecycle import (
+                _set_traffic_limit, _remove_traffic_limit)
+            row = (_load_traffic_limits() or {}).get(old_email)
+            if row:
+                _remove_traffic_limit(old_email)
+                _set_traffic_limit(final_email,
+                                   int(row.get("limit_gb", 0) or 0))
+        except Exception as e:
+            _log("WARN", f"limits transfer: {e}")
+        email = final_email
+        user_dict = new_user
+        if email_renamed:
+            changed.append("email")
+        if name_renamed:
+            changed.append("username")
+
+    # 3) expiry
     if "expiry" in payload:
         days = _expiry_to_days(payload.get("expiry"))
         if days:
@@ -436,7 +562,7 @@ def _update_panel_user(email: str, payload: dict) -> "tuple[int, dict]":
             except Exception:
                 pass
 
-    # quotaMB
+    # 4) quotaMB
     if "quotaMB" in payload or "quotaGb" in payload:
         limit_gb = _quota_to_gb(payload.get("quotaMB"), payload.get("quotaGb"))
         try:
@@ -450,7 +576,7 @@ def _update_panel_user(email: str, payload: dict) -> "tuple[int, dict]":
         except Exception as e:
             _log("WARN", f"quota: {e}")
 
-    # protocols
+    # 5) protocols
     protocols = payload.get("protocols")
     if isinstance(protocols, list):
         try:
@@ -471,7 +597,599 @@ def _update_panel_user(email: str, payload: dict) -> "tuple[int, dict]":
             _log("WARN", f"protocols: {e}")
 
     _log("INFO", f"user updated: {email} ({changed})")
-    return 200, {"status": "updated", "id": email, "changed": changed}
+    return 200, {"ok": True, "status": "updated", "id": email,
+                 "changed": changed, "servicesReloading": True}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  v82: SSE LIVE-ОБНОВЛЕНИЯ + НАСТРОЙКИ СЕРВЕРА (порты/каскад/WARP/логи)
+#  Апстримный фронт общается с бэкендом по WS (только метрики).
+#  Chimera-бэкенд — stdlib: вместо WS — /api/events (SSE). Шим
+#  triple-sse.js (вживляется во фронт при установке) подменяет
+#  window.WebSocket классом поверх EventSource, поэтому контракт
+#  сообщений (msg.type == 'metrics') сохранён без правок app.js.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── SSE-шина ────────────────────────────────────────────────────────────────
+_SSE_CLIENTS: list = []
+_SSE_LOCK = threading.Lock()
+
+def _sse_subscribe() -> "queue.Queue":
+    q: "queue.Queue" = queue.Queue(maxsize=256)
+    with _SSE_LOCK:
+        _SSE_CLIENTS.append(q)
+    return q
+
+def _sse_unsubscribe(q: "queue.Queue") -> None:
+    with _SSE_LOCK:
+        try:
+            _SSE_CLIENTS.remove(q)
+        except ValueError:
+            pass
+
+def _sse_publish(event: str, data) -> None:
+    """Событие всем SSE-клиентам. data — dict (→json) или готовая строка."""
+    if not isinstance(data, str):
+        data = json.dumps(data, ensure_ascii=False)
+    with _SSE_LOCK:
+        clients = list(_SSE_CLIENTS)
+    for q in clients:
+        try:
+            q.put_nowait((event, data))
+        except queue.Full:
+            pass  # медленный клиент — дроп, рассылку не блокируем
+
+# ── метрики (контракт msg WS апстрима: cpu/ram/naive/mieru) ───────────────────
+_CPU_TICKS: dict = {"prev": None}
+
+def _read_cpu_percent() -> float:
+    """Загрузка CPU между вызовами (первый вызов — 0.0)."""
+    try:
+        parts = open("/proc/stat").readline().split()[1:]
+        idle = int(parts[3]) + int(parts[4])
+        total = sum(int(p) for p in parts)
+        prev = _CPU_TICKS["prev"]
+        _CPU_TICKS["prev"] = (idle, total)
+        if not prev:
+            return 0.0
+        d_idle, d_total = idle - prev[0], total - prev[1]
+        if d_total <= 0:
+            return 0.0
+        return round(max(0.0, 100.0 * (1.0 - d_idle / d_total)), 1)
+    except Exception:
+        return 0.0
+
+def _read_ram_mb() -> "tuple[int, int]":
+    """(usedMB, totalMB) из /proc/meminfo."""
+    try:
+        info = {}
+        for line in open("/proc/meminfo"):
+            k, _, v = line.partition(":")
+            info[k.strip()] = int(v.strip().split()[0])  # kB
+        total = info.get("MemTotal", 0) // 1024
+        avail = info.get("MemAvailable", 0) // 1024
+        return max(0, total - avail), total
+    except Exception:
+        return 0, 0
+
+def _svc_active(name: str) -> bool:
+    import subprocess
+    try:
+        r = subprocess.run(["systemctl", "is-active", name],
+                           capture_output=True, check=False, timeout=5)
+        return r.returncode == 0 and r.stdout.decode().strip() == "active"
+    except Exception:
+        return False
+
+# ── watcher: diff живого состояния → события ────────────────────────────
+_SSE_POLL_SEC = 3.0
+_SSE_METRICS_SEC = 5.0
+_WATCHER: dict = {"users_fp": None, "services": None, "metrics_ts": 0.0}
+
+def _watcher_tick() -> None:
+    users = _assemble_panel_users()
+    fp = json.dumps(users, sort_keys=True, default=str)
+    if fp != _WATCHER["users_fp"]:
+        _WATCHER["users_fp"] = fp
+        _sse_publish("users", users)
+    services = {svc: _svc_active(svc)
+                for svc in ("caddy-naive", "mita", "hysteria-server", "xray")}
+    if services != _WATCHER["services"]:
+        _WATCHER["services"] = services
+        _sse_publish("status", services)
+    if time.time() - _WATCHER["metrics_ts"] >= _SSE_METRICS_SEC:
+        _WATCHER["metrics_ts"] = time.time()
+        ram_used, ram_total = _read_ram_mb()
+        _sse_publish("metrics", {
+            "type": "metrics",
+            "cpu": _read_cpu_percent(),
+            "ramUsedMB": ram_used,
+            "ramTotalMB": ram_total,
+            "naive": services.get("caddy-naive", False),
+            "mieru": services.get("mita", False),
+        })
+
+def _sse_watcher() -> None:
+    """Демон-поток: живые события для открытых SSE-клиентов."""
+    while True:
+        try:
+            _watcher_tick()
+        except Exception as e:
+            _log("WARN", f"sse watcher: {e}")
+        time.sleep(_SSE_POLL_SEC)
+
+# ── egress IP (для warp/cascade-ответов; кэш 30с, чтобы не долбить ipify) ────
+_EGRESS_CACHE: dict = {"ts": 0.0, "ip": ""}
+
+def _egress_ip(timeout: int = 6) -> str:
+    if _EGRESS_CACHE["ip"] and time.time() - _EGRESS_CACHE["ts"] < 30:
+        return _EGRESS_CACHE["ip"]
+    try:
+        import urllib.request
+        with urllib.request.urlopen("https://api.ipify.org",
+                                    timeout=timeout) as r:
+            ip = r.read(64).decode(errors="replace").strip()
+        if ip:
+            _EGRESS_CACHE.update(ts=time.time(), ip=ip)
+            return ip
+    except Exception:
+        pass
+    return ""
+
+# ── логи сервисов (journalctl / кольцо лога панели) ─────────────────────────
+_LOG_SERVICES = {
+    "naive": "caddy-naive", "caddy": "caddy-naive",
+    "mieru": "mita",
+    "hy2": "hysteria-server", "hysteria": "hysteria-server",
+}
+
+def _journal_tail(unit: str, lines: int) -> str:
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["journalctl", "-u", unit, "-n", str(lines), "--no-pager"],
+            capture_output=True, check=False, timeout=6)
+        out = r.stdout.decode(errors="replace").strip()
+        return out or "(no logs available)"
+    except Exception:
+        return "(no logs available)"
+
+def _logs_response(service: str, lines: int) -> "tuple[int, dict]":
+    try:
+        lines = max(1, min(int(lines), 1000))
+    except (TypeError, ValueError):
+        lines = 100
+    if service in ("panel", "triple", "triple-web"):
+        text = "\n".join(_SSE_LOG_RING[-lines:]) or "(no logs available)"
+        return 200, {"logs": text}
+    unit = _LOG_SERVICES.get(service)
+    if not unit:
+        return 400, {"error": "Unknown service"}
+    return 200, {"logs": _journal_tail(unit, lines)}
+
+# ── смена портов протоколов (port_registry + rebuild + откат) ─────────────
+
+def _conflict_detail(conflicts: list) -> str:
+    parts = []
+    for c in conflicts[:5]:
+        parts.append(str(c.get("detail", c)) if isinstance(c, dict) else str(c))
+    return "; ".join(p for p in parts if p)
+
+def _set_naive_port(payload: dict) -> "tuple[int, dict]":
+    """POST /api/settings/naive-port — контракт апстрима (Bug 52)."""
+    try:
+        port = int(payload.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if port < 1 or port > 65535:
+        return 400, {"error": "Invalid port (1-65535)"}
+    try:
+        from chimera.modules import naiveproxy as nv
+        from chimera.modules.proto_common import proto_load_state, proto_save_state
+        state = proto_load_state(nv._MODULE_STATE)
+    except Exception:
+        return 503, {"error": "naiveproxy module unavailable"}
+    old = int(state.get("port", 443) or 443)
+    if port == old:
+        return 200, {"ok": True,
+                     "message": f"NaiveProxy уже слушает порт {port}."}
+    try:
+        from chimera.modules import port_registry as pr
+        conflicts = pr.port_get_conflicts(port, proto="tcp",
+                                          exclude_service=pr.SERVICE_NAIVEPROXY)
+        conflicts += pr.port_check_system(port, proto="tcp")
+    except Exception:
+        conflicts = []
+    if conflicts:
+        return 409, {"error": f"порт занят: {_conflict_detail(conflicts)}"}
+    users = state.get("users", [])
+    state["port"] = port
+    try:
+        proto_save_state(nv._MODULE_STATE, state)
+    except Exception:
+        return 500, {"error": "не удалось сохранить state naiveproxy"}
+
+    def _apply(p: int):
+        return nv._apply_config(
+            state.get("domain", ""), p, users,
+            state.get("fake_url", ""), state.get("probe_secret", ""),
+            state.get("upstream", ""))
+
+    err = _apply(port)
+    if err:
+        state["port"] = old
+        try:
+            proto_save_state(nv._MODULE_STATE, state)
+            _apply(old)
+        except Exception:
+            pass
+        return 500, {"ok": False, "error": str(err)}
+    # смена порт-биндинга — полный restart (не reload), как у апстрима
+    import subprocess
+    try:
+        subprocess.run(["systemctl", "restart", "caddy-naive"],
+                       capture_output=True, check=False, timeout=25)
+    except Exception:
+        pass
+    try:
+        from chimera.modules import port_registry as pr
+        pr.port_unregister(pr.SERVICE_NAIVEPROXY, port=old, proto="tcp")
+        pr.port_register(pr.SERVICE_NAIVEPROXY, port, "tcp",
+                         comment="NaiveProxy (Triple Panel)", force=True)
+        # 443 может быть общим с другими сервисами — чужие правила не трогаем,
+        # своё снимаем только при уходе с нестандартного порта
+        if old != 443:
+            pr.ufw_close_port(old, "tcp", pr.SERVICE_NAIVEPROXY,
+                              legacy_comments=["NaiveProxy"])
+        pr.ufw_open_port(port, "tcp", pr.SERVICE_NAIVEPROXY,
+                         comment="Triple Panel")
+    except Exception as e:
+        _log("WARN", f"port_registry naive: {e}")
+    if not _svc_active("caddy-naive"):
+        return 500, {"ok": False,
+                     "error": "caddy-naive failed to start after port change — "
+                              "run: journalctl -u caddy-naive -n 30"}
+    return 200, {"ok": True,
+                 "message": f"NaiveProxy port changed to {port}. "
+                            "Clients must download new configs."}
+
+def _set_mieru_ports(payload: dict) -> "tuple[int, dict]":
+    """POST /api/settings/mieru-ports — контракт апстрима (Bug 7)."""
+    try:
+        s = int(payload.get("portStart") or 0)
+        e = int(payload.get("portEnd") or 0)
+    except (TypeError, ValueError):
+        return 400, {"error": "Invalid port range (1025-65535, end >= start)"}
+    if not s or not e or s < 1025 or e > 65535 or e < s:
+        return 400, {"error": "Invalid port range (1025-65535, end >= start)"}
+    try:
+        from chimera.modules import mieru as mr
+        from chimera.modules.proto_common import proto_load_state, proto_save_state
+        state = proto_load_state(mr._MODULE_STATE)
+    except Exception:
+        return 503, {"error": "mieru module unavailable"}
+    old_s = int(state.get("port_start", 2012) or 2012)
+    old_e = int(state.get("port_end", 2022) or 2022)
+    if (s, e) == (old_s, old_e):
+        return 200, {"ok": True, "message": f"Mieru уже слушает {s}-{e}."}
+    try:
+        from chimera.modules import port_registry as pr
+        conflicts = []
+        for p in range(s, e + 1):
+            if old_s <= p <= old_e:
+                continue
+            conflicts += pr.port_get_conflicts(
+                p, proto="tcp", exclude_service=pr.SERVICE_MIERU)
+        conflicts += pr.port_check_system(s, proto="tcp")
+        conflicts += pr.port_check_system(e, proto="tcp")
+    except Exception:
+        conflicts = []
+    conflicts = [c for c in conflicts if c]
+    if conflicts:
+        return 409, {"error": f"порты заняты: {_conflict_detail(conflicts)}"}
+    users = state.get("users", [])
+    state["port_start"], state["port_end"] = s, e
+    try:
+        proto_save_state(mr._MODULE_STATE, state)
+    except Exception:
+        return 500, {"error": "не удалось сохранить state mieru"}
+
+    def _apply(ps: int, pe: int):
+        tp = mr._MIERU_TRAFFIC_PRESETS.get(
+            state.get("traffic_preset", "basic"), {}).get("config")
+        return mr._apply_server_config(mr._build_server_config(
+            users, ps, pe, state.get("protocol", "TCP"), traffic_pattern=tp))
+
+    err = _apply(s, e)
+    if err:
+        state["port_start"], state["port_end"] = old_s, old_e
+        try:
+            proto_save_state(mr._MODULE_STATE, state)
+            _apply(old_s, old_e)
+        except Exception:
+            pass
+        return 500, {"ok": False, "error": str(err)}
+    import subprocess
+    try:
+        subprocess.run(["systemctl", "reload-or-restart", "mita"],
+                       capture_output=True, check=False, timeout=25)
+    except Exception:
+        pass
+    try:
+        from chimera.modules import port_registry as pr
+        pr.port_unregister_range(pr.SERVICE_MIERU, old_s, old_e, proto="tcp")
+        pr.port_register_range(pr.SERVICE_MIERU, s, e, "tcp",
+                               comment="Mieru (Triple Panel)")
+        pr.ufw_close_port_range(old_s, old_e, "tcp", pr.SERVICE_MIERU)
+        pr.ufw_open_port_range(s, e, "tcp", pr.SERVICE_MIERU,
+                               comment="Triple Panel")
+    except Exception as ex:
+        _log("WARN", f"port_registry mieru: {ex}")
+    return 200, {"ok": True,
+                 "message": f"Mieru ports changed to {s}-{e}. Service restarted. "
+                            "Clients must download new configs."}
+
+# ── каскад (Naive-leg: upstream в Caddyfile; Mieru-relay в Chimera нет) ─────
+
+def _cascade_view() -> dict:
+    try:
+        from chimera.modules.proto_common import proto_load_state
+        from chimera.modules.naiveproxy import _MODULE_STATE as _NS
+        nst = proto_load_state(_NS)
+    except Exception:
+        nst = {}
+    try:
+        from chimera.modules.proto_common import proto_load_state
+        from chimera.modules.mieru import _MODULE_STATE as _MS
+        mst = proto_load_state(_MS)
+    except Exception:
+        mst = {}
+    upstream = nst.get("upstream", "") or ""
+    return {
+        "cascadeEnabled": bool(upstream),
+        "cascadeNaiveUpstream": upstream,
+        "cascadeMieru": {
+            "host": "",
+            "portStart": int(mst.get("port_start", 2012) or 2012),
+            "portEnd": int(mst.get("port_end", 2022) or 2022),
+            "user": "",
+            "mtu": 1400,
+            # exit-нода в Chimera-модели каскада отсутствует (relay не
+            # применяется) — пароля нет, UI показывает пустое поле.
+            "hasPass": False,
+        },
+    }
+
+def _normalize_upstream(raw: str) -> str:
+    """'naive+https://u:p@h:443#tag' → 'https://u:p@h:443' (формат Caddyfile).
+
+    В отличие от normalizeUpstream апстрима креды СОХРАНЯЮТСЯ: директива
+    upstream в caddy-forwardproxy-naive Химеры принимает полный URL с
+    basic_auth (см. _cascade_menu в naiveproxy.py).
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("naive+"):
+        raw = raw[len("naive+"):]
+    raw = raw.split("#", 1)[0].strip().rstrip("/")
+    if not raw:
+        return ""
+    if not raw.startswith(("https://", "http://")):
+        raw = "https://" + raw.lstrip("/")
+    if not re.match(r"^https?://([^/@\s]+@)?[^/@\s:]+(:\d+)?$", raw):
+        return ""
+    return raw
+
+def _cascade_status_view() -> dict:
+    view = _cascade_view()
+    upstream = view["cascadeNaiveUpstream"]
+    lines = [
+        "=== NAIVE CASCADE (Entry→Exit) ===",
+        f"caddy-naive: {'active' if _svc_active('caddy-naive') else 'inactive'}",
+        f"upstream: {upstream or '(direct — каскад выключен)'}",
+        "",
+        "=== MIERU CASCADE (Variant B) ===",
+        "не применяется в Chimera — mita работает напрямую (см. TUI 10/11).",
+    ]
+    return {"ok": bool(upstream) and _svc_active("caddy-naive"),
+            "output": "\n".join(lines)}
+
+def _cascade_apply(payload: dict) -> "tuple[int, dict]":
+    """POST /api/settings/cascade — Naive-leg + взаимоисключение с WARP.
+
+    Mieru-relay (Variant B: redsocks/mieru-client) в Chimera не существует —
+    поле cascadeMieru принимается, но честно игнорируется (в ответе сказано).
+    """
+    enabled = bool(payload.get("cascadeEnabled"))
+    try:
+        from chimera.modules import naiveproxy as nv
+        from chimera.modules.proto_common import proto_load_state, proto_save_state
+        state = proto_load_state(nv._MODULE_STATE)
+    except Exception:
+        return 503, {"error": "naiveproxy module unavailable"}
+    raw = payload.get("cascadeNaiveUpstream")
+    upstream = state.get("upstream", "") or ""
+    if raw is not None:
+        upstream = _normalize_upstream(str(raw))
+    if not enabled:
+        upstream = ""
+    elif not upstream:
+        return 400, {"error": "cascadeEnabled требует cascadeNaiveUpstream"}
+    # BUG-150 (апстрим): включение каскада снимает WARP
+    warp_torn = False
+    if enabled:
+        try:
+            from chimera.modules import warp
+            if warp._state_get("WARP_CONNECTED", False):
+                warp.uninstall_warp()
+                warp_torn = True
+                _log("INFO", "warp torn down by cascade enable")
+        except Exception as e:
+            _log("WARN", f"warp teardown: {e}")
+    state["upstream"] = upstream
+    try:
+        proto_save_state(nv._MODULE_STATE, state)
+    except Exception:
+        return 500, {"error": "не удалось сохранить state naiveproxy"}
+    err = nv._apply_config(
+        state.get("domain", ""), int(state.get("port", 443) or 443),
+        state.get("users", []), state.get("fake_url", ""),
+        state.get("probe_secret", ""), upstream)
+    caddy_ok = not err
+    msg = (f"Cascade enabled. Naive upstream applied: {upstream}."
+           if enabled else "Cascade disabled. Naive direct egress.")
+    if enabled and isinstance(payload.get("cascadeMieru"), dict):
+        m = payload.get("cascadeMieru") or {}
+        if m.get("host") or m.get("user"):
+            msg += (" Mieru-relay (Variant B) в Chimera не применяется — "
+                    "настройки exit-ноды проигнорированы.")
+    if warp_torn:
+        msg += " WARP был автоматически отключён (взаимоисключение)."
+    return 200, {
+        "ok": caddy_ok, "caddyOk": caddy_ok, "mitaOk": True,
+        "cascadeOk": caddy_ok, "caddyError": err or "",
+        "cascadeOutput": ("Mieru-relay (Variant B) в Chimera не применяется — "
+                          "mita работает напрямую."),
+        "message": msg,
+    }
+
+def _cascade_reset() -> "tuple[int, dict]":
+    status, payload = _cascade_apply({"cascadeEnabled": False})
+    payload["teardownOk"] = True
+    payload["nativeEgress"] = _egress_ip(8) or "(unknown)"
+    payload["message"] = ("Каскад полностью сброшен: Caddyfile без upstream, "
+                          "возврат к прямому egress.")
+    return status, payload
+
+# ── WARP (warp.py: full/selective/runet; WARP ↔ каскад взаимоисключающи) ────
+
+def _warp_module():
+    from chimera.modules import warp
+    return warp
+
+def _warp_connected() -> bool:
+    try:
+        return bool(_warp_module()._state_get("WARP_CONNECTED", False))
+    except Exception:
+        return False
+
+def _warp_view() -> dict:
+    ram = _read_ram_mb()[1]
+    low = 0 < ram <= 1024
+    return {
+        "warpEnabled": _warp_connected(),
+        # Chimera поддерживает WARP автономно (state.json + cron-синк) —
+        # persist отражает фактическое поведение, а не отдельную опцию.
+        "warpPersist": _warp_connected(),
+        "cascadeEnabled": bool(_cascade_view()["cascadeNaiveUpstream"]),
+        "ramMB": ram,
+        "lowRam": low,
+        "lowRamWarning": (
+            "На VPS с ≤1 ГБ RAM дополнительный сетевой слой WARP (WireGuard) "
+            "нагружает память — включайте только при необходимости."
+            if low else ""),
+    }
+
+def _warp_status_view() -> dict:
+    lines = ["=== WARP (chimera warp.py) ==="]
+    try:
+        w = _warp_module()
+        lines.append(f"connected: {w._state_get('WARP_CONNECTED', False)}")
+        lines.append(f"mode: {w._state_get('WARP_MODE', '') or '(n/a)'}")
+        try:
+            svc = w.WG_SERVICE
+        except Exception:
+            svc = "wg-quick@wgcf"
+        lines.append(f"service {svc}: "
+                     f"{'active' if _svc_active(svc) else 'inactive'}")
+    except Exception as e:
+        lines.append(f"(warp module unavailable: {e})")
+    lines.append(f"egress IP: {_egress_ip() or '(unknown)'}")
+    return {"ok": _warp_connected(), "enabled": _warp_connected(),
+            "output": "\n".join(lines)}
+
+def _warp_disable_cascade() -> bool:
+    """BUG-150 (апстрим): включение WARP снимает каскад (naive upstream)."""
+    try:
+        from chimera.modules import naiveproxy as nv
+        from chimera.modules.proto_common import proto_load_state, proto_save_state
+        state = proto_load_state(nv._MODULE_STATE)
+        if not (state.get("upstream", "") or ""):
+            return False
+        state["upstream"] = ""
+        proto_save_state(nv._MODULE_STATE, state)
+        nv._apply_config(
+            state.get("domain", ""), int(state.get("port", 443) or 443),
+            state.get("users", []), state.get("fake_url", ""),
+            state.get("probe_secret", ""), "")
+        return True
+    except Exception as e:
+        _log("WARN", f"cascade teardown: {e}")
+        return False
+
+def _set_warp(payload: dict) -> "tuple[int, dict]":
+    """POST /api/settings/warp — режим warp.py сохраняется; full без SSH-IP
+    деградирует до runet (защита от потери доступа из веба)."""
+    enabled = bool((payload or {}).get("warpEnabled"))
+    try:
+        w = _warp_module()
+    except Exception:
+        return 503, {"error": "warp module unavailable"}
+    if not enabled:
+        try:
+            w.uninstall_warp()
+        except Exception as e:
+            _log("WARN", f"uninstall_warp: {e}")
+        egress = _egress_ip(8)
+        msg = "WARP выключен. Возврат к родному IP сервера."
+        return 200, {"ok": True, "warpEnabled": False, "warpPersist": False,
+                     "egressIP": egress or "(unknown)", "output": "",
+                     "warpResult": {"severity": "success", "code": "disabled",
+                                    "message": msg},
+                     "message": msg}
+    # включение: каскад сначала снимается (взаимоисключение)
+    cascade_cleared = _warp_disable_cascade()
+    mode = w._state_get("WARP_MODE", "") or "runet"
+    ssh_ip = w._state_get("WARP_SSH_CLIENT_IP", "") or ""
+    degraded = ""
+    if mode == "full" and not ssh_ip:
+        mode = "runet"
+        degraded = (" full без SSH-IP из веба не включается (риск потери "
+                    "доступа) — использован runet; задайте SSH-IP в TUI (WARP).")
+    ok = False
+    try:
+        ok = bool(w.configure_warp(mode, ssh_ip))
+    except Exception as e:
+        _log("WARN", f"configure_warp: {e}")
+        ok = False
+    egress = _egress_ip(10)
+    if ok:
+        msg = (f"WARP включён в режиме '{mode}' — egress через Cloudflare "
+               f"(IP {egress or '?'}). SSH и панель доступны напрямую."
+               + (" Каскад был автоматически отключён." if cascade_cleared else "")
+               + degraded)
+        wresult = {"severity": "success", "code": "ok",
+                   "egressIP": egress or "(unknown)", "message": msg}
+    else:
+        msg = ("WARP включить не удалось. Всё откачено, доступ к серверу "
+               "сохранён. Подробности: TUI Химеры → WARP; journalctl -u "
+               "wg-quick@*")
+        wresult = {"severity": "warning", "code": "unknown", "message": msg}
+    return 200, {"ok": ok, "warpEnabled": ok, "warpPersist": ok,
+                 "egressIP": egress or "(unknown)", "output": "",
+                 "warpResult": wresult, "message": msg}
+
+def _warp_reset() -> "tuple[int, dict]":
+    try:
+        w = _warp_module()
+        w.uninstall_warp()
+    except Exception as e:
+        _log("WARN", f"uninstall_warp: {e}")
+    egress = _egress_ip(8)
+    return 200, {"ok": True, "warpEnabled": False,
+                 "nativeEgress": egress or "(unknown)", "output": "",
+                 "message": "WARP полностью снят: интерфейс/маршруты удалены, "
+                            "возврат к родному IP."}
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ПОДПИСКА /sub/:token (UA-детект — полная делегация subscription.py)
@@ -622,6 +1340,38 @@ class _TripleHandler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _handle_sse(self) -> None:
+        """GET /api/events — text/event-stream (вместо WS апстрима).
+
+        События: metrics (контракт WS апстрима), users, status, log.
+        Keepalive ': ping' каждые 20с — nginx-фронт не рвёт read-timeout,
+        X-Accel-Buffering: no — отключает прокси-буферизацию.
+        """
+        q = _sse_subscribe()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self.wfile.write(b"retry: 3000\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    event, data = q.get(timeout=20)
+                    chunk = f"event: {event}\ndata: {data}\n\n".encode(
+                        "utf-8")
+                except queue.Empty:
+                    chunk = b": ping\n\n"
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            _sse_unsubscribe(q)
+            self.close_connection = True
+
     def log_message(self, fmt, *args):  # systemd пишет stdout в журнал
         _log("HTTP", f"{self.client_address[0]} {fmt % args}")
 
@@ -698,6 +1448,36 @@ class _TripleHandler(BaseHTTPRequestHandler):
             self._send_json({"password": proto_gen_password()})
             return
 
+        # v82: SSE-стрим live-событий (вместо WS апстрима)
+        if path == "/api/events":
+            self._handle_sse()
+            return
+
+        # v82: настройки сервера (GET-часть)
+        if path == "/api/settings/cascade":
+            self._send_json(_cascade_view())
+            return
+        if path == "/api/settings/cascade/status":
+            self._send_json(_cascade_status_view())
+            return
+        if path == "/api/settings/warp":
+            self._send_json(_warp_view())
+            return
+        if path == "/api/settings/warp/status":
+            self._send_json(_warp_status_view())
+            return
+
+        # v82: журналы сервисов
+        m = re.match(r"^/api/logs/([a-z0-9\-]+)$", path)
+        if m:
+            try:
+                lines = int((query.get("lines") or ["100"])[0])
+            except ValueError:
+                lines = 100
+            status, payload = _logs_response(m.group(1), lines)
+            self._send_json(payload, status)
+            return
+
         # /api/users/:id/naive-link | mieru-link | universal-config
         m = re.match(r"^/api/users/([^/]+)/(naive-link|mieru-link|universal-config)$", path)
         if m:
@@ -766,6 +1546,53 @@ class _TripleHandler(BaseHTTPRequestHandler):
                 state["language"] = body["language"]
                 _STATE_FILE.write_text(json.dumps(state, indent=2))
             self._send_json({"ok": True})
+            return
+
+        # v82: настройки сервера (мутации)
+        if path == "/api/settings/naive-port":
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            status, payload = _set_naive_port(body or {})
+            self._send_json(payload, status)
+            return
+
+        if path == "/api/settings/mieru-ports":
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            status, payload = _set_mieru_ports(body or {})
+            self._send_json(payload, status)
+            return
+
+        if path == "/api/settings/cascade":
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            status, payload = _cascade_apply(body or {})
+            self._send_json(payload, status)
+            return
+
+        if path == "/api/settings/cascade/reset":
+            status, payload = _cascade_reset()
+            self._send_json(payload, status)
+            return
+
+        if path == "/api/settings/warp":
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            status, payload = _set_warp(body or {})
+            self._send_json(payload, status)
+            return
+
+        if path == "/api/settings/warp/reset":
+            status, payload = _warp_reset()
+            self._send_json(payload, status)
             return
 
         self._send_json({"error": f"not implemented by Chimera port: {path}"},
@@ -917,6 +1744,9 @@ def start_server() -> None:
     state = _load_state()
     port = int(state.get("web_port", 9760))
     host = "127.0.0.1"  # наружу — только через nginx front (эталон b4)
+    watcher = threading.Thread(target=_sse_watcher, daemon=True,
+                               name="triple-sse-watcher")
+    watcher.start()
     server = ThreadingHTTPServer((host, port), _TripleHandler)
     print(f"[Triple Panel] Сервер запущен на {host}:{port} (ThreadingHTTPServer)")
     _log("INFO", f"started on {host}:{port}")

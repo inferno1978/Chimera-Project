@@ -2,6 +2,62 @@
 
 ---
 
+## FEAT(panel/triple): Triple Panel v82 — SSE live-обновления, ротация пароля, смена портов протоколов и каскад/WARP из UI — 9 сентября 2026
+
+**Кейс:** юзер принял v2-план по пунктам 1–4 (per-user Hy2 отложен):
+SSE-лайв вместо поллинга, ротация пароля протокола из UI, смена портов
+протоколов из UI, управление каскадом/WARP из панели. Обязательное условие
+— двунаправленная синхронизация TUI↔панель — сохранена архитектурно:
+мутации идут через юзер-мост v4.25 (те же функции, что у rest_api), чтение
+— живьём на каждый запрос.
+
+**Сделано:**
+- `GET /api/events` — SSE-стрим (text/event-stream, stdlib, WS не нужен):
+  события metrics (контракт WS апстрима: cpu/ram/naive/mieru), users
+  (живая таблица — правки из TUI появляются в открытой панели без F5),
+  status, log. Watcher-поток с диф-детекцией состояния (поллинг 3с,
+  метрики 5с), keepalive ': ping' каждые 20с + X-Accel-Buffering: no для
+  nginx-фронта. Фронт НЕ правится: шим triple-sse.js (вживляется в
+  index.html ДО app.js при установке/обновлении фронта, идемпотентно)
+  подменяет window.WebSocket классом поверх общего EventSource — WS-точка
+  в шапке живая, reconnect-логика апстрима работает как есть.
+- `GET /api/logs/:service` (контракт апстрима): naive|caddy → journalctl
+  -u caddy-naive, mieru → mita, hy2|hysteria → hysteria-server, panel →
+  кольцо последних 200 строк лога панели (параллельно /var/log/chimera.log).
+- `PUT /api/users/:id`: password — ротация пароля протоколов (один на оба
+  протокола, модель апстрима; новые headless `set_password_full` в
+  naiveproxy.py и mieru.py: state + Caddyfile/server.json + reload);
+  email/username — rename через мост v4.25 (uuid не меняется → подписка и
+  токен живучи), TTL и квоты переносятся за юзером на новый email.
+- `POST /api/settings/naive-port | mieru-ports` (контракт апстрима
+  Bug 52/7): валидация → конфликт-чек port_registry (exclude_service) →
+  state → rebuild (Caddyfile / mita server.json) → restart → перерегист-
+  рация портов + ufw; откат state при ошибке применения.
+- `GET/POST /api/settings/cascade{,/status,/reset}`: Naive-leg через
+  upstream в Caddyfile (формат https://user:pass@host:port — креды
+  СОХРАНЯЮТСЯ, директива caddy-forwardproxy-naive их ест), нормализация
+  из naive+-ссылок; Mieru-relay (Variant B) в Chimera не существует —
+  честно отражено в ответе. `GET/POST /api/settings/warp{,/status,/reset}`:
+  warp.py configure/uninstall, режим из TUI сохраняется, full без SSH-IP
+  деградирует до runet (защита от потери доступа из веба). WARP↔каскад
+  взаимоисключающи (BUG-150 апстрима) — в обе стороны.
+- `scripts/triple_panel_smoke.py` — живой смоук в репо (конвенция проекта).
+
+**Тесты:** 84 passed (+40: SSE-шина publish/subscribe/переполнение, логи,
+шим-инъекция до app.js + идемпотентность, ротация, rename + перенос
+TTL/квот, порты 400/409/откат, нормализация upstream, взаимоисключение
+WARP/каскад, деградация full→runet) + живой смоук 60/60 (SSE-стрим по
+сырому сокету с доставкой события, порты, каскад, WARP, логи, раздача
+triple-sse.js). Соседние сьюты rest_api/admin_panel не затронуты.
+
+**Совместимость:** sync contract расширен до v4.26 (set_password_full —
+аддитивно + legacy set_password), протокольные модули получили только
+новые headless-функции, TUI-меню протоколов не менялись. WS по-прежнему
+нет (SSE покрывает метрики апстрима + даёт больше), per-user Hy2 —
+отложен по решению юзера.
+
+---
+
 ## FEAT(panel): Triple Panel — порт веб-панели Panel-Naive-Mieru-by-RIXXX в архитектуру Chimera (v81)
 
 **Кейс:** юзер принёс github.com/cwash797-cmd/Panel-Naive-Mieru-by-RIXXX
