@@ -10,7 +10,7 @@
         "syn_fake_len": 0,
         "syn_ttl": 7,
         "drop_sack": false,
-        "dport_filter": "443",
+        "dport_filter": "",
         "incoming": {
           "mode": "off",
           "min": 14,
@@ -192,6 +192,7 @@
     "pair_built": "duplicate(XHamster-Smooth-v5) -> вычистка targets (эскалация-only, матчится только через эскалацию домена с Fat) -> heavy-профиль -> escalate.to='' (терминальный). escalate.to в конфиге ссылается на XHamster-Smooth-v5.",
     "dns": "Унаследован у Fat при duplicate и не менялся (этап VPS-DNS отложен).",
     "heavy_axis": "Fat: frag tcp + faking timestamp + seg2delay 10/30; Heavy: desync ack/2 + faking pastseq + sni_mutation full — другая ось обхода",
-    "live_check": "xhamster.com: baseline 39.4 КБ/с / through_b4 21.3 КБ/с; эскалация сработала в живом стриминге: fi.total-shadows.online (CDN) идёт через XHamster-Heavy-v1."
+    "live_check": "xhamster.com: baseline 39.4 КБ/с / through_b4 21.3 КБ/с; эскалация сработала в живом стриминге: fi.total-shadows.online (CDN) идёт через XHamster-Heavy-v1.",
+    "port_scope_fix": "2026-09-08: убран tcp.dport_filter='443'. При пустых targets сет становился глобальным port-only (MatchTCPPort) и перехватывал ВЕСЬ TCP/443 в LAN. Приведён к остальным Heavy-сетам (dport_filter='') — матч только через эскалацию домена с Smooth-v5."
   }
 }

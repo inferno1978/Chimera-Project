@@ -10,7 +10,7 @@
         "syn_fake_len": 0,
         "syn_ttl": 7,
         "drop_sack": false,
-        "dport_filter": "443",
+        "dport_filter": "",
         "incoming": {
           "mode": "off",
           "min": 14,
@@ -190,6 +190,7 @@
     "pair_built": "2026-09-06: эскалация-only сет (targets пустые — матчится только через эскалацию домена с Fat и dns-hint). Резервный DoH chimeravpn.online:30443, strict=true. escalate.to пустой — терминальный.",
     "design": "duplicate(Fat) -> вычистка targets -> vpn DoH -> heavy-профиль. После эскалации escalatedSetFor подменяет сет для домена: и DNS, и трафик идут через этот профиль.",
     "heavy_axis": "Fat: frag tcp + faking timestamp + seg2delay; Heavy: desync ack/2 + faking pastseq + sni_mutation full — другая ось обхода",
-    "live_check": "Живая проверка 06.09: baseline TLS_DROP, through_b4 25.8 КБ/с."
+    "live_check": "Живая проверка 06.09: baseline TLS_DROP, through_b4 25.8 КБ/с.",
+    "port_scope_fix": "2026-09-08: убран tcp.dport_filter='443'. При пустых targets сет становился глобальным port-only (MatchTCPPort) и перехватывал ВЕСЬ TCP/443 в LAN. Приведён к остальным Heavy-сетам (dport_filter='') — матч только через эскалацию домена с Smooth-v5."
   }
 }
