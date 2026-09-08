@@ -175,17 +175,28 @@ ipblock.go:101); DNS-триггер (dns.go:181) включится сам, ко
 
 **Живая проверка (06.09):** watchdog 5/5 healthy, 0 фейлов —
 www.youtube.com 117.8 КБ/с, www.facebook.com 33.1 (Meta),
-xhamster.com 34.5 (Fat). Главная улика: эскалация сработала в
-проде через ~минуту после сборки — CDN-стриминг
-`fi.total-shadows.online` пошёл через XHamster-Heavy-v1 и
-держится (40/40 свежих коннектов). Артефакты:
+xhamster.com 34.5 (Fat). Артефакты:
 `set-artifacts/vps-prodcdn/*.json`.
 
-**Наблюдение (следить):** SNI-less коннекты VPS к Telegram-DC
-(149.154.x — MTProto-апстрим) атрибутируются Heavy по IP-хинту
-от эскалационного маршрута. Десинки TTL-фейковые, протоколу не
-вредят; маршрут живёт 3600с и само-возвращается. Если MTProto
-зашумит — снять эскалацию или подождать TTL.
+**Пост-мортем (08.09): старая «улика эскалации» была миной.**
+Ранее здесь стояла «главная улика»: CDN-стриминг
+`fi.total-shadows.online` через XHamster-Heavy (40/40) якобы
+доказывал работу эскалации. Ложь: матчи были глобальным
+перехватом порта. duplicate(XHamster-Smooth) наследовал
+tcp.dport_filter='443', «вычистка targets» удаляла только
+sni/ip/geosite/geoip — порт оставался. Сет с dport_filter и
+ПУСТЫМИ targets в b4 = global port-only (sni.MatchTCPPort),
+ловит ВЕСЬ TCP/443. На prodcdn 100/100 исходящих коннектов
+сервера (Telegram-DC 149.154.x, total-shadows, DoH) получали
+heavy-десинк; на chimeravpn — 35/100 с retry-loop в
+1.1.1.1:443 каждые 200-400 мс (ломающиеся хендшейки).
+Фикс 08.09: dport_filter '' на роутере и обеих VPS (live);
+после него SNI-less матчи исчезли в ноль => «IP-хинтов»
+не существовало. Выводы: (а) у эскалация-only сета dport_filter
+обязан быть пуст — проверка «targets пустые» без проверки порта
+недостаточна (verify 53/53 мину пропустил); (б) матч без SNI —
+в первую очередь подозрение на port-only перехват, эскалационный
+IP-хинт — последняя гипотеза, не первая.
 
 **chimeravpn (вторая нода, 06.09 поздним вечером):** юзер принёс
 MCP-эндпоинт — сделано «то же самое». Было 5 сетов (пара только у
@@ -194,14 +205,16 @@ YouTube); собраны Meta-Heavy / XHamster-Heavy / YT-Wide-Heavy,
 (у YouTube/Meta — Cloudflare 1.1.1.1, у XHamster — локальный
 127.0.0.1, у YT-Wide — выкл). Watchdog 5/5 healthy (добавлены
 www.facebook.com и xhamster.com): www.youtube.com 136-141 КБ/с,
-xhamster.com 24.8 КБ/с. Эскалация задействована живьём через ~30с
-после wiring: коннекты xhamster.com (адрес, где Fat-ось ловит RST)
-переброшены XHamster-Smooth-v5 → XHamster-Heavy-v1, 21/100 свежих
-коннектов идут через Heavy; SNI-less DNS-путь b4 к 1.1.1.1:443
-едет с атрибуцией эскалированного флоу (как MTProto-наблюдение на
-prodcdn). Эпизод www.facebook.com «degraded» (TCP RST) был
-транзиентом egress — восстановился сам (18 КБ/с). Артефакты:
-`set-artifacts/vps-vpn/*.json`.
+xhamster.com 24.8 КБ/с. Эскалация xhamster.com (адрес, где
+Fat-ось ловит RST): коннекты переброшены XHamster-Smooth-v5 →
+XHamster-Heavy-v1, 21/100 свежих коннектов — эта часть была
+настоящей эскалацией (SNI матчит Smooth). SNI-less DNS-путь b4
+к 1.1.1.1:443, ошибочно записанный тогда как «атрибуция
+эскалированного флоу», был той же port-only миной (доказано
+08.09: после снятия dport_filter — retry-loop исчез, 0/100).
+Эпизод www.facebook.com «degraded» (TCP RST) ретроспективно
+заподозрен в работе мины, а не в транзиенте egress.
+Артефакты: `set-artifacts/vps-vpn/*.json`.
 
 Этап 2 (по команде): прописать DoH по co-located схеме
 (prodcdn-сеты → свой DoH первично + chimeravpn-резерв; vpn-сеты →

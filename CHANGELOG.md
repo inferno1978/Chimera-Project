@@ -2,6 +2,57 @@
 
 ---
 
+## FIX(b4/sets): XHamster-Heavy-v1 глобально перехватывал весь TCP/443 (все три инстанса b4) — 8 сентября 2026
+
+**Кейс:** роутер (дом): почти все приложения телефона
+медленно/не работают; ozon.ru, dzen.ru недоступны. VPS
+chimeravpn: собственный DoH-резолвер в retry-loop (новые
+TLS-соединения к 1.1.1.1:443 каждые 200-400 мс). VPS
+chimeraprodcdn: 100/100 исходящих коннектов сервера
+(Telegram-DC 149.154.x, total-shadows.online, DoH) под
+heavy-профилем.
+
+**Диагноз:** `XHamster-Heavy-v1` собран 06.09 по рецепту
+`duplicate(Fat) → вычистка targets → heavy-профиль`. Источник
+(XHamster-Smooth-v5) легально носил `tcp.dport_filter='443'`
+(безопасно при 108 доменах), но вычистка удаляла только
+sni/ip/geosite/geoip — порт оставался. В b4 сет с dport_filter
+и ПУСТЫМИ targets = global port-only (`sni.MatchTCPPort`):
+матчит весь TCP/443 без разбора SNI. Heavy-десинк
+(ack/2 + pastseq + sni_mutation) ломал TLS-рукопожатия всему,
+что попадалось: LAN-клиентам роутера (Microsoft-телеметрия,
+appsflyer) и исходящему самих VPS. Верификация сборки 53/53
+мину пропустила: проверка «targets пустые» не покрывала
+dport_filter.
+
+**Старая «улика эскалации» — ретракция:** наблюдение 06.09 из
+OWN_DOH_FAQ §8 («fi.total-shadows.online 40/40 через Heavy»,
+«Telegram-DC по IP-хинту», «десинки протоколу не вредят»)
+было работой этой же мины, а не эскалации. После снятия
+dport_filter все SNI-less матчи исчезли в ноль на обеих VPS —
+«эскалационных IP-хинтов» не существовало.
+
+**Что сделано:**
+- Живой фикс на всех трёх инстансах (MCP `b4_set_config_value`,
+  live, без рестарта): `sets[XHamster-Heavy-v1].tcp.dport_filter`
+  `'443' → ''` — роутер 192.168.50.1, chimeravpn.online,
+  chimeraprodcdn.online. Откат — `b4_revert_last_change`.
+- Артефакты (3 копии: router / vps-vpn / vps-prodcdn):
+  `dport_filter=''` + `_meta.port_scope_fix` с описанием.
+- OWN_DOH_FAQ §8: пост-мортем вместо ретрактированных
+  наблюдений; правило: у эскалация-only сета dport_filter обязан
+  быть пустым, «матч без SNI» — сначала подозрение на
+  port-only перехват.
+
+**Проверка:** роутер 48/100 → 0/100 (окно лога 03:18),
+chimeravpn 35/100 → 0/100, prodcdn 100/100 → 0/100;
+`b4_test_domain_now api.github.com` — OK в обе моды на обеих
+VPS (исходящий TLS серверов работает с поднятым B4);
+эскалационные цепочки Fat→Heavy целы на всех инстансах;
+скан всех сетов трёх хостов — других мин нет.
+
+---
+
 ## FIX(mieru/hybrid-addon): rollback поднимал Xray до остановки mita — порт оставался занят, xray уходил в «activating» (v80) — 7 сентября 2026
 
 **Кейс:** юзер откатывал Mieru Hybrid Addon на боевой ноде
