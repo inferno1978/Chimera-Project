@@ -2765,6 +2765,7 @@ def do_manage_web_panel() -> None:
         _box_item("5", f"{'Закрыть доступ снаружи' if exposed else 'Открыть доступ снаружи (ВНИМАНИЕ: без TLS!)'}")
         _box_item("6", f"{RED}🗑️  Удалить полностью{NC}")
         _box_item("7", f"🌐 nginx front (TLS) — {'выключен' if not _nginx_front_enabled else 'настройки'}")
+        _box_item("8", f"🧩 Triple Panel (Naive+Mieru+H2)  {DIM}(порт RIXXX-панели: установка/обновления/доступ){NC}")
         _box_item("Q", "Назад")
         _box_bottom()
 
@@ -2896,6 +2897,16 @@ def do_manage_web_panel() -> None:
                 do_manage_nginx_front()
             except Exception as e:
                 warn(f"Не удалось открыть меню nginx front: {e}")
+                _input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "8":
+            #  Triple Panel — порт веб-панели Panel-Naive-Mieru-by-RIXXX
+            #  (Naive+Mieru+H2) в архитектуру Chimera. Свой сервис/порт/версии.
+            try:
+                from chimera.modules.triple_panel import do_triple_panel_menu
+                do_triple_panel_menu()
+            except Exception as e:
+                warn(f"Не удалось открыть меню Triple Panel: {e}")
                 _input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch in ("q", ""):

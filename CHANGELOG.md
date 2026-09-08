@@ -2,6 +2,61 @@
 
 ---
 
+## FEAT(panel): Triple Panel — порт веб-панели Panel-Naive-Mieru-by-RIXXX в архитектуру Chimera (v81)
+
+**Кейс:** юзер принёс github.com/cwash797-cmd/Panel-Naive-Mieru-by-RIXXX
+(зрелый проект, v1.11.2, MIT, Node.js+Express+SQLite+PM2) — «затащить в
+Химеру». Анализ показал: нижний слой у панели и Химеры ИДЕНТИЧЕН
+(/usr/local/bin/caddy-naive, /etc/caddy-naive/Caddyfile, caddy-naive.service,
+mita.service, /etc/hysteria/config.yaml, hysteria-server), а юзер-мост,
+квоты, TTL, подписка с UA-детектом и WARP у Химеры уже есть. Реальная
+дельта панели — unified-модель юзера (protocols[]-чекбоксы), одна умная
+ссылка и сам UX. Питон-порт (вариант 2): Node/PM2/SQLite НЕ тащим.
+
+**Сделано:**
+- `modules/triple_panel.py` (TUI, жизненный цикл): установка с ВЫБОРОМ
+  порта юзером (конфликт-чек port_registry → регистрация + ufw), фронт
+  апстрима вендорится download_manager'ом (tarball GitHub → atomic swap →
+  LICENSE-кредит MIT), версии/обновления по паттерну dpi_bypass (GitHub
+  API releases/latest, TTL-кэш 5 мин, header row «Фронт/Апстрим/доступно
+  обновление», смоук GET / с авто-откатом), доступ по эталону b4:
+  panel_nginx_front (SSH-туннель / self-signed по IP / Let's Encrypt по
+  домену) + ufw deny прямого порта при включённом фронте. Отдельный
+  systemd-юнит triple-web.service (loopback; порт в state, не в юните).
+- `modules/triple_panel_web.py` (веб-бэкенд, stdlib ThreadingHTTPServer
+  как у rest_api): сессии cookie tp_session (24ч, in-memory),
+  SHA-256(соль+пароль)+hmac.compare_digest. Контракт панели:
+  /api/login|logout|me, /api/users (GET unified-view: users.json +
+  naive/mieru state + TTL + traffic_limits + subToken из pepper-прост-
+  ранства подписки; POST/PUT/DELETE — юзер-мост v4.25:
+  rest_api._sync_ensure_user/_sync_remove_user + TTL + квоты),
+  /api/config (subset: language), /api/status (сервисы тройки),
+  /api/apply-status, /api/password/generate, /api/users/:id/naive-link|
+  mieru-link|universal-config. /sub/:token — публичный роут с UA-детек-
+  том (ПОЛНАЯ делегация subscription.py: base64/base64_safe/singbox/
+  clash + Subscription-Userinfo + Profile-Update-Interval). Статика
+  фронта с path-traversal guard и SPA-фолбэком. Не реализовано в v1
+  (честные 501): смена портов протоколов из UI, cascade/warp/federation/
+  backup — ими владеют TUI-модули; WS — фронт деградирует на поллинг.
+- Меню: раздел 1 «Установка и Система» → W «Веб-панель управления» →
+  пункт 8 «Triple Panel (Naive+Mieru+H2)».
+- WARP в порт НЕ входит: реализация Химеры (warp.py + youtube/telemt-
+  warp_route, ~4000 строк, 3 режима) строго богаче панельной.
+
+**Тесты:** +44 (tests/test_triple_panel.py: версии/порты/тарболл+traversal
+guard/креды/сессии/unified-view/конвертеры/safe_join/подписка на фейках/
+CRUD на фейках с sys.modules-подменой ядра) + живой смоук HTTP-слоя
+30/30 (static/login/session/CRUD/UA-детект/501) + раздача РЕАЛЬНОГО
+фронта апстрима (index 73КБ, app.js 125КБ, locales) + соседние сьюты
+rest_api/admin_panel 61 OK.
+
+**Совместимость:** протоколы не тронуты (владеют naiveproxy.py/mieru.py/
+hysteria2_*), rest_api.py — только пункт меню 8, юзер-мост используется
+по контракту v4.25 без правок. Hy2 остаётся shared-password (hysteria2_
+sync) — чекбокс в UI = индикатор транспорта.
+
+---
+
 ## FIX(b4/sets): XHamster-Heavy-v1 глобально перехватывал весь TCP/443 (все три инстанса b4) — 8 сентября 2026
 
 **Кейс:** роутер (дом): почти все приложения телефона
