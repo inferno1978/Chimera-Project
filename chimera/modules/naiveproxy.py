@@ -1256,6 +1256,59 @@ def rename_user(old_name: str, new_name: str) -> bool:
         {"email": new_name, "name": new_name},
     )
 
+def set_password_full(user: dict, password: Optional[str] = None) -> Optional[str]:
+    """Ротация пароля NaiveProxy-аккаунта (web-панель, sync contract v4.26).
+
+    password = None → сгенерировать новый (proto_gen_password).
+    Возвращает новый пароль или None (юзера нет / пароль слаб / ошибка).
+    Caddyfile перезаписывается, caddy-naive перезагружается. Пароль меняется
+    при каждом вызове — идемпотентности нет by design (это ротация).
+    """
+    try:
+        if not _is_installed():
+            return None
+        email = user.get("email", "") or ""
+        username = _username_from_email(email)
+        if not username:
+            return None
+        new_password = password if (password and isinstance(password, str)) \
+            else proto_gen_password()
+        if not isinstance(new_password, str) or len(new_password) < 8:
+            return None
+        state = proto_load_state(_MODULE_STATE)
+        users = state.get("users", [])
+        row = next((u for u in users if u.get("username") == username), None)
+        if row is None:
+            return None
+        try:
+            password_hash = _hash_password(new_password)
+        except Exception:
+            password_hash = ""
+        row["password"] = new_password
+        row["password_hash"] = password_hash
+        state["users"] = users
+        proto_save_state(_MODULE_STATE, state)
+        # Применяем конфиг (перезапишет Caddyfile + reload caddy-naive).
+        _apply_config(
+            state.get("domain", ""),
+            state.get("port", _DEFAULT_PORT),
+            users,
+            state.get("fake_url", _DEFAULT_FAKE),
+            state.get("probe_secret", ""),
+            state.get("upstream", ""),
+        )
+        return new_password
+    except Exception as e:
+        try:
+            print(f"  {RED}✗{NC}  naiveproxy.set_password_full: {e}")
+        except Exception:
+            pass
+        return None
+
+def set_password(name: str, password: Optional[str] = None) -> Optional[str]:
+    """Legacy contract — принимает email или name как строку."""
+    return set_password_full({"email": name, "name": name}, password)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  КАСКАД (Entry → Exit)
 # ══════════════════════════════════════════════════════════════════════════════

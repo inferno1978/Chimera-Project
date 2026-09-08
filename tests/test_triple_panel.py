@@ -18,11 +18,20 @@ Unit-тесты для chimera/modules/triple_panel.py + triple_panel_web.py.
   9. Подписка: _sub_response (format routing на фейке subscription.py)
  10. CRUD: _create_panel_user / _delete_panel_user / _update_panel_user
      (фейковые rest_api / ttl_users / user_lifecycle / naiveproxy / mieru)
+ 11. v82 SSE: шина (publish/subscribe/unsubscribe/drop) + логи (_logs_response)
+ 12. v82 SSE-шим: _inject_sse_shim (до app.js, идемпотентность, фолбэк)
+ 13. v82 юзеры: ротация пароля (set_password_full) + rename email
+     (мост v4.25 + перенос TTL/квот)
+ 14. v82 порты: _set_naive_port / _set_mieru_ports (валидация, конфликты,
+     port_registry-перерегистрация, откат)
+ 15. v82 каскад/WARP: view/apply/reset + normalize_upstream + взаимное
+     исключение (BUG-150) + деградация full→runet без SSH-IP
 """
 from __future__ import annotations
 
 import io
 import json
+import queue
 import sys
 import tarfile
 import tempfile
@@ -34,6 +43,46 @@ from unittest.mock import patch
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
+
+
+# ── хелперы подмены модулей ──────────────────────────────────────────────
+# ВАЖНО: `from X import Y` резолвится ЧЕРЕЗ атрибут родительского пакета,
+# если реальный модуль уже был импортирован (например, соседним тест-
+# сьютом в общем прогоне). Одного sys.modules-фейка мало — патчим и
+# атрибут родителя, иначе фейк тихо обходится и тесты падают на
+# AttributeError в РЕАЛЬНОМ модуле.
+
+def _install_fake(name: str, mod) -> None:
+    sys.modules[name] = mod
+    parent, _, child = name.rpartition(".")
+    parent_mod = sys.modules.get(parent)
+    if parent_mod is not None:
+        setattr(parent_mod, child, mod)
+
+
+def _snapshot_module(name: str) -> tuple:
+    parent, _, child = name.rpartition(".")
+    parent_mod = sys.modules.get(parent)
+    had_attr = parent_mod is not None and hasattr(parent_mod, child)
+    return (sys.modules.get(name),
+            getattr(parent_mod, child, None) if had_attr else None,
+            had_attr)
+
+
+def _restore_module(name: str, snap: tuple) -> None:
+    mod, attr, had_attr = snap
+    if mod is not None:
+        sys.modules[name] = mod
+    else:
+        sys.modules.pop(name, None)
+    parent, _, child = name.rpartition(".")
+    parent_mod = sys.modules.get(parent)
+    if parent_mod is not None:
+        if had_attr:
+            setattr(parent_mod, child, attr)
+        elif hasattr(parent_mod, child):
+            delattr(parent_mod, child)
+
 
 from chimera.modules import triple_panel as tp
 from chimera.modules import triple_panel_web as web
@@ -380,14 +429,12 @@ def _fake_subscription_module():
 class TestSubResponse(unittest.TestCase):
 
     def setUp(self):
-        self._orig = sys.modules.get("chimera.modules.subscription")
-        sys.modules["chimera.modules.subscription"] = _fake_subscription_module()
+        self._snap = _snapshot_module("chimera.modules.subscription")
+        _install_fake("chimera.modules.subscription",
+                      _fake_subscription_module())
 
     def tearDown(self):
-        if self._orig is not None:
-            sys.modules["chimera.modules.subscription"] = self._orig
-        else:
-            sys.modules.pop("chimera.modules.subscription", None)
+        _restore_module("chimera.modules.subscription", self._snap)
 
     def _run(self, token="goodtoken", fmt="", ua=""):
         return web._sub_response(token, fmt, ua)
@@ -412,18 +459,15 @@ class TestSubResponse(unittest.TestCase):
     def test_ua_clash_builder_ok(self):
         fake_mn = types.ModuleType("chimera.modules.subscription_multinode")
         fake_mn.build_mihomo_config = lambda user: "proxies: []"
-        orig_mn = sys.modules.get("chimera.modules.subscription_multinode")
-        sys.modules["chimera.modules.subscription_multinode"] = fake_mn
+        snap_mn = _snapshot_module("chimera.modules.subscription_multinode")
+        _install_fake("chimera.modules.subscription_multinode", fake_mn)
         try:
             status, headers, body = self._run(ua="ClashMeta/1.18")
             self.assertEqual(status, 200)
             self.assertTrue(headers["Content-Type"].startswith("text/yaml"))
         finally:
-            if orig_mn is not None:
-                sys.modules["chimera.modules.subscription_multinode"] = orig_mn
-            else:
-                sys.modules.pop(
-                    "chimera.modules.subscription_multinode", None)
+            _restore_module("chimera.modules.subscription_multinode",
+                            snap_mn)
 
     def test_ua_karing_base64_safe(self):
         status, headers, body = self._run(ua="Karing/1.0")
@@ -457,39 +501,40 @@ def _install_fakes(store: _FakeStore):
     ra._sync_ensure_user = lambda name, user=None: {"naiveproxy": True,
                                                     "mieru": True}
     ra._sync_remove_user = lambda name, user=None: {}
-    sys.modules["chimera.modules.rest_api"] = ra
+    _install_fake("chimera.modules.rest_api", ra)
 
     ttl = types.ModuleType("chimera.modules.ttl_users")
     ttl._ttl_set = lambda email, days: store.ttl.update(
         {email: {"expires_at": f"days={days}", "days": days}})
     ttl._ttl_remove = lambda email: store.ttl.pop(email, None)
-    sys.modules["chimera.modules.ttl_users"] = ttl
+    _install_fake("chimera.modules.ttl_users", ttl)
 
     ul = types.ModuleType("chimera.modules.user_lifecycle")
     ul._set_traffic_limit = lambda email, gb: store.limits.update(
         {email: {"limit_gb": gb}})
     ul._remove_traffic_limit = lambda email: store.limits.pop(email, None)
-    sys.modules["chimera.modules.user_lifecycle"] = ul
+    _install_fake("chimera.modules.user_lifecycle", ul)
 
     naive = types.ModuleType("chimera.modules.naiveproxy")
     naive.ensure_user_full = lambda user: True
     naive.remove_user_full = lambda user: store.naive_removed.append(
         user.get("email"))
-    sys.modules["chimera.modules.naiveproxy"] = naive
+    _install_fake("chimera.modules.naiveproxy", naive)
 
     mieru = types.ModuleType("chimera.modules.mieru")
     mieru.ensure_user_full = lambda user: True
     mieru.remove_user_full = lambda user: store.mieru_removed.append(
         user.get("email"))
-    sys.modules["chimera.modules.mieru"] = mieru
+    _install_fake("chimera.modules.mieru", mieru)
 
     core = types.ModuleType("chimera._core")
     core.gen_uuid = lambda: "fake-uuid-1234"
     core._users_apply_to_config = lambda users: store.applied.append(
         len(users))
-    # КРИТИЧНО: положить в sys.modules ДО вызовов — иначе importlib
-    # погрузит настоящий _core.py (mkdir /var/backups + топ-левел импорты).
-    sys.modules["chimera._core"] = core
+    # КРИТИЧНО: положить в sys.modules (+ атрибут пакета chimera) ДО
+    # вызовов — иначе importlib погрузит настоящий _core.py (mkdir
+    # /var/backups + топ-левел импорты).
+    _install_fake("chimera._core", core)
     return core
 
 
@@ -497,18 +542,15 @@ class TestCrud(unittest.TestCase):
 
     def setUp(self):
         self.store = _FakeStore()
-        self._saved = {name: sys.modules.get(name) for name in (
+        self._saved = {name: _snapshot_module(name) for name in (
             "chimera.modules.rest_api", "chimera.modules.ttl_users",
             "chimera.modules.user_lifecycle", "chimera.modules.naiveproxy",
             "chimera.modules.mieru", "chimera._core")}
         self.fake_core = _install_fakes(self.store)
 
     def tearDown(self):
-        for name, mod in self._saved.items():
-            if mod is not None:
-                sys.modules[name] = mod
-            else:
-                sys.modules.pop(name, None)
+        for name, snap in self._saved.items():
+            _restore_module(name, snap)
 
     def test_create_user_full(self):
         status, resp = web._create_panel_user({
@@ -591,6 +633,564 @@ class TestStateFunctions(unittest.TestCase):
             f.write_text(json.dumps({"web_port": 9999}))
             with patch.object(web, "_STATE_FILE", f):
                 self.assertEqual(web._load_state()["web_port"], 9999)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  11. v82: SSE-ШИНА + ЛОГИ
+# ══════════════════════════════════════════════════════════════════════════════
+class TestSSEBus(unittest.TestCase):
+
+    def test_publish_delivers_to_subscriber(self):
+        q = web._sse_subscribe()
+        try:
+            web._sse_publish("metrics", {"type": "metrics", "cpu": 3.0})
+            event, data = q.get_nowait()
+            self.assertEqual(event, "metrics")
+            self.assertIn("cpu", json.loads(data))
+        finally:
+            web._sse_unsubscribe(q)
+
+    def test_unsubscribe_stops_delivery(self):
+        q = web._sse_subscribe()
+        web._sse_unsubscribe(q)
+        web._sse_publish("users", [])
+        with self.assertRaises(queue.Empty):
+            q.get_nowait()
+
+    def test_slow_client_dropped_not_blocked(self):
+        # переполнение очереди клиента не блокирует рассылку (put_nowait/Full)
+        q = web._sse_subscribe()
+        try:
+            for _ in range(300):  # > maxsize=256
+                web._sse_publish("log", {"line": "x"})
+        finally:
+            web._sse_unsubscribe(q)
+        # шина пережила переполнение — новое событие уходит без исключений
+        q2 = web._sse_subscribe()
+        try:
+            web._sse_publish("log", {"line": "y"})
+            self.assertEqual(q2.get_nowait()[0], "log")
+        finally:
+            web._sse_unsubscribe(q2)
+
+    def test_log_ring_via_publish(self):
+        saved = list(web._SSE_LOG_RING)
+        web._SSE_LOG_RING.clear()
+        try:
+            web._log("INFO", "ring-test")
+            self.assertTrue(any("ring-test" in l for l in web._SSE_LOG_RING))
+        finally:
+            web._SSE_LOG_RING[:] = saved
+
+
+class TestLogsResponse(unittest.TestCase):
+
+    def test_unknown_service_400(self):
+        status, _ = web._logs_response("bogus", 100)
+        self.assertEqual(status, 400)
+
+    def test_panel_ring(self):
+        saved = list(web._SSE_LOG_RING)
+        web._SSE_LOG_RING.clear()
+        web._SSE_LOG_RING.append("line-1")
+        try:
+            status, resp = web._logs_response("panel", 10)
+            self.assertEqual(status, 200)
+            self.assertIn("line-1", resp["logs"])
+        finally:
+            web._SSE_LOG_RING[:] = saved
+
+    def test_service_map(self):
+        self.assertEqual(web._LOG_SERVICES["naive"], "caddy-naive")
+        self.assertEqual(web._LOG_SERVICES["caddy"], "caddy-naive")
+        self.assertEqual(web._LOG_SERVICES["mieru"], "mita")
+        self.assertEqual(web._LOG_SERVICES["hy2"], "hysteria-server")
+        self.assertEqual(web._LOG_SERVICES["hysteria"], "hysteria-server")
+
+    def test_journal_tail_monkeypatched(self):
+        with patch.object(web, "_journal_tail", return_value="JOURNAL-TEXT"):
+            status, resp = web._logs_response("naive", 50)
+            self.assertEqual(status, 200)
+            self.assertEqual(resp["logs"], "JOURNAL-TEXT")
+
+    def test_lines_clamped_to_1000(self):
+        with patch.object(web, "_journal_tail") as jt:
+            web._logs_response("naive", 99999)
+            jt.assert_called_once_with("caddy-naive", 1000)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  12. v82: SSE-ШИМ (инъекция во фронт)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestSseShimInjection(unittest.TestCase):
+
+    def test_inject_before_appjs_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            www = Path(tmp)
+            (www / "index.html").write_text(
+                '<html><head><title>t</title></head>'
+                '<body><script src="app.js"></script></body></html>')
+            self.assertTrue(tp._inject_sse_shim(www))
+            html = (www / "index.html").read_text()
+            self.assertIn("triple-sse.js", html)
+            self.assertLess(html.index("triple-sse.js"), html.index("app.js"))
+            shim = (www / "triple-sse.js").read_text()
+            self.assertIn("EventSource", shim)
+            self.assertIn("window.WebSocket", shim)
+            # идемпотентность: повторная инъекция не дублирует тег
+            self.assertTrue(tp._inject_sse_shim(www))
+            self.assertEqual(
+                (www / "index.html").read_text().count("triple-sse.js"), 1)
+
+    def test_inject_fallback_no_appjs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            www = Path(tmp)
+            (www / "index.html").write_text(
+                "<html><head></head><body>x</body></html>")
+            self.assertTrue(tp._inject_sse_shim(www))
+            self.assertIn("triple-sse.js", (www / "index.html").read_text())
+
+    def test_inject_no_index_html(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(tp._inject_sse_shim(Path(tmp)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  13. v82: РОТАЦИЯ ПАРОЛЯ + RENAME (расширенные CRUD-фейки)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestV82UserOps(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self.store = types.SimpleNamespace(
+            users=[{"email": "existing@x.com", "uuid": "u0",
+                    "name": "existing", "portal_password": "p",
+                    "created": "2026-01-01"}],
+            ttl={}, limits={}, applied=[], renamed=[],
+            pw_naive=[], pw_mieru=[])
+        s = self.store
+        self._saved = {name: _snapshot_module(name) for name in (
+            "chimera.modules.rest_api", "chimera.modules.ttl_users",
+            "chimera.modules.user_lifecycle", "chimera.modules.naiveproxy",
+            "chimera.modules.mieru", "chimera.modules.subscription",
+            "chimera._core")}
+
+        ra = types.ModuleType("chimera.modules.rest_api")
+        ra._get_users = lambda: list(s.users)
+        ra._save_users = lambda users: setattr(s, "users", list(users))
+        ra._sync_users_from_config = lambda: 0
+        ra._sync_rename_user = lambda old, new, old_user=None, \
+            new_user=None: s.renamed.append((old, new))
+        _install_fake("chimera.modules.rest_api", ra)
+
+        ttl = types.ModuleType("chimera.modules.ttl_users")
+        ttl._ttl_set = lambda e, d: s.ttl.update(
+            {e: {"expires_at": f"days={d}", "days": d}})
+        ttl._ttl_remove = lambda e: s.ttl.pop(e, None)
+        ttl._ttl_load = lambda: dict(s.ttl)
+        _install_fake("chimera.modules.ttl_users", ttl)
+
+        ul = types.ModuleType("chimera.modules.user_lifecycle")
+        ul._set_traffic_limit = lambda e, gb: s.limits.update(
+            {e: {"limit_gb": gb}})
+        ul._remove_traffic_limit = lambda e: s.limits.pop(e, None)
+        _install_fake("chimera.modules.user_lifecycle", ul)
+
+        sub = types.ModuleType("chimera.modules.subscription")
+        sub._load_traffic_limits = lambda: dict(s.limits)
+        _install_fake("chimera.modules.subscription", sub)
+
+        import chimera.modules.proto_common as pc
+        naive = types.ModuleType("chimera.modules.naiveproxy")
+        naive._MODULE_STATE = tmp / "naive.json"
+        pc.proto_save_state(naive._MODULE_STATE, {
+            "users": [{"username": "existing", "password": "oldpw",
+                       "password_hash": "h"}],
+            "domain": "d.example", "port": 443, "upstream": ""})
+        naive.set_password_full = lambda user, pw=None: (
+            s.pw_naive.append((user.get("email"), pw)) or (pw or "gen-naive"))
+        _install_fake("chimera.modules.naiveproxy", naive)
+
+        mieru = types.ModuleType("chimera.modules.mieru")
+        mieru._MODULE_STATE = tmp / "mieru.json"
+        pc.proto_save_state(mieru._MODULE_STATE, {
+            "users": [{"username": "existing", "password": "oldpw"}],
+            "port_start": 2012, "port_end": 2022, "protocol": "TCP"})
+        mieru.set_password_full = lambda user, pw=None: (
+            s.pw_mieru.append((user.get("email"), pw)) or (pw or "gen-mieru"))
+        _install_fake("chimera.modules.mieru", mieru)
+
+        core = types.ModuleType("chimera._core")
+        core.gen_uuid = lambda: "fake-uuid-v82"
+        core._users_apply_to_config = lambda users: s.applied.append(
+            len(users))
+        _install_fake("chimera._core", core)
+
+    def tearDown(self):
+        for name, snap in self._saved.items():
+            _restore_module(name, snap)
+        self._tmp.cleanup()
+
+    def test_password_rotation(self):
+        status, resp = web._update_panel_user("existing@x.com",
+                                              {"password": "newpass123"})
+        self.assertEqual(status, 200)
+        self.assertIn("password", resp["changed"])
+        self.assertTrue(resp["ok"])
+        # один и тот же пароль уехал в оба протокола
+        self.assertEqual(self.store.pw_naive,
+                         [("existing@x.com", "newpass123")])
+        self.assertEqual(self.store.pw_mieru,
+                         [("existing@x.com", "newpass123")])
+
+    def test_password_too_short_400(self):
+        status, resp = web._update_panel_user("existing@x.com",
+                                              {"password": "short"})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.store.pw_naive, [])
+
+    def test_password_absent_no_rotation(self):
+        status, _ = web._update_panel_user("existing@x.com", {"quotaMB": 1024})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.store.pw_naive, [])
+
+    def test_rename_email(self):
+        self.store.ttl["existing@x.com"] = {"days": 30, "expires_at": "x"}
+        self.store.limits["existing@x.com"] = {"limit_gb": 5}
+        status, resp = web._update_panel_user(
+            "existing@x.com", {"email": "renamed@x.com"})
+        self.assertEqual(status, 200)
+        self.assertIn("email", resp["changed"])
+        self.assertEqual(resp["id"], "renamed@x.com")
+        # users.json: uuid сохранён, email/name обновлены (name = префикс)
+        u = self.store.users[0]
+        self.assertEqual(u["email"], "renamed@x.com")
+        self.assertEqual(u["uuid"], "u0")
+        self.assertEqual(u["name"], "renamed")
+        # мост rename вызван, конфиг перезаписан
+        self.assertTrue(self.store.renamed)
+        self.assertTrue(self.store.applied)
+        # TTL и квота переехали на новый email
+        self.assertNotIn("existing@x.com", self.store.ttl)
+        self.assertIn("renamed@x.com", self.store.ttl)
+        self.assertIn("renamed@x.com", self.store.limits)
+        self.assertNotIn("existing@x.com", self.store.limits)
+
+    def test_rename_email_conflict_409(self):
+        self.store.users.append({"email": "other@x.com", "uuid": "u1",
+                                 "name": "other"})
+        status, _ = web._update_panel_user("existing@x.com",
+                                           {"email": "other@x.com"})
+        self.assertEqual(status, 409)
+
+    def test_rename_invalid_email_400(self):
+        status, _ = web._update_panel_user("existing@x.com",
+                                           {"email": "not-an-email"})
+        self.assertEqual(status, 400)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  14-15. v82: ПОРТЫ ПРОТОКОЛОВ + КАСКАД/WARP (фейки port_registry и warp)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestV82Settings(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self.s = types.SimpleNamespace(
+            registry=[], conflicts=[], warp_calls=[], warp_uninstalled=0,
+            warp_state={"WARP_CONNECTED": False, "WARP_MODE": "",
+                        "WARP_SSH_CLIENT_IP": ""})
+        s = self.s
+        self._saved = {name: _snapshot_module(name) for name in (
+            "chimera.modules.naiveproxy", "chimera.modules.mieru",
+            "chimera.modules.port_registry", "chimera.modules.warp")}
+
+        import chimera.modules.proto_common as pc
+        naive = types.ModuleType("chimera.modules.naiveproxy")
+        naive._MODULE_STATE = tmp / "naive.json"
+        pc.proto_save_state(naive._MODULE_STATE, {
+            "users": [{"username": "u", "password": "p"}],
+            "domain": "d", "port": 443, "upstream": ""})
+        naive._apply_config = lambda domain, port, users, fu, ps, up="": (
+            s.registry.append(("apply-naive", port)) or None)
+        _install_fake("chimera.modules.naiveproxy", naive)
+
+        mieru = types.ModuleType("chimera.modules.mieru")
+        mieru._MODULE_STATE = tmp / "mieru.json"
+        pc.proto_save_state(mieru._MODULE_STATE, {
+            "users": [], "port_start": 2012, "port_end": 2022,
+            "protocol": "TCP"})
+        mieru._MIERU_TRAFFIC_PRESETS = {}
+        mieru._build_server_config = lambda users, ps, pe, proto, \
+            traffic_pattern=None: {"ports": (ps, pe)}
+        mieru._apply_server_config = lambda cfg: None
+        _install_fake("chimera.modules.mieru", mieru)
+
+        pr = types.ModuleType("chimera.modules.port_registry")
+        pr.SERVICE_NAIVEPROXY = "naiveproxy"
+        pr.SERVICE_MIERU = "mieru"
+        pr.port_get_conflicts = lambda port, proto="tcp", \
+            exclude_service=None: list(s.conflicts)
+        pr.port_check_system = lambda port, proto="tcp": []
+        pr.port_register = lambda tag, port, proto="tcp", comment="", \
+            force=False: (s.registry.append(("reg", tag, port))
+                          or (True, "ok"))
+        pr.port_unregister = lambda tag, port=None, proto=None: (
+            s.registry.append(("unreg", tag, port)) or True)
+        pr.port_register_range = lambda tag, ps, pe, proto="tcp", \
+            comment="": (s.registry.append(("reg-range", tag, ps, pe))
+                         or (True, "ok"))
+        pr.port_unregister_range = lambda tag, ps, pe, proto=None: (
+            s.registry.append(("unreg-range", tag, ps, pe)) or True)
+        pr.ufw_open_port = lambda port, proto, tag, comment=None: (
+            s.registry.append(("ufw-open", port)))
+        pr.ufw_close_port = lambda port, proto, tag, \
+            legacy_comments=None: (s.registry.append(("ufw-close", port)))
+        pr.ufw_open_port_range = lambda ps, pe, proto, tag, \
+            comment=None: (s.registry.append(("ufw-open-range", ps, pe)))
+        pr.ufw_close_port_range = lambda ps, pe, proto, tag, \
+            legacy=None: (s.registry.append(("ufw-close-range", ps, pe)))
+        _install_fake("chimera.modules.port_registry", pr)
+
+        warp = types.ModuleType("chimera.modules.warp")
+        warp._state_get = lambda name, default=None: s.warp_state.get(
+            name, default)
+        warp._state_set = lambda name, value: s.warp_state.update(
+            {name: value})
+        warp.configure_warp = lambda mode, ssh, custom_ips=None, \
+            custom_domains=None: (
+                s.warp_state.update({"WARP_CONNECTED": True})
+                or s.warp_calls.append((mode, ssh)) or True)
+        warp.uninstall_warp = lambda: (
+            s.warp_state.update({"WARP_CONNECTED": False})
+            or setattr(s, "warp_uninstalled", s.warp_uninstalled + 1)
+            or True)
+        warp.WG_SERVICE = "wg-quick@wgcf"
+        _install_fake("chimera.modules.warp", warp)
+
+        self._svc_patch = patch.object(web, "_svc_active", return_value=True)
+        self._svc_patch.start()
+
+    def tearDown(self):
+        self._svc_patch.stop()
+        for name, snap in self._saved.items():
+            _restore_module(name, snap)
+        self._tmp.cleanup()
+
+    def _naive_state(self):
+        import chimera.modules.proto_common as pc
+        from chimera.modules import naiveproxy as nv
+        return pc.proto_load_state(nv._MODULE_STATE)
+
+    def _mieru_state(self):
+        import chimera.modules.proto_common as pc
+        from chimera.modules import mieru as mr
+        return pc.proto_load_state(mr._MODULE_STATE)
+
+    # ── порты naive ───────────────────────────────────────────────────────
+    def test_naive_port_change(self):
+        status, resp = web._set_naive_port({"port": 8443})
+        self.assertEqual(status, 200)
+        self.assertTrue(resp["ok"])
+        self.assertIn("8443", resp["message"])
+        self.assertEqual(self._naive_state()["port"], 8443)
+        ops = [op[0] for op in self.s.registry]
+        self.assertIn("reg", ops)          # перерегистрация за naiveproxy
+        self.assertIn("unreg", ops)
+        self.assertIn("ufw-open", ops)
+        self.assertIn("apply-naive", ops)  # Caddyfile пересобран
+
+    def test_naive_port_invalid(self):
+        for bad in (0, 70000, "x"):
+            status, _ = web._set_naive_port({"port": bad})
+            self.assertEqual(status, 400)
+
+    def test_naive_port_conflict_409_no_state_change(self):
+        self.s.conflicts = [{"type": "registry", "detail": "занят: vless-web",
+                             "service": "vless"}]
+        status, resp = web._set_naive_port({"port": 8443})
+        self.assertEqual(status, 409)
+        self.assertIn("занят", resp["error"])
+        self.assertEqual(self._naive_state()["port"], 443)
+
+    def test_naive_port_same_noop(self):
+        status, resp = web._set_naive_port({"port": 443})
+        self.assertEqual(status, 200)
+        self.assertIn("уже", resp["message"])
+
+    def test_naive_port_apply_error_rollback(self):
+        from chimera.modules import naiveproxy as nv
+        orig = nv._apply_config
+        nv._apply_config = lambda d, p, u, f, pr_, up="": "Caddyfile error"
+        try:
+            status, resp = web._set_naive_port({"port": 8443})
+            self.assertEqual(status, 500)
+            self.assertEqual(self._naive_state()["port"], 443)  # откат
+        finally:
+            nv._apply_config = orig
+
+    # ── порты mieru ───────────────────────────────────────────────────────
+    def test_mieru_ports_change(self):
+        status, resp = web._set_mieru_ports({"portStart": 3000,
+                                             "portEnd": 3010})
+        self.assertEqual(status, 200)
+        self.assertTrue(resp["ok"])
+        st = self._mieru_state()
+        self.assertEqual((st["port_start"], st["port_end"]), (3000, 3010))
+        ops = [op[0] for op in self.s.registry]
+        self.assertIn("reg-range", ops)
+        self.assertIn("unreg-range", ops)
+        self.assertIn("ufw-open-range", ops)
+
+    def test_mieru_ports_invalid(self):
+        status, _ = web._set_mieru_ports({"portStart": 2000, "portEnd": 1990})
+        self.assertEqual(status, 400)
+        status, _ = web._set_mieru_ports({"portStart": 100, "portEnd": 200})
+        self.assertEqual(status, 400)
+
+    def test_mieru_ports_conflict_409(self):
+        self.s.conflicts = [{"type": "registry", "detail": "занят: singbox",
+                             "service": "singbox"}]
+        status, _ = web._set_mieru_ports({"portStart": 3000,
+                                          "portEnd": 3010})
+        self.assertEqual(status, 409)
+        st = self._mieru_state()
+        self.assertEqual((st["port_start"], st["port_end"]), (2012, 2022))
+
+    # ── каскад ─────────────────────────────────────────────────────────
+    def test_cascade_view_disabled(self):
+        view = web._cascade_view()
+        self.assertFalse(view["cascadeEnabled"])
+        self.assertEqual(view["cascadeNaiveUpstream"], "")
+        self.assertFalse(view["cascadeMieru"]["hasPass"])
+        self.assertEqual(view["cascadeMieru"]["portStart"], 2012)
+
+    def test_cascade_enable_and_disable(self):
+        status, resp = web._cascade_apply({
+            "cascadeEnabled": True,
+            "cascadeNaiveUpstream": "https://u:p@exit.example:443"})
+        self.assertEqual(status, 200)
+        self.assertTrue(resp["ok"])
+        self.assertEqual(self._naive_state()["upstream"],
+                         "https://u:p@exit.example:443")
+        self.assertTrue(web._cascade_view()["cascadeEnabled"])
+        # WARP не трогался (не был включен)
+        self.assertEqual(self.s.warp_uninstalled, 0)
+        # отключение
+        status, resp = web._cascade_apply({"cascadeEnabled": False})
+        self.assertEqual(status, 200)
+        self.assertEqual(self._naive_state()["upstream"], "")
+
+    def test_cascade_enable_tears_warp(self):
+        self.s.warp_state["WARP_CONNECTED"] = True
+        status, resp = web._cascade_apply({
+            "cascadeEnabled": True,
+            "cascadeNaiveUpstream": "https://u:p@exit.example:443"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.s.warp_uninstalled, 1)
+        self.assertIn("взаимоисключение", resp["message"])
+
+    def test_cascade_enable_requires_upstream(self):
+        status, _ = web._cascade_apply({"cascadeEnabled": True,
+                                        "cascadeNaiveUpstream": ""})
+        self.assertEqual(status, 400)
+
+    def test_cascade_mieru_leg_ignored_honestly(self):
+        status, resp = web._cascade_apply({
+            "cascadeEnabled": True,
+            "cascadeNaiveUpstream": "https://u:p@h:443",
+            "cascadeMieru": {"host": "exit.example", "user": "u"}})
+        self.assertEqual(status, 200)
+        self.assertIn("не применяется", resp["message"])
+
+    def test_normalize_upstream(self):
+        cases = [
+            ("naive+https://u:p@h:443#tag", "https://u:p@h:443"),
+            ("https://u:p@h:443/", "https://u:p@h:443"),
+            ("h.example:8443", "https://h.example:8443"),
+            ("", ""),
+            ("garbage@@@", ""),
+        ]
+        for raw, expected in cases:
+            self.assertEqual(web._normalize_upstream(raw), expected,
+                             f"raw={raw!r}")
+
+    def test_cascade_reset(self):
+        web._cascade_apply({"cascadeEnabled": True,
+                            "cascadeNaiveUpstream": "https://u:p@h:443"})
+        with patch.object(web, "_egress_ip", return_value="1.2.3.4"):
+            status, resp = web._cascade_reset()
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["nativeEgress"], "1.2.3.4")
+        self.assertEqual(self._naive_state()["upstream"], "")
+
+    def test_cascade_status_view(self):
+        web._cascade_apply({"cascadeEnabled": True,
+                            "cascadeNaiveUpstream": "https://u:p@h:443"})
+        view = web._cascade_status_view()
+        self.assertTrue(view["ok"])
+        self.assertIn("https://u:p@h:443", view["output"])
+
+    # ── WARP ─────────────────────────────────────────────────────────
+    def test_warp_view_and_enable(self):
+        view = web._warp_view()
+        self.assertFalse(view["warpEnabled"])
+        self.assertIn("ramMB", view)
+        self.assertIn("lowRamWarning", view)
+        # включение: режим по умолчанию runet (state пуст)
+        with patch.object(web, "_egress_ip", return_value="5.6.7.8"):
+            status, resp = web._set_warp({"warpEnabled": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(resp["ok"])
+        self.assertEqual(self.s.warp_calls, [("runet", "")])
+        self.assertEqual(resp["egressIP"], "5.6.7.8")
+        # warp.py отразил подключение → view видит включение
+        self.assertTrue(web._warp_view()["warpEnabled"])
+
+    def test_warp_enable_full_degrades_without_ssh_ip(self):
+        self.s.warp_state["WARP_MODE"] = "full"
+        with patch.object(web, "_egress_ip", return_value=""):
+            status, resp = web._set_warp({"warpEnabled": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.s.warp_calls[0][0], "runet")
+        self.assertIn("runet", resp["message"])
+
+    def test_warp_enable_full_with_ssh_ip_kept(self):
+        self.s.warp_state["WARP_MODE"] = "full"
+        self.s.warp_state["WARP_SSH_CLIENT_IP"] = "9.9.9.9"
+        with patch.object(web, "_egress_ip", return_value=""):
+            status, _ = web._set_warp({"warpEnabled": True})
+        self.assertEqual(self.s.warp_calls[0][0], "full")
+
+    def test_warp_enable_clears_cascade(self):
+        web._cascade_apply({"cascadeEnabled": True,
+                            "cascadeNaiveUpstream": "https://u:p@h:443"})
+        with patch.object(web, "_egress_ip", return_value=""):
+            web._set_warp({"warpEnabled": True})
+        self.assertEqual(self._naive_state()["upstream"], "")
+
+    def test_warp_disable_and_reset(self):
+        with patch.object(web, "_egress_ip", return_value=""):
+            status, resp = web._set_warp({"warpEnabled": False})
+        self.assertEqual(status, 200)
+        self.assertFalse(resp["warpEnabled"])
+        self.assertEqual(resp["warpResult"]["code"], "disabled")
+        self.assertEqual(self.s.warp_uninstalled, 1)
+        with patch.object(web, "_egress_ip", return_value="1.1.1.1"):
+            status, resp = web._warp_reset()
+        self.assertEqual(resp["nativeEgress"], "1.1.1.1")
+        self.assertEqual(self.s.warp_uninstalled, 2)
+
+    def test_warp_status_view(self):
+        self.s.warp_state["WARP_CONNECTED"] = True
+        self.s.warp_state["WARP_MODE"] = "runet"
+        with patch.object(web, "_egress_ip", return_value="3.3.3.3"):
+            view = web._warp_status_view()
+        self.assertTrue(view["ok"])
+        self.assertIn("runet", view["output"])
+        self.assertIn("3.3.3.3", view["output"])
 
 
 if __name__ == "__main__":

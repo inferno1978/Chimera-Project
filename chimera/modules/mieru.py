@@ -1381,6 +1381,57 @@ def rename_user(old_name: str, new_name: str) -> bool:
         {"email": new_name, "name": new_name},
     )
 
+def set_password_full(user: dict, password: Optional[str] = None) -> Optional[str]:
+    """Ротация пароля Mieru-аккаунта (web-панель, sync contract v4.26).
+
+    password = None → сгенерировать новый (proto_gen_password).
+    Возвращает новый пароль или None (юзера нет / пароль слаб / ошибка).
+    /etc/mita/server.json перегенерируется, mita перезапускается.
+    """
+    try:
+        if not _is_installed():
+            return None
+        email = user.get("email", "") or ""
+        username = _username_from_email(email)
+        if not username or not _RE_USERNAME.match(username):
+            return None
+        new_password = password if (password and isinstance(password, str)) \
+            else proto_gen_password()
+        if not isinstance(new_password, str) or len(new_password) < 8:
+            return None
+        state = proto_load_state(_MODULE_STATE)
+        users = state.get("users", [])
+        row = next((u for u in users if u.get("username") == username), None)
+        if row is None:
+            return None
+        row["password"] = new_password
+        state["users"] = users
+        proto_save_state(_MODULE_STATE, state)
+        # Регенерируем server.json и перезапускаем mita.
+        _tp_name = state.get("traffic_preset", "basic")
+        _tp_config = _MIERU_TRAFFIC_PRESETS.get(_tp_name, {}).get("config")
+        cfg = _build_server_config(
+            users,
+            state.get("port_start", _DEFAULT_PORT_START),
+            state.get("port_end",   _DEFAULT_PORT_END),
+            state.get("protocol",   _DEFAULT_PROTOCOL),
+            traffic_pattern=_tp_config,
+        )
+        err = _apply_server_config(cfg)
+        if not err:
+            _run(["systemctl", "reload-or-restart", _SERVICE_NAME])
+        return new_password
+    except Exception as e:
+        try:
+            print(f"  {RED}✗{NC}  mieru.set_password_full: {e}")
+        except Exception:
+            pass
+        return None
+
+def set_password(name: str, password: Optional[str] = None) -> Optional[str]:
+    """Legacy contract — принимает email или name как строку."""
+    return set_password_full({"email": name, "name": name}, password)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  СТАТУС
 # ══════════════════════════════════════════════════════════════════════════════
