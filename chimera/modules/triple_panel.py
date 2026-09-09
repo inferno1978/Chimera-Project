@@ -53,6 +53,7 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -186,16 +187,42 @@ def _box_top(title: str = "") -> None:
 def _box_sep() -> None: print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
 def _box_bot() -> None: print(f"{CYAN}╚{'═' * _BOX_W}╝{NC}")
 
-def _box_row(text: str = "") -> None:
+def _truncate_ansi(text: str, max_w: int) -> str:
+    """Обрезает text до видимой ширины max_w-1 + «…», не рвя ANSI-коды.
+
+    v83 резала по индексу plain-строки — ESC-последовательности могли
+    разрезаться посередине (мусор в терминале). Здесь ширина считается
+    по исходной строке, CSI-коды нулевой ширины копируются целиком.
+    """
+    out, acc, i, n = [], 0, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\x1b":                      # CSI-код — целиком, ширина 0
+            j = i + 1
+            if j < n and text[j] == "[":
+                j += 1
+                while j < n and not text[j].isalpha():
+                    j += 1
+                if j < n:
+                    j += 1
+            out.append(text[i:j]); i = j
+            continue
+        w = _wlen(ch)
+        if acc + w > max_w - 1:               # резерв под «…»
+            return "".join(out) + "…"
+        out.append(ch); acc += w; i += 1
+    return "".join(out)
+
+def _render_box_row(text: str) -> str:
+    """Строка бокса (без печати) — общий рендер _box_row и live-вывода."""
     w = _wlen(text)
     if w > _BOX_W:
-        acc, plain_txt = 0, _plain(text); cut = 0
-        for i, ch in enumerate(plain_txt):
-            acc += _wlen(ch)
-            if acc > _BOX_W - 1: cut = i; break
-        text = text[:cut] + "…"; w = _wlen(text)
+        text = _truncate_ansi(text, _BOX_W); w = _wlen(text)
     pad = max(0, _BOX_W - w)
-    print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
+    return f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}"
+
+def _box_row(text: str = "") -> None:
+    print(_render_box_row(text))
 
 def _box_item(key: str, label: str) -> None:
     col = RED + BOLD if key.strip().upper() in ("Q", "0") else WHITE + BOLD
@@ -219,6 +246,176 @@ def _box_link(link: str, color: str = "") -> None:
         pad = max(0, _BOX_W - 2 - _wlen(chunk))
         print(f"{CYAN}║{NC}  {color}{chunk}{NC}{' ' * pad}{CYAN}║{NC}")
         i += max_w
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  v83.2: LIVE-BOX — сырой вывод стороннего кода строками бокса
+#  download_manager / journalctl / nginx-front печатают «голым» print() —
+#  эти строки разрывали открытый бокс. Прокси sys.stdout рендерит каждую
+#  ПОЛНУЮ строку как строку бокса: длинные — переносом (информация не
+#  теряется, в отличие от «…»), пустые — пустой строкой в рамке. Фрагменты
+#  без перевода строки (приглашения input) проходят как есть — их
+#  дорисовывает _box_ask.
+# ══════════════════════════════════════════════════════════════════════════════
+def _ansi_wrap(text: str, first_w: int, cont_w: int, cont_prefix: str) -> list:
+    """Перенос длинной строки на куски видимой шириной ≤ first_w/cont_w.
+
+    ANSI-последовательности имеют нулевую ширину и не рвутся на границе.
+    Продолжения — с отступом cont_prefix (2 пробела), висячий пробел на
+    границе переноса съедается.
+    """
+    rows, cur, cur_w, width, prefix = [], [], 0, first_w, ""
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\x1b":                      # CSI-код — целиком в кусок
+            j = i + 1
+            if j < n and text[j] == "[":
+                j += 1
+                while j < n and not text[j].isalpha():
+                    j += 1
+                if j < n:
+                    j += 1
+            cur.append(text[i:j]); i = j
+            continue
+        if ch == "\r":
+            i += 1
+            continue
+        w = _wlen(ch)
+        if cur and cur_w + w > width:
+            rows.append(prefix + "".join(cur))
+            cur, cur_w = [], 0
+            width, prefix = cont_w, cont_prefix
+            if ch == " ":
+                i += 1
+            continue
+        cur.append(ch); cur_w += w; i += 1
+    if cur or not rows:
+        rows.append(prefix + "".join(cur))
+    return rows
+
+class _BoxedStdout:
+    """Прокси sys.stdout: полные строки → строки бокса (live-frame).
+
+    print("строка") пишет ДВУМЯ вызовами write («строка», затем «\\n») —
+    поэтому фрагменты буферизуются до перевода строки и рендерятся
+    одной строкой бокса. flush() с неполным буфером (приглашение input
+    без \\n) показывает его как есть — строку дорисует _box_ask.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self._buf = ""
+        self._raw_open = False      # незакрытая raw-строка после flush
+
+    def write(self, s):
+        if not s:
+            return 0
+        if self._raw_open:
+            # raw-фрагмент уже «закрыт» внешним переводом строки
+            # (tty-echo при input) — новый write начинает новую строку
+            self._raw_open = False
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._emit(line)
+        return len(s)
+
+    def _emit(self, line: str) -> None:
+        line = line.rstrip()
+        if not line.strip():
+            self._real.write(f"{CYAN}║{NC}{' ' * _BOX_W}{CYAN}║{NC}\n")
+            return
+        # уже готовая строка бокса (напр. _box_warn, вызванный внутри
+        # контекста) — печатается как есть, НЕ заворачивается повторно
+        p = _plain(line)
+        if (p.startswith("║") and p.endswith("║")
+                and _wlen(p) == _BOX_W + 2):
+            self._real.write(line + "\n")
+            return
+        for row in _ansi_wrap(line, _BOX_W, _BOX_W - 2, "  "):
+            self._real.write(_render_box_row(row) + "\n")
+
+    def flush(self):
+        if self._buf and not self._raw_open:
+            # фрагмент без перевода строки (приглашение) — как есть
+            self._real.write(self._buf)
+            self._buf = ""
+            self._raw_open = True
+        self._real.flush()
+
+    def isatty(self):
+        return self._real.isatty()
+
+    def fileno(self):
+        return self._real.fileno()
+
+    @property
+    def encoding(self):
+        return getattr(self._real, "encoding", "utf-8")
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+@contextmanager
+def _boxed_output():
+    """Контекст: stdout стороннего print()-вывода — строками бокса.
+
+    ВНИМАНИЕ: внутри контекста не должно быть интерактивных вводов —
+    приглашение пройдёт мимо рамки (для вводов есть _box_ask).
+    """
+    real = sys.stdout
+    sys.stdout = _BoxedStdout(real)
+    try:
+        yield
+    finally:
+        sys.stdout = real
+        try:
+            real.flush()
+        except Exception:
+            pass
+
+def _redraw_ask_row(label: str, value: str) -> None:
+    """Заменяет строку приглашения на ПОЛНУЮ строку бокса (up+clear+row).
+
+    После input() курсор стоит в начале следующей строки: поднимаемся
+    на строку вверх, очищаем её и печатаем готовую строку бокса со
+    значением — рамка остаётся идеальной (в т.ч. после Ctrl+C: строка
+    «— отмена —» вместо «^C Приглашение: ...»).
+    """
+    try:
+        row = _render_box_row(f"  {CYAN}{label}{NC} {value}")
+        sys.stdout.write("\033[A\033[2K" + row + "\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+def _box_ask(label: str, default: str = "") -> str:
+    """Интерактивный ввод СТРОКОЙ ВНУТРИ бокса (v83.2).
+
+    TTY: приглашение печатается левой половиной строки бокса (║ + метка),
+    ввод эхом терминала ложится в ту же строку; после Enter строка
+    ПЕРЕРИСОВЫВАЕТСЯ целиком (правая рамка + значение) через
+    _redraw_ask_row — ввод всегда визуально внутри рамки.
+    Не-TTY (тесты/pipe): приглашение не печатается, после ввода выводится
+    готовая строка бокса — вывод детерминирован.
+    Ctrl+C → строка «— отмена —», наружу летит ProtoCancelled (как proto_ask).
+    """
+    label = (label or "").rstrip()
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    prompt = f"{CYAN}║{NC}  {CYAN}{label} {NC}" if interactive else ""
+    try:
+        val = proto_ask(prompt, default=default, c=True)
+    except _Cancelled:
+        if interactive:
+            _redraw_ask_row(label, f"{DIM}— отмена —{NC}")
+        raise
+    val = (val or "").strip()
+    shown = val if val else default
+    if interactive:
+        _redraw_ask_row(label, str(shown))
+    else:
+        _box_row(f"  {CYAN}{label}{NC} {shown}")
+    return val
 
 def _pause() -> None:
     try:
@@ -245,9 +442,13 @@ def _detect_installed() -> bool:
     st = _load_state()
     return bool(st.get("installed")) and _SERVICE_FILE.exists() and _WWW_DIR.exists()
 
-def _service_active() -> bool:
+def _service_state() -> str:
+    """is-active: 'active'/'inactive'/'failed'/... ('' при ошибке)."""
     r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True, check=False)
-    return r.returncode == 0 and r.stdout.decode().strip() == "active"
+    return (r.stdout or b"").decode(errors="replace").strip()
+
+def _service_active() -> bool:
+    return _service_state() == "active"
 
 def _detect_upstream_version(timeout: int = 10) -> str:
     """Версия апстрима. '' при ошибке.
@@ -328,13 +529,17 @@ def _update_header_row() -> str:
 def _front_mirror_urls(filename: str) -> list:
     """Лестница зеркал для тарболла исходников апстрима.
 
-    v83.1: апстрим НЕ тегает релизы (git ls-remote --tags пуст) — теговые
-    архивы 404-или, единственный живой источник — архив ветки main
-    (проверено: codeload 200, ~430 КБ). Поэтому: сначала тег vX.Y.Z
-    (на случай, что апстрим начнёт тегать), затем гарантированная ветка.
+    v83.2: ветка main — ПЕРВОЙ. Апстрим не тегает релизы (git ls-remote
+    --tags пуст), теговые архивы дают вечный 404 — на живой установке
+    юзера первые два зеркала падали 404 и выглядели ошибкой, хотя ветка
+    main ниже была гарантированно живой. Теги — последними, задел на
+    случай, если апстрим начнёт тегать.
     jsDelivr/statically тарболлы не раздают — только GitHub-архивы.
     """
-    urls = []
+    urls = [
+        f"https://github.com/{_UPSTREAM_REPO}/archive/refs/heads/main.tar.gz",
+        f"https://codeload.github.com/{_UPSTREAM_REPO}/tar.gz/refs/heads/main",
+    ]
     m = re.search(r"v(\d+\.\d+\.\d+)", filename)
     if m:
         tag = f"v{m.group(1)}"
@@ -342,10 +547,6 @@ def _front_mirror_urls(filename: str) -> list:
             f"https://github.com/{_UPSTREAM_REPO}/archive/refs/tags/{tag}.tar.gz",
             f"https://codeload.github.com/{_UPSTREAM_REPO}/tar.gz/refs/tags/{tag}",
         ]
-    urls += [
-        f"https://github.com/{_UPSTREAM_REPO}/archive/refs/heads/main.tar.gz",
-        f"https://codeload.github.com/{_UPSTREAM_REPO}/tar.gz/refs/heads/main",
-    ]
     return urls
 
 def _front_spec(version: str):
@@ -566,35 +767,38 @@ def _fetch_front(version: str, quiet: bool = False) -> bool:
     v83.1: зеркало может отдать архив ветки main (новее запрошенной
     version) — фактическая версия вендореного фронта доступна после
     успеха через _front_actual_version().
+    v83.2: весь сырой вывод download_manager (лестница зеркал, прогресс,
+    диагностика ручного файла, curl/scp-подсказка) идёт через
+    _boxed_output — строками бокса с переносом, рамка не разрывается.
     """
     from chimera.modules.download_manager import fetch_package
     if not quiet:
-        _info(f"Скачиваю фронтенд апстрима v{_strip_v(version)}...")
+        _box_info(f"Скачиваю фронтенд апстрима v{_strip_v(version)}...")
     spec = _front_spec(version)
-    ok = fetch_package(spec, progress_label="triple-panel front")
-    if not ok:
-        return False
-    tar_path = STATE_DIR / spec.filename_builder()
-    # staging → atomic swap
-    if _STAGING_DIR.exists():
-        shutil.rmtree(_STAGING_DIR, ignore_errors=True)
-    if not _extract_front(tar_path, _STAGING_DIR):
-        return False
-    if _WWW_DIR.exists():
-        shutil.rmtree(_WWW_DIR, ignore_errors=True)
-    _STAGING_DIR.rename(_WWW_DIR)
-    try:
-        tar_path.unlink(missing_ok=True)
-    except Exception:
-        pass
-    # v82: SSE-шим поверх EventSource (подменяет WS апстрима во фронте)
-    _inject_sse_shim(_WWW_DIR)
-    ok = _WWW_DIR.exists() and (_WWW_DIR / "index.html").exists()
+    with _boxed_output():
+        ok = fetch_package(spec, progress_label="triple-panel front")
+        if not ok:
+            return False
+        tar_path = STATE_DIR / spec.filename_builder()
+        # staging → atomic swap
+        if _STAGING_DIR.exists():
+            shutil.rmtree(_STAGING_DIR, ignore_errors=True)
+        if not _extract_front(tar_path, _STAGING_DIR):
+            return False
+        if _WWW_DIR.exists():
+            shutil.rmtree(_WWW_DIR, ignore_errors=True)
+        _STAGING_DIR.rename(_WWW_DIR)
+        try:
+            tar_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        # v82: SSE-шим поверх EventSource (подменяет WS апстрима во фронте)
+        _inject_sse_shim(_WWW_DIR)
+        ok = _WWW_DIR.exists() and (_WWW_DIR / "index.html").exists()
     if ok and not quiet:
         actual = _front_actual_version()
         if actual and _version_key(actual) != _version_key(version):
-            _info(f"Зеркало отдало фронт ветки main — фактическая версия "
-                  f"v{actual}.")
+            _box_info(f"Зеркало отдало фронт ветки main — версия v{actual}.")
     return ok
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -623,13 +827,31 @@ def _validate_web_port(port: int) -> "tuple[bool, list]":
     return (len(conflicts) == 0), conflicts
 
 def _ask_web_port(default: int = _DEFAULT_PORT) -> "Optional[int]":
-    """Интерактивный выбор порта панели с показом конфликтов. None = отмена."""
+    """Полный мини-бокс выбора порта: приглашение ВНУТРИ рамки (после
+    Enter строка перерисовывается целиком), конфликты — строками бокса,
+    повторный ввод — в том же боксе. None = отмена.
+
+    v83.2: раньше — сиротские строки рамки без top/bot и приглашение
+    вне бокса. Теперь самостоятельный бокс: вызывается и из установки
+    (между интро- и прогресс-боксом), и из смены порта (пункт 5).
+    """
+    _box_top("🔌  ВЫБОР ПОРТА  •  TRIPLE PANEL")
+    _box_row()
+    _box_row(f"  {DIM}Порт веб-панели (Enter = {default}):{NC}")
+    _box_row(f"  {DIM}Проверю port_registry и слушателей перед регистрацией.{NC}")
+    _box_row()
     while True:
-        _box_row()
-        _box_row(f"  {DIM}Порт веб-панели (ввод = {default}):{NC}")
-        _box_row(f"  {DIM}Проверю port_registry и слушателей перед регистрацией.{NC}")
-        raw = proto_ask(f"  {CYAN}Порт: {NC}", default=str(default), c=True).strip()
+        try:
+            raw = _box_ask("Порт:", default=str(default))
+        except _Cancelled:
+            _box_row()
+            _box_row(f"  {DIM}Отмена.{NC}")
+            _box_bot(); print()
+            return None
         if raw.lower() == "q":
+            _box_row()
+            _box_row(f"  {DIM}Отмена.{NC}")
+            _box_bot(); print()
             return None
         try:
             port = int(raw)
@@ -638,12 +860,16 @@ def _ask_web_port(default: int = _DEFAULT_PORT) -> "Optional[int]":
             continue
         ok, conflicts = _validate_web_port(port)
         if ok:
+            _box_row()
+            _box_ok(f"Порт {port} свободен.")
+            _box_bot(); print()
             return port
         _box_row()
         _box_warn(f"Порт {port} недоступен:")
         for c in conflicts[:6]:
             _box_row(f"    {RED}•{NC} {c}")
-        _box_row(f"  {DIM}Выберите другой порт.{NC}")
+        _box_row(f"  {DIM}Выберите другой порт (или Q — отмена).{NC}")
+        _box_row()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  АДМИН-КРЕДЫ (SHA-256 + соль; вывод пароля ОДИН раз — паттерн vless-web)
@@ -681,43 +907,88 @@ User=root
 WantedBy=multi-user.target
 """
     _SERVICE_FILE.write_text(unit)
-    _run(["systemctl", "daemon-reload"], check=False)
+    _run(["systemctl", "daemon-reload"], capture=True, check=False)
 
-def _smoke_check(port: int, timeout: int = 15) -> bool:
-    """GET / на локальный порт — фронт отдаётся? (контракто-смоук v1)."""
+def _smoke_check(port: int, timeout: int = 5) -> bool:
+    """GET / на локальный порт — фронт отдаётся? (контракто-смоук v1).
+
+    v83.2: (1) запрос идёт через ProxyHandler({}) — на серверах с
+    http_proxy/https_proxy в окружении urllib гнал 127.0.0.1 ЧЕРЕЗ
+    прокси и живой сервис выглядел «не отвечающим»; (2) timeout 5с —
+    функция теперь вызывается в ретрай-цикле _wait_service_http.
+    """
     try:
-        with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/", timeout=timeout) as resp:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{port}/", timeout=timeout) as resp:
             return resp.status == 200
     except Exception:
         return False
+
+def _wait_service_http(port: int, attempts: int = 30, delay: float = 1.0,
+                       announce: bool = False) -> bool:
+    """Ждёт настоящего ответа GET / с ретраями.
+
+    Type=simple: systemctl is-active = «active» сразу после fork, а
+    питон-импорт бэкенда (chimera.* — десятки модулей) на слабом VPS
+    занимает секунды. Один мгновенный GET после enable --now ловил
+    connection refused → ложное «GET / не отвечает» на живом инсталле
+    юзера (v83.1). Ретраи до attempts, ранний выход при failed.
+    """
+    for i in range(attempts):
+        if _smoke_check(port):
+            return True
+        if _service_state() == "failed":
+            return False
+        if announce and i == 0:
+            _box_info("Жду ответа веб-сервера (импорт бэкенда занимает секунды)...")
+        time.sleep(delay)
+    return False
+
+def _journal_boxed(n: int = 20) -> None:
+    """Хвост journalctl — строками бокса (перенос длинных строк)."""
+    r = _run(["journalctl", "-u", _SERVICE_NAME, "-n", str(n), "--no-pager"],
+             capture=True, check=False)
+    with _boxed_output():
+        for line in (r.stdout or b"").decode(errors="replace").splitlines():
+            print(line)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  УСТАНОВКА
 # ══════════════════════════════════════════════════════════════════════════════
 def _install() -> bool:
+    # Бокс 1: интро — закрывается ДО выбора порта (канон naiveproxy:
+    # подсказки в боксе, интерактивные вводы — между боксами)
     os.system("clear")
     _box_top("🧩  УСТАНОВКА  •  TRIPLE PANEL")
     _box_row()
-    _box_row(f"  Питон-порт панели Panel-Naive-Mieru-by-RIXXX в Chimera.")
+    _box_row("  Питон-порт панели Panel-Naive-Mieru-by-RIXXX в Chimera.")
     _box_row(f"  {DIM}Фронт апстрима (MIT © RIXXX) + бэкенд поверх модулей"
              f" 10/11/H2.{NC}")
     _box_row()
-    _box_sep()
+    _box_bot()
+    print()
 
-    # 1. Порт (требование: выбор юзера + конфликт-чек)
+    # Бокс 2: выбор порта — самостоятельный полный бокс (требование №5)
     port = _ask_web_port()
     if port is None:
         return False
 
-    # 2. Фронт (download_manager)
+    # Бокс 3: прогресс — фронт → креды → port_registry → сервис → итог.
+    # v83.2: весь вывод (download_manager, systemctl, journalctl) —
+    # строками бокса, вводы — через _box_ask; сырых строк вне рамки нет.
+    _box_top("🧩  УСТАНОВКА  •  TRIPLE PANEL")
+    _box_row()
+
+    # 2. Фронт (download_manager; лестница зеркал — в рамке)
     upstream = _refresh_upstream_cache() or _PORT_FRONT_VERSION
     if not _fetch_front(upstream):
-        _box_err("Не удалось скачать фронтенд (см. подсказку download_manager).")
+        _box_err("Не удалось скачать фронтенд (подсказка выше в рамке).")
         _box_row(f"  {DIM}Ручной путь: скачайте тарболл в /root/ и повторите.{NC}")
+        _box_row()
         _box_bot(); _pause()
         return False
-    _box_ok(f"Фронтенд v{_front_actual_version() or upstream} вендорен → {_WWW_DIR}")
+    _box_ok(f"Фронтенд v{_front_actual_version() or upstream} вендорен → triple_panel_www/")
 
     # 3. Креды (пароль показывается ОДИН раз)
     state = _load_state()
@@ -725,45 +996,61 @@ def _install() -> bool:
     # v83.1: фактическая версия вендореного фронта (зеркало могло отдать main)
     state["front_version"] = _front_actual_version() or upstream
     state["language"] = state.get("language", "ru")
+    _box_row()
     try:
-        admin_user = proto_ask(
-            f"  {CYAN}Логин админа: {NC}",
-            default=state.get("admin_user", "admin"), c=True).strip() or "admin"
+        admin_user = _box_ask(
+            "Логин админа:",
+            default=state.get("admin_user", "admin") or "admin")
     except _Cancelled:
+        _box_row()
+        _box_row(f"  {DIM}Отмена.{NC}")
+        _box_row()
+        _box_bot(); print()
         return False
+    admin_user = (admin_user or "").strip() or "admin"
     password = _gen_admin_password()
     state["admin_user"] = admin_user
     _set_admin_password(state, password)
 
-    # 4. port_registry (требование №2): регистрация + ufw
-    try:
-        from chimera.modules.port_registry import port_register, ufw_open_port
-        ok, msg = port_register(_PORT_TAG, port, proto="tcp",
-                                comment="Chimera Triple Panel web UI")
-        if not ok:
-            _box_warn(f"port_registry: {msg}")
-        ufw_open_port(port, "tcp", _PORT_TAG,
-                      comment="Chimera Triple Panel web UI")
-    except Exception as e:
-        _box_warn(f"port_registry недоступен: {e}")
+    # 4. port_registry (требование №2): регистрация + ufw — вывод в рамке
+    # (_box_warn внутри контекста печатается прокси как есть, без двойной
+    # обёртки)
+    with _boxed_output():
+        try:
+            from chimera.modules.port_registry import port_register, ufw_open_port
+            ok, msg = port_register(_PORT_TAG, port, proto="tcp",
+                                    comment="Chimera Triple Panel web UI")
+            if not ok:
+                _box_warn(f"port_registry: {msg}")
+            ufw_open_port(port, "tcp", _PORT_TAG,
+                          comment="Chimera Triple Panel web UI")
+        except Exception as e:
+            _box_warn(f"port_registry недоступен: {e}")
 
-    # 5. Юнит + старт
+    # 5. Юнит + старт (v83.2: вывод systemctl — под capture, «Created
+    # symlink …» больше не рвёт бокс; ожидание ответа GET / — с ретраями)
     _write_service_unit()
     state["installed"] = True
     _save_state(state)
-    _run(["systemctl", "enable", "--now", _SERVICE_NAME], check=False)
-    for _ in range(15):
-        if _service_active():
-            break
-        time.sleep(1)
-    if not _service_active():
-        _box_err("Сервис не поднялся. Журнал:")
-        _run(["journalctl", "-u", _SERVICE_NAME, "-n", "20", "--no-pager"])
+    _box_row()
+    _box_info(f"Запускаю {_SERVICE_NAME}.service...")
+    r = _run(["systemctl", "enable", "--now", _SERVICE_NAME],
+             capture=True, check=False)
+    if r.returncode != 0:
+        tail = (r.stderr or b"").decode(errors="replace").strip().splitlines()
+        _box_warn(f"systemctl enable: rc={r.returncode}"
+                  + (f" — {tail[-1][:70]}" if tail else ""))
+    if _wait_service_http(port, announce=True):
+        _box_ok(f"Сервис {_SERVICE_NAME} активен (127.0.0.1:{port})")
+    else:
+        if _service_state() == "active":
+            _box_err("Сервис активен, но GET / не отвечает. Журнал:")
+        else:
+            _box_err("Сервис не поднялся. Журнал:")
+        _journal_boxed()
+        _box_row()
         _box_bot(); _pause()
         return False
-    if not _smoke_check(port):
-        _box_warn("Сервис активен, но GET / не отвечает — проверьте journalctl.")
-    _box_ok(f"Сервис {_SERVICE_NAME} активен (127.0.0.1:{port})")
 
     # 6. Итог
     _box_sep()
@@ -790,12 +1077,22 @@ def _update_front() -> bool:
     state = _load_state()
     current = state.get("front_version", "")
     upstream = _refresh_upstream_cache(force=True)
+    os.system("clear")
+    _box_top("⬆️  ОБНОВЛЕНИЕ ФРОНТА  •  TRIPLE PANEL")
+    _box_row()
     if not upstream:
-        _box_err("Не удалось получить версию апстрима (GitHub API).")
+        # v83.2: раньше — сиротская строка рамки без top/bot
+        _box_err("Не удалось получить версию апстрима (raw/jsDelivr/API).")
+        _box_row(f"  {DIM}Повторите позже — фронт не тронут.{NC}")
+        _box_row()
+        _box_bot()
         _pause()
         return False
+    _box_kv("Установлено:", f"{CYAN}{current or '—'}{NC}")
+    _box_kv("Доступно:",   f"{GREEN}{upstream}{NC}")
+    _box_row()
     if current and _version_key(current) >= _version_key(upstream):
-        _box_ok(f"Фронт актуален: v{current} (апстрим v{upstream}).")
+        _box_ok(f"Фронт актуален: v{current}.")
         # v82: даже без обновления фронта — до-вживляем SSE-шим (идемпотентно):
         # установки эпохи v81 получили бы его только с переустановкой фронта.
         if _WWW_DIR.exists():
@@ -804,26 +1101,30 @@ def _update_front() -> bool:
                 _box_ok("SSE-шим (v82) вживлён во фронт — live-обновления "
                         "включены.")
                 if _service_active():
-                    _run(["systemctl", "restart", _SERVICE_NAME], check=False)
+                    _run(["systemctl", "restart", _SERVICE_NAME],
+                         capture=True, check=False)
                     _box_ok(f"{_SERVICE_NAME}.service перезапущен.")
+        _box_row()
+        _box_bot()
         _pause()
         return True
-    os.system("clear")
-    _box_top("⬆️  ОБНОВЛЕНИЕ ФРОНТА  •  TRIPLE PANEL")
-    _box_row()
-    _box_kv("Установлено:", f"{CYAN}{current or '—'}{NC}")
-    _box_kv("Доступно:",   f"{GREEN}{upstream}{NC}")
-    _box_row()
     _box_row(f"  {DIM}Бэкенд-контракт — код Chimera, он не меняется.{NC}")
     _box_row(f"  {DIM}После swap гоняю смоук (GET /) с откатом при провале.{NC}")
     _box_row()
     try:
-        confirm = proto_ask(
-            f"  {CYAN}Обновить фронт до v{upstream}? [y/N]: {NC}",
-            default="n", c=True).strip().lower()
+        confirm = _box_ask(f"Обновить фронт до v{upstream}? [y/N]:",
+                           default="n").strip().lower()
     except _Cancelled:
+        _box_row()
+        _box_row(f"  {DIM}Отмена.{NC}")
+        _box_row()
+        _box_bot(); print()
         return False
     if confirm != "y":
+        _box_row()
+        _box_row(f"  {DIM}Отмена — фронт не тронут.{NC}")
+        _box_row()
+        _box_bot(); print()
         return False
 
     # бэкап текущего → качаем новый → swap → смоук → откат при провале
@@ -833,29 +1134,39 @@ def _update_front() -> bool:
         if backup.exists():
             shutil.rmtree(backup, ignore_errors=True)
         shutil.copytree(_WWW_DIR, backup)
-    if not _fetch_front(upstream, quiet=True):
+    # v83.2: quiet больше не нужен — вывод download_manager теперь
+    # строками бокса (live-frame), лестница зеркал видна и при обновлении
+    if not _fetch_front(upstream):
         _box_err("Скачивание не удалось.")
         if backup and backup.exists():
             _box_warn("Текущий фронт не тронут.")
+        _box_row()
+        _box_bot()
         _pause()
         return False
-    if not _smoke_check(int(state.get("web_port", _DEFAULT_PORT))):
+    if not _wait_service_http(int(state.get("web_port", _DEFAULT_PORT)),
+                              attempts=5, delay=1):
         _box_err("Смоук после обновления провален — ОТКАТ.")
         if backup and backup.exists():
             if _WWW_DIR.exists():
                 shutil.rmtree(_WWW_DIR, ignore_errors=True)
             backup.rename(_WWW_DIR)
             _box_ok("Откат выполнен, предыдущий фронт восстановлен.")
+        _box_row()
+        _box_bot()
         _pause()
         return False
     state["front_version"] = _front_actual_version() or upstream
     _save_state(state)
     if backup and backup.exists():
         shutil.rmtree(backup, ignore_errors=True)
+    _box_row()
     _box_ok(f"Фронт обновлён: v{current or '—'} → "
             f"v{_front_actual_version() or upstream}")
     _log("INFO", f"front updated {current} -> "
                  f"{_front_actual_version() or upstream}")
+    _box_row()
+    _box_bot()
     _pause()
     return True
 
@@ -964,8 +1275,14 @@ def _access_menu() -> None:
             break
         if ch == "1":
             if st.get("enabled"):
-                ok, msg = _nginx_remove()
-                (_ok if ok else _err)(msg)
+                # v83.2: результат — в собственном боксе, вывод nginx — в рамке
+                _box_top("🌐  ДОСТУП  •  TRIPLE PANEL")
+                _box_row()
+                with _boxed_output():
+                    ok, msg = _nginx_remove()
+                (_box_ok if ok else _box_err)(msg)
+                _box_row()
+                _box_bot()
                 _pause()
             else:
                 from chimera.modules.panel_nginx_front import (
@@ -974,12 +1291,17 @@ def _access_menu() -> None:
                 domain = None
                 if not use_self_signed:
                     domain = ask_domain()
-                ok, msg = _nginx_install(use_self_signed, domain)
-                (_ok if ok else _err)(msg)
+                _box_top("🌐  ДОСТУП  •  TRIPLE PANEL")
+                _box_row()
+                with _boxed_output():
+                    ok, msg = _nginx_install(use_self_signed, domain)
+                (_box_ok if ok else _box_err)(msg)
                 if ok:
                     _box_row()
                     _box_row(f"  {BOLD}{WHITE}URL панели:{NC}")
                     _box_link(_nginx_url() or "https://<домен>:9761")
+                _box_row()
+                _box_bot()
                 _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -990,36 +1312,47 @@ def _change_web_port() -> bool:
 
     Порт читается бэкендом из state при старте (не из юнита), поэтому
     смена порта = правка state + port_registry + рестарт сервиса.
+    v83.2: порт — мини-боксом (_ask_web_port), результат — в боксе,
+    ожидание ответа GET / — с ретраями (не sleep(2)+одна попытка).
     """
     state = _load_state()
     old = int(state.get("web_port", _DEFAULT_PORT))
     port = _ask_web_port()
     if port is None or port == old:
         return False
-    _run(["systemctl", "stop", _SERVICE_NAME], check=False)
-    try:
-        from chimera.modules.port_registry import (port_register,
-                                                   port_unregister,
-                                                   ufw_open_port,
-                                                   ufw_close_port)
-        port_unregister(_PORT_TAG, old, "tcp")
-        ufw_close_port(old, "tcp", _PORT_TAG)
-        ok, msg = port_register(_PORT_TAG, port, proto="tcp",
-                                comment="Chimera Triple Panel web UI")
-        if not ok:
-            _warn(f"port_registry: {msg}")
-        ufw_open_port(port, "tcp", _PORT_TAG,
-                      comment="Chimera Triple Panel web UI")
-    except Exception as e:
-        _warn(f"port_registry: {e}")
+    _box_top("🔀  СМЕНА ПОРТА  •  TRIPLE PANEL")
+    _box_row()
+    _box_kv("Было:", f"{DIM}127.0.0.1:{old}{NC}")
+    _box_kv("Стало:", f"{CYAN}127.0.0.1:{port}{NC}")
+    _box_row()
+    _run(["systemctl", "stop", _SERVICE_NAME], capture=True, check=False)
+    with _boxed_output():
+        try:
+            from chimera.modules.port_registry import (port_register,
+                                                       port_unregister,
+                                                       ufw_open_port,
+                                                       ufw_close_port)
+            port_unregister(_PORT_TAG, old, "tcp")
+            ufw_close_port(old, "tcp", _PORT_TAG)
+            ok, msg = port_register(_PORT_TAG, port, proto="tcp",
+                                    comment="Chimera Triple Panel web UI")
+            if not ok:
+                _box_warn(f"port_registry: {msg}")
+            ufw_open_port(port, "tcp", _PORT_TAG,
+                          comment="Chimera Triple Panel web UI")
+        except Exception as e:
+            _box_warn(f"port_registry: {e}")
     state["web_port"] = port
     _save_state(state)
-    _run(["systemctl", "restart", _SERVICE_NAME], check=False)
-    time.sleep(2)
-    if _service_active() and _smoke_check(port):
-        _ok(f"Порт изменён: {old} → {port}")
+    _run(["systemctl", "restart", _SERVICE_NAME], capture=True, check=False)
+    _box_info("Жду ответа веб-сервера на новом порту...")
+    if _wait_service_http(port, attempts=20):
+        _box_ok(f"Порт изменён: {old} → {port} (сервис активен).")
     else:
-        _err("Сервис не поднялся на новом порту — проверьте journalctl.")
+        _box_err("Сервис не поднялся на новом порту. Журнал:")
+        _journal_boxed()
+    _box_row()
+    _box_bot()
     _pause()
     return True
 
@@ -1050,22 +1383,27 @@ def _uninstall() -> bool:
         return False
     if confirm != "y":
         return False
-    _nginx_remove()
-    _run(["systemctl", "disable", "--now", _SERVICE_NAME], check=False)
-    try:
-        _SERVICE_FILE.unlink()
-        _run(["systemctl", "daemon-reload"], check=False)
-    except Exception:
-        pass
-    state = _load_state()
-    try:
-        from chimera.modules.port_registry import (port_unregister,
-                                                   ufw_close_port)
-        port_unregister(_PORT_TAG)
-        ufw_close_port(int(state.get("web_port", _DEFAULT_PORT)), "tcp",
-                       _PORT_TAG)
-    except Exception:
-        pass
+    # v83.2: процесс удаления — в боксе, вывод nginx/systemctl — в рамке
+    _box_top("🗑️  УДАЛЕНИЕ  •  TRIPLE PANEL")
+    _box_row()
+    with _boxed_output():
+        _nginx_remove()
+        _run(["systemctl", "disable", "--now", _SERVICE_NAME],
+             capture=True, check=False)
+        try:
+            _SERVICE_FILE.unlink()
+            _run(["systemctl", "daemon-reload"], capture=True, check=False)
+        except Exception:
+            pass
+        state = _load_state()
+        try:
+            from chimera.modules.port_registry import (port_unregister,
+                                                       ufw_close_port)
+            port_unregister(_PORT_TAG)
+            ufw_close_port(int(state.get("web_port", _DEFAULT_PORT)), "tcp",
+                           _PORT_TAG)
+        except Exception:
+            pass
     for d in (_WWW_DIR, _STAGING_DIR):
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
@@ -1075,7 +1413,9 @@ def _uninstall() -> bool:
     state["installed"] = False
     state["front_version"] = ""
     _save_state(state)
-    _ok("Triple Panel удалена (протоколы naive/mieru/hy2 не тронуты).")
+    _box_ok("Triple Panel удалена (протоколы naive/mieru/hy2 не тронуты).")
+    _box_row()
+    _box_bot()
     _log("INFO", "uninstalled")
     _pause()
     return True
@@ -1168,7 +1508,8 @@ def do_triple_panel_menu() -> None:
                 _install()
             else:
                 action = "stop" if running else "start"
-                _run(["systemctl", action, _SERVICE_NAME], check=False)
+                _run(["systemctl", action, _SERVICE_NAME],
+                     capture=True, check=False)
                 time.sleep(1.5)
                 if _service_active():
                     _ok(f"Сервис {'остановлен' if action == 'stop' else 'запущен'}.")

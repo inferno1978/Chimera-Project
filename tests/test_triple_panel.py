@@ -26,12 +26,18 @@ Unit-тесты для chimera/modules/triple_panel.py + triple_panel_web.py.
      port_registry-перерегистрация, откат)
  15. v82 каскад/WARP: view/apply/reset + normalize_upstream + взаимное
      исключение (BUG-150) + деградация full→runet без SSH-IP
+ 16. v83.2 live-box: _render_box_row/_truncate_ansi/_ansi_wrap (ANSI не
+     рвётся, ровно 68 колонок), _BoxedStdout (print = ДВА write →
+     буферизация до \n, длинные — переносом), _box_ask (не-TTY ветка),
+     _smoke_check (ProxyHandler({}) — 127.0.0.1 мимо http_proxy),
+     _wait_service_http (ретраи, ранний выход при failed)
 """
 from __future__ import annotations
 
 import io
 import json
 import queue
+import re
 import sys
 import tarfile
 import tempfile
@@ -39,6 +45,7 @@ import time
 import types
 import unittest
 import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
@@ -161,14 +168,15 @@ class TestFrontFetch(unittest.TestCase):
 
     def test_mirror_urls_from_tag(self):
         urls = tp._front_mirror_urls("triple-panel-front-v1.11.2.tar.gz")
-        # v83.1: апстрим не тегает релизы — лестница: тег (404 сегодня,
-        # задел на будущее) → архив ветки main (гарантированно живой)
+        # v83.2: ветка main — ПЕРВОЙ (апстрим не тегает релизы — теговые
+        # архивы 404-или; на живом инсталле зеркала 1-2 выглядели ошибкой).
+        # Теги — последними, задел на будущее.
         self.assertEqual(len(urls), 4)
-        self.assertIn("archive/refs/tags/v1.11.2.tar.gz", urls[0])
+        self.assertIn("archive/refs/heads/main.tar.gz", urls[0])
         self.assertIn("codeload.github.com", urls[1])
         self.assertIn(tp._UPSTREAM_REPO, urls[0])
-        self.assertIn("archive/refs/heads/main.tar.gz", urls[2])
-        self.assertIn("tar.gz/refs/heads/main", urls[3])
+        self.assertIn("archive/refs/tags/v1.11.2.tar.gz", urls[2])
+        self.assertIn("tar.gz/refs/tags/v1.11.2", urls[3])
 
     def test_mirror_urls_latest(self):
         urls = tp._front_mirror_urls("triple-panel-front-latest.tar.gz")
@@ -176,13 +184,14 @@ class TestFrontFetch(unittest.TestCase):
         self.assertEqual(len(urls), 2)
         self.assertTrue(all("main" in u for u in urls))
 
-    def test_mirror_urls_tag_first_branch_fallback(self):
-        """Порядок: теговые зеркала ДО веточных — fetch_package идёт по списку."""
+    def test_mirror_urls_branch_first_tag_fallback(self):
+        """Порядок v83.2: веточные зеркала ДО теговых — первое зеркало
+        живое (инсталл без 404-шума), теги — задел на будущее."""
         urls = tp._front_mirror_urls("triple-panel-front-v1.11.2.tar.gz")
         tag_idx = [i for i, u in enumerate(urls) if "/tags/" in u]
         branch_idx = [i for i, u in enumerate(urls) if "/heads/" in u]
         self.assertTrue(tag_idx and branch_idx)
-        self.assertLess(max(tag_idx), min(branch_idx))
+        self.assertLess(max(branch_idx), min(tag_idx))
 
     def _make_front_tarball(self, tmp: Path) -> Path:
         """Собирает тарболл со структурой апстрима + poison-файл с '../'."""
@@ -1319,6 +1328,205 @@ class TestV82Settings(unittest.TestCase):
         self.assertTrue(view["ok"])
         self.assertIn("runet", view["output"])
         self.assertIn("3.3.3.3", view["output"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  16. v83.2: LIVE-BOX — рамка для сырого вывода + _box_ask + ожидание GET /
+# ══════════════════════════════════════════════════════════════════════════════
+class TestV832LiveBox(unittest.TestCase):
+    """Сырой вывод (download_manager/journalctl/systemctl) — строками
+    бокса; вводы — внутри рамки; GET / — ретраи и без прокси."""
+
+    # ── _render_box_row / _truncate_ansi ─────────────────────────────────
+    def test_render_row_exact_width(self):
+        for text in ("", "  текст", "  " + "x" * 60, "  🧩 эмодзи ✗ ✓ ●",
+                     f"  {tp.CYAN}цветной{tp.NC} текст"):
+            row = tp._render_box_row(text)
+            self.assertEqual(tp._wlen(row), 68, repr(text))
+            self.assertIn("║", row)
+
+    def test_render_row_truncates_long(self):
+        row = tp._render_box_row("  " + "y" * 200)
+        self.assertLessEqual(tp._wlen(row), 68)
+        self.assertIn("…", tp._plain(row))
+
+    def test_truncate_ansi_keeps_escapes(self):
+        colored = f"{tp.CYAN}цвет{tp.NC}" + "z" * 100
+        cut = tp._truncate_ansi(colored, 30)
+        self.assertLessEqual(tp._wlen(cut), 30)
+        # ANSI-коды не порезаны: каждый ESC — полная CSI-последовательность
+        self.assertEqual(
+            cut.count("\x1b"),
+            len(re.findall(r"\x1b\[[0-9;]*m", cut)))
+
+    # ── _ansi_wrap ───────────────────────────────────────────────────────
+    def test_ansi_wrap_widths_and_content(self):
+        long_line = "  " + "слово " * 40
+        rows = tp._ansi_wrap(long_line, tp._BOX_W, tp._BOX_W - 2, "  ")
+        self.assertGreater(len(rows), 1)
+        for r in rows:
+            self.assertLessEqual(tp._wlen(r), tp._BOX_W)
+        # содержимое не теряется (не считая съеденных висячих пробелов)
+        joined = tp._plain("".join(rows))
+        self.assertEqual(joined.replace(" ", ""),
+                         tp._plain(long_line).replace(" ", ""))
+
+    def test_ansi_wrap_never_splits_escape(self):
+        colored = f"{tp.CYAN}" + ("текст-" * 30) + f"{tp.NC}"
+        rows = tp._ansi_wrap(colored, tp._BOX_W, tp._BOX_W - 2, "  ")
+        self.assertGreater(len(rows), 1)
+        for r in rows:
+            self.assertEqual(
+                r.count("\x1b"),
+                len(re.findall(r"\x1b\[[0-9;]*m", r)))
+
+    # ── _BoxedStdout: print() пишет ДВУМЯ write — буферизация обязательна ──
+    def test_boxed_stdout_boxes_lines(self):
+        real = io.StringIO()
+        proxy = tp._BoxedStdout(real)
+        with patch("sys.stdout", proxy):
+            print("  triple-panel front → зеркало 1/4: github.com...")
+            print()
+        out = real.getvalue().splitlines()
+        self.assertEqual(len(out), 2)
+        for line in out:
+            self.assertEqual(tp._wlen(line), 68)
+            self.assertTrue(line.startswith("║") and line.endswith("║"))
+
+    def test_boxed_stdout_wraps_long(self):
+        real = io.StringIO()
+        proxy = tp._BoxedStdout(real)
+        long_line = "  " + "данные " * 30
+        with patch("sys.stdout", proxy):
+            print(long_line)
+        lines = real.getvalue().splitlines()
+        self.assertGreater(len(lines), 1)
+        for line in lines:
+            self.assertEqual(tp._wlen(line), 68)
+
+    def test_boxed_stdout_partial_flushes_raw(self):
+        real = io.StringIO()
+        proxy = tp._BoxedStdout(real)
+        proxy.write("приглашение")
+        self.assertEqual(real.getvalue(), "")       # буферизуется
+        proxy.flush()
+        self.assertEqual(real.getvalue(), "приглашение")  # flush → как есть
+        # после «закрытия» raw-строки новый print — снова строками бокса
+        with patch("sys.stdout", proxy):
+            print("строка")
+        self.assertIn("║", real.getvalue().splitlines()[-1])
+
+    def test_boxed_output_restores_stdout(self):
+        real = io.StringIO()
+        saved = sys.stdout
+        try:
+            sys.stdout = real
+            with tp._boxed_output():
+                print("в рамке")
+            self.assertIs(sys.stdout, real)
+            lines = real.getvalue().splitlines()
+        finally:
+            sys.stdout = saved
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(tp._wlen(lines[0]), 68)
+
+    def test_boxed_stdout_passes_ready_box_rows(self):
+        """_box_warn, вызванный внутри _boxed_output, — уже готовая строка
+        бокса: печатается как есть, НЕ заворачивается повторно."""
+        real = io.StringIO()
+        proxy = tp._BoxedStdout(real)
+        with patch("sys.stdout", proxy):
+            tp._box_warn("предупреждение")
+        lines = real.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(tp._wlen(lines[0]), 68)
+        self.assertFalse(lines[0].startswith("║║"))
+        self.assertIn("⚠", lines[0])
+
+    # ── _box_ask (не-TTY ветка: без приглашения, строка бокса после ввода) ──
+    def test_box_ask_value(self):
+        with patch.object(tp, "proto_ask", return_value="9760"), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(tp._box_ask("Порт:", default="9760"), "9760")
+
+    def test_box_ask_default_and_row(self):
+        buf = io.StringIO()
+        with patch.object(tp, "proto_ask", return_value=""), \
+             patch("sys.stdout", buf):
+            val = tp._box_ask("Порт:", default="9760")
+        self.assertEqual(val, "")                    # proto_ask вернул ''
+        lines = buf.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("9760", lines[0])              # дефолт показан в строке
+        self.assertEqual(tp._wlen(lines[0]), 68)
+
+    def test_box_ask_cancel_raises(self):
+        def boom(prompt, default="", c=False):
+            raise tp.ProtoCancelled()
+        with patch.object(tp, "proto_ask", side_effect=boom), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with self.assertRaises(tp.ProtoCancelled):
+                tp._box_ask("Порт:", default="9760")
+
+    # ── _smoke_check: явный обход http_proxy для 127.0.0.1 ───────────────
+    def test_smoke_check_bypasses_env_proxy(self):
+        opened = {}
+
+        class _Resp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        class _Opener:
+            def open(self, url, timeout=None):
+                opened["url"] = url
+                opened["timeout"] = timeout
+                return _Resp()
+
+        def fake_build_opener(*handlers):
+            opened["handlers"] = handlers
+            return _Opener()
+
+        with patch.object(urllib.request, "build_opener",
+                          side_effect=fake_build_opener):
+            self.assertTrue(tp._smoke_check(9760, timeout=3))
+        self.assertEqual(opened["url"], "http://127.0.0.1:9760/")
+        # ProxyHandler({}) в цепочке — 127.0.0.1 не должен идти через прокси
+        self.assertTrue(any(isinstance(h, urllib.request.ProxyHandler)
+                            for h in opened["handlers"]))
+
+    # ── _wait_service_http: ретраи и ранний выход при failed ─────────────
+    def test_wait_retries_until_ok(self):
+        calls = {"n": 0}
+
+        def flaky(port):
+            calls["n"] += 1
+            return calls["n"] >= 3
+
+        slept = []
+        with patch.object(tp, "_smoke_check", side_effect=flaky), \
+             patch.object(tp, "_service_state", return_value="active"), \
+             patch.object(tp.time, "sleep", side_effect=slept.append):
+            self.assertTrue(tp._wait_service_http(9760, attempts=10))
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(len(slept), 2)              # 2 паузы между 3 попытками
+
+    def test_wait_failed_exits_early(self):
+        tries = {"n": 0}
+
+        def never(port):
+            tries["n"] += 1
+            return False
+
+        with patch.object(tp, "_smoke_check", side_effect=never), \
+             patch.object(tp, "_service_state", return_value="failed"), \
+             patch.object(tp.time, "sleep", side_effect=lambda s: None):
+            self.assertFalse(tp._wait_service_http(9760, attempts=50))
+        self.assertEqual(tries["n"], 1)              # failed — сразу выходим
 
 
 if __name__ == "__main__":
