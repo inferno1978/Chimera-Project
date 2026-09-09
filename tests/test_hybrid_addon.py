@@ -1125,5 +1125,112 @@ class TestV86TrafficPatternSingleParam(unittest.TestCase):
             ha._persist_traffic_pattern_blob("GgQIARAFIgIIAQ==")  # не падает
 
 
+class TestV87_2KaringUdpAddr(unittest.TestCase):
+    """v87.2: _karing_udp_addr (гибрид) — UDP+домен подставляет IP
+    (баг ядра Karing: mieru-UDP не резолвит домен). TCP/IP — как есть."""
+
+    def test_udp_domain_substitutes_ip(self):
+        from chimera.modules import hybrid_addon as ha
+        with patch.object(ha, "_karing_udp_server_ip",
+                          return_value="138.124.255.238"):
+            addr, sub = ha._karing_udp_addr("udp", "chimeraprodcdn.online")
+        self.assertEqual(addr, "138.124.255.238")
+        self.assertTrue(sub)
+
+    def test_udp_domain_ip_missing_keeps_domain(self):
+        from chimera.modules import hybrid_addon as ha
+        with patch.object(ha, "_karing_udp_server_ip", return_value=""):
+            addr, sub = ha._karing_udp_addr("udp", "chimeraprodcdn.online")
+        self.assertEqual(addr, "chimeraprodcdn.online")
+        self.assertFalse(sub)
+
+    def test_tcp_and_ip_unchanged(self):
+        from chimera.modules import hybrid_addon as ha
+        with patch.object(ha, "_karing_udp_server_ip", return_value="1.2.3.4"):
+            self.assertEqual(ha._karing_udp_addr("tcp", "chimeraprodcdn.online"),
+                             ("chimeraprodcdn.online", False))
+            self.assertEqual(ha._karing_udp_addr("udp", "138.124.255.238"),
+                             ("138.124.255.238", False))
+
+    def test_is_public_ipv4(self):
+        from chimera.modules import hybrid_addon as ha
+        self.assertTrue(ha._is_public_ipv4("138.124.255.238"))
+        for bad in ("", "foo", "10.0.0.1", "127.0.0.1", "192.168.0.1",
+                    "172.20.1.1", "169.254.0.9", "1.2.3", "999.1.1.1"):
+            self.assertFalse(ha._is_public_ipv4(bad), bad)
+
+
+class TestV87_2LinksUdpIpIntegration(unittest.TestCase):
+    """v87.2: _show_mieru_client_links с udp+домен — Karing-ссылка и JSON
+    с IP (домен+UDP в Karing = 0 байт/с), Nekobox-ссылка с доменом;
+    TCP-выдача подстановкой не затронута."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmp = Path(tempfile.mkdtemp())
+        store = {}
+        self._store = store
+
+        class _FakePath:
+            def __init__(self, p):
+                self._p = str(p)
+
+            def write_text(self, data, encoding=None):
+                store[self._p] = data
+
+            def __str__(self):
+                return self._p
+
+        self._FakePath = _FakePath
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_udp_links_ip_and_json(self):
+        import json as _json
+        from chimera.modules import hybrid_addon as ha
+        from chimera.modules import mieru
+        creds = {"udp": {"port": 5443, "login": "u_be3f4705",
+                         "password": "ag7SFeda2C2n1ofvWIEjcWiu"}}
+        buf = io.StringIO()
+        with patch.object(ha, "Path", self._FakePath), \
+             patch.object(mieru, "_print_qr", lambda *a, **k: None), \
+             patch.object(ha, "_karing_udp_server_ip",
+                          return_value="138.124.255.238"), \
+             redirect_stdout(buf):
+            ha._show_mieru_client_links(creds, "chimeraprodcdn.online")
+        plain = _ANSI_RE.sub("", buf.getvalue())
+        # Karing-ссылка — с IP; Nekobox-ссылка — с доменом
+        self.assertIn("@138.124.255.238?port=5443&protocol=UDP", plain)
+        self.assertIn("@chimeraprodcdn.online:5443?transport=UDP", plain)
+        self.assertNotIn("@chimeraprodcdn.online?port=5443&protocol=UDP", plain)
+        # JSON: server = IP, без domain_resolver и dns.rules
+        cfg = _json.loads(self._store["/tmp/karing-mieru-hybrid-udp-u_be3f4705.json"])
+        ob = cfg["outbounds"][0]
+        self.assertEqual(ob["server"], "138.124.255.238")
+        self.assertNotIn("domain_resolver", ob)
+        self.assertNotIn("rules", cfg["dns"])
+        # предупреждение о подстановке — в боксе (рамка цела)
+        self.assertIn("UDP для Karing: с IP", plain)
+
+    def test_tcp_links_not_touched(self):
+        from chimera.modules import hybrid_addon as ha
+        from chimera.modules import mieru
+        creds = {"tcp": {"port": 443, "login": "u_d106fd33",
+                         "password": "goep167KyRYE2u76w9sv-Sr3"}}
+        buf = io.StringIO()
+        with patch.object(ha, "Path", self._FakePath), \
+             patch.object(mieru, "_print_qr", lambda *a, **k: None), \
+             patch.object(ha, "_karing_udp_server_ip",
+                          return_value="138.124.255.238"), \
+             redirect_stdout(buf):
+            ha._show_mieru_client_links(creds, "chimeraprodcdn.online")
+        plain = _ANSI_RE.sub("", buf.getvalue())
+        self.assertIn("@chimeraprodcdn.online?port=443&protocol=TCP", plain)
+        self.assertNotIn("138.124.255.238", plain)
+        self.assertNotIn("UDP для Karing", plain)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

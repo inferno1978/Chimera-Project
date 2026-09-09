@@ -785,6 +785,76 @@ def _dns_host_is_domain(address: str) -> bool:
         return True
 
 
+def _is_public_ipv4(addr: str) -> bool:
+    """v87.2: IPv4 и публичный (не loopback/приватный/link-local) —
+    для подстановки IP в клиентскую выдачу вместо домена."""
+    parts = (addr or "").strip().split(".")
+    if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+        return False
+    try:
+        import socket
+        socket.inet_aton(addr.strip())
+    except OSError:
+        return False
+    a, b = int(parts[0]), int(parts[1])
+    if a in (10, 127):
+        return False
+    if a == 192 and b == 168:
+        return False
+    if a == 172 and 16 <= b <= 31:
+        return False
+    if a == 169 and b == 254:
+        return False
+    return True
+
+
+def _karing_udp_server_ip() -> str:
+    """v87.2: публичный IPv4 сервера для Karing-выдачи UDP, '' — не нашли.
+
+    Порядок: UDP-сокет до 8.8.8.8 (мгновенно, без трафика — адрес
+    исходящего интерфейса), затем api.ipify.org. Приватный/невалидный
+    результат — '' (подстановка не выполняется, выдача остаётся с
+    доменом, как было)."""
+    ip = ""
+    try:
+        import socket as _s
+        with _s.socket(_s.AF_INET, _s.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+    except OSError:
+        ip = ""
+    if not _is_public_ipv4(ip):
+        try:
+            with urllib.request.urlopen("https://api.ipify.org", timeout=5) as r:
+                ip = r.read().decode().strip()
+        except Exception:
+            ip = ""
+    return ip if _is_public_ipv4(ip) else ""
+
+
+def _karing_link_addr(transport: str, client_addr: str) -> tuple:
+    """v87.2: адрес для Karing-ссылки/JSON на ДАННЫЙ транспорт.
+
+    Баг ядра Karing (ветки karing_v1.13.x/v1.14.x, проверено по
+    исходникам KaringX/sing-box, protocol/mieru/outbound.go):
+    ClientConfig.Resolver не передаётся (NilDNSResolver), а флаг
+    BypassDialerDNS у mieru действует только на TCP-underlay (см. доку
+    enfein/mieru: «stream oriented network connection»). UDP-underlay
+    всегда зовёт ResolveUDPAddr() через резолвер — с доменом это
+    падает («look up IP address of … is not supported»), с IP срабатывает
+    короткий путь без резолвера. Симптом: Karing «подключён», трафик
+    0 байт/с в обе стороны (TCP-ссылка при этом работает).
+
+    Отсюда: для UDP-транспорта Karing-выдача (ссылка и JSON-outbound)
+    идёт с голым IP; TCP и Nekobox/Nyamebox-ссылки домен сохраняют.
+    Возвращает (адрес, подставили_ли_IP)."""
+    if (transport or "").upper() == "UDP" and _dns_host_is_domain(client_addr):
+        ip = _karing_udp_server_ip()
+        if ip:
+            return ip, True
+    return client_addr, False
+
+
 def _parse_dns_addresses(client_dns: str) -> list:
     """v87: список DNS-адресов из строки «через запятую/плюс».
 
@@ -951,7 +1021,9 @@ def _build_karing_multi_config(outbounds: list, client_dns: str = "",
     obs = []
     for ob in outbounds:
         ob = dict(ob)
-        if server_domain:
+        # v87.2: domain_resolver — только outbound'ам с доменом в server
+        # (UDP-outbound при гибридной выдаче идёт с IP — _karing_link_addr)
+        if server_domain and _dns_host_is_domain(ob.get("server", "")):
             ob["domain_resolver"] = "local"
         obs.append(ob)
     if len(obs) > 1:
@@ -1348,13 +1420,17 @@ def _run_install_inner() -> None:
     pwd            = users[0]["password"]
     # v86: BOTH — пары ссылок на каждый транспорт (TCP и UDP)
     _tp = state.get("traffic_preset", "basic")
-    link_pairs = [
-        (p,
-         _gen_client_share_link(client_addr, port_start, port_end, p, uname, pwd,
-                                 traffic_preset=_tp),
-         _gen_client_share_link_nekobox(client_addr, port_start, p, uname, pwd))
-        for p in _protocol_variants(protocol)
-    ]
+    # v87.2: Karing-ссылка UDP — с IP (баг ядра Karing: домен+UDP = 0 байт/с),
+    # TCP и Nekobox/Nyamebox — домен, как выбран при установке
+    _udp_ip_used = False
+    link_pairs = []
+    for p in _protocol_variants(protocol):
+        k_addr, _sub = _karing_link_addr(p, client_addr)
+        _udp_ip_used = _udp_ip_used or _sub
+        link_pairs.append((p,
+            _gen_client_share_link(k_addr, port_start, port_end, p, uname, pwd,
+                                   traffic_preset=_tp),
+            _gen_client_share_link_nekobox(client_addr, port_start, p, uname, pwd)))
 
     os.system("clear")
     _box_top("✅  УСТАНОВКА ЗАВЕРШЕНА  •  MIERU")
@@ -1375,6 +1451,8 @@ def _run_install_inner() -> None:
     # v87: ссылки — ВНЕ рамки (целиком, не резанные по ширине): рамка
     # закрывается, пары ссылок печатаются после неё, затем QR
     _box_info("Ссылки Karing и Nekobox/Nyamebox — ПОД рамкой, целиком.")
+    if _udp_ip_used:
+        _box_warn("UDP для Karing — с IP: в Karing домен+UDP не работает")
     _box_warn("Karing: убедитесь что выбрано ядро sing-box (не Xray-core!)")
     _box_info("Добавьте пользователей через пункт [2].")
     _box_warn("Убедитесь что время на клиенте синхронизировано!")
@@ -1501,13 +1579,16 @@ def _add_user(state: dict) -> None:
     protocol   = state.get("protocol",   _DEFAULT_PROTOCOL)
     # v86: BOTH — пары ссылок на каждый транспорт
     _tp = state.get("traffic_preset", "basic")
-    link_pairs = [
-        (p,
-         _gen_client_share_link(server_ip, port_start, port_end, p, username, password,
-                                 traffic_preset=_tp),
-         _gen_client_share_link_nekobox(server_ip, port_start, p, username, password))
-        for p in _protocol_variants(protocol)
-    ]
+    # v87.2: Karing-ссылка UDP — с IP (баг ядра Karing: домен+UDP = 0 байт/с)
+    _udp_ip_used = False
+    link_pairs = []
+    for p in _protocol_variants(protocol):
+        k_addr, _sub = _karing_link_addr(p, server_ip)
+        _udp_ip_used = _udp_ip_used or _sub
+        link_pairs.append((p,
+            _gen_client_share_link(k_addr, port_start, port_end, p, username, password,
+                                   traffic_preset=_tp),
+            _gen_client_share_link_nekobox(server_ip, port_start, p, username, password)))
 
     os.system("clear")
     _box_top("✅  ПОЛЬЗОВАТЕЛЬ ДОБАВЛЕН")
@@ -1552,15 +1633,18 @@ def _show_user_link(users: list, server_ip: str,
     _state = proto_load_state(_MODULE_STATE)
     # v86: BOTH — пары ссылок на каждый транспорт
     _tp = _state.get("traffic_preset", "basic")
-    link_pairs = [
-        (p,
-         _gen_client_share_link(server_ip, port_start, port_end, p,
-                                user["username"], user["password"],
-                                traffic_preset=_tp),
-         _gen_client_share_link_nekobox(server_ip, port_start, p,
-                                        user["username"], user["password"]))
-        for p in _protocol_variants(protocol)
-    ]
+    # v87.2: Karing-ссылка UDP — с IP (баг ядра Karing: домен+UDP = 0 байт/с)
+    _udp_ip_used = False
+    link_pairs = []
+    for p in _protocol_variants(protocol):
+        k_addr, _sub = _karing_link_addr(p, server_ip)
+        _udp_ip_used = _udp_ip_used or _sub
+        link_pairs.append((p,
+            _gen_client_share_link(k_addr, port_start, port_end, p,
+                                   user["username"], user["password"],
+                                   traffic_preset=_tp),
+            _gen_client_share_link_nekobox(server_ip, port_start, p,
+                                           user["username"], user["password"])))
     os.system("clear")
     _box_top(f"🔗  {user['username']}  •  MIERU")
     _box_row()
@@ -1607,9 +1691,13 @@ def _show_singbox_json(users: list, server_ip: str,
     client_dns = (_state.get("client_dns", "") or "").strip()
     server_domain = server_ip if _dns_host_is_domain(server_ip) else ""
     outbounds = []
+    _udp_ip_used = False
     for p in _protocol_variants(protocol):
+        # v87.2: UDP-outbound — с IP (баг ядра Karing: домен+UDP не резолвится)
+        k_addr, _sub = _karing_link_addr(p, server_ip)
+        _udp_ip_used = _udp_ip_used or _sub
         ob = _gen_singbox_outbound(
-            server_ip, port_start, port_end, p,
+            k_addr, port_start, port_end, p,
             user["username"], user["password"],
         )
         if len(_protocol_variants(protocol)) > 1:
@@ -1626,6 +1714,8 @@ def _show_singbox_json(users: list, server_ip: str,
     _box_top("📋  SING-BOX КОНФИГ ДЛЯ KARING")
     _box_row()
     _box_ok(f"Конфиг сохранён: {cfg_path}")
+    if _udp_ip_used:
+        _box_warn("UDP-подключение — с IP: домен+UDP в Karing не работает")
     _box_row()
     _box_info("Импорт в Karing: Добавить подписку → вставить путь к файлу или JSON")
     _box_info("Karing принимает и mierus://-ссылку, и этот JSON-файл")
