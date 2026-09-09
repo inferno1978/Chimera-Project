@@ -844,5 +844,96 @@ class TestV85ShowMieruClientLinks(unittest.TestCase):
         self.assertNotIn("rules", cfg["dns"])
 
 
+class TestV86TrafficPatternSingleParam(unittest.TestCase):
+    """v86: Karing-ссылка с blob — ровно ОДИН traffic-pattern=.
+
+    До фиксы _gen_client_share_link вставлял preset basic, а вызывающий код
+    дописывал blob — в ссылке оказывались ДВА параметра, и первый (basic)
+    мог перебивать реальный паттерн сервера. Генераторы ссылок — НАСТОЯЩИЕ
+    (не фейки), чтобы двойной параметр был бы виден, как у юзера."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmp = Path(tempfile.mkdtemp())
+        store = {}
+        self._store = store
+
+        class _FakePath:
+            def __init__(self, p):
+                self._p = str(p)
+            def write_text(self, data, encoding=None):
+                store[self._p] = data
+            def __str__(self):
+                return self._p
+
+        self._FakePath = _FakePath
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _karing_links(self, blob):
+        """Прогоняет выдачу ссылок с реальными генераторами; возвращает
+        Karing-ссылки (отличаются параметром protocol=)."""
+        from chimera.modules import hybrid_addon as ha
+        from chimera.modules import mieru
+        captured = []
+        creds = {"tcp": {"port": 443, "login": "u_d106fd33",
+                         "password": "goep167KyRYE2u76w9sv-Sr3"}}
+        with patch.object(ha, "Path", self._FakePath), \
+             patch.object(ha, "_box_link", lambda s: captured.append(s)), \
+             patch.object(ha, "box_header", lambda *a, **k: None), \
+             patch.object(ha, "_box_row", lambda *a, **k: None), \
+             patch.object(ha, "_box_bottom", lambda *a, **k: None), \
+             patch.object(mieru, "_print_qr", lambda *a, **k: None):
+            ha._show_mieru_client_links(creds, "203.0.113.103",
+                                        client_dns="",
+                                        traffic_pattern_blob=blob)
+        return [l for l in captured
+                if l.startswith("mierus://") and "protocol=" in l]
+
+    def test_blob_single_traffic_pattern(self):
+        links = self._karing_links("GgQIARAFIgIIAQ==")
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].count("traffic-pattern="), 1)
+        # параметр — сам blob (url-encoded), НЕ basic-пресет
+        self.assertIn("traffic-pattern=GgQIARAFIgIIAQ%3D%3D", links[0])
+
+    def test_no_blob_keeps_basic_preset(self):
+        """Регресс: без blob в ссылке один traffic-pattern (basic-пресет)."""
+        links = self._karing_links(None)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].count("traffic-pattern="), 1)
+
+    def test_blob_saved_to_state(self):
+        """v86: _persist_traffic_pattern_blob пишет blob в state (для
+        singbox-подписки nyamebox); пустой blob ничего не трогает."""
+        from chimera.modules import hybrid_addon as ha
+        saved = {}
+        with patch.object(ha, "load_state", return_value={"transport": "both"}), \
+             patch.object(ha, "save_state", lambda st: saved.update(st)):
+            ha._persist_traffic_pattern_blob("GgQIARAFIgIIAQ==")
+        self.assertEqual(saved.get("traffic_pattern_blob"), "GgQIARAFIgIIAQ==")
+        self.assertEqual(saved.get("transport"), "both")  # state не затёрт
+
+        # пустой blob — load/save не вызываются вовсе
+        calls = []
+        with patch.object(ha, "load_state", side_effect=lambda: calls.append("load")), \
+             patch.object(ha, "save_state", side_effect=lambda st: calls.append("save")):
+            ha._persist_traffic_pattern_blob(None)
+            ha._persist_traffic_pattern_blob("")
+        self.assertEqual(calls, [])
+
+    def test_blob_state_write_error_not_fatal(self):
+        """Битый state (die() внутри load_state) — не бросает наружу."""
+        from chimera.modules import hybrid_addon as ha
+
+        def _die():
+            raise SystemExit("state not found")
+
+        with patch.object(ha, "load_state", side_effect=_die):
+            ha._persist_traffic_pattern_blob("GgQIARAFIgIIAQ==")  # не падает
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
