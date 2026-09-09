@@ -56,6 +56,14 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from chimera.modules.proto_common import proto_ask, ProtoCancelled
+# Конвенция проекта (как в naiveproxy/mieru): локальный алиас, чтобы
+# `except _Cancelled:` работал без изменений. ВАЖНО: proto_common НЕ
+# экспортирует имя `_Cancelled` — импорт «from proto_common import
+# _Cancelled» падает ImportError (латентный баг v81, пойманный тестом
+# test_update_front_up_to_date_injects_shim).
+_Cancelled = ProtoCancelled
+
 # ── Прямой запуск (python3 .../triple_panel.py) — bootstrap корня проекта ───
 if __package__ in (None, ""):
     _ROOT = Path(__file__).resolve().parent.parent.parent
@@ -191,7 +199,7 @@ def _box_link(link: str) -> None:
 def _pause() -> None:
     try:
         input(f"\n{BLUE}  Нажмите Enter...{NC}")
-    except (EOFError, KeyboardInterrupt):
+    except (EOFError, KeyboardInterrupt, OSError):
         print()
 
 def _run(cmd: list, capture: bool = False, check: bool = False):
@@ -535,7 +543,6 @@ def _validate_web_port(port: int) -> "tuple[bool, list]":
 
 def _ask_web_port(default: int = _DEFAULT_PORT) -> "Optional[int]":
     """Интерактивный выбор порта панели с показом конфликтов. None = отмена."""
-    from chimera.modules.proto_common import proto_ask, _Cancelled
     while True:
         _box_row()
         _box_row(f"  {DIM}Порт веб-панели (ввод = {default}):{NC}")
@@ -608,7 +615,6 @@ def _smoke_check(port: int, timeout: int = 15) -> bool:
 #  УСТАНОВКА
 # ══════════════════════════════════════════════════════════════════════════════
 def _install() -> bool:
-    from chimera.modules.proto_common import proto_ask, _Cancelled
     os.system("clear")
     _box_top("🧩  TRIPLE PANEL — УСТАНОВКА")
     _box_row()
@@ -698,7 +704,6 @@ def _install() -> bool:
 #  ОБНОВЛЕНИЕ ФРОНТА (требование №1: версии как у B4)
 # ══════════════════════════════════════════════════════════════════════════════
 def _update_front() -> bool:
-    from chimera.modules.proto_common import proto_ask, _Cancelled
     state = _load_state()
     current = state.get("front_version", "")
     upstream = _refresh_upstream_cache(force=True)
@@ -708,6 +713,16 @@ def _update_front() -> bool:
         return False
     if current and _version_key(current) >= _version_key(upstream):
         _box_ok(f"Фронт актуален: v{current} (апстрим v{upstream}).")
+        # v82: даже без обновления фронта — до-вживляем SSE-шим (идемпотентно):
+        # установки эпохи v81 получили бы его только с переустановкой фронта.
+        if _WWW_DIR.exists():
+            had_shim = (_WWW_DIR / "triple-sse.js").exists()
+            if _inject_sse_shim(_WWW_DIR) and not had_shim:
+                _box_ok("SSE-шим (v82) вживлён во фронт — live-обновления "
+                        "включены.")
+                if _service_active():
+                    _run(["systemctl", "restart", _SERVICE_NAME], check=False)
+                    _box_ok(f"{_SERVICE_NAME}.service перезапущен.")
         _pause()
         return True
     os.system("clear")
@@ -831,7 +846,6 @@ def _nginx_url() -> "Optional[str]":
     return f"https://{domain}:{st.get('port', DEFAULT_NGINX_PORT)}"
 
 def _access_menu() -> None:
-    from chimera.modules.proto_common import proto_ask, _Cancelled
     while True:
         os.system("clear")
         print()
@@ -892,7 +906,6 @@ def _change_web_port() -> bool:
     Порт читается бэкендом из state при старте (не из юнита), поэтому
     смена порта = правка state + port_registry + рестарт сервиса.
     """
-    from chimera.modules.proto_common import proto_ask, _Cancelled
     state = _load_state()
     old = int(state.get("web_port", _DEFAULT_PORT))
     port = _ask_web_port()
@@ -926,7 +939,6 @@ def _change_web_port() -> bool:
     return True
 
 def _change_admin_password() -> None:
-    from chimera.modules.proto_common import proto_ask, _Cancelled
     state = _load_state()
     password = _gen_admin_password()
     _set_admin_password(state, password)
@@ -945,7 +957,6 @@ def _change_admin_password() -> None:
     _pause()
 
 def _uninstall() -> bool:
-    from chimera.modules.proto_common import proto_ask, _Cancelled
     try:
         confirm = proto_ask(
             f"  {RED}Удалить Triple Panel полностью? [y/N]: {NC}",
@@ -1012,7 +1023,6 @@ def _proto_statuses() -> dict:
 #  TUI-МЕНЮ (точка входа: раздел 1 → W → 8)
 # ══════════════════════════════════════════════════════════════════════════════
 def do_triple_panel_menu() -> None:
-    from chimera.modules.proto_common import proto_ask, _Cancelled
     while True:
         os.system("clear")
         print()
