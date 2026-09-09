@@ -1628,7 +1628,7 @@ def _show_singbox_json(users: list, server_ip: str,
     _box_ok(f"Конфиг сохранён: {cfg_path}")
     _box_row()
     _box_info("Импорт в Karing: Добавить подписку → вставить путь к файлу или JSON")
-    _box_warn("mierus:// ссылка НЕ работает в Karing — используйте JSON файл!")
+    _box_info("Karing принимает и mierus://-ссылку, и этот JSON-файл")
     _box_row(); _box_sep()
     for line in json_str.splitlines():
         _box_row(f"  {DIM}{line}{NC}")
