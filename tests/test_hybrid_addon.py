@@ -18,17 +18,23 @@ Unit-тесты для chimera/modules/hybrid_addon.py.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import platform
+import re
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
+
+# ANSI-коды в выводе (срезаем в тестах захвата stdout)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _setup_core_in_sysmodules():
@@ -714,7 +720,12 @@ class TestV85DetectServerDomain(unittest.TestCase):
 
 class TestV85AskClientLinkSettings(unittest.TestCase):
     """_ask_client_link_settings — Enter=домен если найден, [1]=IP;
-    DNS-ввод, подсказка домена, опечатка → дефолт Google."""
+    DNS-меню v87, подсказка домена, опечатка → дефолт Google.
+
+    v87: AGH-детект патчу на «нет AGH» — детерминизм (на живом
+    /var/lib/xray-installer тест зависел бы от машины)."""
+
+    _NO_AGH = {"links": [], "self_signed": False, "status": "no-agh"}
 
     def setUp(self):
         self._tmp = Path(tempfile.mkdtemp())
@@ -724,13 +735,16 @@ class TestV85AskClientLinkSettings(unittest.TestCase):
         import shutil
         shutil.rmtree(self._tmp, ignore_errors=True)
 
-    def _run(self, inputs, state_json=None, detected="cdn.example"):
+    def _run(self, inputs, state_json=None, detected="cdn.example",
+             agh=None):
         from chimera.modules import hybrid_addon as ha
         if state_json is not None:
             self._state.write_text(json.dumps(state_json))
         with patch("builtins.input", side_effect=inputs), \
              patch.object(ha, "STATE_FILE", self._state), \
-             patch.object(ha, "_detect_server_domain", return_value=detected):
+             patch.object(ha, "_detect_server_domain", return_value=detected), \
+             patch.object(ha, "_detect_agh_dns_endpoints",
+                          return_value=agh if agh is not None else self._NO_AGH):
             return ha._ask_client_link_settings()
 
     def test_fresh_domain_default(self):
@@ -844,6 +858,177 @@ class TestV85ShowMieruClientLinks(unittest.TestCase):
         self.assertNotIn("rules", cfg["dns"])
 
 
+class TestV87DnsMenu(unittest.TestCase):
+    """v87: DNS-меню — AGH-детект, умный дефолт, номера, ручной ввод."""
+
+    _NO_AGH = {"links": [], "self_signed": False, "status": "no-agh"}
+    _AGH = {"links": [
+        ("DoH", "https://cdn.example:30443/dns-query"),
+        ("DoT", "tls://cdn.example:853"),
+        ("DoQ", "quic://cdn.example:853"),
+    ], "self_signed": False, "status": "ok"}
+
+    def _ask(self, inputs, old_dns="", agh=None):
+        from chimera.modules import hybrid_addon as ha
+        with patch("builtins.input", side_effect=inputs), \
+             patch.object(ha, "_detect_agh_dns_endpoints",
+                          return_value=agh if agh is not None else self._NO_AGH):
+            return ha._ask_client_dns(old_dns)
+
+    def test_agh_found_enter_defaults_to_agh_doh(self):
+        """AGH на сервере — Enter выбирает DoH-ссылку (юзеру не нужно
+        прописывать DNS руками — ровно запрос из v87)."""
+        res = self._ask([""], agh=self._AGH)
+        self.assertEqual(res, "https://cdn.example:30443/dns-query")
+
+    def test_agh_dot_by_number(self):
+        res = self._ask(["5"], agh=self._AGH)
+        self.assertEqual(res, "tls://cdn.example:853")
+
+    def test_agh_doq_by_number(self):
+        res = self._ask(["6"], agh=self._AGH)
+        self.assertEqual(res, "quic://cdn.example:853")
+
+    def test_no_agh_enter_is_google(self):
+        res = self._ask([""])
+        self.assertEqual(res, "")
+
+    def test_option3_google_cloudflare_pair(self):
+        res = self._ask(["3"])
+        self.assertEqual(res, "8.8.8.8,1.1.1.1")
+
+    def test_manual_option_then_address(self):
+        """Без AGH «вручную» — пункт 4; второй ввод — адрес."""
+        res = self._ask(["4", "panel.example"])
+        self.assertEqual(res, "panel.example")
+
+    def test_manual_option_typo_falls_back(self):
+        res = self._ask(["4", "bad dns com"])
+        self.assertEqual(res, "")
+
+    def test_raw_address_typed_directly(self):
+        """Старое поведение v85: адрес можно ввести сразу, без номера."""
+        res = self._ask(["tls://panel.example:853"])
+        self.assertEqual(res, "tls://panel.example:853")
+
+    def test_old_dns_kept_on_enter(self):
+        """Переустановка: прежний DNS не из меню — Enter оставляет его."""
+        res = self._ask([""], old_dns="10.0.0.53")
+        self.assertEqual(res, "10.0.0.53")
+
+    def test_old_dns_mapped_to_option(self):
+        res = self._ask([""], old_dns="8.8.8.8,1.1.1.1")
+        self.assertEqual(res, "8.8.8.8,1.1.1.1")
+
+    def test_number_out_of_range_is_typo(self):
+        res = self._ask(["99"])
+        self.assertEqual(res, "")
+
+
+class TestV87AghEndpoints(unittest.TestCase):
+    """_detect_agh_dns_endpoints — подглядывание в стейт AGH."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _detect(self, payload=None):
+        from chimera.modules import hybrid_addon as ha
+        state = self._tmp / "aghome_state.json"
+        if payload is not None:
+            state.write_text(json.dumps(payload))
+        with patch.object(ha, "STATE_DIR", self._tmp):
+            return ha._detect_agh_dns_endpoints()
+
+    def test_ok_tls_domain(self):
+        r = self._detect({"domain": "cdn.example",
+                          "tls_enabled": True, "self_signed": False,
+                          "doh_port": 30443, "dot_port": 853, "doq_port": 853})
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["links"][0],
+                         ("DoH", "https://cdn.example:30443/dns-query"))
+        self.assertEqual(r["links"][1],
+                         ("DoT", "tls://cdn.example:853"))
+        self.assertEqual(r["links"][2],
+                         ("DoQ", "quic://cdn.example:853"))
+
+    def test_no_file(self):
+        r = self._detect(None)
+        self.assertEqual(r, {"links": [], "self_signed": False,
+                             "status": "no-agh"})
+
+    def test_no_tls(self):
+        r = self._detect({"domain": "cdn.example",
+                          "tls_enabled": False})
+        self.assertEqual((r["links"], r["status"]), ([], "no-tls"))
+
+    def test_no_domain(self):
+        r = self._detect({"domain": "", "tls_enabled": True})
+        self.assertEqual((r["links"], r["status"]), ([], "no-domain"))
+
+    def test_self_signed_flag(self):
+        r = self._detect({"domain": "dns.example.com", "tls_enabled": True,
+                          "self_signed": True})
+        self.assertTrue(r["self_signed"])
+
+    def test_default_ports_when_missing(self):
+        r = self._detect({"domain": "dns.example.com", "tls_enabled": True})
+        self.assertEqual(r["links"][0],
+                         ("DoH", "https://dns.example.com:30443/dns-query"))
+
+
+class TestV87LinksOutsideFrame(unittest.TestCase):
+    """v87: mierus://-ссылки печатаются ВНЕ рамки — строки со ссылками
+    не содержат символов рамки (║), рамка закрывается до ссылок."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmp = Path(tempfile.mkdtemp())
+        store = {}
+        self._store = store
+
+        class _FakePath:
+            def __init__(self, p):
+                self._p = str(p)
+            def write_text(self, data, encoding=None):
+                store[self._p] = data
+            def __str__(self):
+                return self._p
+
+        self._FakePath = _FakePath
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_hybrid_links_have_no_frame_chars(self):
+        from chimera.modules import hybrid_addon as ha
+        from chimera.modules import mieru
+        creds = {"tcp": {"port": 443, "login": "u_d106fd33",
+                         "password": "goep167KyRYE2u76w9sv-Sr3"}}
+        buf = io.StringIO()
+        with patch.object(ha, "Path", self._FakePath), \
+             patch.object(mieru, "_print_qr", lambda *a, **k: None), \
+             redirect_stdout(buf):
+            ha._show_mieru_client_links(creds, "cdn.example")
+        lines = [_ANSI_RE.sub("", ln).strip()
+                 for ln in buf.getvalue().splitlines()]
+        link_lines = [l for l in lines if l.startswith("mierus://")]
+        self.assertEqual(len(link_lines), 2)  # Karing + Nekobox/Nyamebox
+        for l in link_lines:
+            self.assertNotIn("║", l, "ссылка должна быть вне рамки")
+        # рамка закрылась ДО ссылок: строка ╚ раньше первой строки-ссылки
+        # (внутри рамки есть предупреждение, содержащее «mierus://» как
+        # текст — ищем только строки, НАЧИНАЮЩИЕСЯ с mierus://)
+        first_link_idx = next(i for i, l in enumerate(lines)
+                              if l.startswith("mierus://"))
+        bottom_idx = next(i for i, l in enumerate(lines) if "╚" in l)
+        self.assertLess(bottom_idx, first_link_idx)
+
+
 class TestV86TrafficPatternSingleParam(unittest.TestCase):
     """v86: Karing-ссылка с blob — ровно ОДИН traffic-pattern=.
 
@@ -874,22 +1059,27 @@ class TestV86TrafficPatternSingleParam(unittest.TestCase):
 
     def _karing_links(self, blob):
         """Прогоняет выдачу ссылок с реальными генераторами; возвращает
-        Karing-ссылки (отличаются параметром protocol=)."""
+        Karing-ссылки (отличаются параметром protocol=).
+
+        v87: ссылки печатаются ВНЕ рамки (`print`, одной строкой) —
+        перехватываем stdout и срезаем ANSI, вместо патча _box_link."""
         from chimera.modules import hybrid_addon as ha
         from chimera.modules import mieru
-        captured = []
+        buf = io.StringIO()
         creds = {"tcp": {"port": 443, "login": "u_d106fd33",
                          "password": "goep167KyRYE2u76w9sv-Sr3"}}
         with patch.object(ha, "Path", self._FakePath), \
-             patch.object(ha, "_box_link", lambda s: captured.append(s)), \
              patch.object(ha, "box_header", lambda *a, **k: None), \
              patch.object(ha, "_box_row", lambda *a, **k: None), \
              patch.object(ha, "_box_bottom", lambda *a, **k: None), \
-             patch.object(mieru, "_print_qr", lambda *a, **k: None):
+             patch.object(mieru, "_print_qr", lambda *a, **k: None), \
+             redirect_stdout(buf):
             ha._show_mieru_client_links(creds, "203.0.113.103",
                                         client_dns="",
                                         traffic_pattern_blob=blob)
-        return [l for l in captured
+        lines = [_ANSI_RE.sub("", ln).strip()
+                 for ln in buf.getvalue().splitlines()]
+        return [l for l in lines
                 if l.startswith("mierus://") and "protocol=" in l]
 
     def test_blob_single_traffic_pattern(self):

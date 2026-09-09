@@ -1185,10 +1185,166 @@ def _detect_server_domain() -> str:
     return ""
 
 
+def _parse_dns_addresses(client_dns: str) -> list:
+    """v87: список DNS-адресов из строки «через запятую/плюс» — локальная
+    копия mieru._parse_dns_addresses (CLI-режим работает без пакета
+    chimera, см. _detect_server_domain выше)."""
+    raw = (client_dns or "").strip()
+    if not raw:
+        return []
+    return [p.strip() for p in re.split(r"[,+]", raw) if p.strip()]
+
+
+def _is_plausible_dns_address(client_dns: str) -> bool:
+    """v87: правдоподобный DNS-адрес(а) — локальная копия
+    mieru._is_plausible_dns_address (IP / домен / DoH / DoT / DoQ,
+    списки через запятую; пробел внутри токена — опечатка)."""
+    raw = (client_dns or "").strip()
+    if not raw:
+        return False
+    for part in _parse_dns_addresses(raw):
+        if " " in part:
+            return False
+        if "/" in part and not part.startswith(
+                ("http://", "https://", "tls://", "quic://", "h3://")):
+            return False
+    return True
+
+
+def _detect_agh_dns_endpoints() -> dict:
+    """v87: публичные DoH/DoT/DoQ-эндпоинты ЛОКАЛЬНОГО AdGuard Home —
+    локальная копия mieru._detect_agh_dns_endpoints (тот же формат).
+
+    Подглядывает в стейт AGH (aghome_state.json, пишет aghome_setup.py) —
+    те же ссылки, что статус AGH показывает как «Готовые ссылки для
+    клиентов»: plain-DNS :53 снаружи закрыт UFW, публичен только
+    TLS-набор (30443/853). Возвращает {links, self_signed, status}."""
+    try:
+        st = json.loads(
+            (STATE_DIR / "aghome_state.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {"links": [], "self_signed": False, "status": "no-agh"}
+    if not str(st.get("domain") or "").strip():
+        return {"links": [], "self_signed": False, "status": "no-domain"}
+    if not st.get("tls_enabled"):
+        return {"links": [], "self_signed": False, "status": "no-tls"}
+    host = str(st["domain"]).strip()
+    links = [
+        ("DoH", f"https://{host}:{st.get('doh_port', 30443)}/dns-query"),
+        ("DoT", f"tls://{host}:{st.get('dot_port', 853)}"),
+        ("DoQ", f"quic://{host}:{st.get('doq_port', 853)}"),
+    ]
+    return {"links": links, "self_signed": bool(st.get("self_signed")),
+            "status": "ok"}
+
+
+def _ask_client_dns(old_dns: str = "") -> str:
+    """v87: меню выбора DNS для клиентских конфигов Karing (гибрид).
+
+    Те же пункты, что в mieru._ask_client_dns (Google / Cloudflare /
+    оба / DoH-DoT-DoQ локального AdGuard Home / ручной ввод), но на голом
+    input() + _box_row: CLI-режим `sudo python3 hybrid_addon.py` работает
+    без пакета chimera, EOF/Ctrl-C = Enter (дефолт). Вопросы — короткими
+    строками внутри рамки установки — раньше одна длинная строка
+    «DNS в конфигах Karing [Enter=…]: (подсказка на 100+ символов)»
+    ломала правую границу бокса."""
+    agh = _detect_agh_dns_endpoints()
+    agh_links = agh["links"]
+    labels = ["Google — 8.8.8.8", "Cloudflare — 1.1.1.1",
+              "Google + Cloudflare — 8.8.8.8, 1.1.1.1"]
+    values = ["", "1.1.1.1", "8.8.8.8,1.1.1.1"]
+    for proto_label, url in agh_links:
+        labels.append(f"Свой DNS — AdGuard Home ({proto_label})")
+        values.append(url)
+    labels.append("Ввести адрес вручную")
+    values.append(None)  # маркер ручного ввода (номер = длина списка)
+
+    # «умный» дефолт: прежнее значение → AGH (DoH) → Google
+    default_idx = 0
+    if old_dns and old_dns in values:
+        default_idx = values.index(old_dns)
+    elif old_dns:
+        default_idx = None   # Enter = оставить прежнее (не из меню)
+    elif agh_links:
+        default_idx = 3      # AGH DoH — есть на сервере
+
+    _box_row(f"  {BOLD}DNS в конфигах Karing{NC} "
+             f"{DIM}(запросы клиента — через mieru-туннель):{NC}")
+    for i, label in enumerate(labels):
+        num, val = i + 1, values[i]
+        if val is None:
+            _box_row(f"     {DIM}[{num}]{NC} {label} "
+                     f"{DIM}(IP / домен / https://… / tls://… / quic://…){NC}")
+        elif val.startswith(("https://", "tls://", "quic://")):
+            _box_row(f"     {DIM}[{num}]{NC} {label}:")
+            _box_row(f"     {YELLOW}{val}{NC}")
+        else:
+            _box_row(f"     {DIM}[{num}]{NC} {label}")
+    if agh_links and agh["self_signed"]:
+        _box_row(f"     {DIM}(⚠ сертификат AdGuard Home self-signed — клиенту "
+                 f"придётся доверять ему вручную){NC}")
+    if not agh_links and agh["status"] == "no-tls":
+        _box_row(f"     {DIM}(AdGuard Home на сервере найден, но TLS выключен — "
+                 f"публичных DoH/DoT/DoQ нет){NC}")
+    _box_row()
+
+    if default_idx is None:
+        hint = f"[Enter=прежний: {old_dns}]"
+    else:
+        hint = f"[Enter={default_idx + 1}]"
+
+    def _default_value() -> str:
+        return old_dns if default_idx is None else (values[default_idx] or "")
+
+    try:
+        raw = input(f"  Выбор DNS {hint}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        raw = ""  # как Enter — берём дефолт
+
+    if raw == "":
+        return _default_value()
+
+    if raw.isdigit():
+        # чистая цифра — ТОЛЬКО пункт меню: вне диапазона — опечатка,
+        # голое число не бывает валидным DNS-адресом (не IP и не домен)
+        if not (1 <= int(raw) <= len(values)):
+            c_yellow("Похоже на опечатку — оставляю дефолт (Google).")
+            return _default_value()
+        idx = int(raw) - 1
+        if values[idx] is None:
+            try:
+                raw2 = input("  Адрес DNS (можно список через запятую): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                raw2 = ""
+            if _is_plausible_dns_address(raw2):
+                c_green(f"DNS в выдаче: {raw2} (через mieru-туннель).")
+                return raw2
+            c_yellow("Похоже на опечатку — оставляю дефолт.")
+            return _default_value()
+        val = values[idx] or ""
+        if val:
+            c_green(f"DNS в выдаче: {val} (через mieru-туннель).")
+        return val
+
+    # произвольная строка — принимаем как адрес (старое поведение v85)
+    if _is_plausible_dns_address(raw):
+        c_green(f"DNS в выдаче: {raw} (через mieru-туннель).")
+        return raw
+    c_yellow("Похоже на опечатку — оставляю дефолт (Google).")
+    return _default_value()
+
+
 def _ask_client_link_settings() -> dict:
-    """v85: адрес и DNS клиентской выдачи — интерактивные вопросы для
-    меню-установки. Возвращает {client_server_addr, client_dns}; на Enter
-    — домен если найден (иначе IP-режим) и дефолтный DNS (Google)."""
+    """v85/v87: адрес и DNS клиентской выдачи — интерактивные вопросы для
+    меню-установки. Возвращает {client_server_addr, client_dns}; Enter —
+    домен если найден (иначе IP-режим) и «умный» дефолт DNS: AGH (DoH),
+    если найден на сервере, иначе Google — как раньше.
+
+    v87: оба вопроса — короткими строками через _box_row (правая граница
+    рамки установки больше не ломается; раньше вопрос про адрес и
+    DNS-подсказка были одной строкой на 100+ символов); DNS — меню:
+    Google / Cloudflare / оба / DoH-DoT-DoQ локального AdGuard Home
+    (ссылки подглядываются в стейте AGH) / ручной ввод."""
     old = {}
     try:
         if STATE_FILE.exists():
@@ -1202,10 +1358,15 @@ def _ask_client_link_settings() -> dict:
     client_server_addr = ""
     if domain_hint:
         default_opt = old_addr or "2"
+        # v87: вопрос короткими строками — раньше одна длинная строка
+        # «[1] IP / [2] домен … / или свой домен [Enter=…]» ломала рамку
+        _box_row(f"  {BOLD}Адрес сервера в клиентских ссылках:{NC}")
+        _box_row(f"     {DIM}[1]{NC} IP сервера (как раньше)")
+        _box_row(f"     {DIM}[2]{NC} Домен — {YELLOW}{domain_hint}{NC}")
+        _box_row(f"     {DIM}(рекомендуется: IP меняется — ссылки живут){NC}")
+        _box_row()
         try:
-            raw = input(f"  Адрес в клиентских ссылках: [1] IP / "
-                        f"[2] домен {domain_hint} / или свой домен "
-                        f"[Enter={default_opt}]: ").strip()
+            raw = input(f"  Выбор [Enter={default_opt}] (или свой домен): ").strip()
         except (EOFError, KeyboardInterrupt):
             raw = ""  # как Enter — берём дефолт
         if raw == "1":
@@ -1223,19 +1384,9 @@ def _ask_client_link_settings() -> dict:
             c_green(f"В ссылках/JSON будет домен {client_server_addr} "
                     f"(IP меняется — ссылки живут).")
 
-    dns_hint = ""
-    if domain_hint:
-        dns_hint = f"  (на сервере найден домен: {domain_hint} — если там живёт ваш DNS, можно указать его)"
-    try:
-        raw = input(f"  DNS в конфигах Karing [Enter={old_dns or 'Google 8.8.8.8'}]:{dns_hint} ").strip()
-    except (EOFError, KeyboardInterrupt):
-        raw = old_dns
-    client_dns = raw or old_dns
-    if client_dns and (" " in client_dns or ("/" in client_dns and not client_dns.startswith("http"))):
-        c_yellow("Похоже на опечатку — оставляю дефолт (Google).")
-        client_dns = ""
-    elif client_dns:
-        c_green(f"DNS в выдаче: {client_dns} (через mieru-туннель).")
+    # v87: DNS — меню (AGH-детект + подглядывание ссылок) вместо одной
+    # строки с длинной подсказкой
+    client_dns = _ask_client_dns(old_dns)
 
     return {"client_server_addr": client_server_addr, "client_dns": client_dns}
 
@@ -1293,10 +1444,12 @@ def main() -> None:
                               "интерактивный вопрос (Enter = basic). Custom-режим (вставка "
                               "своего JSON) доступен только интерактивно, без флага.")
     parser.add_argument("--client-dns", type=str, default=None,
-                         help="v85: DNS в клиентских конфигах Karing (вместо Google 8.8.8.8): "
-                              "IP, домен, https://…/dns-query (DoH), tls://… (DoT), quic://… (DoQ). "
-                              "Запросы пойдут ЧЕРЕЗ mieru-туннель. Без флага — вопрос (в --yes — "
-                              "тихий дефолт Google).")
+                         help="v85/v87: DNS в клиентских конфигах Karing (вместо Google 8.8.8.8): "
+                              "IP, домен, https://…/dns-query (DoH), tls://… (DoT), quic://… (DoQ) "
+                              "или список через запятую (например 8.8.8.8,1.1.1.1). "
+                              "Запросы пойдут ЧЕРЕЗ mieru-туннель. Без флага — меню (в --yes — "
+                              "тихий дефолт Google). В меню ещё DoH/DoT/DoQ локального "
+                              "AdGuard Home, если найден на сервере.")
     parser.add_argument("--client-server-addr", type=str, default=None,
                          help="v85: адрес сервера в клиентских ссылках/JSON — домен вместо IP "
                               "(домен должен резолвиться на этот сервер; смена IP не ломает "
@@ -1726,11 +1879,11 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
 
         box_header(f"КЛИЕНТСКАЯ ВЫДАЧА — {proto}")
         try:
-            _box_row(f"  {BOLD}Ссылка для Karing (sing-box core):{NC}")
-            _box_link(share_link)
-            _box_row()
-            _box_row(f"  {BOLD}Ссылка для Nekobox / Nyamebox:{NC}")
-            _box_link(share_link_neko)
+            # v87: сами ссылки — ВНЕ рамки, под ней, целиком одной строкой
+            # (до v87 _box_link резал их по ширине — рамки «ломались», а
+            # копирование требовало склейки строк)
+            _box_row(f"  {BOLD}Karing (sing-box core):{NC} ссылка — ПОД рамкой")
+            _box_row(f"  {BOLD}Nekobox / Nyamebox:{NC} ссылка — ПОД рамкой")
             _box_row()
             try:
                 cfg_path.write_text(json.dumps(full_config, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1739,6 +1892,16 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
                 c_red(f"Не удалось сохранить JSON-конфиг для Karing: {e}")
         finally:
             _box_bottom()
+
+        # v87: ссылки — вне рамки, ОДНОЙ строкой каждая: рамка закрыта,
+        # мягкий перенос терминала не вставляет \n при копировании
+        print()
+        print(f"  {BOLD}Karing (sing-box core):{NC}")
+        print(f"  {YELLOW}{share_link}{NC}")
+        print()
+        print(f"  {BOLD}Nekobox / Nyamebox:{NC}")
+        print(f"  {YELLOW}{share_link_neko}{NC}")
+        print()
 
         _print_qr(share_link, f"Karing / mierus:// ({proto})")
 
