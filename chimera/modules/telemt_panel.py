@@ -75,6 +75,10 @@ DATA_DIR        = Path("/var/lib/telemt-panel")
 SERVICE_FILE    = Path("/etc/systemd/system/telemt-panel.service")
 LOG_FILE        = Path("/var/log/telemt_panel_install.log")
 
+# Стейт ядра Chimera (state.json, naiveproxy.json) — источник домена для
+# авто-детекта в Let's Encrypt (v84 — порт идеи v83.3 из triple_panel.py).
+STATE_DIR       = Path("/var/lib/xray-installer")
+
 SERVICE_NAME    = "telemt-panel"
 SYSTEM_USER     = "telemt-panel"
 GITHUB_API      = "https://api.github.com/repos/amirotin/telemt_panel/releases/latest"
@@ -769,11 +773,19 @@ def _run_install() -> None:
         from chimera.modules.panel_nginx_front import ask_tls_mode, ask_domain
         use_ss, _ = ask_tls_mode(panel_name="Telemt Panel")
         domain = None
+        domain_auto = False
         if not use_ss:
-            domain = ask_domain()
-            if not domain:
-                _warn("Домен не указан — откат на self-signed.")
-                use_ss = True
+            # v84: домен — автоматически (как в b4 и Triple Panel v83.3):
+            # PARAM_DOMAIN → state.json → домен Naive. Ручной ввод —
+            # только если нигде не нашли.
+            domain = _detect_panel_domain()
+            if domain:
+                domain_auto = True
+            else:
+                domain = ask_domain()
+                if not domain:
+                    _warn("Домен не указан — откат на self-signed.")
+                    use_ss = True
         port = _ask_tls_port()
         if _telemt_setup_direct_access(port=port, use_self_signed=use_ss, domain=domain):
             direct = _telemt_direct_status()
@@ -786,6 +798,9 @@ def _run_install() -> None:
                     _box_info("Можно принять сертификат и продолжить.")
                 else:
                     _box_ok("Let's Encrypt сертификат — браузер не предупредит.")
+                    if domain:
+                        _box_kv("Домен:", f"{CYAN}{domain}{NC}"
+                                + (f" {DIM}(авто){NC}" if domain_auto else ""))
                 _box_bot()
     else:
         _info("Прямой доступ не включён. Можно включить позже через пункт [6] в меню.")
@@ -934,6 +949,42 @@ def _telemt_remove_direct_access() -> None:
     )
 
 
+def _core_module():
+    """Ядро Chimera — импорт по требованию (в тестах подменяется)."""
+    import importlib
+    return importlib.import_module("chimera._core")
+
+
+def _detect_panel_domain() -> str:
+    """Домен сервера для Let's Encrypt — АВТОМАТИЧЕСКИ, руками вводить
+    не нужно (v84 — порт идеи v83.3 из triple_panel.py; паттерн b4:
+    ask_domain(default=PARAM_DOMAIN), но с расширенной цепочкой).
+
+    Цепочка: PARAM_DOMAIN (глобаль ядра — домен VLESS) → state.json →
+    домен Naive-конфигурации (naiveproxy.json). Telemt Panel часто стоит
+    на серверах без VLESS (чистый MTProxy) — там домен живёт именно у
+    Naive, а panel_nginx_front его НЕ видит (смотрит только в
+    state.json), поэтому детектим здесь и передаём явно.
+    '' — нигде не нашли (тогда ask_domain как раньше).
+    """
+    try:
+        core = _core_module()
+        d = (getattr(core, "PARAM_DOMAIN", "") or "").strip()
+        if d:
+            return d
+    except Exception:
+        pass
+    for fname in ("state.json", "naiveproxy.json"):
+        try:
+            data = json.loads((STATE_DIR / fname).read_text(encoding="utf-8"))
+            d = (data.get("domain", "") or "").strip()
+            if d:
+                return d
+        except Exception:
+            continue
+    return ""
+
+
 def _ask_tls_port() -> int:
     """Спрашивает у пользователя порт для TLS-фронта Telemt Panel.
 
@@ -971,10 +1022,17 @@ def _toggle_direct_access() -> None:
         use_ss, _ = ask_tls_mode(panel_name="Telemt Panel")
         domain = None
         if not use_ss:
-            domain = ask_domain()
-            if not domain:
-                _warn("Домен не указан — откат на self-signed.")
-                use_ss = True
+            # v84: домен — автоматически (порт v83.3 из Triple Panel):
+            # PARAM_DOMAIN → state.json → домен Naive. Ручной ввод —
+            # только если нигде не нашли.
+            domain = _detect_panel_domain()
+            if domain:
+                _info(f"Домен: {domain} (авто — подхвачен из конфигурации сервера)")
+            else:
+                domain = ask_domain()
+                if not domain:
+                    _warn("Домен не указан — откат на self-signed.")
+                    use_ss = True
         port = _ask_tls_port()
         _telemt_setup_direct_access(port=port, use_self_signed=use_ss, domain=domain)
     _pause()
