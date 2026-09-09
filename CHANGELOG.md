@@ -2,6 +2,59 @@
 
 ---
 
+## FEAT(panel/triple): в Chimera добавлена новая веб-панель Triple Panel (Naive + Mieru + Hysteria2) — сводная запись арка v81–v83.4 — 9 сентября 2026
+
+**Кейс:** сводная запись фиксирует итоговое состояние новой панели после
+завершения арка v81–v83.4 (построчная детализация каждой версии — в
+записях ниже). Панель — питон-порт идей апстрим-панели
+Panel-Naive-Mieru-by-RIXXX (v1.11.2, MIT): веб-фронт апстрима
+вендорируется как есть, бэкенд — собственный (stdlib
+ThreadingHTTPServer, без Node/PM2/SQLite), все данные и операции идут
+через существующие модули и юзер-мост Chimera.
+
+**Что добавлено (итог):**
+- **TUI-жизненный цикл** (меню `1 → W → 8`): установка с выбором порта
+  (конфликт-чек + регистрация port_registry + ufw), вендоринг и
+  обновления фронта апстрима (архив ветки main — тегов у апстрима нет,
+  v83.1), доступ по эталону b4 через panel_nginx_front: SSH-туннель /
+  self-signed по IP / Let's Encrypt по домену; домен LE подхватывается
+  из конфигурации сервера автоматически — руками вводить не нужно
+  (v83.3). Отдельный systemd-юнит `triple-web` (loopback, порт в state).
+- **Единая модель юзера из браузера:** создание/удаление/переименование
+  и ротация пароля протоколов (naive+mieru одним действием) — юзер-мост
+  v4.25/4.26 с переносом TTL и квот; список — unified-view users.json +
+  state протоколов + subToken из pepper-пространства подписки.
+- **Выдача клиенту:** `naive-link` / `mieru-link` / `universal-config`
+  и умные подписки `/sub/:token` — полная делегация subscription.py
+  (UA-детект: base64/sing-box/clash, Subscription-Userinfo,
+  Profile-Update-Interval).
+- **Live-обновления без F5:** SSE-шим в index.html (WebSocket апстрима
+  подменён на EventSource `/api/events`: users/status/log + метрики,
+  watcher-диф 3с) — правки из TUI видны в открытой панели (v82).
+- **Настройки из UI:** смена портов naive/mieru (port_registry-
+  перерегистрация с откатом), статусы каскада/WARP + reset; hy2 —
+  честный статус без мутаций (501 с указанием TUI-пути).
+- **Вкладки (v83.4):** Мониторинг (`/api/stats/users`: mita live
+  30-дн. → traffic_accounting фолбэк, квоты из traffic_limits,
+  серверный итог Naive из systemd IPAccounting), Диагностика (порты
+  ss -tlnup, Caddyfile-юзеры, mita status, NTP-синхрон, probe),
+  panel-stub и webbasepath; `/api/status` — полный контракт апстрима
+  (services/system/panel/domain).
+- **Честные границы:** федерация/backup и Mieru-relay (Variant B) —
+  честные 501; протоколы панель НЕ ставит и НЕ владеет — их ставят
+  naiveproxy.py / mieru.py / hysteria2_*; гибрид-аддон Mieru и
+  standalone — раздельные миры, панель управляет только standalone.
+
+**Тесты:** арк завершился 151 passed (test_triple_panel.py) + живой
+смоук 75/75; соседние сьюты (rest_api/admin_panel/naiveproxy/mieru/
+port_registry + traffic_collectors/hysteria2_common) — 307+29 passed,
+поллюции нет.
+
+**Эксплуатация:** на живых серверах — `git pull` + `systemctl restart
+triple-web`; фронт не переустанавливается (меняется только бэкенд).
+
+---
+
 ## FEAT(panel/triple): v83.4 — закрыты 4×501 вкладок (Пользователи/Настройки/Мониторинг/Диагностика) + контракт /api/status — 9 сентября 2026
 
 **Кейс:** юзер прислал 4 скриншота с живой панели: красные тосты
