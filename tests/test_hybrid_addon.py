@@ -672,5 +672,177 @@ class TestDoRollbackOrder(unittest.TestCase):
         self.assertLess(disables[0], restart_i)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  v85: домен сервера + свой DNS в клиентских конфигах Karing
+# ══════════════════════════════════════════════════════════════════════════════
+class TestV85DetectServerDomain(unittest.TestCase):
+    """_detect_server_domain — state.json → naiveproxy.json напрямую
+    (CLI-безопасно: без импорта chimera._core)."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_state_json_wins(self):
+        from chimera.modules import hybrid_addon as ha
+        (self._tmp / "state.json").write_text('{"domain": "vless.example.com"}')
+        (self._tmp / "naiveproxy.json").write_text('{"domain": "naive.example.com"}')
+        with patch.object(ha, "STATE_DIR", self._tmp):
+            self.assertEqual(ha._detect_server_domain(), "vless.example.com")
+
+    def test_naive_fallback(self):
+        from chimera.modules import hybrid_addon as ha
+        (self._tmp / "naiveproxy.json").write_text(
+            '{"domain": "naive.example.com", "port": 443}')
+        with patch.object(ha, "STATE_DIR", self._tmp):
+            self.assertEqual(ha._detect_server_domain(), "naive.example.com")
+
+    def test_nothing_found(self):
+        from chimera.modules import hybrid_addon as ha
+        with patch.object(ha, "STATE_DIR", self._tmp):
+            self.assertEqual(ha._detect_server_domain(), "")
+
+    def test_garbage_ignored(self):
+        from chimera.modules import hybrid_addon as ha
+        (self._tmp / "state.json").write_text("не json")
+        with patch.object(ha, "STATE_DIR", self._tmp):
+            self.assertEqual(ha._detect_server_domain(), "")
+
+
+class TestV85AskClientLinkSettings(unittest.TestCase):
+    """_ask_client_link_settings — Enter=домен если найден, [1]=IP;
+    DNS-ввод, подсказка домена, опечатка → дефолт Google."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._state = self._tmp / "hybrid_state.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _run(self, inputs, state_json=None, detected="cdn.example"):
+        from chimera.modules import hybrid_addon as ha
+        if state_json is not None:
+            self._state.write_text(json.dumps(state_json))
+        with patch("builtins.input", side_effect=inputs), \
+             patch.object(ha, "STATE_FILE", self._state), \
+             patch.object(ha, "_detect_server_domain", return_value=detected):
+            return ha._ask_client_link_settings()
+
+    def test_fresh_domain_default(self):
+        """Enter+Enter: домен найден → адрес=домен, DNS=Google (как раньше)."""
+        res = self._run(["", ""])
+        self.assertEqual(res["client_server_addr"], "cdn.example")
+        self.assertEqual(res["client_dns"], "")
+
+    def test_explicit_ip(self):
+        res = self._run(["1", ""])
+        self.assertEqual(res["client_server_addr"], "")
+        self.assertEqual(res["client_dns"], "")
+
+    def test_custom_dns(self):
+        res = self._run(["2", "panel.example"])
+        self.assertEqual(res["client_server_addr"], "cdn.example")
+        self.assertEqual(res["client_dns"], "panel.example")
+
+    def test_dns_typo_falls_back(self):
+        res = self._run(["1", "bad dns com"])
+        self.assertEqual(res["client_server_addr"], "")
+        self.assertEqual(res["client_dns"], "")
+
+    def test_old_state_defaults(self):
+        """Переустановка: Enter — прежние значения из state."""
+        res = self._run(["", ""], state_json={
+            "client_server_addr": "old.example.com",
+            "client_dns": "10.0.0.53",
+        })
+        self.assertEqual(res["client_server_addr"], "old.example.com")
+        self.assertEqual(res["client_dns"], "10.0.0.53")
+
+    def test_no_domain_only_dns_question(self):
+        """Домен не найден — вопроса про адрес нет, только DNS."""
+        res = self._run([""], detected="")
+        self.assertEqual(res["client_server_addr"], "")
+        self.assertEqual(res["client_dns"], "")
+
+    def test_doh_url_accepted(self):
+        res = self._run(["1", "https://panel.example/dns-query"])
+        self.assertEqual(res["client_dns"],
+                         "https://panel.example/dns-query")
+
+
+class TestV85ShowMieruClientLinks(unittest.TestCase):
+    """_show_mieru_client_links — Karing-JSON собирается общими билдерами
+    из mieru.py: домен в server + domain_resolver + custom-dns через
+    туннель. Пишем в фейковый Path, генераторы ссылок — фейки, QR — мьют."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmp = Path(tempfile.mkdtemp())
+        store = {}
+        self._store = store
+
+        class _FakePath:
+            def __init__(self, p):
+                self._p = str(p)
+            def write_text(self, data, encoding=None):
+                store[self._p] = data
+            def __str__(self):
+                return self._p
+
+        self._FakePath = _FakePath
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _run(self, server_addr, client_dns=""):
+        from chimera.modules import hybrid_addon as ha
+        from chimera.modules import mieru
+        creds = {"tcp": {"port": 443, "login": "u_d106fd33",
+                         "password": "goep167KyRYE2u76w9sv-Sr3"}}
+        with patch.object(ha, "Path", self._FakePath), \
+             patch.object(mieru, "_gen_client_share_link",
+                          return_value="mierus://fake"), \
+             patch.object(mieru, "_gen_client_share_link_nekobox",
+                          return_value="mierus://fake-neko"), \
+             patch.object(mieru, "_print_qr", lambda *a, **k: None):
+            ha._show_mieru_client_links(creds, server_addr,
+                                        client_dns=client_dns)
+        path = self._store.get("/tmp/karing-mieru-hybrid-tcp-u_d106fd33.json")
+        self.assertIsNotNone(path, "Karing-JSON должен быть записан")
+        return json.loads(path)
+
+    def test_domain_and_custom_dns(self):
+        cfg = self._run("cdn.example",
+                        client_dns="panel.example")
+        ob = cfg["outbounds"][0]
+        self.assertEqual(ob["type"], "mieru")
+        self.assertEqual(ob["server"], "cdn.example")
+        self.assertEqual(ob["domain_resolver"], "local")
+        custom = cfg["dns"]["servers"][0]
+        self.assertEqual(custom["tag"], "custom-dns")
+        self.assertEqual(custom["address"], "panel.example")
+        self.assertEqual(custom["detour"], ob["tag"])
+        self.assertEqual(custom["address_resolver"], "local")
+        self.assertEqual(cfg["dns"]["rules"],
+                         [{"domain": ["cdn.example"],
+                           "server": "local"}])
+        self.assertEqual(cfg["route"]["final"], ob["tag"])
+
+    def test_ip_default_google(self):
+        cfg = self._run("203.0.113.103")
+        ob = cfg["outbounds"][0]
+        self.assertEqual(ob["server"], "203.0.113.103")
+        self.assertNotIn("domain_resolver", ob)
+        self.assertEqual(cfg["dns"]["servers"][0],
+                         {"tag": "google", "address": "8.8.8.8"})
+        self.assertNotIn("rules", cfg["dns"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
