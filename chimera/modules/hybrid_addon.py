@@ -1812,7 +1812,10 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
                              traffic_pattern_blob: str = None) -> None:
     """Доп. клиентская выдача (только для пути через меню установщика):
     mierus:// для Karing/sing-box, mierus:// для Nekobox, sing-box JSON
-    для Karing (mierus:// в нём не работает — только JSON-файл) и QR.
+    для Karing (запасной вариант для старых версий Karing) и QR.
+    v87.1: импорт mierus://-ссылки в Karing проверен живьём — TCP-вариант
+    Hybrid Addon подключился сразу; до v86 ссылку с обфускацией ломал
+    двойной traffic-pattern= (багфикс v86, теперь параметр один).
 
     Переиспользует уже проверенные форматы из modules/mieru.py — лениво
     импортирует их прямо здесь, а не в шапке файла. main() (CLI-режим)
@@ -1871,36 +1874,46 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
         if traffic_pattern_blob:
             # ВНИМАНИЕ: имя поля "traffic_pattern" — по конвенции именования sing-box
             # (snake_case, как server_port) и докам mihomo/sing-box ("base64 string,
-            # см. официальную документацию mieru"), но НЕ проверено живьём на Karing —
-            # стоит свериться на реальном клиенте при первом использовании.
+            # см. официальную документацию mieru"). Сам JSON-файл живьём не проверялся
+            # (юзер ходит ссылкой), но импорт mierus:// с &traffic-pattern= подтверждён
+            # живьём в Karing (v87.1, TCP) — URL-параметр и поле несут один blob.
             outbound["traffic_pattern"] = traffic_pattern_blob
         full_config = _build_karing_full_config(outbound, client_dns, server_domain)
         cfg_path = Path(f"/tmp/karing-mieru-hybrid-{transport}-{login}.json")
 
         box_header(f"КЛИЕНТСКАЯ ВЫДАЧА — {proto}")
+        cfg_saved = False
         try:
             # v87: сами ссылки — ВНЕ рамки, под ней, целиком одной строкой
             # (до v87 _box_link резал их по ширине — рамки «ломались», а
             # копирование требовало склейки строк)
             _box_row(f"  {BOLD}Karing (sing-box core):{NC} ссылка — ПОД рамкой")
             _box_row(f"  {BOLD}Nekobox / Nyamebox:{NC} ссылка — ПОД рамкой")
+            _box_row(f"  {BOLD}Karing (запасной JSON):{NC} путь — ПОД рамкой")
             _box_row()
             try:
                 cfg_path.write_text(json.dumps(full_config, indent=2, ensure_ascii=False), encoding="utf-8")
-                c_yellow(f"mierus:// НЕ работает в Karing — для него файл: {cfg_path}")
+                cfg_saved = True
             except OSError as e:
-                c_red(f"Не удалось сохранить JSON-конфиг для Karing: {e}")
+                _box_row(f"  {RED}Не удалось сохранить JSON для Karing: {e}{NC}")
         finally:
             _box_bottom()
 
         # v87: ссылки — вне рамки, ОДНОЙ строкой каждая: рамка закрыта,
-        # мягкий перенос терминала не вставляет \n при копировании
+        # мягкий перенос терминала не вставляет \n при копировании.
+        # v87.1: Karing принимает mierus://-ссылку напрямую (проверено
+        # живьём, TCP) — JSON-файл остаётся запасным вариантом для старых
+        # версий Karing; его путь тоже ВНЕ рамки (длинный, ломал бы границы)
         print()
         print(f"  {BOLD}Karing (sing-box core):{NC}")
         print(f"  {YELLOW}{share_link}{NC}")
         print()
         print(f"  {BOLD}Nekobox / Nyamebox:{NC}")
         print(f"  {YELLOW}{share_link_neko}{NC}")
+        if cfg_saved:
+            print()
+            print(f"  {BOLD}Karing — JSON-файл (запасной вариант):{NC}")
+            print(f"  {YELLOW}{cfg_path}{NC}")
         print()
 
         _print_qr(share_link, f"Karing / mierus:// ({proto})")
