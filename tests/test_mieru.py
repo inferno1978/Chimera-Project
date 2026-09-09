@@ -366,5 +366,248 @@ class TestReUsername(unittest.TestCase):
                 self.assertFalse(_RE_USERNAME.match(name))
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  v85: домен сервера + свой DNS в клиентских конфигах Karing
+# ══════════════════════════════════════════════════════════════════════════════
+class TestV85DnsHostIsDomain(unittest.TestCase):
+    """_dns_host_is_domain — IP / домен / DoH / DoT / DoQ / порт."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_ip(self):
+        from chimera.modules.mieru import _dns_host_is_domain
+        self.assertFalse(_dns_host_is_domain("8.8.8.8"))
+        self.assertFalse(_dns_host_is_domain("138.124.255.238"))
+        self.assertFalse(_dns_host_is_domain("1.2.3.4:53"))
+
+    def test_domain(self):
+        from chimera.modules.mieru import _dns_host_is_domain
+        self.assertTrue(_dns_host_is_domain("chimeraprodcdn.online"))
+        self.assertTrue(_dns_host_is_domain("dns.example.com:53"))
+
+    def test_doh_url(self):
+        from chimera.modules.mieru import _dns_host_is_domain
+        self.assertTrue(_dns_host_is_domain("https://chimeravpn.online/dns-query"))
+        self.assertFalse(_dns_host_is_domain("https://1.1.1.1/dns-query"))
+
+    def test_dot_quic_schemes(self):
+        from chimera.modules.mieru import _dns_host_is_domain
+        self.assertTrue(_dns_host_is_domain("tls://chimeravpn.online"))
+        self.assertTrue(_dns_host_is_domain("quic://chimeravpn.online"))
+        self.assertFalse(_dns_host_is_domain("tls://10.0.0.1"))
+
+    def test_empty_and_garbage(self):
+        from chimera.modules.mieru import _dns_host_is_domain
+        self.assertFalse(_dns_host_is_domain(""))
+        self.assertFalse(_dns_host_is_domain("   "))
+        self.assertFalse(_dns_host_is_domain("/"))
+
+
+class TestV85BuildKaringDnsBlock(unittest.TestCase):
+    """_build_karing_dns_block — дефолт (Google) / свой DNS / bootstrap-правило."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_default_google_unchanged(self):
+        """Пустой client_dns — блок ровно как до v85 (нулевая регрессия)."""
+        from chimera.modules.mieru import _build_karing_dns_block
+        block = _build_karing_dns_block("", "mieru-u1")
+        self.assertEqual(block["servers"][0],
+                         {"tag": "google", "address": "8.8.8.8"})
+        self.assertEqual(block["servers"][1],
+                         {"tag": "local", "address": "1.1.1.1", "detour": "direct"})
+        self.assertNotIn("rules", block)
+
+    def test_custom_ip_no_resolver(self):
+        from chimera.modules.mieru import _build_karing_dns_block
+        block = _build_karing_dns_block("10.0.0.53", "mieru-u1")
+        custom = block["servers"][0]
+        self.assertEqual(custom["tag"], "custom-dns")
+        self.assertEqual(custom["address"], "10.0.0.53")
+        self.assertEqual(custom["detour"], "mieru-u1")
+        self.assertNotIn("address_resolver", custom)  # IP — резолвер не нужен
+        self.assertEqual(block["servers"][1]["tag"], "local")
+
+    def test_custom_domain_gets_bootstrap_resolver(self):
+        from chimera.modules.mieru import _build_karing_dns_block
+        block = _build_karing_dns_block("chimeraprodcdn.online", "mieru-u1")
+        custom = block["servers"][0]
+        self.assertEqual(custom["address"], "chimeraprodcdn.online")
+        self.assertEqual(custom["address_resolver"], "local")
+        self.assertEqual(custom["detour"], "mieru-u1")
+
+    def test_doh_url_gets_bootstrap_resolver(self):
+        from chimera.modules.mieru import _build_karing_dns_block
+        block = _build_karing_dns_block("https://chimeravpn.online/dns-query",
+                                        "mieru-u1")
+        custom = block["servers"][0]
+        self.assertEqual(custom["address"],
+                         "https://chimeravpn.online/dns-query")
+        self.assertEqual(custom["address_resolver"], "local")
+
+    def test_server_domain_bootstrap_rule(self):
+        """Домен сервера mieru — правило «резолвить напрямую», не через
+        туннель (иначе цикл «домен туннеля нужен для поднятия туннеля»)."""
+        from chimera.modules.mieru import _build_karing_dns_block
+        block = _build_karing_dns_block("", "mieru-u1",
+                                        server_domain="chimeraprodcdn.online")
+        self.assertEqual(block["rules"],
+                         [{"domain": ["chimeraprodcdn.online"],
+                           "server": "local"}])
+
+    def test_ip_server_no_rules(self):
+        from chimera.modules.mieru import _build_karing_dns_block
+        block = _build_karing_dns_block("10.0.0.53", "mieru-u1",
+                                        server_domain="")
+        self.assertNotIn("rules", block)
+
+
+class TestV85BuildKaringFullConfig(unittest.TestCase):
+    """_build_karing_full_config — профиль целиком + domain_resolver."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _outbound(self):
+        from chimera.modules.mieru import _gen_singbox_outbound
+        return _gen_singbox_outbound("1.2.3.4", 2012, 2022, "TCP", "u1", "p1")
+
+    def test_shape(self):
+        from chimera.modules.mieru import _build_karing_full_config
+        cfg = _build_karing_full_config(self._outbound())
+        self.assertEqual(cfg["log"], {"level": "info"})
+        self.assertEqual(cfg["outbounds"][1], {"type": "direct", "tag": "direct"})
+        self.assertEqual(cfg["route"], {"final": "mieru-u1"})
+
+    def test_domain_sets_domain_resolver(self):
+        from chimera.modules.mieru import _build_karing_full_config
+        cfg = _build_karing_full_config(self._outbound(), "",
+                                        "chimeraprodcdn.online")
+        self.assertEqual(cfg["outbounds"][0]["domain_resolver"], "local")
+        self.assertEqual(cfg["dns"]["rules"],
+                         [{"domain": ["chimeraprodcdn.online"],
+                           "server": "local"}])
+
+    def test_ip_no_domain_resolver(self):
+        from chimera.modules.mieru import _build_karing_full_config
+        cfg = _build_karing_full_config(self._outbound())
+        self.assertNotIn("domain_resolver", cfg["outbounds"][0])
+        self.assertNotIn("rules", cfg["dns"])
+
+    def test_outbound_not_mutated(self):
+        """Билдер работает с копией outbound — исходник не трогает
+        (в hybrid_addon к нему уже дописан traffic_pattern)."""
+        from chimera.modules.mieru import _build_karing_full_config
+        ob = self._outbound()
+        ob["traffic_pattern"] = "BLOB"
+        cfg = _build_karing_full_config(ob, "", "chimeraprodcdn.online")
+        self.assertNotIn("domain_resolver", ob)
+        self.assertEqual(cfg["outbounds"][0]["traffic_pattern"], "BLOB")
+
+    def test_custom_dns_wired(self):
+        from chimera.modules.mieru import _build_karing_full_config
+        cfg = _build_karing_full_config(self._outbound(), "10.0.0.53")
+        self.assertEqual(cfg["dns"]["servers"][0]["address"], "10.0.0.53")
+
+
+class TestV85DetectServerDomain(unittest.TestCase):
+    """Цепочка: PARAM_DOMAIN → state.json → naiveproxy.json (как v83.3/v84)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import tempfile
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _core(self, domain):
+        import types
+        m = types.ModuleType("chimera._core")
+        m.PARAM_DOMAIN = domain
+        return m
+
+    def test_param_domain_wins(self):
+        import sys as _sys
+        (self._tmp / "state.json").write_text('{"domain": "core.example.com"}')
+        (self._tmp / "naiveproxy.json").write_text('{"domain": "naive.example.com"}')
+        from chimera.modules import mieru
+        with patch.dict(_sys.modules,
+                        {"chimera._core": self._core("vless.example.com")}), \
+             patch.object(mieru, "_CORE_STATE_DIR", self._tmp):
+            self.assertEqual(mieru._detect_server_domain(), "vless.example.com")
+
+    def test_state_json_fallback(self):
+        import sys as _sys
+        (self._tmp / "state.json").write_text('{"domain": "core.example.com"}')
+        from chimera.modules import mieru
+        with patch.dict(_sys.modules, {"chimera._core": self._core("")}), \
+             patch.object(mieru, "_CORE_STATE_DIR", self._tmp):
+            self.assertEqual(mieru._detect_server_domain(), "core.example.com")
+
+    def test_naive_domain_fallback(self):
+        import sys as _sys
+        (self._tmp / "naiveproxy.json").write_text(
+            '{"domain": "naive.example.com", "port": 443}')
+        from chimera.modules import mieru
+        with patch.dict(_sys.modules, {"chimera._core": self._core("")}), \
+             patch.object(mieru, "_CORE_STATE_DIR", self._tmp):
+            self.assertEqual(mieru._detect_server_domain(), "naive.example.com")
+
+    def test_nothing_found(self):
+        import sys as _sys
+        from chimera.modules import mieru
+        with patch.dict(_sys.modules, {"chimera._core": self._core("")}), \
+             patch.object(mieru, "_CORE_STATE_DIR", self._tmp):
+            self.assertEqual(mieru._detect_server_domain(), "")
+
+    def test_garbage_ignored(self):
+        import sys as _sys
+        (self._tmp / "naiveproxy.json").write_text("не json вообще")
+        from chimera.modules import mieru
+        with patch.dict(_sys.modules, {"chimera._core": self._core("")}), \
+             patch.object(mieru, "_CORE_STATE_DIR", self._tmp):
+            self.assertEqual(mieru._detect_server_domain(), "")
+
+
+class TestV85EffectiveClientAddr(unittest.TestCase):
+    """_effective_client_addr — домен из state выигрывает, пусто → IP."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import tempfile
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_state_domain_wins(self):
+        from chimera.modules import mieru
+        sf = self._tmp / "mstate.json"
+        sf.write_text('{"client_server_addr": "chimeraprodcdn.online"}')
+        with patch.object(mieru, "_MODULE_STATE", sf), \
+             patch.object(mieru, "_get_server_ip", return_value="1.2.3.4"):
+            self.assertEqual(mieru._effective_client_addr(),
+                             "chimeraprodcdn.online")
+
+    def test_empty_falls_back_to_ip(self):
+        from chimera.modules import mieru
+        sf = self._tmp / "mstate.json"
+        sf.write_text('{"client_server_addr": ""}')
+        with patch.object(mieru, "_MODULE_STATE", sf), \
+             patch.object(mieru, "_get_server_ip", return_value="1.2.3.4"):
+            self.assertEqual(mieru._effective_client_addr(), "1.2.3.4")
+
+    def test_missing_state(self):
+        from chimera.modules import mieru
+        with patch.object(mieru, "_MODULE_STATE", self._tmp / "nope.json"), \
+             patch.object(mieru, "_get_server_ip", return_value="1.2.3.4"):
+            self.assertEqual(mieru._effective_client_addr(), "1.2.3.4")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
