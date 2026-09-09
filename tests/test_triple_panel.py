@@ -754,6 +754,24 @@ class TestSseShimInjection(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertFalse(tp._inject_sse_shim(Path(tmp)))
 
+    def test_update_front_up_to_date_injects_shim(self):
+        """v82: ветка «фронт актуален» до-вживляет шим в v81-инсталлы."""
+        with tempfile.TemporaryDirectory() as tmp:
+            www = Path(tmp)
+            (www / "index.html").write_text(
+                '<html><body><script src="app.js"></script></body></html>')
+            with patch.object(tp, "_load_state", return_value={
+                    "front_version": "1.11.2"}), \
+                 patch.object(tp, "_refresh_upstream_cache",
+                              return_value="1.11.2"), \
+                 patch.object(tp, "_WWW_DIR", www), \
+                 patch.object(tp, "_service_active", return_value=False), \
+                 patch.object(tp, "_pause"):
+                self.assertTrue(tp._update_front())
+            self.assertTrue((www / "triple-sse.js").exists())
+            self.assertIn("triple-sse.js",
+                          (www / "index.html").read_text())
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  13. v82: РОТАЦИЯ ПАРОЛЯ + RENAME (расширенные CRUD-фейки)
