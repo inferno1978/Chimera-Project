@@ -5,6 +5,9 @@
 static → login → session → /api/users → POST/PUT/DELETE → /sub/:token (UA)
 + v82: SSE /api/events (сырой сокет), ротация пароля, rename email,
        смена портов naive/mieru, каскад, WARP, /api/logs/:service.
++ v83.4: /api/stats/users (accounting-фолбэк), /api/settings/hy2 (статус
+       + 501 на мутации), /api/diagnostics, /api/panel/stub (roundtrip),
+       /api/status — контракт апстрима ПОЛНОСТЬЮ (services/system/panel).
 """
 import base64
 import json
@@ -49,6 +52,21 @@ web._WWW_DIR = www
 # детерминизм: сервисы «активны», egress не ходит в сеть
 web._svc_active = lambda name: True
 web._egress_ip = lambda timeout=6: "203.0.113.9"
+
+# v83.4: детерминизм новых эндпоинтов (stub/hy2/diagnostics/status —
+# в tmp, процессы не спавним — смоук должен быть одинаков везде)
+web._STUB_FILE = Path(tmp) / "panel-stub" / "index.html"
+web._local_ip = lambda: "127.0.0.1"
+web._run_cmd = lambda cmd, timeout=6: ""
+web._HY2_UNIT = Path(tmp) / "hysteria-server.service"
+web._HY2_CONFIG = Path(tmp) / "hysteria" / "config.yaml"
+web._HY2_STATE = Path(tmp) / "core-state.json"
+web._CADDYFILE = Path(tmp) / "Caddyfile"
+ta = types.ModuleType("chimera.modules.traffic_accounting")
+ta.get_all_accumulated = lambda u: (
+    {"mieru": 5 * 1048576, "naiveproxy": 3 * 1048576}
+    if u == "smoke" else {})
+sys.modules["chimera.modules.traffic_accounting"] = ta
 
 # ── фейковые хранилища ─────────────────────────────────────────────────────
 USERS = [{"email": "smoke@x.com", "uuid": "uuid-smoke-1", "name": "smoke",
@@ -460,12 +478,80 @@ check("GET /api/logs/bogus → 400", st == 400)
 # 12. Разное
 st, _, body = req("/api/password/generate", cookies=[cookie])
 check("/api/password/generate → 200", st == 200)
+
+# 13. v83.4: недостающие эндпоинты (4 ошибки со скринов юзера)
+st, _, body = req("/api/stats/users", cookies=[cookie])
+stats = json.loads(body) if st == 200 else {}
+u = (stats.get("users") or [{}])[0]
+check("GET /api/stats/users → 200, контракт апстрима",
+      st == 200 and sorted(stats) ==
+      ["naivePerUser", "naiveServerTotalMB", "users"])
+check("stats: mieru/naive из accounting-фолбэка",
+      u.get("mieruMB") == 5.0 and u.get("naiveMB") == 3.0)
+check("stats: naive целиком в download, used = сумма (квоты нет)",
+      u.get("uploadMB") == 0 and u.get("downloadMB") == 8.0 and
+      u.get("usedMB") == 8.0)
+check("stats: hy2MB=0 (per-exit-node), lastSeen None",
+      u.get("hy2MB") == 0 and u.get("lastSeen") is None)
+
+st, _, body = req("/api/settings/hy2", cookies=[cookie])
+hy2 = json.loads(body) if st == 200 else {}
+check("GET /api/settings/hy2 → 200 + статус",
+      st == 200 and hy2.get("installed") is False and
+      hy2.get("port") == 443 and "hy2UserCount" in hy2 and
+      hy2.get("stack", {}).get("naive") is True)
+st, _, _ = req("/api/settings/hy2/install", "POST", {"port": 443},
+                cookies=[cookie])
+check("POST hy2/install → 501 с указанием TUI", st == 501)
+
+st, _, body = req("/api/diagnostics", cookies=[cookie])
+diag = json.loads(body) if st == 200 else {}
+check("GET /api/diagnostics → 200, ключи контракта",
+      st == 200 and all(k in diag for k in
+      ("ports", "naiveVersionOk", "caddyfileUsers", "probeMode",
+       "timeSynced", "mitaStateFile", "mitaStatus", "mitaConfig")))
+check("diagnostics: probeMode bare (нет probe_secret)",
+      diag.get("probeMode") == "bare" and
+      diag.get("ports", {}).get("hy2Installed") is False)
+
+st, _, body = req("/api/panel/stub", cookies=[cookie])
+stub = json.loads(body) if st == 200 else {}
+check("GET /api/panel/stub → 200 {path, html}",
+      st == 200 and "path" in stub and stub.get("html") == "")
+st, _, body = req("/api/panel/stub", "POST",
+                   {"html": "<html>stub</html>"}, cookies=[cookie])
+r = json.loads(body) if st == 200 else {}
+check("POST /api/panel/stub → 200 ok + bytes",
+      st == 200 and r.get("ok") and r.get("bytes") == 17)
+st, _, body = req("/api/panel/stub", cookies=[cookie])
+check("stub roundtrip", json.loads(body).get("html") ==
+      "<html>stub</html>")
+st, _, _ = req("/api/panel/stub", "POST", {"html": "   "},
+                cookies=[cookie])
+check("POST stub пустой → 400", st == 400)
+
 st, _, body = req("/api/status", cookies=[cookie])
-check("/api/status → 200 + version", st == 200 and
-      json.loads(body).get("version") == "1.11.2")
+s = json.loads(body) if st == 200 else {}
+check("status: services.naive.active (контракт апстрима)",
+      st == 200 and s.get("services", {}).get("naive", {}).get("active")
+      is True)
+check("status: system.cpu/ram/disk/uptime/os",
+      isinstance(s.get("system", {}).get("cpuPercent"), int) and
+      "ramUsedMB" in s.get("system", {}) and
+      "diskTotalGB" in s.get("system", {}) and
+      "uptime" in s.get("system", {}) and s.get("system", {}).get("os"))
+check("status: panel.userCount=1, version фронта",
+      s.get("panel", {}).get("userCount") == 1 and
+      s.get("panel", {}).get("version") == "1.11.2")
+check("status: domain из naive state + serverIp",
+      s.get("domain") == "smoke.example" and s.get("serverIp") ==
+      "127.0.0.1")
+
 st, _, body = req("/api/config", cookies=[cookie])
 cfg = json.loads(body)
-check("/api/config → 200", st == 200 and "webPort" in cfg)
+check("/api/config → 200 + плоские поля v83.4",
+      st == 200 and "webPort" in cfg and "mieruPortStart" in cfg and
+      "probeMode" in cfg and "serverIp" in cfg)
 st, _, _ = req("/api/logout", "POST", cookies=[cookie])
 check("logout → 200", st == 200)
 

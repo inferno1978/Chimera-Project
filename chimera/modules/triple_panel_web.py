@@ -25,9 +25,38 @@ triple_panel_state.json) — наружу панель экспонируетс�
     DELETE /api/users/:id            — удалить (везде: VLESS+naive+mieru+TTL+лимит)
     GET    /api/config               — панельные настройки (без секретов)
     POST   /api/config               — language
-    GET    /api/status               — версии + статус сервисов тройки
+    GET    /api/status               — v83.4: контракт апстрима ПОЛНОСТЬЮ
+                                        (services.{naive,mieru,hy2,panel},
+                                        system.{cpu,ram,disk,uptime,os,arch},
+                                        panel.{userCount,version}, domain,
+                                        serverIp, language) — дашборд и
+                                        мониторинг фронта читают эти поля
     GET    /api/apply-status         — исход последнего apply (фронт поллит)
     GET    /api/password/generate    — генератор пароля
+    GET    /api/stats/users          — v83.4: трафик по юзерам (апстрим-контракт:
+                                        users[{uploadMB,downloadMB,usedMB,
+                                        naiveMB,mieruMB,hy2MB,lastSeen}],
+                                        naiveServerTotalMB, naivePerUser);
+                                        источники: `mita get users` (30-дневные
+                                        live-цифры, как у апстрима) → фолбэк
+                                        traffic_accounting (накопительный
+                                        per-user mieru/naive); usedMB —
+                                        квотосчётчик traffic_limits;
+                                        серверный итог Naive — systemd
+                                        IPAccounting caddy-naive
+    GET    /api/settings/hy2         — v83.4: статус Hysteria2 (installed/
+                                        active/port/stack/hy2UserCount);
+                                        управление Hy2 — TUI Химеры (из UI —
+                                        честный 501 с указанием пути)
+    GET    /api/diagnostics          — v83.4: порты слушаются (ss), версия
+                                        caddy-naive, Caddyfile-юзеры,
+                                        mita status/describe, синхронизация
+                                        времени, probe_secret
+    GET/POST /api/panel/stub         — v83.4: заглушка-страница (файл
+                                        /var/www/panel-stub/index.html,
+                                        атомарная запись, лимит 256 KiB) —
+                                        контракт апстрима; раздача —
+                                        nginx-фронт/v2 (webBasePath)
     GET    /api/users/:id/naive-link | mieru-link | universal-config
     GET    /sub/:token               — умная подписка: UA-детект (делегация
                                         subscription.py: base64 / base64_safe /
@@ -57,7 +86,9 @@ v82 (SSE + настройки сервера):
                                         взаимоисключающи — как BUG-150 апстрима)
 
 НЕ реализовано (фронт получит 501 с внятным текстом): федерация, backup
-import/export, hy2-настройки из UI (per-user Hy2 — отдельный проект), WS.
+import/export, управление hy2 из UI (per-user Hy2 — отдельный проект; статус —
+GET работает), external-access/webBasePath из UI (nginx-фронт — TUI-пункт 4),
+WS (заменён SSE-шимом).
 
 ДЕЛЕГИРУЕМЫЕ ПРИМИТИВЫ:
     rest_api.py        — _get_users/_save_users/_sync_* (юзер-мост v4.25)
@@ -66,12 +97,15 @@ import/export, hy2-настройки из UI (per-user Hy2 — отдельны
     ttl_users.py       — expiry
     user_lifecycle.py  — квоты (traffic_limits.json)
     subscription.py    — единая подписка + UA-детект + токены (pepper)
+    traffic_accounting.py — v83.4: накопительный per-user трафик
+                            (mieru — journalctl mita, naiveproxy — access.log)
 """
 from __future__ import annotations
 
 import base64
 import hmac
 import json
+import platform
 import queue
 import re
 import secrets
@@ -101,6 +135,20 @@ _BODY_LIMIT     = 1_048_576  # 1 МБ
 # Юзеры без лимита/даты — что отдавать фронтенду:
 _NO_QUOTA_MB = 0
 _NO_EXPIRY = None
+
+# ── v83.4: бинари/пути для stats/hy2/diagnostics/stub (синхронизированы
+#    с naiveproxy.py / mieru.py / hysteria2_common.py) ────────────────────────
+_MITA_BIN     = Path("/usr/local/bin/mita")
+_CADDY_BIN    = Path("/usr/local/bin/caddy-naive")
+_HY2_BIN      = Path("/usr/local/bin/hysteria")
+_CADDYFILE    = Path("/etc/caddy-naive/Caddyfile")
+_HY2_SERVICE  = "hysteria-server"
+_HY2_UNIT     = Path("/etc/systemd/system/hysteria-server.service")
+_HY2_CONFIG   = Path("/etc/hysteria/config.yaml")
+_HY2_STATE    = Path("/var/lib/xray-installer/state.json")
+_MIERU_STATE  = Path("/var/lib/xray-installer/mieru.json")
+_STUB_FILE    = Path("/var/www/panel-stub/index.html")
+_STUB_LIMIT   = 256 * 1024  # как у апстрима
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  STATE
@@ -765,6 +813,447 @@ def _logs_response(service: str, lines: int) -> "tuple[int, dict]":
     if not unit:
         return 400, {"error": "Unknown service"}
     return 200, {"logs": _journal_tail(unit, lines)}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  v83.4: /api/stats/users + /api/settings/hy2 + /api/diagnostics + /api/panel/stub
+#  (все источники изолированы — один умерший источник НЕ зануляет остальные,
+#   паттерн BUG-160 апстрима)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _run_cmd(cmd: list, timeout: int = 6) -> str:
+    """subprocess-обёртка: любой провал → '' (никогда не бросает)."""
+    import subprocess
+    try:
+        r = subprocess.run(cmd, capture_output=True, check=False,
+                           timeout=timeout)
+        return r.stdout.decode(errors="replace").strip()
+    except Exception:
+        return ""
+
+_SIZE_RE = re.compile(r"^([\d.]+)\s*([KMGT]?I?B)$", re.I)
+
+def _to_mb(v: float, unit: str) -> float:
+    """Размер+единица → МБ (IEC и десятичные написания, как toMB апстрима)."""
+    u = (unit or "").upper()
+    if u == "B":
+        return v / 1048576
+    if u in ("KB", "KIB"):
+        return v / 1024
+    if u in ("GB", "GIB"):
+        return v * 1024
+    if u in ("TB", "TIB"):
+        return v * 1048576
+    return v  # MB / MiB
+
+def _mita_live_users() -> dict:
+    """`mita get users` → {username: {uploadMB, downloadMB, usedMB, lastSeen}}.
+
+    Таблица mita (Bug 78 апстрима): User LastActive 1DayDown 1DayUp
+    30DaysDown 30DaysUpload — берём 30-дневные колонки (последние 4 = размеры).
+    Бинаря нет / пустой вывод / мусор → {} (вызывающий фолбэчится на
+    traffic_accounting).
+    """
+    try:
+        if not _MITA_BIN.exists():
+            return {}
+    except OSError:
+        return {}
+    raw = _run_cmd([str(_MITA_BIN), "get", "users"], timeout=8)
+    out: dict = {}
+    for raw_line in (raw or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # заголовок и разделители пропускаем
+        if re.match(r"^user\b", line, re.I) or re.match(r"^[-=\s]+$", line):
+            continue
+        cols = line.split()
+        if len(cols) < 6:
+            continue
+        username, last_active = cols[0], cols[1]
+        vals = []
+        for c in cols[-4:]:
+            m = _SIZE_RE.match(c)
+            if not m:
+                vals = None
+                break
+            vals.append(_to_mb(float(m.group(1)), m.group(2)))
+        if not vals:
+            continue
+        _d1, _u1, d30, u30 = vals
+        out[username] = {
+            "uploadMB": round(u30, 2),
+            "downloadMB": round(d30, 2),
+            "usedMB": round(u30 + d30, 2),
+            "lastSeen": last_active
+            if re.match(r"^\d{4}-\d{2}-\d{2}T", last_active) else None,
+        }
+    return out
+
+def _accounting_user_bytes(username: str) -> dict:
+    """traffic_accounting: {protocol: bytes} по юзеру (mieru/naiveproxy/…)."""
+    if not username:
+        return {}
+    try:
+        from chimera.modules.traffic_accounting import get_all_accumulated
+        return get_all_accumulated(username) or {}
+    except Exception:
+        return {}
+
+def _naive_server_total_mb() -> float:
+    """Серверный итог Naive (МБ) из systemd IPAccounting caddy-naive.
+
+    Единственный надёжный источник по Naive: forward_proxy захватывает
+    CONNECT-туннели и access.log их не пишет (BUG-163 апстрима).
+    """
+    out = _run_cmd(["systemctl", "show", "caddy-naive",
+                    "-p", "IPIngressBytes", "-p", "IPEgressBytes"],
+                   timeout=5)
+    total = 0
+    for line in out.splitlines():
+        k, _, v = line.partition("=")
+        if k.strip() in ("IPIngressBytes", "IPEgressBytes"):
+            try:
+                total += int(v.strip() or 0)
+            except ValueError:
+                pass
+    return round(total / 1048576, 2)
+
+def _stats_users_payload() -> dict:
+    """GET /api/stats/users — контракт апстрима {users, naiveServerTotalMB,
+    naivePerUser}.
+
+    Источники (каждый изолирован): `mita get users` (30-дневные live-цифры,
+    как у апстрима) → фолбэк traffic_accounting (накопительный per-user);
+    naive per-user — access.log-аккаунтинг Химеры (best-effort: CONNECT не
+    пишется, up/down нет → в download, конвенция Subscription-Userinfo);
+    usedMB — квотосчётчик traffic_limits (авторитет для полосы квоты),
+    при отсутствии записи — сумма up+down; hy2 — per-exit-node в Chimera,
+    per-user Hy2 отложен → честный 0.
+    """
+    rows = _assemble_panel_users()
+    limits = _traffic_limits()
+    live = _mita_live_users()
+    users = []
+    for row in rows:
+        email = row.get("email", "")
+        prefix = (row.get("username")
+                  or (email.split("@")[0] if email else "")) or ""
+        acc = _accounting_user_bytes(prefix)
+        naive_mb = round((acc.get("naiveproxy") or 0) / 1048576, 2)
+        lv = live.get(prefix) or {}
+        if lv:
+            mieru_mb = round((lv.get("uploadMB") or 0)
+                             + (lv.get("downloadMB") or 0), 2)
+            up = lv.get("uploadMB") or 0.0
+            down = lv.get("downloadMB") or 0.0
+            last_seen = lv.get("lastSeen")
+        else:
+            mieru_mb = round((acc.get("mieru") or 0) / 1048576, 2)
+            up, down, last_seen = 0.0, mieru_mb, None
+        # naive: раздельного up/down нет → весь объём в download
+        down += naive_mb
+        hy2_mb = 0.0
+        lim = limits.get(email) or {}
+        used = row.get("usedMB") or 0.0
+        if not (lim.get("used_bytes") or lim.get("limit_gb")):
+            used = round(up + down, 2)
+        users.append({
+            "username": row.get("username"),
+            "email": email,
+            "expiry": row.get("expiry"),
+            "protocols": row.get("protocols") or [],
+            "quotaMB": row.get("quotaMB") or 0,
+            "usedMB": round(used, 2),
+            "uploadMB": round(up, 2),
+            "downloadMB": round(down, 2),
+            "naiveMB": naive_mb,
+            "mieruMB": mieru_mb,
+            "hy2MB": hy2_mb,
+            "lastSeen": last_seen,
+        })
+    return {"users": users,
+            "naiveServerTotalMB": _naive_server_total_mb(),
+            "naivePerUser": False}
+
+# ── v83.4: Hysteria2 статус ──────────────────────────────────────────────
+
+def _hy2_installed() -> bool:
+    """Юнит есть / конфиг есть / секция state включена."""
+    try:
+        if _HY2_UNIT.exists():
+            return True
+    except OSError:
+        pass
+    try:
+        if _HY2_CONFIG.exists():
+            return True
+    except OSError:
+        pass
+    try:
+        st = json.loads(_HY2_STATE.read_text())
+        return bool((st.get("hysteria2") or {}).get("enabled"))
+    except Exception:
+        return False
+
+def _hy2_port() -> int:
+    """listen-порт из /etc/hysteria/config.yaml → state → 443.
+
+    Форматы: `listen: :443`, `listen: 0.0.0.0:443`, `listen: 8443`.
+    Порт — ПОСЛЕДНЕЕ число строки (иначе 0.0.0.0:443 отдал бы первый «0»).
+    """
+    try:
+        for line in _HY2_CONFIG.read_text(errors="replace").splitlines():
+            if not re.match(r"^listen:", line.strip()):
+                continue
+            nums = re.findall(r"\d+", line.split("#", 1)[0])
+            if nums:
+                return int(nums[-1])
+    except Exception:
+        pass
+    try:
+        st = json.loads(_HY2_STATE.read_text())
+        ports = (st.get("hysteria2") or {}).get(
+            "firewall", {}).get("udp_ports") or []
+        if ports:
+            return int(ports[0])
+    except Exception:
+        pass
+    return 443
+
+def _hy2_view() -> dict:
+    installed = _hy2_installed()
+    return {
+        "installed": installed,
+        "active": installed and _svc_active(_HY2_SERVICE),
+        "port": _hy2_port(),
+        "stack": {
+            "naive": bool(_naive_state().get("users")),
+            "mieru": bool(_mieru_state().get("users")),
+            "hy2": installed,
+        },
+        # per-user Hy2 в Chimera нет (Hy2 — per-exit-node, решено юзером);
+        # честный 0 вместо выдуманных цифр
+        "hy2UserCount": 0,
+        "chimeraNote": "Управление Hysteria2 — меню Химеры; per-user Hy2 не "
+                       "поддерживается (exit-node архитектура)",
+    }
+
+# ── v83.4: системные метрики для /api/status (контракт апстрима) ─────────
+
+def _os_pretty() -> str:
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if line.startswith("PRETTY_NAME="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except Exception:
+        pass
+    return ""
+
+def _uptime_sec() -> int:
+    try:
+        return int(float(open("/proc/uptime").read().split()[0]))
+    except Exception:
+        return 0
+
+def _disk_gb() -> "tuple[int, int]":
+    try:
+        import shutil
+        u = shutil.disk_usage("/")
+        return round(u.used / 1073741824), round(u.total / 1073741824)
+    except Exception:
+        return 0, 0
+
+def _local_ip() -> str:
+    """Локальный IP без сетевого трафика (UDP connect пакет не шлёт)."""
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return ""
+
+_VERSION_CACHE: dict = {"ts": 0.0, "naive": "", "mieru": "", "hy2": ""}
+
+def _cached_versions() -> dict:
+    """Версии бинарей (60с кэш — не спавним процессы на каждый поллинг)."""
+    if time.time() - _VERSION_CACHE["ts"] < 60:
+        return _VERSION_CACHE
+    def _first_line(p: Path) -> str:
+        out = _run_cmd([str(p), "version"], timeout=6)
+        return (out.splitlines() or [""])[0].strip() if out else ""
+    vals = {"ts": time.time(), "naive": "", "mieru": "", "hy2": ""}
+    try:
+        if _CADDY_BIN.exists():
+            vals["naive"] = _first_line(_CADDY_BIN)
+    except OSError:
+        pass
+    try:
+        if _MITA_BIN.exists():
+            vals["mieru"] = _first_line(_MITA_BIN)
+    except OSError:
+        pass
+    try:
+        if _HY2_BIN.exists() and _hy2_installed():
+            vals["hy2"] = _first_line(_HY2_BIN)
+    except OSError:
+        pass
+    _VERSION_CACHE.update(vals)
+    return _VERSION_CACHE
+
+def _status_view_payload() -> dict:
+    """GET /api/status — контракт апстрима (loadDashboard/refreshStats)."""
+    state = _load_state()
+    from chimera.modules.triple_panel import _PORT_FRONT_VERSION
+    naive = _naive_state()
+    mieru = _mieru_state()
+    hy2_inst = _hy2_installed()
+    ver = _cached_versions()
+    ram_used, ram_total = _read_ram_mb()
+    disk_used, disk_total = _disk_gb()
+    try:
+        core_domain = (getattr(_core_module_cached(), "PARAM_DOMAIN", "")
+                       or "")
+    except Exception:
+        core_domain = ""
+    domain = core_domain or (naive.get("domain") or "")
+    try:
+        user_count = len(_assemble_panel_users())
+    except Exception:
+        user_count = 0
+    return {
+        "services": {
+            "naive": {"active": _svc_active("caddy-naive"),
+                      "version": ver["naive"]},
+            "mieru": {"active": _svc_active("mita"),
+                      "version": ver["mieru"]},
+            "hy2": {"installed": hy2_inst,
+                    "active": hy2_inst and _svc_active(_HY2_SERVICE),
+                    "version": ver["hy2"] if hy2_inst else "",
+                    "port": _hy2_port()},
+            "panel": {"active": True},
+        },
+        "system": {
+            "cpuPercent": round(_read_cpu_percent()),
+            "ramUsedMB": ram_used,
+            "ramTotalMB": ram_total,
+            "diskUsedGB": disk_used,
+            "diskTotalGB": disk_total,
+            "uptime": _uptime_sec(),
+            "os": _os_pretty(),
+            "arch": platform.machine(),
+        },
+        "panel": {
+            "userCount": user_count,
+            "version": state.get("front_version", "") or _PORT_FRONT_VERSION,
+        },
+        "domain": domain,
+        "serverIp": _local_ip(),
+        "language": state.get("language", "ru"),
+    }
+
+# ── v83.4: /api/diagnostics ──────────────────────────────────────────────
+
+def _port_listening(port: int) -> bool:
+    """Слушается ли порт (TCP/UDP) — ss, как у апстрима."""
+    if not port:
+        return False
+    out = _run_cmd(["ss", "-H", "-tlnup", f"sport = :{int(port)}"],
+                   timeout=3)
+    return bool(out) and f":{int(port)}" in out
+
+def _time_synced() -> bool:
+    out = _run_cmd(["timedatectl", "show", "-p", "NTPSynchronized",
+                    "--value"], timeout=4)
+    return out.strip().lower() == "yes"
+
+def _caddyfile_user_count() -> int:
+    """Число basic_auth-директив в Caddyfile (юзеры Naive)."""
+    try:
+        text = _CADDYFILE.read_text(errors="replace")
+    except Exception:
+        return 0
+    return len(re.findall(r"^\s*basic_auth\s+\S+\s+\S+", text, re.M))
+
+def _diagnostics_payload() -> dict:
+    naive = _naive_state()
+    mieru = _mieru_state()
+    naive_port = int(naive.get("port", 443) or 443)
+    mieru_start = int(mieru.get("port_start", 2012) or 2012)
+    mieru_end = int(mieru.get("port_end", 2022) or 2022)
+    hy2_inst = _hy2_installed()
+    hy2_port = _hy2_port()
+    ver = _cached_versions()
+    try:
+        caddy_exists = _CADDYFILE.exists()
+    except OSError:
+        caddy_exists = False
+    probe = (naive.get("probe_secret") or "").strip()
+    mieru_ports_listening = [p for p in (mieru_start, mieru_end)
+                             if _port_listening(p)]
+    return {
+        "ports": {
+            "naive": _port_listening(naive_port),
+            "mieru": _port_listening(mieru_start),
+            "mieruPorts": mieru_ports_listening,
+            # Hy2 — UDP; ss -tlnup покрывает и его
+            "hy2": hy2_inst and _port_listening(hy2_port),
+            "hy2Port": hy2_port,
+            "hy2Installed": hy2_inst,
+        },
+        "naiveVersionOk": bool(ver["naive"]),
+        "naiveVersion": ver["naive"],
+        "naiveConfigExists": caddy_exists,
+        # htpasswd убран апстримом в v1.2.3 (юзеры в Caddyfile) — совместимость
+        "htpasswdExists": False,
+        "htpasswdUsers": 0,
+        "caddyfileExists": caddy_exists,
+        "caddyfileUsers": _caddyfile_user_count(),
+        "mitaStatus": _run_cmd([str(_MITA_BIN), "status"], timeout=8)
+        if _MITA_BIN.exists() else "",
+        "mitaConfig": _run_cmd([str(_MITA_BIN), "describe", "config"],
+                               timeout=8) if _MITA_BIN.exists() else "",
+        "timeSynced": _time_synced(),
+        "mitaStateFile": str(_MIERU_STATE),
+        "probeSecretSet": bool(probe),
+        "probeMode": "secret" if probe else "bare",
+    }
+
+# ── v83.4: /api/panel/stub (заглушка-страница) ────────────────────────────
+
+def _stub_get() -> dict:
+    html = ""
+    try:
+        html = _STUB_FILE.read_text(errors="replace")
+    except Exception:
+        pass
+    return {"path": str(_STUB_FILE), "html": html}
+
+def _stub_set(html) -> "tuple[int, dict]":
+    """POST /api/panel/stub — атомарная запись (tmp + replace), 256 KiB."""
+    if not isinstance(html, str):
+        html = ""
+    # артефакт буфера обмена и BOM — как у апстрима
+    html = html.lstrip("\ufeff")
+    html = re.sub(r"^Copy(?=\s*<)", "", html)
+    if not html.strip():
+        return 400, {"error": "Stub HTML must not be empty"}
+    data = html.encode("utf-8")
+    if len(data) > _STUB_LIMIT:
+        return 400, {"error": "Stub HTML too large (max 256 KiB)"}
+    try:
+        _STUB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _STUB_FILE.with_name(_STUB_FILE.name + ".new")
+        tmp.write_text(html, encoding="utf-8")
+        tmp.chmod(0o644)
+        tmp.replace(_STUB_FILE)  # атомарно — нет полу-записанной заглушки
+    except Exception as e:
+        return 500, {"error": f"Failed to write stub file: {e}"}
+    return 200, {"ok": True, "path": str(_STUB_FILE), "bytes": len(data)}
 
 # ── смена портов протоколов (port_registry + rebuild + откат) ─────────────
 
@@ -1435,7 +1924,7 @@ class _TripleHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/status":
-            self._send_json(self._status_view())
+            self._send_json(_status_view_payload())
             return
 
         if path == "/api/apply-status":
@@ -1446,6 +1935,33 @@ class _TripleHandler(BaseHTTPRequestHandler):
         if path == "/api/password/generate":
             from chimera.modules.proto_common import proto_gen_password
             self._send_json({"password": proto_gen_password()})
+            return
+
+        # v83.4: трафик по юзерам (вкладки Пользователи/Мониторинг)
+        if path == "/api/stats/users":
+            self._send_json(_stats_users_payload())
+            return
+
+        # v83.4: статус Hysteria2 (вкладка Настройки)
+        if path == "/api/settings/hy2":
+            self._send_json(_hy2_view())
+            return
+
+        # v83.4: диагностика (вкладка Диагностика)
+        if path == "/api/diagnostics":
+            self._send_json(_diagnostics_payload())
+            return
+
+        # v83.4: заглушка-страница (вкладка Настройки)
+        if path == "/api/panel/stub":
+            self._send_json(_stub_get())
+            return
+
+        # v83.4: генерация webBasePath — фронт вызывает перед Apply;
+        # раздача base-path — v2, но генератор честный
+        if path == "/api/panel/webbasepath/generate":
+            import secrets as _secrets
+            self._send_json({"webBasePath": _secrets.token_urlsafe(8)})
             return
 
         # v82: SSE-стрим live-событий (вместо WS апстрима)
@@ -1595,6 +2111,26 @@ class _TripleHandler(BaseHTTPRequestHandler):
             self._send_json(payload, status)
             return
 
+        # v83.4: заглушка-страница — атомарная запись
+        if path == "/api/panel/stub":
+            body = self._read_body()
+            if body is None:
+                self._send_json({"error": "Payload Too Large"}, 413)
+                return
+            status, payload = _stub_set((body or {}).get("html"))
+            self._send_json(payload, status)
+            return
+
+        # v83.4: мутации Hy2 из UI — честный отказ с указанием пути в TUI
+        if path in ("/api/settings/hy2/install", "/api/settings/hy2-port",
+                    "/api/settings/hy2/enroll-all"):
+            self._send_json({
+                "error": "Управление Hysteria2 в Chimera — через TUI "
+                         "(меню Hysteria2). Панель показывает статус; "
+                         "per-user Hy2 не поддерживается.",
+            }, 501)
+            return
+
         self._send_json({"error": f"not implemented by Chimera port: {path}"},
                         501)
 
@@ -1637,53 +2173,46 @@ class _TripleHandler(BaseHTTPRequestHandler):
             core_domain = getattr(core, "PARAM_DOMAIN", "") or ""
         except Exception:
             pass
+        domain = core_domain or (naive.get("domain") or "")
+        probe = (naive.get("probe_secret") or "").strip()
+        try:
+            cascade_enabled = bool(_cascade_view().get("enabled"))
+        except Exception:
+            cascade_enabled = False
+        try:
+            warp_enabled = bool(_warp_view().get("enabled"))
+        except Exception:
+            warp_enabled = False
         return {
             "version": state.get("front_version", "") or _PORT_FRONT_VERSION,
             "portVersion": _PORT_FRONT_VERSION,
             "language": state.get("language", "ru"),
-            "domain": core_domain,
+            "domain": domain,
+            "serverIp": _local_ip(),
+            # v83.4: плоские поля апстрима (loadSettings читает их без
+            # вложенности) + вложенный mieruPorts (наш v81) для обратной
+            # совместимости
             "naivePort": naive.get("port", 443),
+            "mieruPortStart": mieru.get("port_start", 2012),
+            "mieruPortEnd": mieru.get("port_end", 2022),
             "mieruPorts": {
                 "start": mieru.get("port_start", 2012),
                 "end": mieru.get("port_end", 2022),
             },
+            # probe_resistance Naive (маска в форме настроек апстрима)
+            "probeSecret": probe,
+            "probeMode": "secret" if probe else "bare",
+            "fakeSiteUrl": naive.get("fake_url", ""),
+            "cascadeEnabled": cascade_enabled,
+            "warpEnabled": warp_enabled,
             "protocols": {
                 "naive": bool(naive.get("users")),
                 "mieru": bool(mieru.get("users")),
-                "hy2": self._hy2_active(),
+                "hy2": _hy2_installed() and _svc_active(_HY2_SERVICE),
             },
             "webPort": int(state.get("web_port", 9760)),
             "adminUser": state.get("admin_user", "admin"),
             "upstreamRepo": "cwash797-cmd/Panel-Naive-Mieru-by-RIXXX",
-        }
-
-    def _hy2_active(self) -> bool:
-        import subprocess
-        try:
-            r = subprocess.run(["systemctl", "is-active", "hysteria-server"],
-                               capture_output=True, check=False)
-            return r.returncode == 0 and r.stdout.decode().strip() == "active"
-        except Exception:
-            return False
-
-    def _status_view(self) -> dict:
-        import subprocess
-        from chimera.modules.triple_panel import _PORT_FRONT_VERSION
-        state = _load_state()
-        services = {}
-        for svc in ("caddy-naive", "mita", "hysteria-server", "xray"):
-            try:
-                r = subprocess.run(["systemctl", "is-active", svc],
-                                   capture_output=True, check=False)
-                services[svc] = r.returncode == 0 and r.stdout.decode().strip() == "active"
-            except Exception:
-                services[svc] = False
-        return {
-            "version": state.get("front_version", ""),
-            "portVersion": _PORT_FRONT_VERSION,
-            "services": services,
-            "webPort": int(state.get("web_port", 9760)),
-            "uptimeSec": int(time.time()),
         }
 
     def _user_link(self, email: str, kind: str) -> "tuple[int, dict]":

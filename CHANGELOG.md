@@ -2,6 +2,73 @@
 
 ---
 
+## FEAT(panel/triple): v83.4 — закрыты 4×501 вкладок (Пользователи/Настройки/Мониторинг/Диагностика) + контракт /api/status — 9 сентября 2026
+
+**Кейс:** юзер прислал 4 скриншота с живой панели: красные тосты
+«not implemented by Chimera port» — Пользователи (`/api/stats/users`),
+Настройки (`/api/panel/stub` + `/api/settings/hy2`), Мониторинг
+(`/api/stats/users`), Диагностика (`/api/diagnostics`). Плюс латентная
+проблема, которую тосты маскировали: наш `/api/status` отдавал плоский
+`{services: {name: bool}}`, а фронт ждёт контракт апстрима
+(`services.naive.active`, `system.cpuPercent`, `panel.userCount`) —
+дашборд/мониторинг рендерили бы undefined даже после починки stats.
+
+**Сделано:**
+- **GET /api/stats/users** (контракт апстрима: `users[]`, `naiveServerTotalMB`,
+  `naivePerUser`): источники изолированы по-одному (паттерн BUG-160 — один
+  умерший источник НЕ зануляет остальные): `mita get users` (30-дневные
+  live-цифры и lastSeen, парсер таблицы апстрима) → фолбэк
+  `traffic_accounting.get_all_accumulated` (накопительный per-user
+  mieru/naive); naive без раздельного up/down → весь в download (конвенция
+  Subscription-Userinfo); `usedMB` — квотосчётчик traffic_limits (тот же
+  источник, что полоса квоты в Мониторинге), при отсутствии записи — сумма
+  up+down; hy2MB=0 честно (per-exit-node архитектура); серверный итог Naive —
+  systemd IPAccounting caddy-naive (CONNECT-туннели access.log не пишет).
+- **GET /api/settings/hy2**: installed (юнит/конфиг/state-секция) + active
+  (systemctl) + port (последнее число `listen:`-строки config.yaml —
+  `0.0.0.0:443` больше не парсится как «0»; фолбэк firewall.udp_ports → 443)
+  + stack + hy2UserCount=0. Мутации из UI (install/hy2-port/enroll) — честный
+  501 с указанием пути в TUI. Добавлен и честный
+  `GET /api/panel/webbasepath/generate`.
+- **GET /api/diagnostics**: порты (ss -tlnup: naive/mieru/mieruPorts/hy2),
+  версия caddy-naive, Caddyfile-юзеры (basic_auth-директивы), `mita status`/
+  `mita describe config`, timeSynced (timedatectl), probe_secret/probeMode,
+  mitaStateFile.
+- **GET/POST /api/panel/stub**: файл `/var/www/panel-stub/index.html`,
+  атомарная запись (tmp+replace, chmod 644), лимит 256 KiB, срез BOM и
+  «Copy»-артефакта — контракт апстрима 1:1 (раздача — nginx-фронт/webBasePath,
+  v2).
+- **/api/status → контракт апстрима ПОЛНОСТЬЮ:**
+  `services.{naive,mieru}.{active,version}` (версии бинарей, кэш 60с),
+  `services.hy2.{installed,active,version,port}`, `services.panel.active`,
+  `system.{cpuPercent,ramUsedMB,ramTotalMB,diskUsedGB,diskTotalGB,uptime,os,arch}`
+  (/proc + /etc/os-release), `panel.{userCount,version}`, domain (PARAM_DOMAIN
+  → naive-домен), serverIp (UDP-connect без трафика), language.
+- **/api/config: плоские поля апстрима** (loadSettings читает их без
+  вложенности): `mieruPortStart/End` (вложенный `mieruPorts` сохранён для
+  обратной совместимости), `serverIp`, `probeSecret`/`probeMode`,
+  `fakeSiteUrl`, `cascadeEnabled`, `warpEnabled`, домен с naive-фолбэком.
+
+**Тесты:** 151 passed (+33: _to_mb-единицы, парсер mita на реальной таблице
+(заголовки/мусор/«-»-дата/GiB), IPAccounting-парсер, merge-логика payload
+(live приоритетнее accounting, used из квот, naive→download), hy2-view
+(unit/config/state-источники installed, варианты listen:, udp_ports),
+диагностика (ключи, basic_auth-подсчёт, probe-режимы, ss-парсер), stub
+(roundtrip, 400 пустой/лимит, BOM/Copy, атомарность без .new-остатка),
+status-payload (контракт апстрима: services/system/panel/domain/serverIp,
+hy2-блок при installed и без). Соседи: 307 passed + 14 subtests
+(rest_api+admin_panel+naiveproxy+mieru+port_registry+triple) и 29 passed
+(traffic_collectors+hysteria2_common) — поллюции нет. Смоук 60→**75**: stats
+(accounting-фолбэк, форма ответа), hy2 (статус + 501 мутации), диагностика,
+stub roundtrip, статус-контракт, плоские поля конфига.
+
+**Совместимость:** таблица маршрутов API — только добавления; старых полей
+/api/status не осталось (фронт их не читал — читал апстрим-контракт);
+web-модуль/state не мигрируются. На сервере юзера: `git pull` + `systemctl
+restart triple-web` — все четыре вкладки оживают без реинсталла фронта.
+
+---
+
 ## FEAT(panel/triple): авто-домен для Let's Encrypt v83.3 — как в b4, руками вводить не нужно — 9 сентября 2026
 
 **Кейс:** юзер включал nginx front для панели: выбор TLS → «1» (Let's
