@@ -96,6 +96,12 @@ DEFAULT_NGINX_PORT = 9761
 _UPSTREAM_REPO     = "cwash797-cmd/Panel-Naive-Mieru-by-RIXXX"
 _UPSTREAM_API_LATEST = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases/latest"
 _UPSTREAM_VERSIONS_URL = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases"
+# v83.1: апстрим не тегает релизы — версия живёт в файле VERSION ветки main.
+# raw — первоисточник, jsDelivr — зеркало (доступен при блокировке raw).
+_UPSTREAM_VERSION_URLS = (
+    f"https://raw.githubusercontent.com/{_UPSTREAM_REPO}/main/VERSION",
+    f"https://cdn.jsdelivr.net/gh/{_UPSTREAM_REPO}@main/VERSION",
+)
 _PORT_FRONT_VERSION  = "1.11.2"   # версия порта: фронт+контракт синхронизированы
 _UPSTREAM_CACHE_TTL  = 300        # сек (5 мин) — паттерн _b4_latest_cache
 
@@ -244,7 +250,26 @@ def _service_active() -> bool:
     return r.returncode == 0 and r.stdout.decode().strip() == "active"
 
 def _detect_upstream_version(timeout: int = 10) -> str:
-    """Последний СТАБИЛЬНЫЙ релиз апстрима (GitHub API). '' при ошибке."""
+    """Версия апстрима. '' при ошибке.
+
+    v83.1: GitHub API /releases/latest 404-ит вечно — апстрим НЕ делает
+    релизов и НЕ тегает репо (git ls-remote --tags пуст). Канонический
+    источник версии — файл VERSION в корне ветки main (+ panel/package.json,
+    синхронизируются scripts/sync-version.sh). Лестница: raw → jsDelivr
+    (зеркало, работает при блокировке raw) → GitHub API (резерв на случай
+    появления тегов).
+    """
+    for url in _UPSTREAM_VERSION_URLS:
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "chimera-triple-panel"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                ver = _strip_v(resp.read().decode(errors="replace").strip())
+            if re.fullmatch(r"\d+\.\d+\.\d+", ver or ""):
+                return ver
+        except Exception:
+            continue
+    # резерв: вдруг апстрим начнёт делать GitHub-релизы
     try:
         req = urllib.request.Request(
             _UPSTREAM_API_LATEST,
@@ -301,22 +326,27 @@ def _update_header_row() -> str:
 #  СКАЧИВАНИЕ ФРОНТА (download_manager, требование №3)
 # ══════════════════════════════════════════════════════════════════════════════
 def _front_mirror_urls(filename: str) -> list:
-    """Кандидаты URL тарболла исходников апстрима под тег из filename.
+    """Лестница зеркал для тарболла исходников апстрима.
 
-    filename = 'triple-panel-front-v1.11.2.tar.gz' → тег 'v1.11.2'.
-    jsDelivr/statically не раздают тарболлы — только GitHub-архивы.
+    v83.1: апстрим НЕ тегает релизы (git ls-remote --tags пуст) — теговые
+    архивы 404-или, единственный живой источник — архив ветки main
+    (проверено: codeload 200, ~430 КБ). Поэтому: сначала тег vX.Y.Z
+    (на случай, что апстрим начнёт тегать), затем гарантированная ветка.
+    jsDelivr/statically тарболлы не раздают — только GitHub-архивы.
     """
+    urls = []
     m = re.search(r"v(\d+\.\d+\.\d+)", filename)
-    tag = f"v{m.group(1)}" if m else "latest"
-    if tag == "latest":
-        return [
-            f"https://github.com/{_UPSTREAM_REPO}/archive/refs/heads/main.tar.gz",
-            f"https://codeload.github.com/{_UPSTREAM_REPO}/tar.gz/refs/heads/main",
+    if m:
+        tag = f"v{m.group(1)}"
+        urls += [
+            f"https://github.com/{_UPSTREAM_REPO}/archive/refs/tags/{tag}.tar.gz",
+            f"https://codeload.github.com/{_UPSTREAM_REPO}/tar.gz/refs/tags/{tag}",
         ]
-    return [
-        f"https://github.com/{_UPSTREAM_REPO}/archive/refs/tags/{tag}.tar.gz",
-        f"https://codeload.github.com/{_UPSTREAM_REPO}/tar.gz/refs/tags/{tag}",
+    urls += [
+        f"https://github.com/{_UPSTREAM_REPO}/archive/refs/heads/main.tar.gz",
+        f"https://codeload.github.com/{_UPSTREAM_REPO}/tar.gz/refs/heads/main",
     ]
+    return urls
 
 def _front_spec(version: str):
     """PackageSpec для фронтенда апстрима (download_manager)."""
@@ -337,6 +367,10 @@ def _extract_front(tar_path: Path, dest: Path) -> bool:
     Path-traversal guard: члены архива с '..' или абсолютными путями
     отбрасываются (tarfile extractall filter — актуально для Python 3.12+,
     здесь ручной guard для совместимости с 3.8+).
+
+    v83.1: попутно захватывает корневой VERSION апстрима → dest/VERSION.upstream
+    (архив ветки main может быть новее запрошенной версии — книга ведётся
+    по фактической версии вендореного фронта, а не по запрошенной).
     """
     try:
         dest.mkdir(parents=True, exist_ok=True)
@@ -346,6 +380,14 @@ def _extract_front(tar_path: Path, dest: Path) -> bool:
                 # нормализация: ведущий ./ и первый компонент (repo-tag)
                 parts = [p for p in name.split("/") if p not in ("", ".")]
                 if len(parts) < 3:
+                    # <repo-root>/VERSION — фактическая версия апстрима
+                    if (len(parts) == 2 and parts[1] == "VERSION"
+                            and member.isfile()):
+                        try:
+                            with tar.extractfile(member) as src:
+                                (dest / "VERSION.upstream").write_bytes(src.read())
+                        except Exception:
+                            pass
                     continue
                 if ".." in parts or name.startswith("/"):
                     continue
@@ -372,6 +414,16 @@ def _extract_front(tar_path: Path, dest: Path) -> bool:
     except Exception as e:
         _err(f"Распаковка фронта: {e}")
         return False
+
+def _front_actual_version(www_dir: "Optional[Path]" = None) -> str:
+    """Фактическая версия вендореного фронта (VERSION.upstream). '' если нет."""
+    d = www_dir or _WWW_DIR
+    try:
+        ver = _strip_v(
+            (d / "VERSION.upstream").read_text(encoding="utf-8").strip())
+        return ver if re.fullmatch(r"\d+\.\d+\.\d+", ver or "") else ""
+    except Exception:
+        return ""
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  v82: SSE-ШИМ (фронт-патч поверх апстримного app.js)
@@ -509,7 +561,12 @@ def _inject_sse_shim(www_dir: Path) -> bool:
         return False
 
 def _fetch_front(version: str, quiet: bool = False) -> bool:
-    """Скачивает и вендорит фронт версии version → _WWW_DIR (atomic swap)."""
+    """Скачивает и вендорит фронт версии version → _WWW_DIR (atomic swap).
+
+    v83.1: зеркало может отдать архив ветки main (новее запрошенной
+    version) — фактическая версия вендореного фронта доступна после
+    успеха через _front_actual_version().
+    """
     from chimera.modules.download_manager import fetch_package
     if not quiet:
         _info(f"Скачиваю фронтенд апстрима v{_strip_v(version)}...")
@@ -532,7 +589,13 @@ def _fetch_front(version: str, quiet: bool = False) -> bool:
         pass
     # v82: SSE-шим поверх EventSource (подменяет WS апстрима во фронте)
     _inject_sse_shim(_WWW_DIR)
-    return _WWW_DIR.exists() and (_WWW_DIR / "index.html").exists()
+    ok = _WWW_DIR.exists() and (_WWW_DIR / "index.html").exists()
+    if ok and not quiet:
+        actual = _front_actual_version()
+        if actual and _version_key(actual) != _version_key(version):
+            _info(f"Зеркало отдало фронт ветки main — фактическая версия "
+                  f"v{actual}.")
+    return ok
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВЫБОР ПОРТА (требование №5: юзер выбирает порт) + port_registry (№2)
@@ -654,12 +717,13 @@ def _install() -> bool:
         _box_row(f"  {DIM}Ручной путь: скачайте тарболл в /root/ и повторите.{NC}")
         _box_bot(); _pause()
         return False
-    _box_ok(f"Фронтенд v{upstream} вендорен → {_WWW_DIR}")
+    _box_ok(f"Фронтенд v{_front_actual_version() or upstream} вендорен → {_WWW_DIR}")
 
     # 3. Креды (пароль показывается ОДИН раз)
     state = _load_state()
     state["web_port"] = port
-    state["front_version"] = upstream
+    # v83.1: фактическая версия вендореного фронта (зеркало могло отдать main)
+    state["front_version"] = _front_actual_version() or upstream
     state["language"] = state.get("language", "ru")
     try:
         admin_user = proto_ask(
@@ -784,12 +848,14 @@ def _update_front() -> bool:
             _box_ok("Откат выполнен, предыдущий фронт восстановлен.")
         _pause()
         return False
-    state["front_version"] = upstream
+    state["front_version"] = _front_actual_version() or upstream
     _save_state(state)
     if backup and backup.exists():
         shutil.rmtree(backup, ignore_errors=True)
-    _box_ok(f"Фронт обновлён: v{current or '—'} → v{upstream}")
-    _log("INFO", f"front updated {current} -> {upstream}")
+    _box_ok(f"Фронт обновлён: v{current or '—'} → "
+            f"v{_front_actual_version() or upstream}")
+    _log("INFO", f"front updated {current} -> "
+                 f"{_front_actual_version() or upstream}")
     _pause()
     return True
 
