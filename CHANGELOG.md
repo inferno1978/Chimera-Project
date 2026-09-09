@@ -2,6 +2,74 @@
 
 ---
 
+## FEAT(mieru/subscription): v86 — BOTH (TCP+UDP) в standalone, mieru в подписке для nyamebox, домен в mierus:// — 9 сентября 2026
+
+**Кейс:** три вопроса юзера после v85. (1) «Если выбираешь TCP и UDP —
+ссылки должны генерироваться и на TCP, и на UDP, сейчас кривовато, на
+один протокол; проверить в обоих вариантах установки». (2) «Ссылки и
+конфиги для nyamebox учтут изменения v85?» (3) Хочу переделать
+выданный ранее Karing-JSON руками (сделано отдельно, вне репо).
+
+**Аудит:** Hybrid Addon при «both» генерил выдачу на оба транспорта
+всегда (цикл по кредам транспорта) — там было верно; в standalone
+«both» не существовало вовсе (одиночный `protocol` в state). А вот
+подписка не видела v85: mierus:// шли с IP (домен — только фолбэк
+при недоступном IPv4-детекте), а `?format=singbox` (его берут
+nyamebox/nekobox по User-Agent) не содержал mieru вообще — плюс в
+hybrid-режиме совал клиенту мёртвый VLESS-outbound (в base64 vless://
+исключался, в singbox — нет). Бонус-находка: Karing-ссылка гибрида
+при включённой обфускации несла ДВА `traffic-pattern=` (basic-пресет
+генератора + blob установщика) — первый мог перебивать реальный
+паттерн сервера.
+
+**Сделано:**
+- **Standalone BOTH:** промпт `Протокол [TCP/UDP/BOTH]`; один диапазон
+  портов слушается по TCP и по UDP (разные сокеты); сервер-конфиг —
+  два portBindings; фаервол открывается/закрывается на оба протокола.
+  Выдача — на КАЖДЫЙ транспорт: пары ссылок Karing+Nekobox/Nyamebox,
+  QR, а пункт «Показать sing-box JSON» собирает ОДИН JSON с двумя
+  mieru-outbound'ами (уникальные теги с суффиксом) и selector-группой
+  `mieru-transport` — транспорт переключается в клиенте, DNS идёт
+  через выбранный (`_build_karing_multi_config`). Меню юзеров, статус,
+  деинсталл и гайд (TCP vs UDP) BOTH-совместимы.
+- **Подписка (v86):** новый единый источник точек
+  `_mieru_client_endpoints()` (hybrid + standalone, домен из
+  `client_server_addr` важнее IP, BOTH → две точки); mierus://-ссылки
+  (base64 и iOS) — с доменом; `_collect_mieru_json_outbounds()` —
+  mieru-outbound'ы для singbox-формата (TCP и UDP отдельными нодами,
+  уникальные теги, `domain_resolver`, traffic-pattern из
+  blob/preset); VLESS-outbound исключается в hybrid-режиме (паритет с
+  base64); DNS-блок (custom-dns через туннель + правила на домен
+  сервера) — только в чистом mieru-профиле (hybrid + `client_dns`),
+  в смешанном VLESS+mieru НЕ ставится: иначе «mieru упал —
+  VLESS-домен не резолвится».
+- **Фикса ссылок гибрида:** `_gen_client_share_link(traffic_preset='')`
+  больше не вставляет basic-пресет, когда вызывающий код добавляет
+  blob — параметр `traffic-pattern=` ровно один, сам blob. Blob теперь
+  сохраняется в state (`traffic_pattern_blob`,
+  `_persist_traffic_pattern_blob()`), его видит подписка.
+
+**Тесты:** mieru 69 (+9: BOTH-конфиг/ссылки/JSON-selector/пустой
+preset), hybrid 75 (+4: один traffic-pattern с реальными
+генераторами, blob в state, не-фатальность записи), подписочная
+семья 197 (+9: домен в mierus://, BOTH-ссылки, endpoints-meta,
+singbox с mieru/DNS/VLESS-исключением/смешанный-без-DNS). Соседи
+299 passed (mieru_stats/download/mirrors/presets/rest_api/
+triple_panel) — поллюции нет. Смоук
+`scripts/smoke_v86_subscription_mieru.py` — 12/12 на кейсе юзера
+(hybrid both, домен, AGH, blob).
+
+**Эксплуатация:** на сервере с аддоном достаточно `git pull` —
+подписка (`/sub/<token>`, формат по User-Agent nyamebox/nekobox)
+сразу начнёт отдавать mieru-outbound'ы с доменом; ссылкам, выданным
+ранее, ничего не грозит. Для standalone BOTH — переустановка модуля с
+выбором BOTH (или оставить как есть: одиночный протокол работает как
+раньше). Домен/DNS в подписке собраны из проверенных блоков, но на
+живом nyamebox не гонялись — при первом использовании глянуть в
+клиенте, что нода завелась (FAQ §7).
+
+---
+
 ## FEAT(mieru): v85 — домен сервера + свой DNS в клиентских конфигах (standalone и Hybrid Addon) — 9 сентября 2026
 
 **Кейс:** юзер принёс Karing-JSON, выданный Hybrid Addon

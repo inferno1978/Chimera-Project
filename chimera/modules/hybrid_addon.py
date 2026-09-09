@@ -448,6 +448,21 @@ def load_state() -> dict:
     return json.loads(STATE_FILE.read_text(encoding="utf-8"))
 
 
+def _persist_traffic_pattern_blob(blob) -> None:
+    """v86: blob traffic-pattern в state — singbox-подписка (nyamebox)
+    встраивает его в mieru-outbound'ы; до v86 blob не сохранялся и
+    терялся сразу после установки. Ошибка записи не фатальна: клиентские
+    ссылки/JSON к этому моменту уже напечатаны."""
+    if not blob:
+        return
+    try:
+        st = load_state()
+        st["traffic_pattern_blob"] = blob
+        save_state(st)
+    except (SystemExit, OSError, ValueError):
+        pass  # state недоступен/битый — не критично
+
+
 # ───────────────────────── Шаг 1: поиск и анализ Xray config.json ─────────────────────────
 def find_xray_config() -> Path:
     for p in XRAY_CONFIG_CANDIDATES:
@@ -1435,6 +1450,9 @@ def main() -> None:
             # печатаются, но state нужен для выдачи через меню позже)
             "client_server_addr": _link_settings["client_server_addr"],
             "client_dns": _link_settings["client_dns"],
+            # v86: blob traffic-pattern — для singbox-подписки (nyamebox)
+            "traffic_pattern_blob": (_export_traffic_pattern_blob()
+                                      if traffic_pattern else "") or "",
         })
     finally:
         # Рамка "УСТАНОВКА" закрывается всегда — при early return (dry-run,
@@ -1626,6 +1644,8 @@ def _menu_install(default_port: int = 443) -> None:
     print_summary(creds)
     _print_traffic_pattern_snippet(traffic_pattern)
     traffic_pattern_blob = _export_traffic_pattern_blob() if traffic_pattern else None
+    # v86: blob в state — для singbox-подписки (nyamebox)
+    _persist_traffic_pattern_blob(traffic_pattern_blob)
     # v85: адрес выдачи — домен из state (если выбран) или публичный IP
     client_addr = _link_settings["client_server_addr"] or get_public_ip()
     _show_mieru_client_links(creds, client_addr,
@@ -1682,7 +1702,11 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
         password = data["password"]
         proto = transport.upper()  # "TCP" / "UDP"
 
-        share_link = _gen_client_share_link(server_ip, port, port, proto, login, password)
+        # v86: при blob — preset-параметр не вставляем: до фиксы ссылка
+        # получала ДВА traffic-pattern= (basic-пресет + blob), и первый
+        # мог перебивать реальный паттерн сервера
+        share_link = _gen_client_share_link(server_ip, port, port, proto, login, password,
+                                            traffic_preset="" if traffic_pattern_blob else "basic")
         share_link_neko = _gen_client_share_link_nekobox(server_ip, port, proto, login, password)
 
         if traffic_pattern_blob:

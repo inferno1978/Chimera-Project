@@ -399,6 +399,24 @@ def is_hybrid_mieru_active() -> bool:
 
 def _build_mieru_uris(user: dict, server_ip: str) -> list[str]:
     links: list[str] = []
+    for ep in _mieru_client_endpoints(user, server_ip):
+        links.append(_gen_mieru_share_link(
+            ep["addr"], ep["port"], ep["proto"], ep["username"], ep["password"],
+        ))
+    return links
+
+
+def _mieru_client_endpoints(user: dict, server_ip: str) -> list[dict]:
+    """v86: единый источник mieru-точек для ссылок и singbox-outbound'ов.
+
+    Возвращает список {addr, port, proto, username, password, client_dns,
+    pattern_b64}: hybrid (порт на транспорт; tcp и udp — ОТДЕЛЬНЫЕ точки)
+    + standalone (протоколы из state, BOTH → TCP и UDP). addr — домен из
+    client_server_addr (v85) важнее переданного server_ip: ссылки и
+    конфиги переживают смену IP сервера. pattern_b64 — client-side
+    traffic-pattern ('' — не задан, ссылкам не нужен).
+    """
+    endpoints: list[dict] = []
 
     # ── hybrid_addon: Mieru — единственный внешний вход ────────────────
     if _HYBRID_STATE.exists() and _MITA_HYBRID_CFG.exists():
@@ -408,13 +426,18 @@ def _build_mieru_uris(user: dict, server_ip: str) -> list[str]:
             users_by_name = {u["name"]: u["password"] for u in mita_cfg.get("users", [])}
             match = _match_by_name(user, "mieru", users_by_name.keys())
             if match:
+                addr = (hybrid_st.get("client_server_addr") or "").strip() or server_ip
+                client_dns = (hybrid_st.get("client_dns") or "").strip()
+                pattern_b64 = (hybrid_st.get("traffic_pattern_blob") or "").strip()
                 # tcp/udp может быть включён по отдельности — берём то, что есть
                 for proto_key, port_key in (("tcp", "tcp_port"), ("udp", "udp_port")):
                     port = hybrid_st.get(port_key)
                     if port:
-                        links.append(_gen_mieru_share_link(
-                            server_ip, int(port), proto_key, match, users_by_name[match],
-                        ))
+                        endpoints.append({
+                            "addr": addr, "port": int(port), "proto": proto_key.upper(),
+                            "username": match, "password": users_by_name[match],
+                            "client_dns": client_dns, "pattern_b64": pattern_b64,
+                        })
         except Exception as e:
             _warn(f"Не удалось прочитать hybrid_mieru_state: {e}")
 
@@ -426,14 +449,74 @@ def _build_mieru_uris(user: dict, server_ip: str) -> list[str]:
                 users_by_name = {u["username"]: u["password"] for u in st.get("users", [])}
                 match = _match_by_name(user, "mieru", users_by_name.keys())
                 if match:
-                    links.append(_gen_mieru_share_link(
-                        server_ip, int(st.get("port_start", 0)), st.get("protocol", "TCP"),
-                        match, users_by_name[match],
-                    ))
+                    addr = (st.get("client_server_addr") or "").strip() or server_ip
+                    client_dns = (st.get("client_dns") or "").strip()
+                    # v86: BOTH — отдельная точка на каждый транспорт
+                    proto = (st.get("protocol") or "TCP").upper()
+                    protos = ("TCP", "UDP") if proto == "BOTH" else (proto,)
+                    pattern_b64 = ""
+                    if st.get("traffic_preset"):
+                        try:
+                            from chimera.modules.mieru_traffic_presets import get_preset_base64
+                            pattern_b64 = get_preset_base64(st.get("traffic_preset"))
+                        except Exception:
+                            pass
+                    for p in protos:
+                        endpoints.append({
+                            "addr": addr, "port": int(st.get("port_start", 0)), "proto": p,
+                            "username": match, "password": users_by_name[match],
+                            "client_dns": client_dns, "pattern_b64": pattern_b64,
+                        })
         except Exception as e:
             _warn(f"Не удалось прочитать mieru.json: {e}")
 
-    return links
+    return endpoints
+
+
+def _collect_mieru_json_outbounds(user: dict, server_ip: str) -> tuple:
+    """v86: mieru-outbound'ы для singbox-подписки (nyamebox/nekobox/sing-box).
+
+    Возвращает (outbounds, meta). outbounds — по одному на транспорт
+    (hybrid both и standalone BOTH → и TCP, и UDP); tag уникален
+    (суффикс -tcp/-udp при коллизии); addr — домен из v85-state;
+    traffic_pattern — blob/preset, если известен. meta = {client_dns,
+    server_domain, first_tag} — для dns-секции конфига подписки."""
+    meta = {"client_dns": "", "server_domain": "", "first_tag": ""}
+    try:
+        from chimera.modules.mieru import _gen_singbox_outbound, _dns_host_is_domain
+    except ImportError:
+        return [], meta
+    endpoints = _mieru_client_endpoints(user, server_ip)
+    if not endpoints:
+        return [], meta
+
+    used_tags: set = set()
+    outbounds: list[dict] = []
+    for ep in endpoints:
+        ob = _gen_singbox_outbound(ep["addr"], ep["port"], ep["port"], ep["proto"],
+                                    ep["username"], ep["password"])
+        # теги sing-box обязаны быть уникальными: при двух транспортах
+        # (или двух источниках) суффиксуем протоколом
+        tag = ob["tag"]
+        if tag in used_tags:
+            tag = f"{tag}-{ep['proto'].lower()}"
+            n = 2
+            while tag in used_tags:
+                tag = f"{ob['tag']}-{ep['proto'].lower()}-{n}"
+                n += 1
+        ob["tag"] = tag
+        used_tags.add(tag)
+        if ep["pattern_b64"]:
+            ob["traffic_pattern"] = ep["pattern_b64"]
+        if _dns_host_is_domain(ep["addr"]):
+            ob["domain_resolver"] = "local"
+        outbounds.append(ob)
+
+    first = endpoints[0]
+    meta["client_dns"] = next((e["client_dns"] for e in endpoints if e.get("client_dns")), "")
+    meta["server_domain"] = first["addr"] if _dns_host_is_domain(first["addr"]) else ""
+    meta["first_tag"] = outbounds[0]["tag"]
+    return outbounds, meta
 
 # ══════════════════════════════════════════════════════════════════════════
 # NAIVEPROXY (тоже независимый клиентский протокол, свой users)
@@ -738,18 +821,34 @@ def build_subscription_singbox_config(user: dict) -> str:
     outbounds: list[dict] = []
 
     # 1. VLESS outbound — переиспользуем логику из rest_api.
-    try:
-        from chimera.modules.rest_api import _generate_singbox_config
-        vless_json = _generate_singbox_config(user)
-        if vless_json:
-            vless_cfg = _json.loads(vless_json)
-            for ob in vless_cfg.get("outbounds", []):
-                outbounds.append(ob)
-    except Exception as e:
-        _log("WARN", f"VLESS singbox outbound: {e}")
+    # v86: в hybrid-режиме внешний вход ушёл с VLESS на Mieru (SOCKS-петля
+    # 127.0.0.1) — такой outbound снаружи мёртв. Исключаем, паритет с
+    # base64-подпиской (is_hybrid_mieru_active там делает то же самое).
+    vless_outbounds: list[dict] = []
+    if not is_hybrid_mieru_active():
+        try:
+            from chimera.modules.rest_api import _generate_singbox_config
+            vless_json = _generate_singbox_config(user)
+            if vless_json:
+                vless_cfg = _json.loads(vless_json)
+                for ob in vless_cfg.get("outbounds", []):
+                    vless_outbounds.append(ob)
+        except Exception as e:
+            _log("WARN", f"VLESS singbox outbound: {e}")
+    outbounds.extend(vless_outbounds)
 
     # 2. Сателлитные протоколы через реестр.
-    outbounds.extend(_collect_registry_json_outbounds(user))
+    registry_outbounds = _collect_registry_json_outbounds(user)
+    outbounds.extend(registry_outbounds)
+
+    # 2.5 v86: mieru-outbound'ы (TCP и UDP — отдельными нодами) — раньше
+    # mierus:// жил только в base64-формате, а nyamebox/nekobox/sing-box
+    # (format=singbox) mieru не получали вовсе. Адрес — домен из v85-state,
+    # traffic-pattern — blob/preset, домен резолвится через domain_resolver.
+    _st = _load_state() or {}
+    _srv = _get_server_ip("4") or _st.get("domain", "")
+    mieru_outbounds, mieru_meta = _collect_mieru_json_outbounds(user, _srv)
+    outbounds.extend(mieru_outbounds)
 
     # 3. Direct + block (базовые outbounds).
     if outbounds:
@@ -766,6 +865,21 @@ def build_subscription_singbox_config(user: dict) -> str:
             "final": outbounds[0].get("tag", "direct"),
         },
     }
+
+    # 3.5 v86: DNS-секция — ТОЛЬКО когда mieru есть, client_dns задан (v85)
+    # и других прокси-outbound'ов нет. В смешанной конфигурации (VLESS+mieru
+    # в standalone) DNS через mieru создавал бы зависимость: mieru упал —
+    # и VLESS-домен перестал бы резолвиться. Чистый hybrid-профиль (mieru —
+    # единственный вход) получает свой AGH через туннель, как в Karing-JSON.
+    if mieru_outbounds and mieru_meta["client_dns"] \
+            and not (vless_outbounds or registry_outbounds):
+        try:
+            from chimera.modules.mieru import _build_karing_dns_block
+            config["dns"] = _build_karing_dns_block(
+                mieru_meta["client_dns"], mieru_meta["first_tag"],
+                mieru_meta["server_domain"])
+        except Exception as e:
+            _log("WARN", f"mieru dns block: {e}")
 
     # singbox_client_rulesets: опциональная инъекция route.rule_set + rules
     # с готовыми .srs-списками для Podkop/OpenWrt (РФ-домены → direct,

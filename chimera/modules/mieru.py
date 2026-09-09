@@ -413,17 +413,21 @@ def _build_server_config(users: list, port_start: int, port_end: int,
     ВАЖНО: mita не поддерживает hot-reload trafficPattern — после изменения
     конфига нужен systemctl restart mita (см. _apply_server_config_with_restart).
     """
+    # v86: protocol='BOTH' — ОДИН диапазон портов слушается и по TCP, и
+    # по UDP (это разные сокеты, конфликта нет); клиенты получают ссылки
+    # на оба транспорта и выбирают сами.
     port_bindings = []
-    if port_start == port_end:
-        port_bindings.append({
-            "port": port_start,
-            "protocol": protocol,
-        })
-    else:
-        port_bindings.append({
-            "portRange": f"{port_start}-{port_end}",
-            "protocol": protocol,
-        })
+    for proto in _protocol_variants(protocol):
+        if port_start == port_end:
+            port_bindings.append({
+                "port": port_start,
+                "protocol": proto,
+            })
+        else:
+            port_bindings.append({
+                "portRange": f"{port_start}-{port_end}",
+                "protocol": proto,
+            })
 
     user_entries = []
     for u in users:
@@ -695,15 +699,20 @@ def _gen_client_share_link(server_ip: str, port_start: int, port_end: int,
     Используем port_start как основной порт.
     """
     import urllib.parse
-    from chimera.modules.mieru_traffic_presets import get_preset_base64
-    pattern_b64 = get_preset_base64(traffic_preset)
-    pattern_encoded = urllib.parse.quote(pattern_b64, safe="")
-    return (
+    link = (
         f"mierus://{username}:{password}@{server_ip}"
         f"?port={port_start}&protocol={protocol.upper()}&profile=default"
         f"&mtu=1400&multiplexing=MULTIPLEXING_HIGH"
-        f"&traffic-pattern={pattern_encoded}"
     )
+    # v86: traffic_preset='' — параметр НЕ добавляется: вызывающий код
+    # допишет свой traffic-pattern= (например blob из hybrid-установки).
+    # До v86 при таком вызове ссылка получала ДВА traffic-pattern=
+    # (preset basic + blob), и первый мог перебивать реальный паттерн сервера.
+    if traffic_preset:
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
+        pattern_b64 = get_preset_base64(traffic_preset)
+        link += f"&traffic-pattern={urllib.parse.quote(pattern_b64, safe='')}"
+    return link
 
 def _gen_client_share_link_nekobox(server_ip: str, port_start: int,
                                     protocol: str, username: str, password: str) -> str:
@@ -839,6 +848,69 @@ def _effective_client_addr() -> str:
         pass
     return _get_server_ip()
 
+
+def _protocol_variants(protocol: str) -> tuple:
+    """v86: протоколы клиентской выдачи/сервера. 'BOTH' → ('TCP', 'UDP'),
+    иначе — один протокол. Регистронезависимо, пустое — дефолт."""
+    p = (protocol or _DEFAULT_PROTOCOL or "TCP").upper()
+    return ("TCP", "UDP") if p == "BOTH" else (p,)
+
+
+def _protocol_label(protocol: str) -> str:
+    """v86: подпись для боксов/статусов: 'TCP' / 'UDP' / 'TCP+UDP'."""
+    return "+".join(_protocol_variants(protocol))
+
+
+def _print_user_link_pairs(link_pairs: list) -> None:
+    """v86: выдача пар ссылок (Karing + Nekobox/Nyamebox) по транспортам.
+
+    link_pairs — [(proto, karing_link, neko_link), ...]; при BOTH их две,
+    каждая пара помечается транспортом, между парами — разделитель."""
+    multi = len(link_pairs) > 1
+    for i, (p, karing, neko) in enumerate(link_pairs):
+        suffix = f" — {p}" if multi else ""
+        _box_row(f"  {BOLD}{WHITE}Ссылка для Karing (sing-box core){suffix}:{NC}")
+        _box_row()
+        _box_link(karing)
+        _box_row()
+        _box_row(f"  {BOLD}{WHITE}Ссылка для Nekobox / Nyamebox{suffix}:{NC}")
+        _box_row()
+        _box_link(neko)
+        _box_row()
+        if i < len(link_pairs) - 1:
+            _box_sep()
+
+
+def _build_karing_multi_config(outbounds: list, client_dns: str = "",
+                               server_domain: str = "") -> dict:
+    """v86: Karing/sing-box JSON с НЕСКОЛЬКИМИ mieru-outbound'ами (BOTH).
+
+    Одиночный outbound — см. _build_karing_full_config (формат не менялся).
+    Несколько: outbound'ы TCP и UDP с суффиксами в tag + selector-группа
+    «mieru-transport» (как multinode Mode B) — транспорт переключается
+    прямо в клиенте; route.final и DNS detour указывают на selector,
+    то есть DNS идёт через ВЫБРАННЫЙ транспорт."""
+    obs = []
+    for ob in outbounds:
+        ob = dict(ob)
+        if server_domain:
+            ob["domain_resolver"] = "local"
+        obs.append(ob)
+    if len(obs) > 1:
+        final_tag = "mieru-transport"
+        body = [{"type": "selector", "tag": final_tag,
+                 "outbounds": [ob["tag"] for ob in obs]}] + obs
+    else:
+        final_tag = obs[0]["tag"]
+        body = obs
+    body.append({"type": "direct", "tag": "direct"})
+    return {
+        "log": {"level": "info"},
+        "dns": _build_karing_dns_block(client_dns, final_tag, server_domain),
+        "outbounds": body,
+        "route": {"final": final_tag},
+    }
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  УСТАНОВКА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -896,10 +968,10 @@ def _run_install_inner() -> None:
             port_end = port_start
 
         raw = proto_ask(
-            f"  {CYAN}Протокол [TCP/UDP, Enter={old_protocol}]: {NC}",
+            f"  {CYAN}Протокол [TCP/UDP/BOTH, Enter={old_protocol}]: {NC}",
             default=old_protocol, c=True,
         ).strip().upper()
-        protocol = raw if raw in ("TCP", "UDP") else old_protocol
+        protocol = raw if raw in ("TCP", "UDP", "BOTH") else old_protocol
 
         # ── v85: адрес сервера в клиентской выдаче (IP или домен) ─────
         old_addr = (state.get("client_server_addr", "") or "").strip()
@@ -1059,8 +1131,10 @@ def _run_install_inner() -> None:
         print(f"  {YELLOW}⚠{NC}  Сервис не запустился после перезапуска — проверьте логи.")
 
     # 7. Фаервол (UFW если активен, иначе iptables)
-    fw_msg = _open_ports(protocol, port_start, port_end)
-    print(f"  {GREEN}✓{NC}  {fw_msg}")
+    # v86: BOTH — один и тот же диапазон открываем и для TCP, и для UDP
+    for fw_msg in [_open_ports(p, port_start, port_end)
+                   for p in _protocol_variants(protocol)]:
+        print(f"  {GREEN}✓{NC}  {fw_msg}")
 
     # 9. Сохраняем состояние (сохраняем traffic_preset если был)
     new_state = {
@@ -1105,9 +1179,15 @@ def _run_install_inner() -> None:
     client_addr    = _effective_client_addr()
     uname          = users[0]["username"]
     pwd            = users[0]["password"]
-    share_link     = _gen_client_share_link(client_addr, port_start, port_end, protocol, uname, pwd,
-                                              traffic_preset=state.get("traffic_preset", "basic"))
-    share_link_neko = _gen_client_share_link_nekobox(client_addr, port_start, protocol, uname, pwd)
+    # v86: BOTH — пары ссылок на каждый транспорт (TCP и UDP)
+    _tp = state.get("traffic_preset", "basic")
+    link_pairs = [
+        (p,
+         _gen_client_share_link(client_addr, port_start, port_end, p, uname, pwd,
+                                 traffic_preset=_tp),
+         _gen_client_share_link_nekobox(client_addr, port_start, p, uname, pwd))
+        for p in _protocol_variants(protocol)
+    ]
 
     os.system("clear")
     _box_top("✅  УСТАНОВКА ЗАВЕРШЕНА  •  MIERU")
@@ -1121,27 +1201,21 @@ def _run_install_inner() -> None:
     else:
         _box_kv("IP сервера:", f"{YELLOW}{server_ip}{NC}")
     port_str = str(port_start) if port_start == port_end else f"{port_start}-{port_end}"
-    _box_kv("Порт(ы):",    f"{YELLOW}{port_str}/{protocol}{NC}")
+    _box_kv("Порт(ы):",    f"{YELLOW}{port_str}/{_protocol_label(protocol)}{NC}")
     if client_dns:
         _box_kv("DNS в выдаче:", f"{YELLOW}{client_dns}{NC} {DIM}(через туннель){NC}")
     _box_row()
     _box_sep()
-    _box_row(f"  {BOLD}{WHITE}Ссылка для Karing (sing-box core):{NC}")
-    _box_row()
-    _box_link(share_link)
-    _box_row()
-    _box_sep()
-    _box_row(f"  {BOLD}{WHITE}Ссылка для Nekobox / Nyamebox:{NC}")
-    _box_row()
-    _box_link(share_link_neko)
-    _box_row()
+    _print_user_link_pairs(link_pairs)
     _box_sep()
     _box_warn("Karing: убедитесь что выбрано ядро sing-box (не Xray-core!)")
     _box_info("Добавьте пользователей через пункт [2].")
     _box_warn("Убедитесь что время на клиенте синхронизировано!")
     _box_bot()
     print()
-    _print_qr(share_link, f"Karing / mierus:// для {uname}")
+    for p, share_link, _neko in link_pairs:
+        _print_qr(share_link, f"Karing / mierus:// для {uname} ({p})"
+                  if len(link_pairs) > 1 else f"Karing / mierus:// для {uname}")
     _pause()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1162,7 +1236,7 @@ def _users_menu() -> None:
         _box_row()
         _box_kv("Пользователей:", str(len(users)))
         port_str = str(port_start) if port_start == port_end else f"{port_start}-{port_end}"
-        _box_kv("Порт(ы):", f"{port_str}/{protocol}")
+        _box_kv("Порт(ы):", f"{port_str}/{_protocol_label(protocol)}")
         _box_row(); _box_sep()
 
         if users:
@@ -1257,9 +1331,15 @@ def _add_user(state: dict) -> None:
     port_start = state.get("port_start", _DEFAULT_PORT_START)
     port_end   = state.get("port_end",   _DEFAULT_PORT_END)
     protocol   = state.get("protocol",   _DEFAULT_PROTOCOL)
-    share_link      = _gen_client_share_link(server_ip, port_start, port_end, protocol, username, password,
-                                               traffic_preset=state.get("traffic_preset", "basic"))
-    share_link_neko = _gen_client_share_link_nekobox(server_ip, port_start, protocol, username, password)
+    # v86: BOTH — пары ссылок на каждый транспорт
+    _tp = state.get("traffic_preset", "basic")
+    link_pairs = [
+        (p,
+         _gen_client_share_link(server_ip, port_start, port_end, p, username, password,
+                                 traffic_preset=_tp),
+         _gen_client_share_link_nekobox(server_ip, port_start, p, username, password))
+        for p in _protocol_variants(protocol)
+    ]
 
     os.system("clear")
     _box_top("✅  ПОЛЬЗОВАТЕЛЬ ДОБАВЛЕН")
@@ -1269,16 +1349,12 @@ def _add_user(state: dict) -> None:
     if err: _box_warn(f"Ошибка конфига: {err}")
     else: _box_ok("Конфиг применён.")
     _box_row(); _box_sep()
-    _box_row(f"  {BOLD}{WHITE}Ссылка для Karing (sing-box core):{NC}")
-    _box_row()
-    _box_link(share_link)
-    _box_row(); _box_sep()
-    _box_row(f"  {BOLD}{WHITE}Ссылка для Nekobox / Nyamebox:{NC}")
-    _box_row()
-    _box_link(share_link_neko)
+    _print_user_link_pairs(link_pairs)
     _box_row(); _box_bot()
     print()
-    _print_qr(share_link, f"Karing / mierus:// для {username}")
+    for p, share_link, _neko in link_pairs:
+        _print_qr(share_link, f"Karing / mierus:// для {username} ({p})"
+                  if len(link_pairs) > 1 else f"Karing / mierus:// для {username}")
     _pause()
 
 def _show_user_link(users: list, server_ip: str,
@@ -1304,27 +1380,29 @@ def _show_user_link(users: list, server_ip: str,
 
     # Загружаем state для получения traffic_preset
     _state = proto_load_state(_MODULE_STATE)
-    share_link      = _gen_client_share_link(server_ip, port_start, port_end, protocol,
-                                               user["username"], user["password"],
-                                               traffic_preset=_state.get("traffic_preset", "basic"))
-    share_link_neko = _gen_client_share_link_nekobox(server_ip, port_start, protocol,
-                                                      user["username"], user["password"])
+    # v86: BOTH — пары ссылок на каждый транспорт
+    _tp = _state.get("traffic_preset", "basic")
+    link_pairs = [
+        (p,
+         _gen_client_share_link(server_ip, port_start, port_end, p,
+                                user["username"], user["password"],
+                                traffic_preset=_tp),
+         _gen_client_share_link_nekobox(server_ip, port_start, p,
+                                        user["username"], user["password"]))
+        for p in _protocol_variants(protocol)
+    ]
     os.system("clear")
     _box_top(f"🔗  {user['username']}  •  MIERU")
     _box_row()
     _box_kv("Логин:", f"{YELLOW}{user['username']}{NC}")
     _box_kv("Пароль:", f"{YELLOW}{user['password']}{NC}")
     _box_row(); _box_sep()
-    _box_row(f"  {BOLD}{WHITE}Ссылка для Karing (sing-box core):{NC}")
-    _box_row()
-    _box_link(share_link)
-    _box_row(); _box_sep()
-    _box_row(f"  {BOLD}{WHITE}Ссылка для Nekobox / Nyamebox:{NC}")
-    _box_row()
-    _box_link(share_link_neko)
+    _print_user_link_pairs(link_pairs)
     _box_row(); _box_bot()
     print()
-    _print_qr(share_link, f"Karing / mierus:// для {user['username']}")
+    for p, share_link, _neko in link_pairs:
+        _print_qr(share_link, f"Karing / mierus:// для {user['username']} ({p})"
+                  if len(link_pairs) > 1 else f"Karing / mierus:// для {user['username']}")
     _pause()
 
 def _show_singbox_json(users: list, server_ip: str,
@@ -1348,17 +1426,24 @@ def _show_singbox_json(users: list, server_ip: str,
     except (ValueError, IndexError):
         print(f"  {RED}✗{NC}  Неверный номер."); _pause(); return
 
-    outbound = _gen_singbox_outbound(
-        server_ip, port_start, port_end, protocol,
-        user["username"], user["password"],
-    )
-
+    # v86: BOTH — ОБА транспорта в ОДНОМ JSON: outbound'ы с суффиксами в tag
+    # + selector-группа «mieru-transport» (транспорт переключается в клиенте).
+    # Один протокол — прежний формат: одиночный outbound, route.final на него.
     # Полный sing-box конфиг для импорта в Karing (v85: dns-секция и домен
     # из state — свои DNS/домен, выбранные при установке)
     _state = proto_load_state(_MODULE_STATE)
     client_dns = (_state.get("client_dns", "") or "").strip()
     server_domain = server_ip if _dns_host_is_domain(server_ip) else ""
-    full_config = _build_karing_full_config(outbound, client_dns, server_domain)
+    outbounds = []
+    for p in _protocol_variants(protocol):
+        ob = _gen_singbox_outbound(
+            server_ip, port_start, port_end, p,
+            user["username"], user["password"],
+        )
+        if len(_protocol_variants(protocol)) > 1:
+            ob["tag"] = f"{ob['tag']}-{p.lower()}"  # теги sing-box уникальны
+        outbounds.append(ob)
+    full_config = _build_karing_multi_config(outbounds, client_dns, server_domain)
     json_str = json.dumps(full_config, indent=2, ensure_ascii=False)
 
     # Сохраняем в файл чтобы можно было скопировать
@@ -1619,7 +1704,7 @@ def _show_status() -> None:
     port_end   = state.get("port_end",   "—")
     protocol   = state.get("protocol",   "—")
     port_str   = str(port_start) if port_start == port_end else f"{port_start}-{port_end}"
-    _box_kv("Порт(ы):", f"{port_str}/{protocol}")
+    _box_kv("Порт(ы):", f"{port_str}/{_protocol_label(protocol)}")
     _box_kv("Пользователей:", str(len(state.get("users", []))))
 
     sync_ok, sync_msg = _check_time_sync()
@@ -1768,6 +1853,8 @@ def _guide_protocol() -> None:
     _box_row()
     _box_info("Для большинства случаев — TCP")
     _box_info("UDP — только если TCP медленный или недоступен")
+    _box_info("BOTH — если оператор режет то TCP, то UDP: клиент")
+    _box_info("переключается между ними без смены конфига (v86)")
     _box_bot(); _pause()
 
 def _guide_diff() -> None:
@@ -1839,7 +1926,9 @@ def _full_uninstall(silent: bool = False) -> bool:
     if _CFG_DIR.exists():
         shutil.rmtree(_CFG_DIR, ignore_errors=True)
 
-    _close_ports(protocol, port_start, port_end)
+    # v86: BOTH — закрываем порты для обоих транспортов
+    for p in _protocol_variants(protocol):
+        _close_ports(p, port_start, port_end)
 
     try:
         if _MODULE_STATE.exists(): _MODULE_STATE.unlink()

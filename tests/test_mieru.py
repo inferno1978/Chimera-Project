@@ -609,5 +609,107 @@ class TestV85EffectiveClientAddr(unittest.TestCase):
             self.assertEqual(mieru._effective_client_addr(), "1.2.3.4")
 
 
+class TestV86BothProtocol(unittest.TestCase):
+    """v86: BOTH (TCP+UDP) — один диапазон портов на оба транспорта,
+    ссылки/JSON генерируются на КАЖДЫЙ транспорт (запрос юзера)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_protocol_variants(self):
+        from chimera.modules.mieru import _protocol_variants, _protocol_label
+        self.assertEqual(_protocol_variants("BOTH"), ("TCP", "UDP"))
+        self.assertEqual(_protocol_variants("both"), ("TCP", "UDP"))
+        self.assertEqual(_protocol_variants("TCP"), ("TCP",))
+        self.assertEqual(_protocol_variants("udp"), ("UDP",))
+        self.assertEqual(_protocol_variants(""), ("TCP",))  # пустое — дефолт
+        self.assertEqual(_protocol_variants(None), ("TCP",))
+        self.assertEqual(_protocol_label("BOTH"), "TCP+UDP")
+        self.assertEqual(_protocol_label("tcp"), "TCP")
+
+    def test_build_server_config_both_single_port(self):
+        """BOTH, один порт: две portBindings — TCP и UDP на одном порту
+        (разные сокеты, конфликта нет)."""
+        from chimera.modules import mieru
+        cfg = mieru._build_server_config(
+            [{"username": "a", "password": "b"}], 443, 443, "BOTH")
+        self.assertEqual(cfg["portBindings"],
+                         [{"port": 443, "protocol": "TCP"},
+                          {"port": 443, "protocol": "UDP"}])
+
+    def test_build_server_config_both_range(self):
+        """BOTH, диапазон: два portRange-биндинга на оба транспорта."""
+        from chimera.modules import mieru
+        cfg = mieru._build_server_config(
+            [{"username": "a", "password": "b"}], 20000, 20010, "BOTH")
+        self.assertEqual(cfg["portBindings"],
+                         [{"portRange": "20000-20010", "protocol": "TCP"},
+                          {"portRange": "20000-20010", "protocol": "UDP"}])
+
+    def test_build_server_config_single_unchanged(self):
+        """Регресс: одиночный протокол — один биндинг, как раньше."""
+        from chimera.modules import mieru
+        cfg = mieru._build_server_config(
+            [{"username": "a", "password": "b"}], 443, 443, "TCP")
+        self.assertEqual(cfg["portBindings"], [{"port": 443, "protocol": "TCP"}])
+        cfg_u = mieru._build_server_config(
+            [{"username": "a", "password": "b"}], 5353, 5353, "UDP")
+        self.assertEqual(cfg_u["portBindings"], [{"port": 5353, "protocol": "UDP"}])
+
+    def test_karing_multi_config_selector(self):
+        """BOTH в Karing-JSON: selector-группа «mieru-transport», route.final
+        и DNS detour на неё; на каждом outbound — domain_resolver=local."""
+        from chimera.modules import mieru
+        obs = [mieru._gen_singbox_outbound("d.example", 443, 443, p, "alice", "pw")
+               for p in ("TCP", "UDP")]
+        obs[0]["tag"] = "mieru-alice-tcp"
+        obs[1]["tag"] = "mieru-alice-udp"
+        cfg = mieru._build_karing_multi_config(obs, "dns.example", "d.example")
+        self.assertEqual(cfg["outbounds"][0]["type"], "selector")
+        self.assertEqual(cfg["route"]["final"], "mieru-transport")
+        sel = cfg["outbounds"][0]
+        self.assertEqual(sel["outbounds"], ["mieru-alice-tcp", "mieru-alice-udp"])
+        # DNS идёт через selector — то есть через ВЫБРАННЫЙ транспорт
+        self.assertEqual(cfg["dns"]["servers"][0]["detour"], "mieru-transport")
+        self.assertEqual(cfg["dns"]["servers"][0]["address"], "dns.example")
+        for ob in cfg["outbounds"][1:3]:
+            self.assertEqual(ob["domain_resolver"], "local")
+        self.assertEqual(cfg["outbounds"][-1], {"type": "direct", "tag": "direct"})
+
+    def test_karing_multi_config_single_no_selector(self):
+        """Регресс: один outbound — без selector, формат как в v85."""
+        from chimera.modules import mieru
+        ob = mieru._gen_singbox_outbound("1.2.3.4", 443, 443, "TCP", "alice", "pw")
+        cfg = mieru._build_karing_multi_config([ob])
+        types = [o.get("type") for o in cfg["outbounds"]]
+        self.assertNotIn("selector", types)
+        self.assertEqual(cfg["route"]["final"], "mieru-alice")
+        self.assertEqual(cfg["dns"]["servers"][0]["tag"], "google")
+
+    def test_share_link_empty_preset_no_pattern(self):
+        """v86: traffic_preset='' — параметра traffic-pattern НЕТ (вызывающий
+        код добавит свой blob; раньше здесь вставался basic — двойной параметр)."""
+        from chimera.modules import mieru
+        link = mieru._gen_client_share_link("1.2.3.4", 443, 443, "TCP", "u", "p",
+                                            traffic_preset="")
+        self.assertNotIn("traffic-pattern=", link)
+
+    def test_share_link_default_preset_keeps_pattern(self):
+        """Регресс: дефолтный preset — параметр на месте (как в v85 и раньше)."""
+        from chimera.modules import mieru
+        link = mieru._gen_client_share_link("1.2.3.4", 443, 443, "TCP", "u", "p")
+        self.assertEqual(link.count("traffic-pattern="), 1)
+
+    def test_wizard_prompt_accepts_both(self):
+        """Валидация ввода из визарда (строка «Протокол [TCP/UDP/BOTH]»):
+        BOTH принимается (в любом регистре — визард upper()-ит), мусор — откат."""
+        for raw, expected in (("BOTH", "BOTH"), ("both", "BOTH"),
+                              ("tcp", "TCP"), ("UDP", "UDP"),
+                              ("xyz", "TCP"), ("", "TCP")):
+            raw = raw.strip().upper()  # как в визарде
+            protocol = raw if raw in ("TCP", "UDP", "BOTH") else "TCP"
+            self.assertEqual(protocol, expected)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

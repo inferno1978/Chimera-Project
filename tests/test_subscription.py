@@ -359,5 +359,225 @@ class TestEnsurePepper(unittest.TestCase):
         self.assertTrue(all(c in "0123456789abcdef" for c in result))
 
 
+class TestV86MieruEndpoints(unittest.TestCase):
+    """v86: единый источник mieru-точек — домен из v85-state в ссылках,
+    BOTH → TCP и UDP отдельными точками, hybrid + standalone."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write(self, name, data):
+        p = self._tmp / name
+        p.write_text(json.dumps(data))
+        return p
+
+    def _user(self):
+        return {"uuid": "uuid-1", "email": "john@x.com"}
+
+    def test_hybrid_domain_in_links(self):
+        """Домен из client_server_addr (v85) попадает в mierus://-ссылки
+        подписки — IP больше не приоритетен."""
+        from chimera.modules import subscription as sub
+        hst = self._write("hybrid_st.json", {
+            "transport": "both", "tcp_port": 443, "udp_port": 444,
+            "client_server_addr": "chimeraprodcdn.online",
+            "client_dns": "chimeravpn.online"})
+        mcfg = self._write("mita.json", {"users": [{"name": "john", "password": "pw"}]})
+        with patch.object(sub, "_HYBRID_STATE", hst), \
+             patch.object(sub, "_MITA_HYBRID_CFG", mcfg), \
+             patch.object(sub, "_MIERU_STATE", self._tmp / "nope.json"):
+            links = sub._build_mieru_uris(self._user(), "138.124.255.238")
+        self.assertEqual(len(links), 2)  # tcp и udp — ОБА транспорта
+        for link in links:
+            self.assertIn("@chimeraprodcdn.online", link)
+            self.assertNotIn("138.124.255.238", link)
+        protos = [l.split("protocol=")[1].split("&")[0] for l in links]
+        self.assertEqual(sorted(protos), ["TCP", "UDP"])
+
+    def test_hybrid_ip_fallback(self):
+        """Нет client_server_addr — как раньше, IP (нулевая регрессия)."""
+        from chimera.modules import subscription as sub
+        hst = self._write("hybrid_st.json", {"tcp_port": 443, "udp_port": None})
+        mcfg = self._write("mita.json", {"users": [{"name": "john", "password": "pw"}]})
+        with patch.object(sub, "_HYBRID_STATE", hst), \
+             patch.object(sub, "_MITA_HYBRID_CFG", mcfg), \
+             patch.object(sub, "_MIERU_STATE", self._tmp / "nope.json"):
+            links = sub._build_mieru_uris(self._user(), "138.124.255.238")
+        self.assertEqual(len(links), 1)
+        self.assertIn("@138.124.255.238", links[0])
+        self.assertIn("protocol=TCP", links[0])
+
+    def test_standalone_both_two_links(self):
+        """Standalone BOTH → две ссылки (TCP и UDP), домен из state."""
+        from chimera.modules import subscription as sub
+        mst = self._write("mieru.json", {
+            "installed": True, "port_start": 20000, "port_end": 20010,
+            "protocol": "BOTH", "client_server_addr": "d.example",
+            "users": [{"username": "john", "password": "pw"}]})
+        with patch.object(sub, "_MIERU_STATE", mst), \
+             patch.object(sub, "_HYBRID_STATE", self._tmp / "nope.json"), \
+             patch.object(sub, "_MITA_HYBRID_CFG", self._tmp / "nope.json"):
+            links = sub._build_mieru_uris(self._user(), "1.2.3.4")
+        self.assertEqual(len(links), 2)
+        protos = [l.split("protocol=")[1].split("&")[0] for l in links]
+        self.assertEqual(sorted(protos), ["TCP", "UDP"])
+        for link in links:
+            self.assertIn("@d.example", link)
+            self.assertIn("port=20000", link)
+
+    def test_standalone_single_protocol_unchanged(self):
+        """Регресс: одиночный протокол — одна ссылка, как до v86."""
+        from chimera.modules import subscription as sub
+        mst = self._write("mieru.json", {
+            "installed": True, "port_start": 5353, "port_end": 5353,
+            "protocol": "UDP",
+            "users": [{"username": "john", "password": "pw"}]})
+        with patch.object(sub, "_MIERU_STATE", mst), \
+             patch.object(sub, "_HYBRID_STATE", self._tmp / "nope.json"), \
+             patch.object(sub, "_MITA_HYBRID_CFG", self._tmp / "nope.json"):
+            links = sub._build_mieru_uris(self._user(), "1.2.3.4")
+        self.assertEqual(len(links), 1)
+        self.assertIn("protocol=UDP", links[0])
+        self.assertIn("port=5353", links[0])
+
+    def test_endpoints_meta(self):
+        """meta из _collect_mieru_json_outbounds: client_dns, домен, первый тег."""
+        from chimera.modules import subscription as sub
+        hst = self._write("hybrid_st.json", {
+            "tcp_port": 443, "udp_port": 444,
+            "client_server_addr": "chimeraprodcdn.online",
+            "client_dns": "chimeravpn.online",
+            "traffic_pattern_blob": "GgQIARAFIgIIAQ=="})
+        mcfg = self._write("mita.json", {"users": [{"name": "john", "password": "pw"}]})
+        with patch.object(sub, "_HYBRID_STATE", hst), \
+             patch.object(sub, "_MITA_HYBRID_CFG", mcfg), \
+             patch.object(sub, "_MIERU_STATE", self._tmp / "nope.json"):
+            obs, meta = sub._collect_mieru_json_outbounds(self._user(), "1.2.3.4")
+        self.assertEqual(len(obs), 2)
+        self.assertEqual(meta["client_dns"], "chimeravpn.online")
+        self.assertEqual(meta["server_domain"], "chimeraprodcdn.online")
+        self.assertEqual(meta["first_tag"], "mieru-john")
+        # теги уникальны, у второго — суффикс транспорта
+        tags = [ob["tag"] for ob in obs]
+        self.assertEqual(len(set(tags)), 2)
+        self.assertEqual(tags, ["mieru-john", "mieru-john-udp"])
+        for ob in obs:
+            self.assertEqual(ob["server"], "chimeraprodcdn.online")
+            self.assertEqual(ob["domain_resolver"], "local")
+            self.assertEqual(ob["traffic_pattern"], "GgQIARAFIgIIAQ==")
+            self.assertEqual(ob["multiplexing"], "MULTIPLEXING_HIGH")
+
+
+class TestV86SingboxSubscription(unittest.TestCase):
+    """v86: nyamebox/nekobox (format=singbox) получают mieru-outbound'ы;
+    VLESS исключается в hybrid-режиме; DNS-блок — только в чистом mieru."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write(self, name, data):
+        p = self._tmp / name
+        p.write_text(json.dumps(data))
+        return p
+
+    def _user(self):
+        return {"uuid": "uuid-1", "email": "john@x.com"}
+
+    def _hybrid_state(self, dns="chimeravpn.online", addr="chimeraprodcdn.online"):
+        hst = self._write("hybrid_st.json", {
+            "transport": "both", "tcp_port": 443, "udp_port": 444,
+            "client_server_addr": addr, "client_dns": dns,
+            "traffic_pattern_blob": "GgQIARAFIgIIAQ=="})
+        mcfg = self._write("mita.json", {"users": [{"name": "john", "password": "pw"}]})
+        return hst, mcfg
+
+    def _build(self, hst, mcfg, mieru_state=None, vless_json=""):
+        from chimera.modules import subscription as sub
+        import chimera.modules.rest_api as rest_api
+        with patch.object(sub, "_HYBRID_STATE", hst), \
+             patch.object(sub, "_MITA_HYBRID_CFG", mcfg), \
+             patch.object(sub, "_MIERU_STATE", mieru_state or (self._tmp / "nope.json")), \
+             patch.object(sub, "_get_server_ip", return_value="138.124.255.238"), \
+             patch.object(sub, "_load_state", return_value={}), \
+             patch.object(sub, "_collect_registry_json_outbounds", return_value=[]), \
+             patch.object(rest_api, "_generate_singbox_config", return_value=vless_json):
+            return sub.build_subscription_singbox_config(self._user())
+
+    def test_hybrid_mieru_outbounds_and_dns(self):
+        """Hybrid-режим: mieru-outbound'ы на ОБА транспорта, домен,
+        DNS-блок (AGH через туннель) — как в Karing-JSON из v85."""
+        hst, mcfg = self._hybrid_state()
+        cfg = json.loads(self._build(hst, mcfg))
+        mieru_obs = [ob for ob in cfg["outbounds"] if ob.get("type") == "mieru"]
+        self.assertEqual(len(mieru_obs), 2)
+        tags = [ob["tag"] for ob in mieru_obs]
+        self.assertEqual(tags, ["mieru-john", "mieru-john-udp"])
+        for ob in mieru_obs:
+            self.assertEqual(ob["server"], "chimeraprodcdn.online")
+            self.assertEqual(ob["domain_resolver"], "local")
+            self.assertEqual(ob["traffic_pattern"], "GgQIARAFIgIIAQ==")
+        # route.final — на первый mieru-outbound
+        self.assertEqual(cfg["route"]["final"], "mieru-john")
+        # DNS-секция: custom-dns через туннель + правила на домен сервера
+        custom = cfg["dns"]["servers"][0]
+        self.assertEqual(custom["tag"], "custom-dns")
+        self.assertEqual(custom["address"], "chimeravpn.online")
+        self.assertEqual(custom["detour"], "mieru-john")
+        self.assertEqual(cfg["dns"]["rules"],
+                         [{"domain": ["chimeraprodcdn.online"], "server": "local"}])
+
+    def test_hybrid_vless_excluded(self):
+        """Hybrid-режим: VLESS-outbound исключён (инбаунд — SOCKS-петля,
+        мёртв снаружи) — паритет с base64-подпиской."""
+        hst, mcfg = self._hybrid_state()
+        fake_vless = json.dumps({
+            "outbounds": [{"type": "vless", "tag": "vless-out",
+                           "server": "138.124.255.238", "server_port": 443}]})
+        cfg = json.loads(self._build(hst, mcfg, vless_json=fake_vless))
+        types = [ob.get("type") for ob in cfg["outbounds"]]
+        self.assertNotIn("vless", types)
+        self.assertIn("mieru", types)
+
+    def test_no_client_dns_no_dns_section(self):
+        """client_dns не задан — dns-секции нет (нулевая регрессия для
+        установок без v85-DNS)."""
+        hst, mcfg = self._hybrid_state(dns="")
+        cfg = json.loads(self._build(hst, mcfg))
+        self.assertNotIn("dns", cfg)
+        self.assertEqual(len([ob for ob in cfg["outbounds"]
+                              if ob.get("type") == "mieru"]), 2)
+
+    def test_mixed_config_no_dns_block(self):
+        """Standalone (VLESS+mieru вместе): mieru-outbound'ы есть, DNS-блока
+        НЕТ — DNS через mieru ломал бы VLESS при падении mieru."""
+        mst = self._write("mieru.json", {
+            "installed": True, "port_start": 20000, "port_end": 20000,
+            "protocol": "BOTH", "client_dns": "dns.example",
+            "users": [{"username": "john", "password": "pw"}]})
+        hst = self._tmp / "nope_hybrid.json"  # не существует → hybrid не активен
+        mcfg = self._tmp / "nope_mita.json"
+        fake_vless = json.dumps({
+            "outbounds": [{"type": "vless", "tag": "vless-out",
+                           "server": "1.2.3.4", "server_port": 443}]})
+        cfg = json.loads(self._build(hst, mcfg, mieru_state=mst,
+                                     vless_json=fake_vless))
+        types = [ob.get("type") for ob in cfg["outbounds"]]
+        self.assertEqual(types.count("vless"), 1)
+        self.assertEqual(types.count("mieru"), 2)  # BOTH → TCP и UDP
+        self.assertNotIn("dns", cfg)
+        # VLESS остаётся первым (route.final не изменился — регресс-защита)
+        self.assertEqual(cfg["route"]["final"], "vless-out")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
