@@ -2,6 +2,63 @@
 
 ---
 
+## FEAT(mieru): v85 — домен сервера + свой DNS в клиентских конфигах (standalone и Hybrid Addon) — 9 сентября 2026
+
+**Кейс:** юзер принёс Karing-JSON, выданный Hybrid Addon
+(`/tmp/karing-mieru-hybrid-tcp-<логин>.json`): `server` — голый IP,
+DNS-секция прибита к Google 8.8.8.8 + Cloudflare 1.1.1.1. Два вопроса:
+(1) если у сервера есть домен — отдавать в выдаче домен, а не IP;
+(2) DNS — свой (у юзера AGH на DoT/DoH/DoQ/plain по двум своим
+доменам) вместо Google. Оба — «да», для обоих путей установки.
+
+**Сделано:**
+- **Общие чистые хелперы в mieru.py** (гибрид берёт их ленивым
+  импортом, как генераторы ссылок): `_detect_server_domain()`
+  (PARAM_DOMAIN → state.json → naiveproxy.json — конвенция v83.3/v84),
+  `_dns_host_is_domain()` (IP/домен/DoH/DoT/DoQ/порт),
+  `_build_karing_dns_block()`, `_build_karing_full_config()`,
+  `_effective_client_addr()`. Один формат выдачи на оба модуля.
+- **Домен в выдаче:** при установке (визард standalone, меню и CLI
+  гибрида) — выбор «[1] IP / [2] домен <найденный> / или свой домен»,
+  Enter = домен если найден. Хранится в state (`client_server_addr`),
+  перевыпуск ссылок/JSON (меню пользователей, sing-box JSON) отдаёт
+  домен; в итоговом боксе — домен + IP как резерв. Техника:
+  `server` = домен, `domain_resolver: "local"` в outbound (новый
+  формат sing-box; старые ядра игнорируют) + `dns.rules`
+  «домен сервера → local» (legacy-зеркало) — иначе цикл «домен
+  туннеля нужно резолвить через туннель». Билдер outbound не мутирует
+  (traffic_pattern из гибрида не теряется).
+- **Свой DNS:** вместо хардкода Google — `custom-dns` первым
+  сервером с `detour: <mieru-tag>` (запросы ЧЕРЕЗ mieru-туннель,
+  провайдеру неотличимы; AGH режет рекламу на клиенте), доменный
+  адрес — с `address_resolver: "local"` (bootstrap до туннеля).
+  Формы: IP, домен, `https://…/dns-query` (DoH), `tls://…` (DoT),
+  `quic://…` (DoQ). Пустой ввод = прежний Google (нулевая
+  регрессия). State: `client_dns`; переустановка — прежние значения
+  дефолтами; CLI: флаги `--client-dns` / `--client-server-addr`
+  (в `--yes` — тихие дефолты).
+- **Гибрид CLI-чистота сохранена:** `_detect_server_domain()` в
+  hybrid_addon читает state.json/naiveproxy.json напрямую, без
+  импорта chimera._core — `sudo python3 hybrid_addon.py` как раньше
+  работает на голом stdlib.
+
+**Тесты:** mieru 60 passed (+10: dns-host-детект всех форм,
+dns-блок — дефолт/свой-IP/домен/DoH/bootstrap-правила, full-config —
+форма/domain_resolver/не-мутация/custom-dns, детект домена ×5,
+effective addr ×3); hybrid 71 passed (+7: детект ×4, промпты ×7,
+Karing-JSON интеграционный — домен+AGH и IP+Google). Соседи:
+mieru_stats+traffic_presets+download+mirrors 93, triple_panel 151,
+rest_api 55 — поллюции нет.
+
+**Эксплуатация:** на живом сервере с аддоном — `git pull` +
+переустановка аддона (пункт меню), при вопросах: Enter = домен
+(cdn.example), DNS = panel.example (или
+`https://panel.example/dns-query`); выданный Karing-JSON
+проверить живьём — домен-режим и custom-dns помечены как непроверенные
+на реальном Karing, IP-вариант остаётся откатом одним нажатием.
+
+---
+
 ## FIX(panel/telemt): v84 — авто-домен для Let's Encrypt в Telemt Panel (порт v83.3) — 9 сентября 2026
 
 **Кейс:** латентное наблюдение из арка Triple Panel: telemt_panel.py

@@ -135,6 +135,9 @@ _SERVER_CFG      = Path("/etc/mita/server.json")
 _SERVICE_FILE    = Path("/etc/systemd/system/mita.service")
 _SERVICE_NAME    = "mita"
 _MODULE_STATE    = Path("/var/lib/xray-installer/mieru.json")
+# Стейт ядра (state.json, naiveproxy.json) — только ЧИТАЕМ (домен для
+# клиентской выдачи, v85); сам файл инстоллера не трогаем.
+_CORE_STATE_DIR  = _MODULE_STATE.parent
 
 _GITHUB_API      = "https://api.github.com/repos/enfein/mieru/releases/latest"
 
@@ -717,6 +720,125 @@ def _gen_client_share_link_nekobox(server_ip: str, port_start: int,
         f"?transport={protocol.upper()}&mtu=1400"
     )
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  v85: ДОМЕН СЕРВЕРА + СВОЙ DNS В КЛИЕНТСКИХ КОНФИГАХ
+# ══════════════════════════════════════════════════════════════════════════════
+# Mieru работает по IP и домена не требует — но если домен у сервера есть,
+# его удобно отдавать в клиентских ссылках/JSON: смена IP сервера не ломает
+# клиентские конфиги (домен резолвит сам клиент), а DNS-секцию Karing можно
+# направить на свой резолвер (например, AGH на этом же или соседнем сервере),
+# вместо Google 8.8.8.8. Функции ниже — чистые, используются и mieru.py,
+# и hybrid_addon.py (ленивый импорт, как и генераторы выше).
+
+def _detect_server_domain() -> str:
+    """Домен сервера для клиентской выдачи (v85), '' — не нашли.
+
+    Цепочка: PARAM_DOMAIN (глобаль ядра — домен VLESS/REALITY) →
+    state.json → домен Naive (naiveproxy.json). Тот же порядок, что в
+    _detect_panel_domain (v83.3/v84) — единая конвенция проекта."""
+    try:
+        import importlib
+        core = importlib.import_module("chimera._core")
+        d = (getattr(core, "PARAM_DOMAIN", "") or "").strip()
+        if d:
+            return d
+    except Exception:
+        pass
+    for fname in ("state.json", "naiveproxy.json"):
+        try:
+            data = json.loads((_CORE_STATE_DIR / fname).read_text(encoding="utf-8"))
+            d = (data.get("domain", "") or "").strip()
+            if d:
+                return d
+        except Exception:
+            continue
+    return ""
+
+
+def _dns_host_is_domain(address: str) -> bool:
+    """True, если DNS-адрес — домен (требует резолвинга), а не IP.
+
+    Понимает формы: голый IP | домен | https://…/dns-query (DoH) |
+    tls://… (DoT) | quic://… (DoQ) | h3://… ."""
+    a = (address or "").strip().lower()
+    for scheme in ("https://", "http://", "tls://", "quic://", "h3://"):
+        if a.startswith(scheme):
+            a = a[len(scheme):]
+    a = a.split("/", 1)[0].split(":", 1)[0]  # отрезаем путь (DoH) и порт
+    if not a:
+        return False
+    try:
+        import socket
+        socket.inet_aton(a)
+        return False
+    except OSError:
+        return True
+
+
+def _build_karing_dns_block(client_dns: str, mieru_tag: str,
+                            server_domain: str = "") -> dict:
+    """DNS-секция Karing/sing-box JSON (v85).
+
+    client_dns='' → как раньше: google (через mieru-туннель, дефолт) +
+    local (1.1.1.1, direct). client_dns=<свой DNS> → он становится
+    дефолтным и ходит ЧЕРЕЗ mieru-туннель (detour=<mieru_tag>): для
+    провайдера DNS-запросы неотличимы от остального mieru-трафика, а
+    свой AGH режет рекламу на клиенте. Доменный адрес резолвится через
+    local (address_resolver) ДО поднятия туннеля — без цикла.
+
+    server_domain — домен сервера mieru в выдаче (v85): резолвится
+    ТОЛЬКО напрямую (dns.rules → local). Без этого выходит цикл
+    «домен туннеля нужно резолвить через туннель»."""
+    if client_dns:
+        custom = {"tag": "custom-dns", "address": client_dns.strip(),
+                  "detour": mieru_tag}
+        if _dns_host_is_domain(client_dns):
+            custom["address_resolver"] = "local"
+        servers = [custom,
+                   {"tag": "local", "address": "1.1.1.1", "detour": "direct"}]
+    else:
+        servers = [{"tag": "google", "address": "8.8.8.8"},
+                   {"tag": "local", "address": "1.1.1.1", "detour": "direct"}]
+    block = {"servers": servers}
+    if server_domain:
+        # домен сервера mieru — только через direct-резолвер (bootstrap)
+        block["rules"] = [{"domain": [server_domain], "server": "local"}]
+    return block
+
+
+def _build_karing_full_config(outbound: dict, client_dns: str = "",
+                              server_domain: str = "") -> dict:
+    """Полный Karing/sing-box профиль вокруг mieru-outbound (v85).
+
+    Чистая функция: используется mieru.py (_show_singbox_json) и
+    hybrid_addon.py (_show_mieru_client_links) — один формат на оба
+    пути установки. При server_domain outbound получает
+    domain_resolver=local (новый формат sing-box; старые ядра поле
+    игнорируют, для них работает dns.rules из dns-блока)."""
+    ob = dict(outbound)
+    if server_domain:
+        ob["domain_resolver"] = "local"
+    return {
+        "log": {"level": "info"},
+        "dns": _build_karing_dns_block(client_dns, ob["tag"], server_domain),
+        "outbounds": [ob, {"type": "direct", "tag": "direct"}],
+        "route": {"final": ob["tag"]},
+    }
+
+
+def _effective_client_addr() -> str:
+    """Адрес сервера для клиентской выдачи (v85): домен из state
+    (если выбран при установке) или публичный IP — как раньше."""
+    try:
+        state = proto_load_state(_MODULE_STATE)
+        d = (state.get("client_server_addr", "") or "").strip()
+        if d:
+            return d
+    except Exception:
+        pass
+    return _get_server_ip()
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  УСТАНОВКА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -778,6 +900,48 @@ def _run_install_inner() -> None:
             default=old_protocol, c=True,
         ).strip().upper()
         protocol = raw if raw in ("TCP", "UDP") else old_protocol
+
+        # ── v85: адрес сервера в клиентской выдаче (IP или домен) ─────
+        old_addr = (state.get("client_server_addr", "") or "").strip()
+        domain_hint = _detect_server_domain() or old_addr
+        client_server_addr = ""
+        if domain_hint:
+            default_opt = old_addr or "2"
+            raw = proto_ask(
+                f"  {CYAN}Адрес в клиентских ссылках: [1] IP / "
+                f"[2] домен {domain_hint} / или свой домен [Enter={default_opt}]: {NC}",
+                default=default_opt, c=True,
+            ).strip()
+            if raw == "1":
+                client_server_addr = ""
+            elif raw == "2":
+                client_server_addr = domain_hint
+            else:
+                # Enter = дефолт (домен из подсказки или прежнее значение),
+                # произвольный ввод = ручной домен
+                client_server_addr = raw
+            if client_server_addr:
+                print(f"  {GREEN}✓{NC}  В ссылках/JSON будет домен "
+                      f"{YELLOW}{client_server_addr}{NC} "
+                      f"{DIM}(IP меняется — ссылки живут){NC}")
+
+        # ── v85: DNS в клиентских конфигах Karing ───────────────────
+        old_dns = (state.get("client_dns", "") or "").strip()
+        dns_hint = (f" {DIM}(на сервере найден домен: {domain_hint} — "
+                    f"если там живёт ваш DNS, можно указать его){NC}"
+                    if domain_hint else "")
+        raw = proto_ask(
+            f"  {CYAN}DNS в конфигах Karing [Enter={old_dns or 'Google 8.8.8.8'}]:{NC}{dns_hint}",
+            default=old_dns, c=True,
+        ).strip()
+        client_dns = raw or old_dns
+        if client_dns and (" " in client_dns or "/" in client_dns
+                           and not client_dns.startswith("http")):
+            print(f"  {YELLOW}⚠{NC}  Похоже на опечатку — оставляю дефолт (Google).")
+            client_dns = ""
+        elif client_dns:
+            print(f"  {GREEN}✓{NC}  DNS в выдаче: {YELLOW}{client_dns}{NC} "
+                  f"{DIM}(через mieru-туннель){NC}")
 
     except _Cancelled: raise
 
@@ -911,6 +1075,11 @@ def _run_install_inner() -> None:
     old_tp = state.get("traffic_preset")
     if old_tp:
         new_state["traffic_preset"] = old_tp
+    # v85: адрес и DNS клиентской выдачи
+    if client_dns:
+        new_state["client_dns"] = client_dns
+    if client_server_addr:
+        new_state["client_server_addr"] = client_server_addr
     proto_save_state(_MODULE_STATE, new_state)
     # Обновляем локальную переменную для использования ниже
     state = new_state
@@ -933,11 +1102,12 @@ def _run_install_inner() -> None:
 
     # ── Итог ──────────────────────────────────────────────────────────────────
     server_ip      = _get_server_ip()
+    client_addr    = _effective_client_addr()
     uname          = users[0]["username"]
     pwd            = users[0]["password"]
-    share_link     = _gen_client_share_link(server_ip, port_start, port_end, protocol, uname, pwd,
+    share_link     = _gen_client_share_link(client_addr, port_start, port_end, protocol, uname, pwd,
                                               traffic_preset=state.get("traffic_preset", "basic"))
-    share_link_neko = _gen_client_share_link_nekobox(server_ip, port_start, protocol, uname, pwd)
+    share_link_neko = _gen_client_share_link_nekobox(client_addr, port_start, protocol, uname, pwd)
 
     os.system("clear")
     _box_top("✅  УСТАНОВКА ЗАВЕРШЕНА  •  MIERU")
@@ -945,9 +1115,15 @@ def _run_install_inner() -> None:
     _box_ok("mita установлен и запущен." if svc_ok else
             "Установлен, но сервис не запустился — проверьте логи.")
     _box_row()
-    _box_kv("IP сервера:", f"{YELLOW}{server_ip}{NC}")
+    if client_addr != server_ip:
+        _box_kv("Домен в выдаче:", f"{YELLOW}{client_addr}{NC}")
+        _box_kv("IP сервера:", f"{DIM}{server_ip} (резерв, если домен недоступен){NC}")
+    else:
+        _box_kv("IP сервера:", f"{YELLOW}{server_ip}{NC}")
     port_str = str(port_start) if port_start == port_end else f"{port_start}-{port_end}"
     _box_kv("Порт(ы):",    f"{YELLOW}{port_str}/{protocol}{NC}")
+    if client_dns:
+        _box_kv("DNS в выдаче:", f"{YELLOW}{client_dns}{NC} {DIM}(через туннель){NC}")
     _box_row()
     _box_sep()
     _box_row(f"  {BOLD}{WHITE}Ссылка для Karing (sing-box core):{NC}")
@@ -976,7 +1152,8 @@ def _users_menu() -> None:
         os.system("clear")
         state  = proto_load_state(_MODULE_STATE)
         users  = state.get("users", [])
-        server_ip  = _get_server_ip()
+        # v85: адрес клиентской выдачи — домен (если выбран) или IP
+        server_ip  = _effective_client_addr()
         port_start = state.get("port_start", _DEFAULT_PORT_START)
         port_end   = state.get("port_end",   _DEFAULT_PORT_END)
         protocol   = state.get("protocol",   _DEFAULT_PROTOCOL)
@@ -1076,7 +1253,7 @@ def _add_user(state: dict) -> None:
     if not err:
         _run(["systemctl", "reload-or-restart", _SERVICE_NAME])
 
-    server_ip  = _get_server_ip()
+    server_ip  = _effective_client_addr()
     port_start = state.get("port_start", _DEFAULT_PORT_START)
     port_end   = state.get("port_end",   _DEFAULT_PORT_END)
     protocol   = state.get("protocol",   _DEFAULT_PROTOCOL)
@@ -1176,21 +1353,12 @@ def _show_singbox_json(users: list, server_ip: str,
         user["username"], user["password"],
     )
 
-    # Полный sing-box конфиг для импорта в Karing
-    full_config = {
-        "log": {"level": "info"},
-        "dns": {
-            "servers": [
-                {"tag": "google", "address": "8.8.8.8"},
-                {"tag": "local", "address": "1.1.1.1", "detour": "direct"}
-            ]
-        },
-        "outbounds": [
-            outbound,
-            {"type": "direct", "tag": "direct"}
-        ],
-        "route": {"final": outbound["tag"]}
-    }
+    # Полный sing-box конфиг для импорта в Karing (v85: dns-секция и домен
+    # из state — свои DNS/домен, выбранные при установке)
+    _state = proto_load_state(_MODULE_STATE)
+    client_dns = (_state.get("client_dns", "") or "").strip()
+    server_domain = server_ip if _dns_host_is_domain(server_ip) else ""
+    full_config = _build_karing_full_config(outbound, client_dns, server_domain)
     json_str = json.dumps(full_config, indent=2, ensure_ascii=False)
 
     # Сохраняем в файл чтобы можно было скопировать
