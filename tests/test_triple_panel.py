@@ -31,6 +31,12 @@ Unit-тесты для chimera/modules/triple_panel.py + triple_panel_web.py.
      буферизация до \n, длинные — переносом), _box_ask (не-TTY ветка),
      _smoke_check (ProxyHandler({}) — 127.0.0.1 мимо http_proxy),
      _wait_service_http (ретраи, ранний выход при failed)
+ 17. v83.4 недостающие эндпоинты: _to_mb/_mita_live_users (парсер таблицы
+     mita), _stats_users_payload (merge: live→accounting фолбэк, usedMB
+     из квот или сумма, naiveServerTotal из IPAccounting), _hy2_view
+     (installed/port из unit/config/state), _diagnostics_payload (порты,
+     Caddyfile-юзеры, probe), _stub_get/_stub_set (roundtrip, лимиты,
+     BOM/Copy), _status_view_payload (контракт апстрима ПОЛНОСТЬЮ)
 """
 from __future__ import annotations
 
@@ -1683,6 +1689,407 @@ class TestV833AccessMenuFlow(unittest.TestCase):
         self.assertEqual(calls["ask_domain"], 0)
         self.assertEqual(calls["install"], [(True, None)])
         self.assertNotIn("Домен:", out)               # self-signed — без домена
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  17. v83.4 — НЕДОСТАЮЩИЕ ЭНДПОИНТЫ (stats/hy2/diagnostics/stub + статус)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_MITA_TABLE = "\n".join([
+    "User  LastActive           1DayDownload  1DayUpload  30DaysDownload  30DaysUpload",
+    "smoke 2026-09-01T10:00:00Z 1.5MiB        0.5MiB      150.2MiB        42.7MiB",
+    "vasya -                    0B            0B          3GiB           1GiB",
+    "garbage-row without sizes",
+    "----  ----  ----  ----  ----  ----",
+])
+
+
+class TestStatsHelpers(unittest.TestCase):
+
+    def test_to_mb_units(self):
+        self.assertAlmostEqual(web._to_mb(1, "B"), 1 / 1048576)
+        self.assertAlmostEqual(web._to_mb(2, "KB"), 2 / 1024)
+        self.assertAlmostEqual(web._to_mb(2, "KiB"), 2 / 1024)
+        self.assertEqual(web._to_mb(5, "MB"), 5)
+        self.assertEqual(web._to_mb(5, "MiB"), 5)
+        self.assertEqual(web._to_mb(2, "GB"), 2048)
+        self.assertEqual(web._to_mb(1, "TiB"), 1048576)
+
+    def test_mita_parse_real_table(self):
+        with patch.object(web, "_MITA_BIN", Path("/bin/ls")), \
+                patch.object(web, "_run_cmd", return_value=_MITA_TABLE):
+            live = web._mita_live_users()
+        self.assertEqual(sorted(live), ["smoke", "vasya"])
+        self.assertEqual(live["smoke"]["downloadMB"], 150.2)
+        self.assertEqual(live["smoke"]["uploadMB"], 42.7)
+        self.assertEqual(live["smoke"]["usedMB"], round(150.2 + 42.7, 2))
+        self.assertEqual(live["smoke"]["lastSeen"], "2026-09-01T10:00:00Z")
+        # «-» вместо даты → lastSeen None; GiB-колонки конвертируются
+        self.assertIsNone(live["vasya"]["lastSeen"])
+        self.assertEqual(live["vasya"]["downloadMB"], 3072)
+        self.assertEqual(live["vasya"]["uploadMB"], 1024)
+
+    def test_mita_missing_binary(self):
+        with patch.object(web, "_MITA_BIN", Path("/nonexistent/mita")):
+            self.assertEqual(web._mita_live_users(), {})
+
+    def test_mita_dead_cmd(self):
+        with patch.object(web, "_MITA_BIN", Path("/bin/ls")), \
+                patch.object(web, "_run_cmd", return_value=""):
+            self.assertEqual(web._mita_live_users(), {})
+
+    def test_naive_server_total_from_ipaccounting(self):
+        fake = "IPIngressBytes=5242880\nIPEgressBytes=10485760\n"
+        with patch.object(web, "_run_cmd", return_value=fake):
+            self.assertEqual(web._naive_server_total_mb(), 15.0)
+
+    def test_naive_server_total_dead(self):
+        with patch.object(web, "_run_cmd", return_value=""):
+            self.assertEqual(web._naive_server_total_mb(), 0.0)
+
+    def test_naive_server_total_garbage(self):
+        with patch.object(web, "_run_cmd",
+                          return_value="IPIngressBytes=abc\nbusy=1"):
+            self.assertEqual(web._naive_server_total_mb(), 0.0)
+
+
+class TestStatsUsersPayload(unittest.TestCase):
+
+    ROWS = [{
+        "id": "vasya@x.com", "email": "vasya@x.com", "username": "vasya",
+        "protocols": ["naive", "mieru"], "expiry": "2099-01-01",
+        "quotaMB": 5120, "usedMB": 4.0, "subToken": "t",
+        "active": True, "createdAt": "c", "updatedAt": "c",
+    }]
+
+    def _payload(self, live=None, acc=None, limits=None,
+                 rows=None, server_total=7.5):
+        patches = [
+            patch.object(web, "_assemble_panel_users",
+                         return_value=rows or self.ROWS),
+            patch.object(web, "_traffic_limits",
+                         return_value=limits or {}),
+            patch.object(web, "_mita_live_users", return_value=live or {}),
+            patch.object(web, "_accounting_user_bytes",
+                         return_value=acc or {}),
+            patch.object(web, "_naive_server_total_mb",
+                         return_value=server_total),
+        ]
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            return web._stats_users_payload()
+
+    def test_shape(self):
+        out = self._payload()
+        self.assertEqual(sorted(out), ["naivePerUser", "naiveServerTotalMB",
+                                       "users"])
+        self.assertEqual(out["naiveServerTotalMB"], 7.5)
+        self.assertFalse(out["naivePerUser"])
+        self.assertEqual(len(out["users"]), 1)
+
+    def test_fallback_accounting_when_no_mita(self):
+        acc = {"mieru": 5 * 1048576, "naiveproxy": 3 * 1048576}
+        out = self._payload(acc=acc)
+        u = out["users"][0]
+        self.assertEqual(u["mieruMB"], 5.0)
+        self.assertEqual(u["naiveMB"], 3.0)
+        # naive без up/down → весь объём в download (конвенция userinfo)
+        self.assertEqual(u["uploadMB"], 0.0)
+        self.assertEqual(u["downloadMB"], 8.0)
+        self.assertEqual(u["hy2MB"], 0.0)
+        self.assertIsNone(u["lastSeen"])
+        # квоты нет → used = сумма
+        self.assertEqual(u["usedMB"], 8.0)
+
+    def test_live_mita_preferred(self):
+        live = {"vasya": {"uploadMB": 1.5, "downloadMB": 10.0,
+                          "usedMB": 11.5, "lastSeen": "2026-09-01T10:00:00Z"}}
+        acc = {"mieru": 99 * 1048576, "naiveproxy": 3 * 1048576}
+        out = self._payload(live=live, acc=acc)
+        u = out["users"][0]
+        self.assertEqual(u["mieruMB"], 11.5)          # live, не accounting
+        self.assertEqual(u["uploadMB"], 1.5)
+        self.assertEqual(u["downloadMB"], 13.0)       # 10.0 live + 3.0 naive
+        self.assertEqual(u["lastSeen"], "2026-09-01T10:00:00Z")
+
+    def test_used_from_quota_counter(self):
+        # row.usedMB в проде уже посчитан _panel_user_row из traffic_limits
+        # (единый источник) — payload доверяет ряду, а не сумме up+down (8 МБ)
+        rows = [dict(self.ROWS[0], usedMB=10.0)]
+        limits = {"vasya@x.com": {"limit_gb": 5, "used_bytes": 10485760}}
+        acc = {"mieru": 5 * 1048576, "naiveproxy": 3 * 1048576}
+        out = self._payload(acc=acc, limits=limits, rows=rows)
+        self.assertEqual(out["users"][0]["usedMB"], 10.0)
+
+    def test_fields_passthrough(self):
+        out = self._payload()
+        u = out["users"][0]
+        self.assertEqual(u["username"], "vasya")
+        self.assertEqual(u["email"], "vasya@x.com")
+        self.assertEqual(u["quotaMB"], 5120)
+        self.assertEqual(u["protocols"], ["naive", "mieru"])
+        self.assertEqual(u["expiry"], "2099-01-01")
+
+
+class TestHy2View(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self._paths = (web._HY2_UNIT, web._HY2_CONFIG, web._HY2_STATE)
+        web._HY2_UNIT = self.tmp / "hysteria-server.service"
+        web._HY2_CONFIG = self.tmp / "config.yaml"
+        web._HY2_STATE = self.tmp / "state.json"
+
+    def tearDown(self):
+        web._HY2_UNIT, web._HY2_CONFIG, web._HY2_STATE = self._paths
+
+    def test_not_installed(self):
+        with patch.object(web, "_svc_active", return_value=True), \
+                patch.object(web, "_naive_state",
+                             return_value={"users": [{"username": "a"}]}), \
+                patch.object(web, "_mieru_state",
+                             return_value={"users": [{"username": "a"}]}):
+            view = web._hy2_view()
+        self.assertFalse(view["installed"])
+        self.assertFalse(view["active"])
+        self.assertEqual(view["port"], 443)
+        self.assertEqual(view["hy2UserCount"], 0)
+        self.assertFalse(view["stack"]["hy2"])
+        self.assertTrue(view["stack"]["naive"])
+        self.assertTrue(view["stack"]["mieru"])
+
+    def test_installed_by_unit(self):
+        web._HY2_UNIT.write_text("[Unit]\n")
+        with patch.object(web, "_svc_active", return_value=True):
+            view = web._hy2_view()
+        self.assertTrue(view["installed"])
+        self.assertTrue(view["active"])
+        self.assertTrue(view["stack"]["hy2"])
+
+    def test_installed_by_config(self):
+        web._HY2_CONFIG.write_text("listen: :8443\n")
+        with patch.object(web, "_svc_active", return_value=False):
+            view = web._hy2_view()
+        self.assertTrue(view["installed"])
+        self.assertFalse(view["active"])
+        self.assertEqual(view["port"], 8443)
+
+    def test_port_from_state_udp_ports(self):
+        web._HY2_UNIT.write_text("[Unit]\n")
+        web._HY2_STATE.write_text(
+            '{"hysteria2": {"enabled": true, "firewall": '
+            '{"udp_ports": [2083, 8443]}}}')
+        self.assertEqual(web._hy2_port(), 2083)
+
+    def test_port_listen_variants(self):
+        cases = {"listen: :443": 443,
+                 "listen: 0.0.0.0:443": 443,
+                 "listen: 8443": 8443,
+                 "listen: :2096 # comment": 2096}
+        for line, expected in cases.items():
+            web._HY2_CONFIG.write_text(line + "\n")
+            self.assertEqual(web._hy2_port(), expected, line)
+
+    def test_installed_by_state_enabled(self):
+        web._HY2_STATE.write_text('{"hysteria2": {"enabled": true}}')
+        self.assertTrue(web._hy2_installed())
+        self.assertEqual(web._hy2_port(), 443)     # дефолт
+
+
+class TestDiagnostics(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self._caddy = web._CADDYFILE
+        web._CADDYFILE = self.tmp / "Caddyfile"
+
+    def tearDown(self):
+        web._CADDYFILE = self._caddy
+
+    def _payload(self, port_open=False, probe=""):
+        naive = {"port": 443, "probe_secret": probe}
+        mieru = {"port_start": 2012, "port_end": 2022}
+        ver = {"naive": "v2.8.4", "mieru": "v1.4.0", "hy2": "", "ts": 1.0}
+        with patch.object(web, "_naive_state", return_value=naive), \
+                patch.object(web, "_mieru_state", return_value=mieru), \
+                patch.object(web, "_cached_versions", return_value=ver), \
+                patch.object(web, "_port_listening",
+                             return_value=port_open), \
+                patch.object(web, "_hy2_installed", return_value=False), \
+                patch.object(web, "_run_cmd", return_value=""):
+            return web._diagnostics_payload()
+
+    def test_shape_and_keys(self):
+        d = self._payload()
+        for key in ("ports", "naiveVersionOk", "naiveVersion",
+                    "naiveConfigExists", "htpasswdExists", "htpasswdUsers",
+                    "caddyfileExists", "caddyfileUsers", "mitaStatus",
+                    "mitaConfig", "timeSynced", "mitaStateFile",
+                    "probeSecretSet", "probeMode"):
+            self.assertIn(key, d, key)
+        for key in ("naive", "mieru", "mieruPorts", "hy2", "hy2Port",
+                    "hy2Installed"):
+            self.assertIn(key, d["ports"], key)
+        self.assertFalse(d["ports"]["naive"])
+        self.assertEqual(d["ports"]["hy2Port"], 443)
+        self.assertFalse(d["ports"]["hy2Installed"])
+        self.assertTrue(d["naiveVersionOk"])
+        self.assertEqual(d["naiveVersion"], "v2.8.4")
+
+    def test_ports_open(self):
+        d = self._payload(port_open=True)
+        self.assertTrue(d["ports"]["naive"])
+        self.assertTrue(d["ports"]["mieru"])
+        self.assertEqual(d["ports"]["mieruPorts"], [2012, 2022])
+
+    def test_caddyfile_users_counted(self):
+        web._CADDYFILE.write_text(
+            ":443 {\n"
+            "    forward_proxy {\n"
+            "        basic_auth alice pw1\n"
+            "        basic_auth bob pw2\n"
+            "    }\n"
+            "}\n")
+        with patch.object(web, "_run_cmd", return_value=""):
+            self.assertEqual(web._caddyfile_user_count(), 2)
+
+    def test_probe_modes(self):
+        self.assertEqual(self._payload(probe="s3cret")["probeMode"], "secret")
+        self.assertTrue(self._payload(probe="s3cret")["probeSecretSet"])
+        self.assertEqual(self._payload()["probeMode"], "bare")
+
+    def test_port_listening_dead(self):
+        with patch.object(web, "_run_cmd", return_value=""):
+            self.assertFalse(web._port_listening(443))
+        with patch.object(web, "_run_cmd",
+                          return_value="tcp LISTEN 0 5 0.0.0.0:443"):
+            self.assertTrue(web._port_listening(443))
+        self.assertFalse(web._port_listening(0))
+
+    def test_time_synced(self):
+        with patch.object(web, "_run_cmd", return_value="yes"):
+            self.assertTrue(web._time_synced())
+        with patch.object(web, "_run_cmd", return_value="no"):
+            self.assertFalse(web._time_synced())
+
+
+class TestPanelStub(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self._stub = web._STUB_FILE
+        web._STUB_FILE = self.tmp / "index.html"
+
+    def tearDown(self):
+        web._STUB_FILE = self._stub
+
+    def test_get_missing_file(self):
+        out = web._stub_get()
+        self.assertEqual(out["html"], "")
+        self.assertEqual(out["path"], str(web._STUB_FILE))
+
+    def test_set_and_get_roundtrip(self):
+        status, payload = web._stub_set("<html>stub</html>")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["bytes"], 17)
+        self.assertEqual(web._stub_get()["html"], "<html>stub</html>")
+
+    def test_set_rejects_empty(self):
+        status, payload = web._stub_set("   ")
+        self.assertEqual(status, 400)
+        self.assertIn("empty", payload["error"])
+        status, _ = web._stub_set(None)
+        self.assertEqual(status, 400)
+
+    def test_set_rejects_too_large(self):
+        status, payload = web._stub_set("<html>" + "x" * (256 * 1024) +
+                                        "</html>")
+        self.assertEqual(status, 400)
+        self.assertIn("large", payload["error"])
+
+    def test_strips_bom_and_copy_artifact(self):
+        # апстрим: replace(/^Copy(?=\s*<)/, '') — «Copy» срезается,
+        # ведущий пробел ОСТАЁТСЯ (буквальная семантика апстрима)
+        status, _ = web._stub_set("\ufeffCopy <html>s</html>")
+        self.assertEqual(status, 200)
+        self.assertEqual(web._stub_get()["html"], " <html>s</html>")
+
+    def test_atomic_no_tmp_left(self):
+        web._stub_set("<html>a</html>")
+        leftovers = [p.name for p in self.tmp.iterdir()
+                     if p.name.endswith(".new")]
+        self.assertEqual(leftovers, [])
+
+
+class TestStatusViewPayload(unittest.TestCase):
+    """Контракт /api/status должен совпадать с апстримом ПОЛНОСТЬЮ —
+    loadDashboard/refreshStats фронта читают services.naive.active,
+    system.cpuPercent, panel.userCount и т.д. (в v81 был плоский
+    services: {name: bool} — фронт рендерил undefined)."""
+
+    def _view(self, hy2_inst=False, svc=True):
+        ver = {"naive": "v2.8.4", "mieru": "v1.4.0", "hy2": "v2.6.1",
+               "ts": time.time()}
+        with patch.object(web, "_svc_active", return_value=svc), \
+                patch.object(web, "_cached_versions", return_value=ver), \
+                patch.object(web, "_hy2_installed", return_value=hy2_inst), \
+                patch.object(web, "_hy2_port", return_value=8443), \
+                patch.object(web, "_naive_state",
+                             return_value={"domain": "d.example",
+                                           "users": [{"username": "a"}]}), \
+                patch.object(web, "_mieru_state",
+                             return_value={"users": [{"username": "a"}]}), \
+                patch.object(web, "_read_cpu_percent", return_value=12.5), \
+                patch.object(web, "_read_ram_mb", return_value=(100, 200)), \
+                patch.object(web, "_disk_gb", return_value=(3, 10)), \
+                patch.object(web, "_uptime_sec", return_value=999), \
+                patch.object(web, "_local_ip", return_value="192.0.2.10"), \
+                patch.object(web, "_assemble_panel_users",
+                             return_value=[{}, {}]), \
+                patch.object(web, "_core_module_cached",
+                             side_effect=Exception("no core")):
+            return web._status_view_payload()
+
+    def test_upstream_shape(self):
+        s = self._view()
+        # services
+        self.assertEqual(sorted(s["services"]),
+                         ["hy2", "mieru", "naive", "panel"])
+        self.assertEqual(sorted(s["services"]["naive"]),
+                         ["active", "version"])
+        self.assertTrue(s["services"]["naive"]["active"])
+        self.assertEqual(s["services"]["naive"]["version"], "v2.8.4")
+        self.assertTrue(s["services"]["panel"]["active"])
+        # system
+        self.assertEqual(s["system"]["cpuPercent"], 12)   # round
+        self.assertEqual(s["system"]["ramUsedMB"], 100)
+        self.assertEqual(s["system"]["ramTotalMB"], 200)
+        self.assertEqual(s["system"]["diskUsedGB"], 3)
+        self.assertEqual(s["system"]["diskTotalGB"], 10)
+        self.assertEqual(s["system"]["uptime"], 999)
+        self.assertTrue(s["system"]["os"])               # /etc/os-release
+        self.assertTrue(s["system"]["arch"])
+        # panel/domain/ip
+        self.assertEqual(s["panel"]["userCount"], 2)
+        self.assertEqual(s["domain"], "d.example")       # naive-домен
+        self.assertEqual(s["serverIp"], "192.0.2.10")
+
+    def test_hy2_block(self):
+        s = self._view(hy2_inst=True)
+        self.assertTrue(s["services"]["hy2"]["installed"])
+        self.assertTrue(s["services"]["hy2"]["active"])
+        self.assertEqual(s["services"]["hy2"]["version"], "v2.6.1")
+        self.assertEqual(s["services"]["hy2"]["port"], 8443)
+        s2 = self._view(hy2_inst=False)
+        self.assertFalse(s2["services"]["hy2"]["installed"])
+        self.assertFalse(s2["services"]["hy2"]["active"])
+        self.assertEqual(s2["services"]["hy2"]["version"], "")
+
+    def test_services_all_down(self):
+        s = self._view(svc=False)
+        self.assertFalse(s["services"]["naive"]["active"])
+        self.assertFalse(s["services"]["mieru"]["active"])
+        self.assertFalse(s["services"]["hy2"]["active"])
 
 
 if __name__ == "__main__":
