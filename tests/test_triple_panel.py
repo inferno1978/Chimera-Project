@@ -38,6 +38,7 @@ import tempfile
 import time
 import types
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -160,14 +161,28 @@ class TestFrontFetch(unittest.TestCase):
 
     def test_mirror_urls_from_tag(self):
         urls = tp._front_mirror_urls("triple-panel-front-v1.11.2.tar.gz")
-        self.assertEqual(len(urls), 2)
+        # v83.1: апстрим не тегает релизы — лестница: тег (404 сегодня,
+        # задел на будущее) → архив ветки main (гарантированно живой)
+        self.assertEqual(len(urls), 4)
         self.assertIn("archive/refs/tags/v1.11.2.tar.gz", urls[0])
         self.assertIn("codeload.github.com", urls[1])
         self.assertIn(tp._UPSTREAM_REPO, urls[0])
+        self.assertIn("archive/refs/heads/main.tar.gz", urls[2])
+        self.assertIn("tar.gz/refs/heads/main", urls[3])
 
     def test_mirror_urls_latest(self):
         urls = tp._front_mirror_urls("triple-panel-front-latest.tar.gz")
+        # latest = только ветка main (2 зеркала)
+        self.assertEqual(len(urls), 2)
         self.assertTrue(all("main" in u for u in urls))
+
+    def test_mirror_urls_tag_first_branch_fallback(self):
+        """Порядок: теговые зеркала ДО веточных — fetch_package идёт по списку."""
+        urls = tp._front_mirror_urls("triple-panel-front-v1.11.2.tar.gz")
+        tag_idx = [i for i, u in enumerate(urls) if "/tags/" in u]
+        branch_idx = [i for i, u in enumerate(urls) if "/heads/" in u]
+        self.assertTrue(tag_idx and branch_idx)
+        self.assertLess(max(tag_idx), min(branch_idx))
 
     def _make_front_tarball(self, tmp: Path) -> Path:
         """Собирает тарболл со структурой апстрима + poison-файл с '../'."""
@@ -217,6 +232,101 @@ class TestFrontFetch(unittest.TestCase):
             bad = tmpdir / "bad.tar.gz"
             bad.write_bytes(b"not a tarball at all")
             self.assertFalse(tp._extract_front(bad, tmpdir / "www"))
+
+    def _make_front_tarball_with_version(self, tmp: Path, version: str) -> Path:
+        """Тарболл апстрима с корневым VERSION (как в архиве ветки main)."""
+        tar_path = tmp / "front-ver.tar.gz"
+        root = "Panel-Naive-Mieru-by-RIXXX-main"
+        payload = {
+            f"{root}/VERSION": version.encode(),
+            f"{root}/panel/public/index.html": b"<html>panel</html>",
+        }
+        with tarfile.open(tar_path, "w:gz") as tar:
+            for name, data in payload.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        return tar_path
+
+    def test_extract_front_captures_version(self):
+        """v83.1: корневой VERSION → dest/VERSION.upstream (честная книга)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            tar_path = self._make_front_tarball_with_version(tmpdir, "1.12.0")
+            dest = tmpdir / "www"
+            self.assertTrue(tp._extract_front(tar_path, dest))
+            self.assertTrue((dest / "VERSION.upstream").exists())
+            self.assertEqual((dest / "VERSION.upstream").read_text(), "1.12.0")
+            # VERSION не попадает в раздачу как index/файл фронта
+            self.assertFalse((dest / "VERSION").exists())
+
+    def test_extract_front_without_version(self):
+        """VERSION в архиве нет → VERSION.upstream не создаётся, распаковка ок."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            tar_path = self._make_front_tarball(tmpdir)
+            dest = tmpdir / "www"
+            self.assertTrue(tp._extract_front(tar_path, dest))
+            self.assertFalse((dest / "VERSION.upstream").exists())
+
+    def test_front_actual_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self.assertEqual(tp._front_actual_version(d), "")
+            (d / "VERSION.upstream").write_text("1.11.2")
+            self.assertEqual(tp._front_actual_version(d), "1.11.2")
+            # мусор/HTML-заглушка вместо версии → '' (не парсим как версию)
+            (d / "VERSION.upstream").write_text("<html>404</html>")
+            self.assertEqual(tp._front_actual_version(d), "")
+
+
+class TestUpstreamVersionDetection(unittest.TestCase):
+    """v83.1: апстрим не тегает релизы — версия из файла VERSION ветки main."""
+
+    class _Resp:
+        def __init__(self, body: bytes):
+            self._body = body
+        def read(self):
+            return self._body
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def test_raw_version_first(self):
+        with patch.object(tp.urllib.request, "urlopen",
+                          return_value=self._Resp(b"1.12.0\n")) as u:
+            self.assertEqual(tp._detect_upstream_version(), "1.12.0")
+            # первый кандидат — raw.githubusercontent (канонический источник)
+            first_url = u.call_args_list[0][0][0].full_url
+            self.assertIn("raw.githubusercontent.com", first_url)
+
+    def test_raw_garbage_falls_to_jsdelivr(self):
+        # raw отдал HTML-заглушку → не версия → jsDelivr-зеркало
+        responses = [self._Resp(b"<!DOCTYPE html>blocked"),
+                     self._Resp(b"v1.11.4")]
+        with patch.object(tp.urllib.request, "urlopen",
+                          side_effect=responses) as u:
+            self.assertEqual(tp._detect_upstream_version(), "1.11.4")
+            urls = [c[0][0].full_url for c in u.call_args_list]
+            self.assertIn("cdn.jsdelivr.net", urls[1])
+
+    def test_all_raw_dead_api_reserve(self):
+        # оба VERSION-источника упали → резерв GitHub API /releases/latest
+        api_body = json.dumps({"tag_name": "v1.13.0"}).encode()
+        responses = [urllib.error.URLError("blocked"),
+                     urllib.error.URLError("blocked"),
+                     self._Resp(api_body)]
+        with patch.object(tp.urllib.request, "urlopen",
+                          side_effect=responses) as u:
+            self.assertEqual(tp._detect_upstream_version(), "1.13.0")
+            urls = [c[0][0].full_url for c in u.call_args_list]
+            self.assertIn("api.github.com", urls[2])
+
+    def test_everything_dead(self):
+        with patch.object(tp.urllib.request, "urlopen",
+                          side_effect=urllib.error.URLError("no net")):
+            self.assertEqual(tp._detect_upstream_version(), "")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
