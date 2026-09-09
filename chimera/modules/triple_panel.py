@@ -56,20 +56,24 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+# ── Прямой запуск (python3 .../triple_panel.py) — bootstrap корня проекта ───
+# (до первого chimera-импорта, иначе `import chimera.*` падает раньше бутстрапа)
+if __package__ in (None, ""):
+    _ROOT = Path(__file__).resolve().parent.parent.parent
+    if str(_ROOT) not in sys.path:
+        sys.path.insert(0, str(_ROOT))
+
 from chimera.modules.proto_common import proto_ask, ProtoCancelled
+# Единая ANSI/emoji-осведомлённая ширина строк — как во всех 23 модулях
+# с box-рендером (naiveproxy/mieru/mtproto/...). Своя копия через len()
+# считала ANSI-коды и эмодзи видимыми колонками — правая рамка съезжала.
+from chimera.modules.text_width import wlen as _wlen, plain as _plain
 # Конвенция проекта (как в naiveproxy/mieru): локальный алиас, чтобы
 # `except _Cancelled:` работал без изменений. ВАЖНО: proto_common НЕ
 # экспортирует имя `_Cancelled` — импорт «from proto_common import
 # _Cancelled» падает ImportError (латентный баг v81, пойманный тестом
 # test_update_front_up_to_date_injects_shim).
 _Cancelled = ProtoCancelled
-
-# ── Прямой запуск (python3 .../triple_panel.py) — bootstrap корня проекта ───
-if __package__ in (None, ""):
-    _ROOT = Path(__file__).resolve().parent.parent.parent
-    if str(_ROOT) not in sys.path:
-        sys.path.insert(0, str(_ROOT))
-    import chimera.modules.proto_common as _pc_bootstrap  # noqa: F401
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  КОНСТАНТЫ
@@ -101,26 +105,26 @@ _FRONT_TARBALL_SUBDIR = "panel/public"
 # SHA-256 (соль) для пароля админа — сравнение hmac.compare_digest в вебе.
 _SALT_LEN = 16
 
-# ── Цвета (self-contained, паттерн naiveproxy.py) ────────────────────────────
+# ── Цвета (канон проекта: naiveproxy.py / mieru.py — НЕ bright-палитра) ─────
 def _detect_colors() -> dict:
     if os.environ.get("NO_COLOR"):
         return {k: "" for k in ("CYAN", "NC", "GREEN", "YELLOW", "RED",
-                                 "BLUE", "BOLD", "DIM", "WHITE", "TITLE")}
+                                 "BOLD", "DIM", "WHITE")}
     if not sys.stdout.isatty() and os.environ.get("FORCE_COLOR") is None:
         return {k: "" for k in ("CYAN", "NC", "GREEN", "YELLOW", "RED",
-                                 "BLUE", "BOLD", "DIM", "WHITE", "TITLE")}
+                                 "BOLD", "DIM", "WHITE")}
+    # Точная палитра 23 модулей проекта (naiveproxy dark): 0;3x, а не яркие 9x
     return {
-        "CYAN": "\033[96m", "NC": "\033[0m", "GREEN": "\033[92m",
-        "YELLOW": "\033[93m", "RED": "\033[91m", "BLUE": "\033[94m",
-        "BOLD": "\033[1m", "DIM": "\033[2m", "WHITE": "\033[97m",
-        "TITLE": "\033[96m\x1b[1m",
+        "CYAN": "\033[0;36m", "NC": "\033[0m", "GREEN": "\033[0;32m",
+        "YELLOW": "\033[1;33m", "RED": "\033[0;31m",
+        "BOLD": "\033[1m", "DIM": "\033[2m", "WHITE": "\033[1;37m",
     }
 _C = _detect_colors()
 CYAN, NC   = _C["CYAN"], _C["NC"]
 GREEN, YELLOW, RED = _C["GREEN"], _C["YELLOW"], _C["RED"]
-BLUE, BOLD, DIM, WHITE, TITLE = _C["BLUE"], _C["BOLD"], _C["DIM"], _C["WHITE"], _C["TITLE"]
+BOLD, DIM, WHITE = _C["BOLD"], _C["DIM"], _C["WHITE"]
 
-_BOX_W = 64
+_BOX_W = 66
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЯДРО / STATE (лениво, как warp.py)
@@ -162,44 +166,58 @@ def _save_state(state: dict) -> None:
     proto_save_state(_STATE_FILE, state)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  BOX-РЕНДЕР (локальный, паттерн naiveproxy.py)
+#  BOX-РЕНДЕРИНГ (канон проекта: naiveproxy.py / mieru.py, 1:1)
+#  v83: собственная реализация через len() ломала рамку (ANSI/эмодзи
+#  считались колонками) и выбивалась цветом (bright 9x vs 0;3x).
 # ══════════════════════════════════════════════════════════════════════════════
 def _box_top(title: str = "") -> None:
+    print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
     if title:
-        pad = _BOX_W - len(title) - 2
-        left = pad // 2
-        print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
-        print(f"{CYAN}║{' ' * left}{TITLE}{title}{NC}{CYAN}{' ' * (pad - left)}║{NC}")
-        print(f"{CYAN}╠{'═' * _BOX_W}╣{NC}")
-    else:
-        print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
+        pad = _BOX_W - _wlen(title); lpad = pad // 2; rpad = pad - lpad
+        print(f"{CYAN}║{NC}{' ' * lpad}{BOLD}{WHITE}{title}{NC}{' ' * rpad}{CYAN}║{NC}")
+        print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
+
+def _box_sep() -> None: print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
+def _box_bot() -> None: print(f"{CYAN}╚{'═' * _BOX_W}╝{NC}")
 
 def _box_row(text: str = "") -> None:
-    ln = len(text)
-    print(f"{CYAN}║{NC}{text}{' ' * max(0, _BOX_W - ln)}{CYAN}║{NC}")
-
-def _box_sep() -> None:
-    print(f"{CYAN}╠{'═' * _BOX_W}╣{NC}")
-
-def _box_bot() -> None:
-    print(f"{CYAN}╚{'═' * _BOX_W}╝{NC}")
+    w = _wlen(text)
+    if w > _BOX_W:
+        acc, plain_txt = 0, _plain(text); cut = 0
+        for i, ch in enumerate(plain_txt):
+            acc += _wlen(ch)
+            if acc > _BOX_W - 1: cut = i; break
+        text = text[:cut] + "…"; w = _wlen(text)
+    pad = max(0, _BOX_W - w)
+    print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
 
 def _box_item(key: str, label: str) -> None:
-    print(f"{CYAN}║{NC}  {BOLD}{key:<4}{NC} {label}")
+    col = RED + BOLD if key.strip().upper() in ("Q", "0") else WHITE + BOLD
+    _box_row(f"  {DIM}[{NC}{col}{key}{NC}{DIM}]{NC}  {label}")
 
 def _box_kv(key: str, val: str, kw: int = 22) -> None:
-    print(f"{CYAN}║{NC}  {DIM}{key:<{kw}}{NC} {val}")
+    key_colored = f"{CYAN}{key}{NC}"
+    key_pad = kw - _wlen(key_colored)
+    _box_row(f"  {key_colored}{' ' * max(0, key_pad)}  {val}")
 
-def _box_ok(msg):   _box_row(f"  {GREEN}✓{NC}  {msg}")
-def _box_warn(msg): _box_row(f"  {YELLOW}⚠{NC}  {msg}")
-def _box_err(msg):  _box_row(f"  {RED}✗{NC}  {msg}")
-def _box_link(link: str) -> None:
-    _box_row(f"  {WHITE}{link}{NC}")
+def _box_ok(msg: str)   -> None: _box_row(f"  {GREEN}✓{NC}  {msg}")
+def _box_warn(msg: str) -> None: _box_row(f"  {YELLOW}⚠{NC}  {msg}")
+def _box_info(msg: str) -> None: _box_row(f"  {CYAN}→{NC}  {msg}")
+def _box_err(msg: str)  -> None: _box_row(f"  {RED}✗{NC}  {msg}")
+
+def _box_link(link: str, color: str = "") -> None:
+    color = color or YELLOW; max_w = _BOX_W - 2
+    plain_link = _plain(link); i = 0
+    while i < len(plain_link):
+        chunk = plain_link[i:i + max_w]
+        pad = max(0, _BOX_W - 2 - _wlen(chunk))
+        print(f"{CYAN}║{NC}  {color}{chunk}{NC}{' ' * pad}{CYAN}║{NC}")
+        i += max_w
 
 def _pause() -> None:
     try:
-        input(f"\n{BLUE}  Нажмите Enter...{NC}")
-    except (EOFError, KeyboardInterrupt, OSError):
+        print(f"\n  {DIM}Нажмите Enter...{NC}", end="", flush=True); input()
+    except (KeyboardInterrupt, EOFError, UnicodeDecodeError, OSError):
         print()
 
 def _run(cmd: list, capture: bool = False, check: bool = False):
@@ -616,10 +634,11 @@ def _smoke_check(port: int, timeout: int = 15) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 def _install() -> bool:
     os.system("clear")
-    _box_top("🧩  TRIPLE PANEL — УСТАНОВКА")
+    _box_top("🧩  УСТАНОВКА  •  TRIPLE PANEL")
     _box_row()
-    _box_row(f"  Порт веб-панели {TITLE}Panel-Naive-Mieru-by-RIXXX{NC} в архитектуре Chimera.")
-    _box_row(f"  {DIM}Фронт апстрима (MIT © RIXXX) + питон-бэкенд поверх модулей 10/11/H2.{NC}")
+    _box_row(f"  Питон-порт панели Panel-Naive-Mieru-by-RIXXX в Chimera.")
+    _box_row(f"  {DIM}Фронт апстрима (MIT © RIXXX) + бэкенд поверх модулей"
+             f" 10/11/H2.{NC}")
     _box_row()
     _box_sep()
 
@@ -726,7 +745,7 @@ def _update_front() -> bool:
         _pause()
         return True
     os.system("clear")
-    _box_top("⬆️  TRIPLE PANEL — ОБНОВЛЕНИЕ ФРОНТА")
+    _box_top("⬆️  ОБНОВЛЕНИЕ ФРОНТА  •  TRIPLE PANEL")
     _box_row()
     _box_kv("Установлено:", f"{CYAN}{current or '—'}{NC}")
     _box_kv("Доступно:",   f"{GREEN}{upstream}{NC}")
@@ -848,15 +867,14 @@ def _nginx_url() -> "Optional[str]":
 def _access_menu() -> None:
     while True:
         os.system("clear")
-        print()
         st = _nginx_status()
-        _box_top("🌐  TRIPLE PANEL — ДОСТУП (эталон b4)")
+        _box_top("🌐  ДОСТУП  •  TRIPLE PANEL")
         _box_row()
         state = _load_state()
         port = int(state.get("web_port", _DEFAULT_PORT))
         _box_kv("Прямой порт:", f"{CYAN}127.0.0.1:{port}{NC} {DIM}(SSH-туннель){NC}")
         url = _nginx_url()
-        _box_kv("nginx front:", (f"{GREEN}включён{NC} — {url}" if url
+        _box_kv("nginx front:", (f"{GREEN}включён{NC} — {YELLOW}{url}{NC}" if url
                                  else f"{DIM}выключен (доступ только SSH-туннелем){NC}"))
         _box_row()
         _box_row(f"  {DIM}Три режима (как у b4):{NC}")
@@ -866,9 +884,10 @@ def _access_menu() -> None:
         _box_row()
         _box_sep()
         if st.get("enabled"):
-            _box_item("1", f"{RED}Выключить nginx front{NC} {DIM}(вернуть SSH-режим){NC}")
+            _box_item("1", f"{RED}Выключить nginx front{NC} "
+                            f"{DIM}(вернуть SSH-режим){NC}")
         else:
-            _box_item("1", "🌐 Включить nginx front (TLS)")
+            _box_item("1", "🌐  Включить nginx front (TLS)")
         _box_item("Q", "← Назад")
         _box_bot()
         try:
@@ -945,7 +964,7 @@ def _change_admin_password() -> None:
     state["installed"] = state.get("installed", True)
     _save_state(state)
     os.system("clear")
-    _box_top("🔑  TRIPLE PANEL — НОВЫЙ ПАРОЛЬ")
+    _box_top("🔑  НОВЫЙ ПАРОЛЬ  •  TRIPLE PANEL")
     _box_row()
     _box_kv("Логин:", f"{YELLOW}{state.get('admin_user', 'admin')}{NC}")
     _box_kv("Пароль:", f"{YELLOW}{password}{NC}")
@@ -1025,48 +1044,54 @@ def _proto_statuses() -> dict:
 def do_triple_panel_menu() -> None:
     while True:
         os.system("clear")
-        print()
-        _box_top("🧩  TRIPLE PANEL — Naive + Mieru + Hysteria2")
-        _box_row()
         state = _load_state()
         installed = _detect_installed()
         running = _service_active()
         port = int(state.get("web_port", _DEFAULT_PORT))
 
-        if not installed:
-            _box_warn("Панель НЕ установлена — пункт 1 для установки.")
-            _box_row()
-        else:
-            _box_row(f"  Сервис:  {GREEN+'активен'+NC if running else YELLOW+'остановлен'+NC}"
-                     f"  {DIM}(triple-web){NC}")
-            _box_row(f"  Порт:    {CYAN}127.0.0.1:{port}{NC} {DIM}(SSH-туннель){NC}")
+        svc_str = (
+            f"{GREEN}● активен{NC}"  if running  else
+            f"{RED}● остановлен{NC}" if installed else
+            f"{YELLOW}● не установлена{NC}"
+        )
+
+        _box_top("🧩  TRIPLE PANEL  •  NAIVE + MIERU + HYSTERIA2")
+        _box_row()
+        _box_kv("Статус:", svc_str)
+
+        if installed:
+            _box_kv("Порт:", f"{CYAN}127.0.0.1:{port}{NC} {DIM}(SSH-туннель){NC}")
             url = _nginx_url()
-            _box_row(f"  Напрямую: {url or DIM+'закрыто (только SSH-туннель)'+NC}")
-            _box_row(f"  Админ:   {CYAN}{state.get('admin_user', 'admin')}{NC}")
+            _box_kv("Напрямую:",
+                    (f"{GREEN}включён{NC} — {YELLOW}{url}{NC}" if url
+                     else f"{DIM}закрыто (только SSH-туннель){NC}"))
+            _box_kv("Админ:", f"{CYAN}{state.get('admin_user', 'admin')}{NC}")
+
         _box_row()
         _box_row(_update_header_row())
-        _box_row(f"  {DIM}Порт Химеры:{NC} v{_PORT_FRONT_VERSION}  "
-                 f"{DIM}апстрим: github.com/{_UPSTREAM_REPO.split('/')[0]}{NC}")
-        _box_row()
         ps = _proto_statuses()
-        _box_row(f"  {DIM}Протоколы:{NC} naive {GREEN+'✓'+NC if ps['naive'] else RED+'✗'+NC}"
-                 f"  mieru {GREEN+'✓'+NC if ps['mieru'] else RED+'✗'+NC}"
-                 f"  hy2 {GREEN+'✓'+NC if ps['hy2'] else RED+'✗'+NC}"
+        _box_row(f"  {DIM}Протоколы:{NC} naive {GREEN if ps['naive'] else RED}"
+                 f"{'✓' if ps['naive'] else '✗'}{NC}"
+                 f"  mieru {GREEN if ps['mieru'] else RED}"
+                 f"{'✓' if ps['mieru'] else '✗'}{NC}"
+                 f"  hy2 {GREEN if ps['hy2'] else RED}"
+                 f"{'✓' if ps['hy2'] else '✗'}{NC}"
                  f"  {DIM}(модули 10/11/7){NC}")
-        _box_row()
-        _box_sep()
+        _box_row(); _box_sep()
         if not installed:
-            _box_item("1", "🚀 Установить панель")
+            _box_item("1", "🚀  Установить панель")
         else:
             _box_item("1", f"{'Остановить' if running else 'Запустить'} сервис")
-        _box_item("2", f"⬆️  Обновить фронт  {DIM}(версии/апдейты как у b4){NC}")
-        _box_item("3", f"🔑 Сменить пароль админа")
-        _box_item("4", f"🌐 Доступ  {DIM}(SSH / публичный IP / домен — эталон b4){NC}")
-        _box_item("5", f"🔀 Сменить порт панели")
+        _box_item("2", "⬆️  Обновить фронт  "
+                        f"{DIM}(версии/апдейты как у b4){NC}")
+        _box_item("3", "🔑  Сменить пароль админа")
+        _box_item("4", "🌐  Доступ  "
+                        f"{DIM}(SSH / публичный IP / домен — эталон b4){NC}")
+        _box_item("5", "🔀  Сменить порт панели")
         _box_item("6", f"{RED}🗑️  Удалить панель{NC}")
         _box_sep()
         _box_item("Q", "← Назад")
-        _box_bot()
+        _box_bot(); print()
         try:
             ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
         except _Cancelled:
