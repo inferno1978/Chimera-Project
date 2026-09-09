@@ -1241,6 +1241,35 @@ def _nginx_url() -> "Optional[str]":
         return None
     return f"https://{domain}:{st.get('port', DEFAULT_NGINX_PORT)}"
 
+def _detect_panel_domain() -> str:
+    """Домен сервера для Let's Encrypt — АВТОМАТИЧЕСКИ, руками вводить
+    не нужно (требование юзера: «как в B4, там забивать руками ничего
+    не нужно»; паттерн b4: ask_domain(default=PARAM_DOMAIN)).
+
+    Цепочка: PARAM_DOMAIN (глобаль ядра — домен VLESS) → state.json →
+    домен Naive-конфигурации (naiveproxy.json). Triple Panel стоит
+    поверх модулей 10/11: на серверах без VLESS домен живёт именно у
+    Naive — и panel_nginx_front его НЕ видит (смотрит только в
+    state.json), поэтому детектим здесь и передаём явно.
+    '' — нигде не нашли (тогда ask_domain как раньше).
+    """
+    try:
+        core = _core_module()
+        d = (getattr(core, "PARAM_DOMAIN", "") or "").strip()
+        if d:
+            return d
+    except Exception:
+        pass
+    for fname in ("state.json", "naiveproxy.json"):
+        try:
+            data = json.loads((STATE_DIR / fname).read_text(encoding="utf-8"))
+            d = (data.get("domain", "") or "").strip()
+            if d:
+                return d
+        except Exception:
+            continue
+    return ""
+
 def _access_menu() -> None:
     while True:
         os.system("clear")
@@ -1289,10 +1318,26 @@ def _access_menu() -> None:
                     ask_tls_mode, ask_domain)
                 use_self_signed, _dh = ask_tls_mode(panel_name="Triple Panel")
                 domain = None
+                domain_auto = False
                 if not use_self_signed:
-                    domain = ask_domain()
+                    # v83.3: домен — автоматически (как в b4): PARAM_DOMAIN →
+                    # state.json → домен Naive. Ручной ввод — только если
+                    # нигде не нашли.
+                    domain = _detect_panel_domain()
+                    if domain:
+                        domain_auto = True
+                    else:
+                        domain = ask_domain()
                 _box_top("🌐  ДОСТУП  •  TRIPLE PANEL")
                 _box_row()
+                if not use_self_signed and domain:
+                    if domain_auto:
+                        _box_kv("Домен:", f"{CYAN}{domain}{NC} {DIM}(авто){NC}")
+                        _box_row(f"  {DIM}Подхвачен из конфигурации сервера —"
+                                 f" ввод не нужен.{NC}")
+                    else:
+                        _box_kv("Домен:", f"{CYAN}{domain}{NC}")
+                    _box_row()
                 with _boxed_output():
                     ok, msg = _nginx_install(use_self_signed, domain)
                 (_box_ok if ok else _box_err)(msg)

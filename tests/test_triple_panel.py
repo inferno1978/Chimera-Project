@@ -1529,5 +1529,161 @@ class TestV832LiveBox(unittest.TestCase):
         self.assertEqual(tries["n"], 1)              # failed — сразу выходим
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  17. v83.3: авто-домен для Let's Encrypt (как в b4 — без ручного ввода)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestV833AutoDomain(unittest.TestCase):
+    """Цепочка _detect_panel_domain: PARAM_DOMAIN → state.json →
+    naiveproxy.json (домен Naive — его panel_nginx_front не видит)."""
+
+    def _core(self, domain):
+        return types.SimpleNamespace(PARAM_DOMAIN=domain)
+
+    def test_param_domain_wins(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "state.json").write_text('{"domain": "core.example.com"}')
+        (tmp / "naiveproxy.json").write_text(
+            '{"domain": "naive.example.com"}')
+        with patch.object(tp, "_core_module",
+                          return_value=self._core("vless.example.com")), \
+             patch.object(tp, "STATE_DIR", tmp):
+            self.assertEqual(tp._detect_panel_domain(), "vless.example.com")
+
+    def test_state_json_fallback(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "state.json").write_text('{"domain": "core.example.com"}')
+        (tmp / "naiveproxy.json").write_text(
+            '{"domain": "naive.example.com"}')
+        with patch.object(tp, "_core_module", return_value=self._core("")), \
+             patch.object(tp, "STATE_DIR", tmp):
+            self.assertEqual(tp._detect_panel_domain(), "core.example.com")
+
+    def test_naive_domain_fallback(self):
+        """Сервер без VLESS: домен живёт в naiveproxy.json — панель
+        обязана подхватить его сама (кейс юзера: пустое «Домен:»)."""
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "naiveproxy.json").write_text(
+            '{"domain": "naive.example.com", "port": 443}')
+        with patch.object(tp, "_core_module", return_value=self._core("")), \
+             patch.object(tp, "STATE_DIR", tmp):
+            self.assertEqual(tp._detect_panel_domain(), "naive.example.com")
+
+    def test_nothing_found(self):
+        tmp = Path(tempfile.mkdtemp())
+        with patch.object(tp, "_core_module", return_value=self._core("")), \
+             patch.object(tp, "STATE_DIR", tmp):
+            self.assertEqual(tp._detect_panel_domain(), "")
+
+    def test_garbage_files_ignored(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "naiveproxy.json").write_text("не json вообще")
+        with patch.object(tp, "_core_module", return_value=self._core("")), \
+             patch.object(tp, "STATE_DIR", tmp):
+            self.assertEqual(tp._detect_panel_domain(), "")
+
+    def test_core_import_failure_ignored(self):
+        def boom():
+            raise ImportError("нет ядра")
+
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "naiveproxy.json").write_text('{"domain": "naive.example.com"}')
+        with patch.object(tp, "_core_module", side_effect=boom), \
+             patch.object(tp, "STATE_DIR", tmp):
+            self.assertEqual(tp._detect_panel_domain(), "naive.example.com")
+
+
+class TestV833AccessMenuFlow(unittest.TestCase):
+    """Пункт «Включить nginx front»: домен подставляется автоматически,
+    ask_domain не вызывается; ручной ввод — только если ничего не нашли."""
+
+    def _run_menu(self, tmp, ask_domain_impl, install_impl, tls_impl=None):
+        import chimera.modules.panel_nginx_front as pnf
+        if tls_impl is None:
+            tls_impl = lambda panel_name="панель": (False, None)  # LE
+        buf = io.StringIO()
+        with patch.object(tp, "_nginx_status",
+                          return_value={"enabled": False}), \
+             patch.object(tp, "_load_state", return_value={
+                 "installed": True, "web_port": 9760,
+                 "admin_user": "admin"}), \
+             patch.object(tp, "_core_module",
+                          return_value=types.SimpleNamespace(
+                              PARAM_DOMAIN="")), \
+             patch.object(tp, "STATE_DIR", tmp), \
+             patch.object(tp, "_nginx_install", side_effect=install_impl), \
+             patch.object(tp, "_nginx_url",
+                          return_value="https://naive.example.com:9761"), \
+             patch.object(tp, "_pause"), \
+             patch.object(pnf, "ask_tls_mode", side_effect=tls_impl), \
+             patch.object(pnf, "ask_domain", side_effect=ask_domain_impl), \
+             patch.object(tp, "proto_ask", side_effect=["1", "q"]), \
+             patch.object(tp, "os") as os_mock, \
+             patch("sys.stdout", buf):
+            os_mock.system = lambda s: None
+            tp._access_menu()
+        return buf.getvalue()
+
+    def test_auto_domain_skips_ask_domain(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "naiveproxy.json").write_text('{"domain": "naive.example.com"}')
+        calls = {"ask_domain": 0, "install": []}
+
+        def fake_ask_domain(default=None):
+            calls["ask_domain"] += 1
+            return None
+
+        def fake_install(ss, domain):
+            calls["install"].append((ss, domain))
+            return True, "nginx front установлен"
+
+        out = self._run_menu(tmp, fake_ask_domain, fake_install)
+        self.assertEqual(calls["ask_domain"], 0)      # ручной ввод не нужен
+        self.assertEqual(calls["install"], [(False, "naive.example.com")])
+        self.assertIn("авто", out)
+        self.assertIn("naive.example.com", out)
+        self.assertIn("https://naive.example.com:9761", out)
+        # все строки рамки — ровно 68 колонок
+        for ln in out.splitlines():
+            if "║" in ln:
+                self.assertEqual(tp._wlen(ln), 68, ln[:50])
+
+    def test_manual_domain_when_nothing_found(self):
+        tmp = Path(tempfile.mkdtemp())
+        calls = {"ask_domain": 0, "install": []}
+
+        def fake_ask_domain(default=None):
+            calls["ask_domain"] += 1
+            return "typed.example.com"
+
+        def fake_install(ss, domain):
+            calls["install"].append((ss, domain))
+            return True, "ok"
+
+        out = self._run_menu(tmp, fake_ask_domain, fake_install)
+        self.assertEqual(calls["ask_domain"], 1)      # нигде не нашли — спросили
+        self.assertEqual(calls["install"], [(False, "typed.example.com")])
+        self.assertIn("typed.example.com", out)
+        self.assertNotIn("(авто)", out)
+
+    def test_self_signed_skips_domain(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "naiveproxy.json").write_text('{"domain": "naive.example.com"}')
+        calls = {"ask_domain": 0, "install": []}
+
+        def fake_ask_domain(default=None):
+            calls["ask_domain"] += 1
+            return None
+
+        def fake_install(ss, domain):
+            calls["install"].append((ss, domain))
+            return True, "ok"
+
+        out = self._run_menu(tmp, fake_ask_domain, fake_install,
+                             tls_impl=lambda panel_name="панель": (True, None))
+        self.assertEqual(calls["ask_domain"], 0)
+        self.assertEqual(calls["install"], [(True, None)])
+        self.assertNotIn("Домен:", out)               # self-signed — без домена
+
+
 if __name__ == "__main__":
     unittest.main()
