@@ -1165,6 +1165,82 @@ def get_public_ip() -> str:
     return "<не удалось определить, посмотри сам: curl ifconfig.me>"
 
 
+def _is_public_ipv4(addr: str) -> bool:
+    """v87.2: IPv4 и публичный (не loopback/приватный/link-local) —
+    для подстановки IP в Karing-выдачу UDP вместо домена."""
+    parts = (addr or "").strip().split(".")
+    if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+        return False
+    try:
+        import socket
+        socket.inet_aton(addr.strip())
+    except OSError:
+        return False
+    a, b = int(parts[0]), int(parts[1])
+    if a in (10, 127):
+        return False
+    if a == 192 and b == 168:
+        return False
+    if a == 172 and 16 <= b <= 31:
+        return False
+    if a == 169 and b == 254:
+        return False
+    return True
+
+
+def _karing_udp_server_ip() -> str:
+    """v87.2: публичный IPv4 для Karing-выдачи UDP, '' — не нашли.
+
+    UDP-сокет до 8.8.8.8 (мгновенно, без трафика — адрес исходящего
+    интерфейса) → фолбэк get_public_ip(). Приватный/невалидный — ''
+    (подстановка не выполняется, выдача остаётся с доменом)."""
+    ip = ""
+    try:
+        import socket as _s
+        with _s.socket(_s.AF_INET, _s.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+    except OSError:
+        ip = ""
+    if not _is_public_ipv4(ip):
+        ip = get_public_ip()
+    return ip if _is_public_ipv4(ip) else ""
+
+
+def _karing_udp_addr(transport: str, client_addr: str,
+                      is_domain=None) -> tuple:
+    """v87.2: адрес для Karing-ссылки/JSON на ДАННЫЙ транспорт (гибрид).
+
+    Баг ядра Karing (karing_v1.13.x/v1.14.x, проверено по исходникам
+    KaringX/sing-box, protocol/mieru/outbound.go): в mieru-outbound не
+    передаётся DNS-резолвер (ClientConfig.Resolver=nil →
+    NilDNSResolver), а флаг BypassDialerDNS у mieru действует только на
+    TCP-underlay. UDP-underlay всегда резолвит домен сам — с доменом
+    падает, с IP работает короткий путь. Симптом: Karing «подключён»,
+    трафик 0 байт/с в обе стороны (TCP при этом бегит).
+
+    Локальная stdlib-копия логики mieru.py `_karing_link_addr` (CLI
+    `sudo python3 hybrid_addon.py` пакета chimera не требует);
+    is_domain — уже вычисленный признак «client_addr — домен» (в выдаче
+    доступен ленивый импорт из mieru), None — проверим ip-токен сами.
+    Возвращает (адрес, подставили_ли_IP)."""
+    if (transport or "").upper() != "UDP":
+        return client_addr, False
+    if is_domain is None:
+        try:
+            import socket
+            socket.inet_aton((client_addr or "").strip())
+            is_domain = False
+        except OSError:
+            is_domain = True
+    if not is_domain:
+        return client_addr, False
+    ip = _karing_udp_server_ip()
+    if ip:
+        return ip, True
+    return client_addr, False
+
+
 def _detect_server_domain() -> str:
     """Домен сервера для клиентской выдачи (v85), '' — не нашли.
 
@@ -1850,7 +1926,9 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
         return
 
     client_dns = (client_dns or "").strip()
-    server_domain = server_ip if _dns_host_is_domain(server_ip) else ""
+    # v87.2: server_domain больше не нужен на уровне функции — для JSON
+    # домен определяется по фактическому адресу каждого транспорта
+    # (UDP идёт с IP — см. _karing_udp_addr)
 
     for transport, data in creds.items():
         port = data["port"]
@@ -1861,7 +1939,11 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
         # v86: при blob — preset-параметр не вставляем: до фиксы ссылка
         # получала ДВА traffic-pattern= (basic-пресет + blob), и первый
         # мог перебивать реальный паттерн сервера
-        share_link = _gen_client_share_link(server_ip, port, port, proto, login, password,
+        # v87.2: Karing-ссылка/JSON для UDP — с IP: домен+UDP в ядре
+        # Karing не резолвится (NilDNSResolver) — «подключено, 0 байт/с».
+        # Nekobox/Nyamebox-ссылка домен сохраняет. TCP не затронут.
+        karing_addr, karing_udp_ip = _karing_udp_addr(transport, server_ip)
+        share_link = _gen_client_share_link(karing_addr, port, port, proto, login, password,
                                             traffic_preset="" if traffic_pattern_blob else "basic")
         share_link_neko = _gen_client_share_link_nekobox(server_ip, port, proto, login, password)
 
@@ -1870,7 +1952,7 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
             share_link = f"{share_link}&{tp_param}"
             share_link_neko = f"{share_link_neko}&{tp_param}"
 
-        outbound = _gen_singbox_outbound(server_ip, port, port, proto, login, password)
+        outbound = _gen_singbox_outbound(karing_addr, port, port, proto, login, password)
         if traffic_pattern_blob:
             # ВНИМАНИЕ: имя поля "traffic_pattern" — по конвенции именования sing-box
             # (snake_case, как server_port) и докам mihomo/sing-box ("base64 string,
@@ -1878,7 +1960,9 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
             # (юзер ходит ссылкой), но импорт mierus:// с &traffic-pattern= подтверждён
             # живьём в Karing (v87.1, TCP) — URL-параметр и поле несут один blob.
             outbound["traffic_pattern"] = traffic_pattern_blob
-        full_config = _build_karing_full_config(outbound, client_dns, server_domain)
+        full_config = _build_karing_full_config(
+            outbound, client_dns,
+            karing_addr if _dns_host_is_domain(karing_addr) else "")
         cfg_path = Path(f"/tmp/karing-mieru-hybrid-{transport}-{login}.json")
 
         box_header(f"КЛИЕНТСКАЯ ВЫДАЧА — {proto}")
@@ -1890,6 +1974,9 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
             _box_row(f"  {BOLD}Karing (sing-box core):{NC} ссылка — ПОД рамкой")
             _box_row(f"  {BOLD}Nekobox / Nyamebox:{NC} ссылка — ПОД рамкой")
             _box_row(f"  {BOLD}Karing (запасной JSON):{NC} путь — ПОД рамкой")
+            if karing_udp_ip:
+                _box_row(f"  {BOLD}UDP для Karing:{NC} с IP — домен+UDP в Karing не")
+                _box_row(f"  подключится (баг ядра); Nyamebox — домен как есть")
             _box_row()
             try:
                 cfg_path.write_text(json.dumps(full_config, indent=2, ensure_ascii=False), encoding="utf-8")

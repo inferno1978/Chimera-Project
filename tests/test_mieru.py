@@ -947,5 +947,95 @@ class TestV87PrintLinkPairsOutside(unittest.TestCase):
         self.assertIn("Nekobox / Nyamebox (UDP):", lines)
 
 
+class TestV87_2KaringUdpAddr(unittest.TestCase):
+    """v87.2: _karing_link_addr — UDP+домен подставляет IP (баг ядра
+    Karing: mieru-UDP не резолвит домен — NilDNSResolver, а
+    BypassDialerDNS у mieru действует только на TCP-underlay).
+    TCP/IP-выдача не трогается."""
+
+    def test_udp_domain_substitutes_ip(self):
+        from chimera.modules import mieru
+        with patch.object(mieru, "_karing_udp_server_ip",
+                          return_value="203.0.113.103"):
+            addr, sub = mieru._karing_link_addr("UDP", "cdn.example")
+        self.assertEqual(addr, "203.0.113.103")
+        self.assertTrue(sub)
+
+    def test_udp_domain_ip_missing_keeps_domain(self):
+        from chimera.modules import mieru
+        with patch.object(mieru, "_karing_udp_server_ip", return_value=""):
+            addr, sub = mieru._karing_link_addr("UDP", "cdn.example")
+        self.assertEqual(addr, "cdn.example")
+        self.assertFalse(sub)
+
+    def test_tcp_domain_unchanged(self):
+        from chimera.modules import mieru
+        with patch.object(mieru, "_karing_udp_server_ip", return_value="1.2.3.4"):
+            addr, sub = mieru._karing_link_addr("TCP", "cdn.example")
+        self.assertEqual(addr, "cdn.example")
+        self.assertFalse(sub)
+
+    def test_udp_ip_unchanged(self):
+        from chimera.modules import mieru
+        addr, sub = mieru._karing_link_addr("UDP", "203.0.113.103")
+        self.assertEqual(addr, "203.0.113.103")
+        self.assertFalse(sub)
+
+    def test_is_public_ipv4(self):
+        from chimera.modules import mieru
+        for a in ("1.2.3.4", "203.0.113.103", "8.8.8.8", "255.255.255.255"):
+            self.assertTrue(mieru._is_public_ipv4(a), a)
+        for a in ("", "foo", "10.0.0.1", "127.0.0.1", "192.168.1.1",
+                  "172.16.0.1", "172.31.9.9", "169.254.1.1", "300.1.1.1",
+                  "1.2.3", "1.2.3.4.5"):
+            self.assertFalse(mieru._is_public_ipv4(a), a)
+
+
+class TestV87_2KaringUdpLinksAndJson(unittest.TestCase):
+    """v87.2: ссылочная выдача и JSON — Karing-UDP с IP, домен в TCP
+    и Nekobox/Nyamebox; domain_resolver — только доменным outbound'ам."""
+
+    def test_both_pairs_udp_karing_gets_ip(self):
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import mieru
+        with patch.object(mieru, "_karing_udp_server_ip",
+                          return_value="203.0.113.103"):
+            pairs = []
+            _ports = {"TCP": 443, "UDP": 5443}
+            for p in mieru._protocol_variants("BOTH"):
+                k_addr, _sub = mieru._karing_link_addr(p, "cdn.example")
+                pairs.append((p,
+                    mieru._gen_client_share_link(k_addr, _ports[p], _ports[p],
+                                                 p, "u1", "p1"),
+                    mieru._gen_client_share_link_nekobox("cdn.example",
+                                                         _ports[p], p, "u1", "p1")))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            mieru._print_link_pairs_outside(pairs)
+        text = buf.getvalue()
+        self.assertIn("@cdn.example?port=443&protocol=TCP", text)
+        self.assertIn("@203.0.113.103?port=5443&protocol=UDP", text)
+        self.assertIn("@cdn.example:5443?transport=UDP", text)
+
+    def test_multi_config_domain_resolver_only_for_domain_outbounds(self):
+        from chimera.modules import mieru
+        obs = [
+            mieru._gen_singbox_outbound("cdn.example", 443, 443,
+                                        "TCP", "u1", "p1"),
+            mieru._gen_singbox_outbound("203.0.113.103", 5443, 5443,
+                                        "UDP", "u2", "p2"),
+        ]
+        cfg = mieru._build_karing_multi_config(obs, "8.8.8.8",
+                                               "cdn.example")
+        mieru_obs = [ob for ob in cfg["outbounds"] if ob.get("type") == "mieru"]
+        dom_ob = next(ob for ob in mieru_obs
+                      if ob["server"] == "cdn.example")
+        ip_ob = next(ob for ob in mieru_obs
+                     if ob["server"] == "203.0.113.103")
+        self.assertEqual(dom_ob["domain_resolver"], "local")
+        self.assertNotIn("domain_resolver", ip_ob)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
