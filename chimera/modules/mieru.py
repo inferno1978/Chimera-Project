@@ -785,6 +785,76 @@ def _dns_host_is_domain(address: str) -> bool:
         return True
 
 
+def _parse_dns_addresses(client_dns: str) -> list:
+    """v87: список DNS-адресов из строки «через запятую/плюс».
+
+    '8.8.8.8, 1.1.1.1' → ['8.8.8.8', '1.1.1.1'] (пункт меню «Google +
+    Cloudflare»); одиночный адрес → [он]; пусто → []. Пробелы вокруг
+    разделителей игнорируются, пробел ВНУТРИ токена остаётся — его
+    отвергнет _is_plausible_dns_address (защита от «bad dns com»)."""
+    raw = (client_dns or "").strip()
+    if not raw:
+        return []
+    return [p.strip() for p in re.split(r"[,+]", raw) if p.strip()]
+
+
+def _is_plausible_dns_address(client_dns: str) -> bool:
+    """v87: правдоподобный DNS-адрес(а) для ручного ввода/CLI-флага.
+
+    Понимает: IP, домен, https://…/dns-query (DoH), tls://… (DoT),
+    quic://… (DoQ), h3://… и списки через запятую/плюс. Пробел внутри
+    токена или посторонний слэш — опечатка → False. Используется меню
+    DNS обоих mieru-модулей (в т.ч. гибрид-аддоном, своя копия).
+
+    v85-валидация отвергала tls:// и quic:// (слэш без http-префикса) —
+    это был баг: DoT/DoQ теперь легальные значения."""
+    raw = (client_dns or "").strip()
+    if not raw:
+        return False
+    for part in _parse_dns_addresses(raw):
+        if " " in part:
+            return False
+        if "/" in part and not part.startswith(
+                ("http://", "https://", "tls://", "quic://", "h3://")):
+            return False
+    return True
+
+
+def _detect_agh_dns_endpoints() -> dict:
+    """v87: публичные DoH/DoT/DoQ-эндпоинты ЛОКАЛЬНОГО AdGuard Home.
+
+    Подглядывает в стейт AGH (aghome_state.json, пишет aghome_setup.py)
+    — те же ссылки, что статус AGH показывает как «Готовые ссылки для
+    клиентов». Читает файл напрямую на stdlib, без импорта
+    aghome_setup (тяжёлый, тянет core) — это чистая функция.
+
+    Публичен только TLS-набор: plain-DNS :53 снаружи закрыт UFW
+    (aghome_setup регистрирует только 30443/853), поэтому без домена
+    или без TLS список пуст. Возвращает dict:
+      links       — [("DoH", https://…/dns-query), ("DoT", tls://…:853),
+                     ("DoQ", quic://…:853)] (пусто, если AGH не нашёлся)
+      self_signed — True → клиент должен доверять сертификату вручную
+      status      — "ok" | "no-agh" | "no-tls" | "no-domain" — для
+                    подсказки в меню DNS (почему AGH не предложен)"""
+    try:
+        st = json.loads(
+            (_CORE_STATE_DIR / "aghome_state.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {"links": [], "self_signed": False, "status": "no-agh"}
+    if not str(st.get("domain") or "").strip():
+        return {"links": [], "self_signed": False, "status": "no-domain"}
+    if not st.get("tls_enabled"):
+        return {"links": [], "self_signed": False, "status": "no-tls"}
+    host = str(st["domain"]).strip()
+    links = [
+        ("DoH", f"https://{host}:{st.get('doh_port', 30443)}/dns-query"),
+        ("DoT", f"tls://{host}:{st.get('dot_port', 853)}"),
+        ("DoQ", f"quic://{host}:{st.get('doq_port', 853)}"),
+    ]
+    return {"links": links, "self_signed": bool(st.get("self_signed")),
+            "status": "ok"}
+
+
 def _build_karing_dns_block(client_dns: str, mieru_tag: str,
                             server_domain: str = "") -> dict:
     """DNS-секция Karing/sing-box JSON (v85).
@@ -796,16 +866,24 @@ def _build_karing_dns_block(client_dns: str, mieru_tag: str,
     свой AGH режет рекламу на клиенте. Доменный адрес резолвится через
     local (address_resolver) ДО поднятия туннеля — без цикла.
 
+    v87: адресов может быть НЕСКОЛЬКО (через запятую/плюс — пункт меню
+    «Google + Cloudflare»): первый — дефолтный custom-dns, остальные —
+    дополнительные custom-dns-2/…-N, все через mieru-туннель. Одиночный
+    адрес → блок ПОБАЙТОВО как в v85 (нулевая регрессия, тесты фиксируют).
+
     server_domain — домен сервера mieru в выдаче (v85): резолвится
     ТОЛЬКО напрямую (dns.rules → local). Без этого выходит цикл
     «домен туннеля нужно резолвить через туннель»."""
-    if client_dns:
-        custom = {"tag": "custom-dns", "address": client_dns.strip(),
-                  "detour": mieru_tag}
-        if _dns_host_is_domain(client_dns):
-            custom["address_resolver"] = "local"
-        servers = [custom,
-                   {"tag": "local", "address": "1.1.1.1", "detour": "direct"}]
+    addrs = _parse_dns_addresses(client_dns)
+    if addrs:
+        servers = []
+        for i, addr in enumerate(addrs):
+            custom = {"tag": "custom-dns" if i == 0 else f"custom-dns-{i + 1}",
+                      "address": addr, "detour": mieru_tag}
+            if _dns_host_is_domain(addr):
+                custom["address_resolver"] = "local"
+            servers.append(custom)
+        servers.append({"tag": "local", "address": "1.1.1.1", "detour": "direct"})
     else:
         servers = [{"tag": "google", "address": "8.8.8.8"},
                    {"tag": "local", "address": "1.1.1.1", "detour": "direct"}]
@@ -861,26 +939,6 @@ def _protocol_label(protocol: str) -> str:
     return "+".join(_protocol_variants(protocol))
 
 
-def _print_user_link_pairs(link_pairs: list) -> None:
-    """v86: выдача пар ссылок (Karing + Nekobox/Nyamebox) по транспортам.
-
-    link_pairs — [(proto, karing_link, neko_link), ...]; при BOTH их две,
-    каждая пара помечается транспортом, между парами — разделитель."""
-    multi = len(link_pairs) > 1
-    for i, (p, karing, neko) in enumerate(link_pairs):
-        suffix = f" — {p}" if multi else ""
-        _box_row(f"  {BOLD}{WHITE}Ссылка для Karing (sing-box core){suffix}:{NC}")
-        _box_row()
-        _box_link(karing)
-        _box_row()
-        _box_row(f"  {BOLD}{WHITE}Ссылка для Nekobox / Nyamebox{suffix}:{NC}")
-        _box_row()
-        _box_link(neko)
-        _box_row()
-        if i < len(link_pairs) - 1:
-            _box_sep()
-
-
 def _build_karing_multi_config(outbounds: list, client_dns: str = "",
                                server_domain: str = "") -> dict:
     """v86: Karing/sing-box JSON с НЕСКОЛЬКИМИ mieru-outbound'ами (BOTH).
@@ -910,6 +968,124 @@ def _build_karing_multi_config(outbounds: list, client_dns: str = "",
         "outbounds": body,
         "route": {"final": final_tag},
     }
+
+
+def _print_link_pairs_outside(link_pairs: list) -> None:
+    """v87: пары ссылок (Karing + Nekobox/Nyamebox) — ВНЕ рамки, каждая
+    ссылкой ОДНОЙ строкой.
+
+    До v87 ссылки резались под ширину бокса (гибрид) или жёстко по
+    символам внутри рамки (standalone) — рамки «ломались», а копирование
+    требовало склейки строк. Теперь: рамка закрыта, ссылка — целиком
+    одной строкой; мягкий перенос терминала при копировании НЕ вставляет
+    перевод строки (в отличие от наших жёстких переносов), так что
+    клиент получает валидную mierus://-ссылку без ручной склейки."""
+    multi = len(link_pairs) > 1
+    for p, karing, neko in link_pairs:
+        suffix = f" ({p})" if multi else ""
+        print(f"  {BOLD}{WHITE}Karing (sing-box core){suffix}:{NC}")
+        print(f"  {YELLOW}{karing}{NC}")
+        print()
+        print(f"  {BOLD}{WHITE}Nekobox / Nyamebox{suffix}:{NC}")
+        print(f"  {YELLOW}{neko}{NC}")
+        print()
+
+
+def _ask_client_dns(old_dns: str = "") -> str:
+    """v87: меню выбора DNS для клиентских конфигов Karing (standalone).
+
+    Пункты: Google / Cloudflare / Google+Cloudflare, затем DoH/DoT/DoQ
+    ЛОКАЛЬНОГО AdGuard Home (ссылки подглядываются в его стейте —
+    _detect_agh_dns_endpoints; в Karing-JSON уходят как custom-dns через
+    mieru-туннель), последним — ручной ввод. Enter — «умный» дефолт:
+    прежнее значение из state → иначе AGH (DoH), если найден → иначе
+    Google (хранится как '' — ровно как дефолт v85, нулевая регрессия
+    dns-блока). Произвольная строка вместо номера — принимается как
+    адрес (совместимо со старым поведением v85: power-юзер вводит
+    домен/URL сразу, без подменю)."""
+    agh = _detect_agh_dns_endpoints()
+    agh_links = agh["links"]
+    labels = ["Google — 8.8.8.8", "Cloudflare — 1.1.1.1",
+              "Google + Cloudflare — 8.8.8.8, 1.1.1.1"]
+    values = ["", "1.1.1.1", "8.8.8.8,1.1.1.1"]
+    for proto_label, url in agh_links:
+        labels.append(f"Свой DNS — AdGuard Home на сервере ({proto_label})")
+        values.append(url)
+    labels.append("Ввести адрес вручную")
+    values.append(None)  # маркер ручного ввода (номер = длина списка)
+
+    # «умный» дефолт: прежнее значение → AGH (DoH) → Google
+    default_idx = 0
+    if old_dns and old_dns in values:
+        default_idx = values.index(old_dns)
+    elif old_dns:
+        default_idx = None   # Enter = оставить прежнее (не из меню)
+    elif agh_links:
+        default_idx = 3      # AGH DoH — есть на сервере
+
+    print(f"  {CYAN}DNS в конфигах Karing{NC} "
+          f"{DIM}(запросы клиента — через mieru-туннель):{NC}")
+    for i, label in enumerate(labels):
+        num, val = i + 1, values[i]
+        if val is None:
+            print(f"     {DIM}[{num}]{NC} {label} "
+                  f"{DIM}(IP / домен / https://… / tls://… / quic://…){NC}")
+        elif val.startswith(("https://", "tls://", "quic://")):
+            print(f"     {DIM}[{num}]{NC} {label}:")
+            print(f"         {YELLOW}{val}{NC}")
+        else:
+            print(f"     {DIM}[{num}]{NC} {label}")
+    if agh_links and agh["self_signed"]:
+        print(f"     {DIM}(⚠ сертификат AdGuard Home self-signed — "
+              f"клиенту придётся доверять ему вручную){NC}")
+    if not agh_links and agh["status"] == "no-tls":
+        print(f"     {DIM}(AdGuard Home на сервере найден, но TLS выключен — "
+              f"публичных DoH/DoT/DoQ нет){NC}")
+
+    if default_idx is None:
+        hint = f"[Enter=прежний: {old_dns}]"
+    else:
+        hint = f"[Enter={default_idx + 1}]"
+
+    def _default_value() -> str:
+        return old_dns if default_idx is None else (values[default_idx] or "")
+
+    raw = proto_ask(f"  {CYAN}Выбор {hint}: {NC}", c=True).strip()
+
+    if raw == "":
+        return _default_value()
+
+    if raw.isdigit():
+        # чистая цифра — ТОЛЬКО пункт меню: вне диапазона — опечатка,
+        # голое число не бывает валидным DNS-адресом (не IP и не домен)
+        if not (1 <= int(raw) <= len(values)):
+            print(f"  {YELLOW}⚠{NC}  Похоже на опечатку — оставляю дефолт (Google).")
+            return _default_value()
+        idx = int(raw) - 1
+        if values[idx] is None:
+            # ручной ввод — второй вопрос; опечатка → дефолт, как раньше
+            raw2 = proto_ask(
+                f"  {CYAN}Адрес DNS (можно список через запятую): {NC}",
+                c=True).strip()
+            if _is_plausible_dns_address(raw2):
+                print(f"  {GREEN}✓{NC}  DNS в выдаче: {YELLOW}{raw2}{NC} "
+                      f"{DIM}(через mieru-туннель){NC}")
+                return raw2
+            print(f"  {YELLOW}⚠{NC}  Похоже на опечатку — оставляю дефолт.")
+            return _default_value()
+        val = values[idx] or ""
+        if val:
+            print(f"  {GREEN}✓{NC}  DNS в выдаче: {YELLOW}{val}{NC} "
+                  f"{DIM}(через mieru-туннель){NC}")
+        return val
+
+    # произвольная строка — принимаем как адрес (старое поведение v85)
+    if _is_plausible_dns_address(raw):
+        print(f"  {GREEN}✓{NC}  DNS в выдаче: {YELLOW}{raw}{NC} "
+              f"{DIM}(через mieru-туннель){NC}")
+        return raw
+    print(f"  {YELLOW}⚠{NC}  Похоже на опечатку — оставляю дефолт (Google).")
+    return _default_value()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  УСТАНОВКА
@@ -973,15 +1149,20 @@ def _run_install_inner() -> None:
         ).strip().upper()
         protocol = raw if raw in ("TCP", "UDP", "BOTH") else old_protocol
 
-        # ── v85: адрес сервера в клиентской выдаче (IP или домен) ─────
+        # ── v85/v87: адрес сервера в клиентской выдаче (IP или домен) ───
         old_addr = (state.get("client_server_addr", "") or "").strip()
         domain_hint = _detect_server_domain() or old_addr
         client_server_addr = ""
         if domain_hint:
             default_opt = old_addr or "2"
+            # v87: вопрос короткими строками — раньше одна длинная строка
+            # не влезала в рамку/терминал и ломала боксы
+            print(f"  {CYAN}Адрес сервера в клиентских ссылках:{NC}")
+            print(f"     {DIM}[1]{NC} IP сервера (как раньше)")
+            print(f"     {DIM}[2]{NC} Домен — {YELLOW}{domain_hint}{NC}")
+            print(f"     {DIM}    (рекомендуется: IP меняется — ссылки живут){NC}")
             raw = proto_ask(
-                f"  {CYAN}Адрес в клиентских ссылках: [1] IP / "
-                f"[2] домен {domain_hint} / или свой домен [Enter={default_opt}]: {NC}",
+                f"  {CYAN}Выбор [Enter={default_opt}] (или свой домен): {NC}",
                 default=default_opt, c=True,
             ).strip()
             if raw == "1":
@@ -997,23 +1178,9 @@ def _run_install_inner() -> None:
                       f"{YELLOW}{client_server_addr}{NC} "
                       f"{DIM}(IP меняется — ссылки живут){NC}")
 
-        # ── v85: DNS в клиентских конфигах Karing ───────────────────
+        # ── v87: DNS в конфигах Karing — меню вместо одной строки ────
         old_dns = (state.get("client_dns", "") or "").strip()
-        dns_hint = (f" {DIM}(на сервере найден домен: {domain_hint} — "
-                    f"если там живёт ваш DNS, можно указать его){NC}"
-                    if domain_hint else "")
-        raw = proto_ask(
-            f"  {CYAN}DNS в конфигах Karing [Enter={old_dns or 'Google 8.8.8.8'}]:{NC}{dns_hint}",
-            default=old_dns, c=True,
-        ).strip()
-        client_dns = raw or old_dns
-        if client_dns and (" " in client_dns or "/" in client_dns
-                           and not client_dns.startswith("http")):
-            print(f"  {YELLOW}⚠{NC}  Похоже на опечатку — оставляю дефолт (Google).")
-            client_dns = ""
-        elif client_dns:
-            print(f"  {GREEN}✓{NC}  DNS в выдаче: {YELLOW}{client_dns}{NC} "
-                  f"{DIM}(через mieru-туннель){NC}")
+        client_dns = _ask_client_dns(old_dns)
 
     except _Cancelled: raise
 
@@ -1205,14 +1372,15 @@ def _run_install_inner() -> None:
     if client_dns:
         _box_kv("DNS в выдаче:", f"{YELLOW}{client_dns}{NC} {DIM}(через туннель){NC}")
     _box_row()
-    _box_sep()
-    _print_user_link_pairs(link_pairs)
-    _box_sep()
+    # v87: ссылки — ВНЕ рамки (целиком, не резанные по ширине): рамка
+    # закрывается, пары ссылок печатаются после неё, затем QR
+    _box_info("Ссылки Karing и Nekobox/Nyamebox — ПОД рамкой, целиком.")
     _box_warn("Karing: убедитесь что выбрано ядро sing-box (не Xray-core!)")
     _box_info("Добавьте пользователей через пункт [2].")
     _box_warn("Убедитесь что время на клиенте синхронизировано!")
     _box_bot()
     print()
+    _print_link_pairs_outside(link_pairs)
     for p, share_link, _neko in link_pairs:
         _print_qr(share_link, f"Karing / mierus:// для {uname} ({p})"
                   if len(link_pairs) > 1 else f"Karing / mierus:// для {uname}")
@@ -1348,10 +1516,12 @@ def _add_user(state: dict) -> None:
     _box_kv("Пароль:", f"{YELLOW}{password}{NC}")
     if err: _box_warn(f"Ошибка конфига: {err}")
     else: _box_ok("Конфиг применён.")
-    _box_row(); _box_sep()
-    _print_user_link_pairs(link_pairs)
-    _box_row(); _box_bot()
+    _box_row()
+    # v87: ссылки — ВНЕ рамки, целиком ПОД ней (не резанные по ширине)
+    _box_info("Ссылки Karing и Nekobox/Nyamebox — ПОД рамкой, целиком.")
+    _box_bot()
     print()
+    _print_link_pairs_outside(link_pairs)
     for p, share_link, _neko in link_pairs:
         _print_qr(share_link, f"Karing / mierus:// для {username} ({p})"
                   if len(link_pairs) > 1 else f"Karing / mierus:// для {username}")
@@ -1396,10 +1566,12 @@ def _show_user_link(users: list, server_ip: str,
     _box_row()
     _box_kv("Логин:", f"{YELLOW}{user['username']}{NC}")
     _box_kv("Пароль:", f"{YELLOW}{user['password']}{NC}")
-    _box_row(); _box_sep()
-    _print_user_link_pairs(link_pairs)
-    _box_row(); _box_bot()
+    _box_row()
+    # v87: ссылки — ВНЕ рамки, целиком ПОД ней (не резанные по ширине)
+    _box_info("Ссылки Karing и Nekobox/Nyamebox — ПОД рамкой, целиком.")
+    _box_bot()
     print()
+    _print_link_pairs_outside(link_pairs)
     for p, share_link, _neko in link_pairs:
         _print_qr(share_link, f"Karing / mierus:// для {user['username']} ({p})"
                   if len(link_pairs) > 1 else f"Karing / mierus:// для {user['username']}")

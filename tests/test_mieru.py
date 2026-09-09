@@ -711,5 +711,241 @@ class TestV86BothProtocol(unittest.TestCase):
             self.assertEqual(protocol, expected)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  v87: DNS-меню + AGH-детект + мульти-адреса + ссылки вне рамки
+# ═════════════════════════════════════════════════════════════════════════════
+class TestV87ParseDnsAddresses(unittest.TestCase):
+    """_parse_dns_addresses — списки через запятую/плюс (пункт «Google +
+    Cloudflare» и ручной ввод)."""
+
+    def test_single_address(self):
+        from chimera.modules.mieru import _parse_dns_addresses
+        self.assertEqual(_parse_dns_addresses("8.8.8.8"), ["8.8.8.8"])
+
+    def test_comma_list_with_spaces(self):
+        from chimera.modules.mieru import _parse_dns_addresses
+        self.assertEqual(_parse_dns_addresses("8.8.8.8, 1.1.1.1"),
+                         ["8.8.8.8", "1.1.1.1"])
+
+    def test_plus_list(self):
+        from chimera.modules.mieru import _parse_dns_addresses
+        self.assertEqual(_parse_dns_addresses("8.8.8.8+1.1.1.1"),
+                         ["8.8.8.8", "1.1.1.1"])
+
+    def test_empty_and_garbage(self):
+        from chimera.modules.mieru import _parse_dns_addresses
+        self.assertEqual(_parse_dns_addresses(""), [])
+        self.assertEqual(_parse_dns_addresses(None), [])
+        self.assertEqual(_parse_dns_addresses(" ,+ "), [])
+
+    def test_spaces_inside_token_kept(self):
+        """Пробел ВНУТРИ токена не режется — его отвергнет валидация."""
+        from chimera.modules.mieru import _parse_dns_addresses
+        self.assertEqual(_parse_dns_addresses("bad dns com"), ["bad dns com"])
+
+
+class TestV87PlausibleDns(unittest.TestCase):
+    """_is_plausible_dns_address — что прошло валидацию, что опечатка.
+
+    v85 отвергала tls:// и quic:// (слэш без http-префикса) — баг, v87
+    легализует DoT/DoQ и списки адресов."""
+
+    def _ok(self, s):
+        from chimera.modules.mieru import _is_plausible_dns_address
+        return _is_plausible_dns_address(s)
+
+    def test_addresses(self):
+        for s in ("8.8.8.8", "1.1.1.1", "panel.example",
+                  "https://panel.example/dns-query",
+                  "tls://panel.example:853",
+                  "quic://panel.example:853",
+                  "8.8.8.8,1.1.1.1", "8.8.8.8, panel.example"):
+            self.assertTrue(self._ok(s), s)
+
+    def test_typos(self):
+        for s in ("", "bad dns com", "https//no-slashes", "https://ok / x"):
+            self.assertFalse(self._ok(s), s)
+
+
+class TestV87BuildKaringDnsBlockMulti(unittest.TestCase):
+    """_build_karing_dns_block — несколько адресов (пункт «Google +
+    Cloudflare»): первый — дефолтный custom-dns, остальные — допы."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_two_public_resolvers(self):
+        from chimera.modules.mieru import _build_karing_dns_block
+        block = _build_karing_dns_block("8.8.8.8,1.1.1.1", "mieru-u1")
+        servers = block["servers"]
+        self.assertEqual(len(servers), 3)  # custom-dns, custom-dns-2, local
+        self.assertEqual(servers[0],
+                         {"tag": "custom-dns", "address": "8.8.8.8",
+                          "detour": "mieru-u1"})
+        self.assertEqual(servers[1],
+                         {"tag": "custom-dns-2", "address": "1.1.1.1",
+                          "detour": "mieru-u1"})
+        self.assertEqual(servers[2]["tag"], "local")
+        self.assertNotIn("address_resolver", servers[0])  # IP — не нужен
+
+    def test_mixed_ip_and_domain(self):
+        from chimera.modules.mieru import _build_karing_dns_block
+        block = _build_karing_dns_block("8.8.8.8,panel.example", "mieru-u1")
+        self.assertEqual(block["servers"][1]["address"], "panel.example")
+        self.assertEqual(block["servers"][1]["address_resolver"], "local")
+
+    def test_single_address_bytes_unchanged(self):
+        """Регресс v85: одиночный адрес — блок побайтово как раньше."""
+        from chimera.modules.mieru import _build_karing_dns_block
+        block = _build_karing_dns_block("10.0.0.53", "mieru-u1")
+        self.assertEqual(block["servers"][0],
+                         {"tag": "custom-dns", "address": "10.0.0.53",
+                          "detour": "mieru-u1"})
+
+    def test_spaces_around_comma_ok(self):
+        from chimera.modules.mieru import _build_karing_dns_block
+        block = _build_karing_dns_block("8.8.8.8, 1.1.1.1", "mieru-u1")
+        self.assertEqual(len(block["servers"]), 3)
+
+
+class TestV87DetectAghDnsEndpoints(unittest.TestCase):
+    """_detect_agh_dns_endpoints — подглядывание DoH/DoT/DoQ в стейт AGH."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _detect(self, payload=None):
+        from chimera.modules import mieru
+        if payload is not None:
+            (self._tmp / "aghome_state.json").write_text(
+                __import__("json").dumps(payload))
+        with patch.object(mieru, "_CORE_STATE_DIR", self._tmp):
+            return mieru._detect_agh_dns_endpoints()
+
+    def test_ok_tls_domain(self):
+        r = self._detect({"domain": "cdn.example",
+                          "tls_enabled": True, "self_signed": False})
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(
+            r["links"],
+            [("DoH", "https://cdn.example:30443/dns-query"),
+             ("DoT", "tls://cdn.example:853"),
+             ("DoQ", "quic://cdn.example:853")])
+
+    def test_no_file(self):
+        r = self._detect(None)
+        self.assertEqual((r["links"], r["status"]), ([], "no-agh"))
+
+    def test_no_tls(self):
+        r = self._detect({"domain": "cdn.example",
+                          "tls_enabled": False})
+        self.assertEqual((r["links"], r["status"]), ([], "no-tls"))
+
+    def test_no_domain(self):
+        r = self._detect({"domain": "", "tls_enabled": True})
+        self.assertEqual((r["links"], r["status"]), ([], "no-domain"))
+
+    def test_self_signed_flag(self):
+        r = self._detect({"domain": "dns.example.com", "tls_enabled": True,
+                          "self_signed": True})
+        self.assertTrue(r["self_signed"])
+
+    def test_custom_ports(self):
+        r = self._detect({"domain": "dns.example.com", "tls_enabled": True,
+                          "doh_port": 8443, "dot_port": 8853, "doq_port": 8853})
+        self.assertEqual(r["links"][0],
+                         ("DoH", "https://dns.example.com:8443/dns-query"))
+        self.assertEqual(r["links"][1], ("DoT", "tls://dns.example.com:8853"))
+
+
+class TestV87AskClientDns(unittest.TestCase):
+    """_ask_client_dns (standalone) — то же меню, что в гибриде, но на
+    proto_ask; Enter-дефолты, номера, ручной ввод, опечатки."""
+
+    _NO_AGH = {"links": [], "self_signed": False, "status": "no-agh"}
+    _AGH = {"links": [
+        ("DoH", "https://cdn.example:30443/dns-query"),
+        ("DoT", "tls://cdn.example:853"),
+        ("DoQ", "quic://cdn.example:853"),
+    ], "self_signed": False, "status": "ok"}
+
+    def _ask(self, inputs, old_dns="", agh=None):
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import mieru
+        answers = iter(inputs)
+        buf = io.StringIO()
+        with patch.object(mieru, "proto_ask",
+                          side_effect=lambda *a, **k: next(answers)), \
+             patch.object(mieru, "_detect_agh_dns_endpoints",
+                          return_value=agh if agh is not None else self._NO_AGH), \
+             redirect_stdout(buf):
+            return mieru._ask_client_dns(old_dns)
+
+    def test_agh_found_enter_defaults_to_agh_doh(self):
+        self.assertEqual(
+            self._ask([""], agh=self._AGH),
+            "https://cdn.example:30443/dns-query")
+
+    def test_agh_doq_by_number(self):
+        self.assertEqual(self._ask(["6"], agh=self._AGH),
+                         "quic://cdn.example:853")
+
+    def test_no_agh_enter_is_google(self):
+        self.assertEqual(self._ask([""]), "")
+
+    def test_option3_pair(self):
+        self.assertEqual(self._ask(["3"]), "8.8.8.8,1.1.1.1")
+
+    def test_manual_flow(self):
+        self.assertEqual(self._ask(["4", "panel.example"]),
+                         "panel.example")
+
+    def test_manual_typo_falls_back(self):
+        self.assertEqual(self._ask(["4", "bad dns com"]), "")
+
+    def test_raw_address_typed_directly(self):
+        self.assertEqual(self._ask(["tls://panel.example:853"]),
+                         "tls://panel.example:853")
+
+    def test_old_dns_kept_on_enter(self):
+        self.assertEqual(self._ask([""], old_dns="10.0.0.53"), "10.0.0.53")
+
+
+class TestV87PrintLinkPairsOutside(unittest.TestCase):
+    """_print_link_pairs_outside — ссылки ВНЕ рамки, одной строкой каждая:
+    в строках-ссылках нет символов рамки (║), все mierus://-ссылки целые."""
+
+    def test_links_printed_whole_outside_frame(self):
+        import io
+        import re
+        from contextlib import redirect_stdout
+        from chimera.modules import mieru
+        pairs = [
+            ("TCP", "mierus://u1:p1@cdn.example?port=443&protocol=TCP&traffic-pattern=BLOB%3D%3D",
+             "mierus://u1:p1@cdn.example:443?transport=TCP&mtu=1400"),
+            ("UDP", "mierus://u2:p2@cdn.example?port=5443&protocol=UDP&traffic-pattern=BLOB%3D%3D",
+             "mierus://u2:p2@cdn.example:5443?transport=UDP&mtu=1400"),
+        ]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            mieru._print_link_pairs_outside(pairs)
+        ansi = re.compile(r"\x1b\[[0-9;]*m")
+        lines = [ansi.sub("", ln).strip() for ln in buf.getvalue().splitlines()]
+        link_lines = [l for l in lines if l.startswith("mierus://")]
+        # 2 пары × (Karing + Nekobox) = 4 ссылки, каждая — ЦЕЛИКОМ
+        self.assertEqual(len(link_lines), 4)
+        for l in link_lines:
+            self.assertNotIn("║", l)
+        # суффиксы транспортов видны в подписях при BOTH
+        self.assertIn("Karing (sing-box core) (TCP):", lines)
+        self.assertIn("Nekobox / Nyamebox (UDP):", lines)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
