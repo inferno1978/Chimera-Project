@@ -483,5 +483,143 @@ class TestPortRegistryCoverage(unittest.TestCase):
         mock_unreg.assert_called()
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  v84: авто-домен для Let's Encrypt (порт v83.3 из triple_panel.py)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestV84AutoDomain(unittest.TestCase):
+    """Цепочка _detect_panel_domain: PARAM_DOMAIN → state.json →
+    naiveproxy.json (домен Naive — его panel_nginx_front не видит).
+    v84 — порт фикса v83.3: Telemt Panel на серверах без VLESS больше
+    не застревает на пустом «Домен:» при включении прямого доступа."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _core(self, domain):
+        import types
+        return types.SimpleNamespace(PARAM_DOMAIN=domain)
+
+    def test_param_domain_wins(self):
+        from chimera.modules import telemt_panel
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "state.json").write_text('{"domain": "core.example.com"}')
+        (tmp / "naiveproxy.json").write_text(
+            '{"domain": "naive.example.com"}')
+        with patch.object(telemt_panel, "_core_module",
+                          return_value=self._core("vless.example.com")), \
+             patch.object(telemt_panel, "STATE_DIR", tmp):
+            self.assertEqual(telemt_panel._detect_panel_domain(),
+                             "vless.example.com")
+
+    def test_state_json_fallback(self):
+        from chimera.modules import telemt_panel
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "state.json").write_text('{"domain": "core.example.com"}')
+        (tmp / "naiveproxy.json").write_text(
+            '{"domain": "naive.example.com"}')
+        with patch.object(telemt_panel, "_core_module",
+                          return_value=self._core("")), \
+             patch.object(telemt_panel, "STATE_DIR", tmp):
+            self.assertEqual(telemt_panel._detect_panel_domain(),
+                             "core.example.com")
+
+    def test_naive_domain_fallback(self):
+        """Сервер без VLESS (чистый MTProxy): домен живёт в naiveproxy.json —
+        панель обязана подхватить его сама (кейс юзера: пустое «Домен:»)."""
+        from chimera.modules import telemt_panel
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "naiveproxy.json").write_text(
+            '{"domain": "naive.example.com", "port": 443}')
+        with patch.object(telemt_panel, "_core_module",
+                          return_value=self._core("")), \
+             patch.object(telemt_panel, "STATE_DIR", tmp):
+            self.assertEqual(telemt_panel._detect_panel_domain(),
+                             "naive.example.com")
+
+    def test_nothing_found(self):
+        from chimera.modules import telemt_panel
+        tmp = Path(tempfile.mkdtemp())
+        with patch.object(telemt_panel, "_core_module",
+                          return_value=self._core("")), \
+             patch.object(telemt_panel, "STATE_DIR", tmp):
+            self.assertEqual(telemt_panel._detect_panel_domain(), "")
+
+    def test_garbage_files_ignored(self):
+        from chimera.modules import telemt_panel
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "naiveproxy.json").write_text("не json вообще")
+        with patch.object(telemt_panel, "_core_module",
+                          return_value=self._core("")), \
+             patch.object(telemt_panel, "STATE_DIR", tmp):
+            self.assertEqual(telemt_panel._detect_panel_domain(), "")
+
+    def test_core_import_failure_ignored(self):
+        from chimera.modules import telemt_panel
+
+        def boom():
+            raise ImportError("нет ядра")
+
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "naiveproxy.json").write_text('{"domain": "naive.example.com"}')
+        with patch.object(telemt_panel, "_core_module", side_effect=boom), \
+             patch.object(telemt_panel, "STATE_DIR", tmp):
+            self.assertEqual(telemt_panel._detect_panel_domain(),
+                             "naive.example.com")
+
+
+class TestV84ToggleDirectAccessFlow(unittest.TestCase):
+    """Пункт [6] «Прямой доступ»: домен подставляется автоматически,
+    ask_domain НЕ вызывается; ручной ввод — только если нигде не нашли;
+    пустой ручной ввод — откат на self-signed (как было до v84)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _run_toggle(self, detect_value, ask_domain_return=None):
+        """Прогоняет _toggle_direct_access (ветка «включить») с фейками.
+        Возвращает (kwargs_вызова_setup, mock_ask_domain)."""
+        from chimera.modules import telemt_panel
+        from chimera.modules import panel_nginx_front
+        setup_calls = []
+        with patch.object(telemt_panel, "_telemt_direct_status",
+                          return_value={"enabled": False}), \
+             patch.object(telemt_panel, "_telemt_setup_direct_access",
+                          side_effect=lambda **kw:
+                              setup_calls.append(kw) or True), \
+             patch.object(telemt_panel, "_detect_panel_domain",
+                          return_value=detect_value), \
+             patch.object(telemt_panel, "_ask_tls_port", return_value=8444), \
+             patch.object(telemt_panel, "_pause", lambda: None), \
+             patch.object(panel_nginx_front, "ask_tls_mode",
+                          return_value=(False, None)), \
+             patch.object(panel_nginx_front, "ask_domain",
+                          return_value=ask_domain_return) as mock_ad:
+            telemt_panel._toggle_direct_access()
+        return setup_calls, mock_ad
+
+    def test_auto_domain_skips_ask_domain(self):
+        """Домен найден (Naive) — ask_domain не вызывается вообще."""
+        calls, mock_ad = self._run_toggle("naive.example.com")
+        mock_ad.assert_not_called()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].get("domain"), "naive.example.com")
+        self.assertFalse(calls[0].get("use_self_signed"))
+
+    def test_manual_input_when_not_found(self):
+        """Нигде не нашли — классический ручной ввод (как до v84)."""
+        calls, mock_ad = self._run_toggle("", ask_domain_return="manual.example.com")
+        mock_ad.assert_called_once()
+        self.assertEqual(calls[0].get("domain"), "manual.example.com")
+        self.assertFalse(calls[0].get("use_self_signed"))
+
+    def test_fallback_to_self_signed_when_empty(self):
+        """Не нашли + ручной ввод пуст → откат на self-signed (регресс
+        исходного поведения v80)."""
+        calls, mock_ad = self._run_toggle("", ask_domain_return=None)
+        mock_ad.assert_called_once()
+        self.assertTrue(calls[0].get("use_self_signed"))
+        self.assertIsNone(calls[0].get("domain"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
