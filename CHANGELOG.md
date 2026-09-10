@@ -2,6 +2,49 @@
 
 ---
 
+## FIX(tests): изоляция межтестового состояния subscription_multinode и детерминированные фикстуры dnscrypt pool-sync — 10 сентября 2026
+
+**Порядко-зависимость подписки (16 тестов):** при алфавитном
+прогоне всего сьюта test_subscription_multinode падал пачками
+(«1 exit-нода вместо 2», «multinode enabled=False»), при одиночном
+запуске — зелёный. Минимальный репро:
+test_singbox_client_rulesets → test_singbox_multinode_config →
+test_subscription_multinode. Корень в цепочке кеша
+sys.modules: интеграционный тест rulesets импортирует
+chimera.modules.subscription, тот при импорте тянет
+subscription_multinode — настоящий модуль (системные пути
+/var/lib/xray-installer) оседает в кеше; следующий тест
+(singbox_multinode_config) в setUpClass находит его в кеше
+(mod is not None), ставит на ОБЩИЙ объект свои monkey-патчи
+`_load_state = lambda: dict(STATE)`, а tearDownClass
+восстанавливает тот же объект — патчи-лямбды протекают во все
+последующие тесты процесса (патчи путей _STATE_FILE бессильны:
+лямбда вообще не читает файл). Лечение двумя барьерами:
+(1) singbox_multinode_config сохраняет оригиналы
+_load_state/_geo_lookup и снимает свои замены в tearDownClass;
+(2) test_subscription_multinode в каждом setUpClass выкидывает
+из кеша пару subscription + subscription_multinode
+(_fresh_multinode) — модули импортируются заново и связывают
+lazy _core_call со СВОИМ fake chimera._core; сброс subscription
+обязателен: без него кешированный subscription.py звал бы
+СТАРЫЙ объект multinode мимо патчей теста.
+
+**dnscrypt pool-sync (4 интеграционных теста):** фикстуры живых
+списков ссылались на локальные снапшоты вне репо
+(scripts/public-resolvers.md, ra-test/cache-B3-pool-clean/);
+на чистой машине их нет, fallback давал 50 секций — ниже
+MIN_LIVE_SECTIONS (200), pool-sync справедливо отказывался
+менять конфиг, 4 теста краснели даже в одиночном прогоне.
+Fallback переписан: полный пул (245, «всё живо») + релеи из
+маршрутов и wildcard — детерминированно на любой машине.
+
+Верификация: алфавитный прогон всего сьюта тремя непрерывными
+кусками — 6248 passed / 0 failed; точный минимальный репро
+(ранее 16 failed) — 67 passed; изолированные прогоны трёх
+правленых файлов + вся subscription-семья вместе — 230 passed.
+
+---
+
 ## FIX(mieru): UDP-ссылки для Karing идут с IP: у ядра Karing баг «домен+UDP = 0 байт/с» (диагноз по исходникам) — 10 сентября 2026
 
 **Кейс:** юзер проверил в Karing обе ссылки Hybrid Addon: TCP
