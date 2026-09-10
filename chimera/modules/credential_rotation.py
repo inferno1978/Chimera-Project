@@ -347,6 +347,12 @@ def _rotate_reality_keys() -> dict:
                 rs["privateKey"] = new_priv
                 rs["publicKey"]  = new_pub
                 rs["shortIds"]   = [new_sid]
+                # Самозалечивание старых конфигов: Xray 26.7.11+ при ОТСУТСТВИИ
+                # minClientVer применяет дефолт 26.3.27 — mihomo-семейство
+                # (Clash Verge / FlClash) тогда не проходит REALITY-auth.
+                # setdefault: не трогаем явные значения, добавляем только пустые.
+                rs.setdefault("minClientVer", "")
+                rs.setdefault("maxClientVer", "")
                 changed = True
             if changed:
                 cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))

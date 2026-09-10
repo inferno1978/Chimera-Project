@@ -352,6 +352,13 @@ def inject_pq_inbound(
         "privateKey":  private_key,
         "publicKey":   public_key,
         "shortIds":    [shortid],
+        # Xray-core 26.7.11+ по умолчанию ставит minClientVer=26.3.27 (гейт
+        # версий клиента в REALITY); mihomo-семейство версию не отчитывает и
+        # не проходит НИКАКОЙ непустой порог — пишем пустые строки явно,
+        # иначе PQ-инбаунд (этот конфиг) унаследует дефолт и отвалит
+        # Clash Verge / FlClash. См. MetaCubeX/mihomo#3042, 3x-ui#5922.
+        "minClientVer": "",
+        "maxClientVer": "",
     }
     if mldsa65_seed:
         reality_settings["mldsa65Seed"] = mldsa65_seed
