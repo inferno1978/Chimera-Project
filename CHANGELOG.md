@@ -2,6 +2,80 @@
 
 ---
 
+## FEAT(fp): рецепт B — mihomo-конфиги с MLKEM768 + смена Fingerprint из меню (пункт F) — 10 сентября 2026
+
+**Контекст:** фикс minClientVer="" (запись выше) корректен и применён,
+но НЕ решал аут против Xray-core 26.9.9: настоящая причина — зашитое
+в библиотеку xtls/reality (пин Xray v26.9.8/26.9.9) требование видеть
+keyShare X25519MLKEM768 ДО X25519 в ClientHello («reject outdated/
+strange Client Hello», конфигом не отключается). mihomo по умолчанию
+ВЫРЕЗАЕТ MLKEM768 «for the old reality server», а в utls-форке mihomo
+MLKEM768 есть ТОЛЬКО в HelloChrome_Auto (133). Живой тест на флоте
+(2026-09-10): mihomo 1.19.30 `chrome + support-x25519mlkem768: true`
+→ RU1 ✓ / RU2 ✓ / PL (старое ядро) ✓; firefox в любом виде → RU ✗.
+Юзер выбрал рецепт B (остаёмся на свежих ядрах, правим клиентов).
+
+**Сделано (генераторы mihomo-конфигов — рецепт B):**
+- subscription_multinode._mihomo_proxy_block: REALITY-ноды теперь
+  пишут `support-x25519mlkem768: true` ВНУТРИ `reality-opts:` (поле
+  RealityOptions — проверено по исходникам mihomo adapter/outbound/
+  reality.go: `proxy:"support-x25519mlkem768,omitempty"`) и
+  `client-fingerprint: chrome` ФОРСИРОВАН независимо от state/chain
+  fp — FP-разнообразие для REALITY против ядер 26.9.8+ невозможно
+  (MLKEM есть только у chrome), а chrome+флаг работает и против
+  старых ядер (PL-контроль). xHTTP-ноды не тронуты (обычный TLS,
+  MLKEM не участвует, client-fingerprint из state). vless://-URI
+  (base64-подписка) тоже не тронуты — fp из state остаётся
+  источником правды для Xray-семьи клиентов.
+- client_config_export (clash-meta.yaml, REALITY-ветка): то же —
+  флаг + форсированный chrome; sing-box/hiddify JSON и
+  vless-link.txt не тронуты.
+
+**Сделано (смена FP без переустановки):**
+- Меню «Управление Пользователями» → новый пункт **F** — «🔑 Смена
+  TLS Fingerprint → перегенерация ссылок» (user_fp_manager.
+  do_change_fp_interactive существовал, но НЕ был подключён к TUI —
+  только TG-бот /setfp; теперь подключён). Список FP — единый
+  XRAY_FP_LIST из fingerprint_manager.py (тот же, что в
+  установочном флоу), REALITY-гард на random/randomized.
+- После успешной смены: ссылки ВСЕХ активных юзеров перегенерируются
+  и показываются сразу же (_show_regenerated_links — тот же рендер,
+  что у «Показать ссылку / QR» [3]: новые fp=, QR, /root/vless_link_
+  <имя>.txt). Пункт [3] и все остальные потребители (подписки,
+  REST API, TG-боты, fragment-конфиги, экспорт) читают
+  state.json напрямую — новый FP подхватывают мгновенно.
+- apply_fp: синхронизация in-memory глобала _core.PARAM_FINGERPRINT
+  (_sync_core_global_fp) — без него ссылки в ТОЙ ЖЕ сессии меню
+  генерировались бы со старым FP (глобал заполняется один раз при
+  старте меню; его лениво читают _fp_from_state / chain_nodes /
+  pq_vless).
+- Экран смены FP: подсказка «Xray ≥ 26.9.8: mihomo-семья — только
+  fp=chrome (MLKEM768)».
+- Старое меню «Ротация Fingerprint» (Автоматизация): та же
+  семантика — REALITY-гард на randomized (раньше пропускал —
+  ломал REALITY-сессии), подсказка про MLKEM, синхронизация
+  PARAM_FINGERPRINT после ручной смены.
+
+**Тесты:** +13 (TestMihomoMlkemRecipeB ×5 — флаг/chrome/порядок/
+xhttp-исключение/URI-источник-правды; TestApplyFpGlobalSync ×3;
+TestShowRegeneratedLinks ×3 — активные юзеры/пусто/сбой-не-валит;
+TestFingerprintMenuWiring ×4 — пункт F активен, обработчик, синх
+глобала и гард в старом меню; +1 clash-рецепт в
+test_client_config_export). Сьюты: user_fp_manager 29 /
+subscription_multinode 29 / client_config_export 8 /
+fingerprint+users+ios_menu+tg_bot 88 / rest_api+subscription 97 /
+chain_nodes+xray_install 115 — все passed. Визуальная симуляция
+флоу F: state+chain+config+глобал = edge, ссылки показаны.
+
+**Применение на живых нодах:** `git pull` в /opt/chimera-project →
+меню 2 → 1 → **F** → выбрать `chrome` (пункт 1) — ссылки и mihomo-
+подписка перегенерируются, Xray перезапустится. Клиентам mihomo:
+ядро ≥ 1.19.29 + обновить подписку (конфиг теперь несёт
+support-x25519mlkem768). Xray-семье клиентов достаточно новых ссылок
+(fp=chrome).
+
+---
+
 ## FIX(xray): REALITY minClientVer — гейт версий клиента выключен, совместимость с mihomo-семейством — 10 сентября 2026
 
 **Кейс:** обновление xray-core до 26.9.9 (prerelease) на RU-нодах

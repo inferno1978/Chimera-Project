@@ -429,6 +429,19 @@ def _mihomo_proxy_block(nd: dict, indent: str = "  ") -> list[str]:
             f"{indent}  servername: {nd['sni'] or nd['host']}",
         ]
     else:
+        # REALITY + mihomo (рецепт B, Xray-core 26.9.8+):
+        # библиотека xtls/reality (пин Xray v26.9.8/26.9.9) ОБЯЗАНА видеть
+        # keyShare X25519MLKEM768 ДО X25519 в ClientHello — иначе «reject
+        # outdated/strange Client Hello», конфигом не отключается. В utls-
+        # форке mihomo MLKEM768 есть ТОЛЬКО в HelloChrome_Auto (133), опция
+        # support-x25519mlkem768 (внутри reality-opts!) запрещает вырезание
+        # MLKEM. Живой тест на флоте: chrome+флаг проходит и против новых
+        # (26.9.9), и против старых ядер; firefox/safari/ios/edge — только
+        # против старых. Поэтому для REALITY-нод FP фиксирован на chrome
+        # независимо от state/chain fp — FP-разнообразие для REALITY против
+        # новых ядер невозможно. Старые mihomo (<1.19.29) неизвестное поле
+        # в reality-opts молча игнорируют — конфиг остаётся совместимым.
+        # См. worklog: ru-xray26-postfix-verify, LIVE 2026-09-10.
         lines += [
             f"{indent}  network: tcp",
             f"{indent}  tls: true",
@@ -438,7 +451,8 @@ def _mihomo_proxy_block(nd: dict, indent: str = "  ") -> list[str]:
             f"{indent}  reality-opts:",
             f"{indent}    public-key: {nd['pbk']}",
             f"{indent}    short-id: {_yq(nd.get('sid', ''))}",
-            f"{indent}  client-fingerprint: {nd['fp']}",
+            f"{indent}    support-x25519mlkem768: true",
+            f"{indent}  client-fingerprint: chrome",
         ]
     return lines
 

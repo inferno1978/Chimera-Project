@@ -127,6 +127,14 @@ def do_generate_client_config() -> None:
 
     # --- Clash Meta YAML ---
     if proto == "reality":
+        # REALITY + mihomo (рецепт B, Xray-core 26.9.8+): серверная
+        # библиотека xtls/reality требует keyShare X25519MLKEM768 в
+        # ClientHello; в mihomo он есть только у HelloChrome_Auto, опция
+        # support-x25519mlkem768 (внутри reality-opts) запрещает его
+        # вырезание. FP фиксирован на chrome (живой тест 2026-09-10:
+        # chrome+флаг работает и против новых, и против старых ядер).
+        # Ссылка vless-link.txt ниже по-прежнему берёт fp из state.json —
+        # Xray-семья клиентов выбирает FP сама по версии ядра.
         clash_proxy = textwrap.dedent(f"""\
             proxies:
               - name: VLESS-Reality
@@ -141,7 +149,8 @@ def do_generate_client_config() -> None:
                 reality-opts:
                   public-key: {pub_key}
                   short-id: {short_id}
-                client-fingerprint: {fp}
+                  support-x25519mlkem768: true
+                client-fingerprint: chrome
                 servername: {sni}
 
             proxy-groups:
