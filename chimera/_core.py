@@ -3078,9 +3078,9 @@ def do_rebuild_xray_config() -> None:
 
     Полезно когда:
       • Обновился Xray-core до новой мажорной версии и в код инсталлятора добавили
-        новые обязательные поля (например minClientVer для Xray 26.7.11+).
-        В уже существующем config.json этих полей нет, а полная переустановка
-        не нужна — нужен только rebuild конфига.
+        новые обязательные поля (например явный minClientVer="" для Xray 26.7.11+,
+        отключающий гейт версий клиента). В уже существующем config.json этих
+        полей нет, а полная переустановка не нужна — нужен только rebuild конфига.
       • Конфиг был повреждён / частично изменён вручную и нужно вернуть его
         к каноническому виду с сохранением всех параметров из state.json.
 
@@ -3140,18 +3140,29 @@ def do_rebuild_xray_config() -> None:
         warn(f"Восстановите из бэкапа: ls /var/backups/xray/configs/")
         return
 
-    # Показать что minClientVer действительно появился (если REALITY-режим)
+    # Проверить итоговое значение minClientVer (если REALITY-режим).
+    # Семантика Xray 26.7.11+: "" — гейт версий выключен (mihomo-семейство
+    # работает); непустое значение (в т.ч. "1.0.0") — гейт включён, клиенты
+    # без версии Xray (Clash Verge / FlClash) отвергаются с декоем (Timeout);
+    # отсутствующее поле — наследуется дефолт 26.3.27 (то же самое).
     if PROTOCOL_MODE == "reality" and PROTOCOL_MODE != "xhttp":
         try:
             cfg = json.loads((CONFIG_DIR / "config.json").read_text())
             for ib in cfg.get("inbounds", []):
                 rs = ib.get("streamSettings", {}).get("realitySettings", {})
                 if rs:
-                    mcv = rs.get("minClientVer", "")
-                    if mcv:
-                        success(f"minClientVer = {mcv}  ✓  (совместимость с Xray 26.7.11+)")
+                    mcv = rs.get("minClientVer")
+                    if mcv == "":
+                        success(f"minClientVer = \"\"  ✓  (гейт версий выключен, "
+                                f"mihomo / Clash Verge совместимы)")
+                    elif mcv is None:
+                        warn("minClientVer отсутствует — Xray 26.7.11+ применит "
+                             "дефолт 26.3.27, mihomo-клиенты отвалятся; "
+                             "проверьте generate_xray_config()")
                     else:
-                        warn("minClientVer отсутствует — проверьте generate_xray_config()")
+                        warn(f"minClientVer = {mcv} — непустой гейт версий; клиенты "
+                             f"без версии Xray (mihomo-семейство) не пройдут "
+                             f"аутентификацию REALITY (Timeout)")
                     break
         except Exception:
             pass
@@ -7281,7 +7292,7 @@ def _menu_install_system() -> None:
         _box_item("3", f"📦 Миграция  {DIM}(Экспорт / Импорт конфигурации){NC}")
         _box_item("4", f"⚡ Оптимизация системы  {DIM}(Sysctl / Limits){NC}")
         _box_item("5", "🔧 Обновить Xray-core")
-        _box_item("5b", f"♻️  Перегенерировать конфиг Xray  {DIM}(из state.json, с minClientVer для 26.7.11+){NC}")
+        _box_item("5b", f"♻️  Перегенерировать конфиг Xray  {DIM}(из state.json; minClientVer=\"\" — гейт версий выкл., mihomo-совместимо){NC}")
         _box_item("6", f"🛠️  Аварийное восстановление  {DIM}(из state.json, без переустановки){NC}")
         _box_item("7", "🗑️  Удалить установку")
         _box_item("8", "🧪 Запустить unit-тесты")
