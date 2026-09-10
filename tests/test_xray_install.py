@@ -16,6 +16,9 @@ Xray-core, парсинг x25519-ключей, нормализация верс
   7. _detect_xhttp_mode_support — определение date-based vs семантической версии.
   8. _verify_sha256 — верификация SHA256 (mocked _run, command_exists).
   9. create_xray_service — генерация systemd-unit (3 ветки: xhttp / AWG / REALITY).
+ 10. _install_autoupdate_service — bash-скрипт автообновления: сравнение
+     версий «старше» (апгрейд только «вверх»), поведенческие прогоны в
+     песочнице с фейковыми xray/curl/systemctl.
 """
 from __future__ import annotations
 
@@ -1267,6 +1270,212 @@ class TestGenerateXhttpConfigCdnMasking(unittest.TestCase):
         self.assertNotIn("sessionKey", xhttp_settings["extra"],
             "sessionKey must NOT be present in simple XHTTP mode "
             "(only in CDN masking profile)")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  _install_autoupdate_service — bash-скрипт автообновления
+#  (сравнение «старше»: апгрейд только «вверх», авто-даунгрейд исключён)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestAutoupdateScript(unittest.TestCase):
+    """Поведенческие тесты bash-скрипта xray-autoupdate.sh.
+
+    Скрипт извлекается РЕАЛЬНЫМ вызовом _install_autoupdate_service()
+    (Path.write_text перехватывается — на диск ничего не пишется),
+    константы LOG/BACKUP_DIR заворачиваются в tmp-песочницу, а
+    xray/curl/systemctl заменяются фейками в PATH — реальная система
+    не затрагивается. Проверяются три исхода:
+      • установленная НОВЕЕ stable-latest → ничего не делать
+        (регрессия: прежнее сравнение «на равенство» даунгрейдило
+        флот 26.9.9 до stable v26.3.27 ближайшей ночью);
+      • равна → ничего не делать;
+      • СТАРШЕ → обновление (curl идёт за release-zip).
+    """
+
+    def _capture_script(self) -> str:
+        """Генерирует скрипт через настоящий _install_autoupdate_service().
+
+        Path.write_text перехватывается (ничего не пишется на диск),
+        _core подменяется exec-фейком, _run — no-op (реальный exec-ядро
+        звонил бы в systemctl).
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        core = _setup_core_in_sysmodules()
+        # no-op _run: systemctl-вызовы из python-части не выполняются
+        core._run = lambda cmd, **kw: MagicMock(
+            returncode=0, stdout="", stderr="")
+        captured = {}
+
+        def _fake_write_text(self, data, *a, **kw):
+            captured[str(self)] = data
+            return len(data or "")
+
+        with patch.object(Path, "write_text", _fake_write_text), \
+             patch.object(Path, "mkdir", lambda self, *a, **kw: None), \
+             patch.object(Path, "chmod", lambda self, *a, **kw: None), \
+             patch("sys.argv", ["installer.py"]):
+            from chimera.modules import xray_install
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                xray_install._install_autoupdate_service()
+
+        script = captured.get("/usr/local/bin/xray-autoupdate.sh")
+        self.assertIsNotNone(
+            script, "xray-autoupdate.sh не сгенерирован (или путь изменён)")
+        return script
+
+    def _run_script(self, script: str, installed: str, latest: str):
+        """Запускает скрипт в песочнице с фейковыми xray/curl/systemctl.
+
+        Возвращает (returncode, текст лога, строки-вызовы curl).
+        curl: releases/latest → JSON {"tag_name": latest}; любой другой
+        URL → фиксируется и rc=1 (сети нет — путь загрузки обрывается
+        сразу после записи URL, что и проверяем).
+        """
+        import os
+        import subprocess as sp
+
+        sbx = Path(tempfile.mkdtemp(prefix="xau_test_"))
+        try:
+            bin_dir = sbx / "bin"
+            bin_dir.mkdir()
+            log_path = sbx / "autoupdate.log"
+            backups = sbx / "backups"
+            curl_calls = sbx / "curl_calls.txt"
+            systemctl_calls = sbx / "systemctl_calls.txt"
+
+            (bin_dir / "xray").write_text(
+                "#!/bin/sh\n"
+                f"echo 'Xray {installed} (fake for autoupdate test)'\n")
+            (bin_dir / "xray").chmod(0o755)
+
+            (bin_dir / "curl").write_text(textwrap.dedent(f"""\
+                #!/bin/sh
+                echo "$*" >> "{curl_calls}"
+                case "$*" in
+                  *releases/latest*)
+                    echo '{{"tag_name": "{latest}"}}'
+                    exit 0
+                    ;;
+                esac
+                exit 1
+            """))
+            (bin_dir / "curl").chmod(0o755)
+
+            (bin_dir / "systemctl").write_text(
+                "#!/bin/sh\n"
+                f'echo "systemctl $*" >> "{systemctl_calls}"\n'
+                "exit 0\n")
+            (bin_dir / "systemctl").chmod(0o755)
+
+            # Две абсолютные константы скрипта → песочница
+            sandboxed = script.replace(
+                'LOG="/var/log/xray-autoupdate.log"', f'LOG="{log_path}"'
+            ).replace(
+                'BACKUP_DIR="/var/backups/xray/binaries"',
+                f'BACKUP_DIR="{backups}"'
+            )
+            self.assertNotIn("/var/log/xray-autoupdate.log", sandboxed)
+            script_path = sbx / "xray-autoupdate.sh"
+            script_path.write_text(sandboxed)
+            script_path.chmod(0o755)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+            proc = sp.run(["bash", str(script_path)], env=env,
+                          capture_output=True, text=True, timeout=60)
+
+            log_text = log_path.read_text() if log_path.exists() else ""
+            curl_lines = ([l for l in curl_calls.read_text().splitlines()
+                           if l.strip()] if curl_calls.exists() else [])
+            systemctl_used = (systemctl_calls.exists() and
+                              systemctl_calls.read_text().strip() != "")
+            return proc.returncode, log_text, curl_lines, systemctl_used
+        finally:
+            shutil.rmtree(sbx, ignore_errors=True)
+
+    # ── исходники: сравнение «старше», а не «равно» ────────────────────
+
+    def test_script_uses_older_not_equal_comparison(self):
+        script = self._capture_script()
+        # новая схема: нормализованные значения сравниваются «старше»
+        self.assertIn("CUR_N", script)
+        self.assertIn('> "$LAT_N"', script)
+        # прежняя схема «только на равенство» исчезла
+        self.assertNotIn('== "$(_norm "$LATEST")"', script)
+
+    # ── установленная НОВЕЕ stable → ничего не делать ──────────────────
+
+    def test_installed_newer_than_stable_skips(self):
+        """Регрессия: флот 26.9.9 при stable v26.3.27 не даунгрейдится."""
+        script = self._capture_script()
+        rc, log, curls, systemctl_used = self._run_script(
+            script, installed="26.9.9", latest="v26.3.27")
+        self.assertEqual(rc, 0)
+        self.assertIn("новее stable-latest", log)
+        downloads = [c for c in curls if "releases/download" in c]
+        self.assertEqual(downloads, [], "даунгрейд не должен качать release-zip")
+        self.assertFalse(systemctl_used, "сервис не должен перезапускаться")
+
+    def test_gate_era_downgrade_not_touched(self):
+        """5c-даунгрейд 26.7.28: ядро новее stable — автапдейт молчит."""
+        script = self._capture_script()
+        rc, log, curls, systemctl_used = self._run_script(
+            script, installed="26.7.28", latest="v26.3.27")
+        self.assertEqual(rc, 0)
+        downloads = [c for c in curls if "releases/download" in c]
+        self.assertEqual(downloads, [])
+        self.assertFalse(systemctl_used)
+
+    def test_pregate_26627_not_touched(self):
+        """5c-даунгрейд 26.6.27 (до-гейт): новее stable — автапдейт молчит."""
+        script = self._capture_script()
+        rc, log, curls, systemctl_used = self._run_script(
+            script, installed="26.6.27", latest="v26.3.27")
+        self.assertEqual(rc, 0)
+        downloads = [c for c in curls if "releases/download" in c]
+        self.assertEqual(downloads, [])
+        self.assertFalse(systemctl_used)
+
+    # ── равна stable → ничего не делать ─────────────────────────────────
+
+    def test_installed_equal_skips(self):
+        script = self._capture_script()
+        rc, log, curls, _ = self._run_script(
+            script, installed="26.3.27", latest="v26.3.27")
+        self.assertEqual(rc, 0)
+        self.assertIn("актуальна", log)
+        downloads = [c for c in curls if "releases/download" in c]
+        self.assertEqual(downloads, [])
+
+    # ── установленная СТАРШЕ stable → обновление ───────────────────────
+
+    def test_installed_older_triggers_update(self):
+        script = self._capture_script()
+        rc, log, curls, _ = self._run_script(
+            script, installed="1.2.3", latest="v26.3.27")
+        # фейковый curl валит загрузку — скрипт честно отчитывается rc=1
+        # (systemd-unit: SuccessExitStatus=0 1)
+        self.assertEqual(rc, 1)
+        self.assertIn("Обновление v1.2.3 → v26.3.27", log)
+        self.assertIn("ERROR: Ошибка загрузки", log)
+        downloads = [c for c in curls if "releases/download" in c]
+        self.assertTrue(
+            any("releases/download/v26.3.27/Xray-linux-64.zip" in c
+                for c in downloads),
+            f"ожидалась загрузка release-zip v26.3.27, curl-вызовы: {curls}")
+
+    def test_multidigit_versions_compare_numerically(self):
+        """26.10.1 новее 26.9.9: нормализация %05d не путает разряды."""
+        script = self._capture_script()
+        rc, log, curls, _ = self._run_script(
+            script, installed="26.9.9", latest="v26.10.1")
+        self.assertEqual(rc, 1)
+        self.assertIn("Обновление v26.9.9 → v26.10.1", log)
+        self.assertTrue(
+            any("releases/download/v26.10.1/" in c for c in curls),
+            "ожидалась загрузка v26.10.1 (числовое сравнение разрядов)")
 
 
 if __name__ == "__main__":
