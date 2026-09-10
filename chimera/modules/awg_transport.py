@@ -2498,7 +2498,7 @@ def awg_full_setup() -> None:
             or Path("/usr/local/etc/xray/config.json").exists()
         )
         if _xray_cfg_exists:
-            # v57 (start-limit-fix): reset-failed перед рестартом
+            # (start-limit-fix): reset-failed перед рестартом
             _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
             _run(["systemctl", "restart", "xray"], check=False, quiet=True)
             time.sleep(2)

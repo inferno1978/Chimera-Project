@@ -42,7 +42,7 @@ chimera/modules/resolv_conf_fix.py
 - Из DNS Leak Test: prompt "Исправить автоматически? [Y/n]".
 - Из меню Сеть → DNSCrypt.
 
-DNS-WATCHDOG (v46, <node-2>)
+DNS-WATCHDOG (<node-2>)
 ============================
 AGH (владелец :53 после финализации) умер через ~час после установки
 (креш/OOM) → :53 без слушателя, redirect 53→5300 уже снят, resolv.conf →
@@ -114,9 +114,9 @@ _PERSIST_SVC_NAME     = "chimera-dns-fix.service"
 _PERSIST_SVC_PATH     = Path("/etc/systemd/system") / _PERSIST_SVC_NAME
 _PERSIST_SCRIPT_PATH  = Path("/usr/local/bin/chimera-dns-fix-apply.py")
 
-# DNS-WATCHDOG (v46, <node-2>) — systemd-timer каждую минуту пробует
+# DNS-WATCHDOG (<node-2>) — systemd-timer каждую минуту пробует
 # 127.0.0.1:53 (dig/getent). Мёртв → лестница: рестарт AGH (владелец :53)
-# → dnscrypt + redirect 53→порт (оба протокола). Закрывает дыру v44/v45:
+# → dnscrypt + redirect 53→порт (оба протокола). Закрывает дыру v44/:
 # _ensure_system_dns_alive работал только В МОМЕНТ операций, а AGH,
 # умерший ЧАС спустя (OOM/креш-луп), уносил системный DNS с собой —
 # redirect уже снят, resolv.conf → 127.0.0.1, слушателя нет → black-hole.
@@ -436,7 +436,7 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
         "aghome_active": _is_aghome_active(),
         "aghome_serving_53": False,
         "dns_redirect_active": True,  # default: не нужен (port == 53)
-        # v55 (agh_probe): глубокий health-check — живая проба резолва
+        # (agh_probe): глубокий health-check — живая проба резолва
         # (end-to-end AGH → DNSCrypt → интернет), только при AGH на :53
         "agh_resolves": False,
         "agh_note": "",
@@ -467,7 +467,7 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
             result["dns_redirect_active"] = True  # не нужен если port == 53
 
     # AGH владеет :53? В этом состоянии redirect не нужен ВООБЩЕ.
-    # v55 (agh_probe): глубокий health-check — живая проба резолва
+    # (agh_probe): глубокий health-check — живая проба резолва
     # (end-to-end AGH → DNSCrypt → интернет): отвечает на вопрос «работает
     # ли ВЕСЬ путь», который is-active/ss проверить не могут.
     result["aghome_serving_53"] = _is_aghome_serving_53()
@@ -543,7 +543,7 @@ def diagnose_resolv_conf() -> Dict[str, Any]:
 
     # AGH владеет :53 И РЕЗОЛВИТ, но redirect 53→dnscrypt ВСЁ ЕЩЁ активен —
     # трафик воруется у AGH (фильтры/кеш/DoH молча обходятся). Нужен re-fix.
-    # v55: guard agh_resolves — при сломанном AGH redirect не «вор» ,
+    # guard agh_resolves — при сломанном AGH redirect не «вор»,
     # а спасательный обход (см. ветку ниже в fix-flow).
     if (result["aghome_serving_53"]
             and result.get("agh_resolves")
@@ -822,7 +822,7 @@ def _enable_persist_service() -> tuple:
 
 
 # =============================================================================
-#  DNS-WATCHDOG (v46) — системный DNS не должен умирать НАДОЛГО
+# DNS-WATCHDOG — системный DNS не должен умирать НАДОЛГО
 # =============================================================================
 def _watchdog_script_content() -> str:
     """Bash-скрипт watchdog: probe → self-heal лестница.
@@ -1143,7 +1143,7 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False,
     # Пока AGH в wizard-режиме (не слушает :53) — redirect остаётся
     # страховкой (dnscrypt продолжает обслуживать :53-трафик).
     #
-    # v55 (agh_probe): «служит на :53» теперь подтверждается живой пробой
+    # (agh_probe): «служит на :53» теперь подтверждается живой пробой
     # резолва (diag['agh_resolves'], end-to-end AGH → DNSCrypt → интернет).
     # AGH на :53, но НЕ резолвит → redirect НЕ снимаем, а ставим: это обход
     # сломанного AGH (glibc → :53 DNAT → dnscrypt:5300 → интернет), DNS
@@ -1265,7 +1265,7 @@ def fix_resolv_conf_to_localhost(dry_run: bool = False,
         else:
             warnings.append(f"persist-сервис создан, но не активирован: {perr2}")
 
-    # ── 10.5 WATCHDOG — DNS не должен умирать НАДОЛГО (v46) ─────────────────
+    # ── 10.5 WATCHDOG — DNS не должен умирать НАДОЛГО ─────────────────
     # AGH умер через час после финализации (креш/OOM) → :53 без слушателя,
     # redirect уже снят → системный DNS мёртв. Watchdog каждую минуту
     # пробует 127.0.0.1:53 и сам чинит (рестарт AGH → dnscrypt-redirect).
@@ -1337,7 +1337,7 @@ def rollback_resolv_conf() -> Dict[str, Any]:
 
     state = _state_load()
     if not state.get("fixed"):
-        # v59 (инцидент server-ru): state-файл мог быть утерян/повреждён,
+        # (инцидент server-ru): state-файл мог быть утерян/повреждён,
         # а артефакты фикса — продолжать жить (drop-in chimera-dns.conf,
         # бэкапы, persist-сервис, watchdog). Отказ в этой ситуации оставлял
         # systemd-resolved без upstream после удаления стека → SERVFAIL.
@@ -1354,7 +1354,7 @@ def rollback_resolv_conf() -> Dict[str, Any]:
             return {"ok": False, "method": None, "actions": [],
                     "warnings": [], "error": "фикс не был применён (state.fixed=False)"}
         warnings.append("state.fixed=False, но найдены артефакты фикса — "
-                        "выполняю откат (анти-black-hole, v59)")
+                        "выполняю откат (анти-black-hole)")
 
     # 1. Остановить persist-сервис
     ok_ds, err_ds = _disable_persist_service()
@@ -1363,7 +1363,7 @@ def rollback_resolv_conf() -> Dict[str, Any]:
     else:
         warnings.append(f"ошибка удаления persist-сервиса: {err_ds}")
 
-    # 1.5. Удалить DNS-watchdog (v46) — иначе он будет «чинить» 127.0.0.1:53
+    # 1.5. Удалить DNS-watchdog — иначе он будет «чинить» 127.0.0.1:53
     # и бороться с откатом к внешнему DNS.
     try:
         _remove_dns_watchdog()
@@ -1427,9 +1427,9 @@ def rollback_resolv_conf() -> Dict[str, Any]:
 
 
 # =============================================================================
-#  v59: HARD RESTORE — безусловный откат DNS к состоянию чистой системы
+# HARD RESTORE — безусловный откат DNS к состоянию чистой системы
 # =============================================================================
-# Инцидент v59 (server-ru): ПОЛНОЕ удаление Chimera (с AGH) убивало DNS.
+# Инцидент (server-ru): ПОЛНОЕ удаление Chimera (с AGH) убивало DNS.
 # Корневые причины, закрываемые этим блоком:
 #   1. rollback_resolv_conf() требует state.fixed=True — state-файл мог быть
 #      утерян/повреждён/не создан → откат тихо пропускался, а drop-in
@@ -1492,7 +1492,7 @@ def _probe_system_dns(host: str = "ya.ru") -> bool:
 
 def hard_restore_clean_dns(probe_host: str = "ya.ru",
                            keep_backups: bool = False) -> Dict[str, Any]:
-    """v59: БЕЗУСЛОВНЫЙ откат DNS к состоянию чистой системы.
+    """БЕЗУСЛОВНЫЙ откат DNS к состоянию чистой системы.
 
     Вызывается ТОЛЬКО при полном удалении стека Chimera (uninstall.py),
     когда AGH/dnscrypt уже снесены. Отличия от rollback_resolv_conf():

@@ -604,7 +604,7 @@ class TestCaptureRestoreOwnerMode(unittest.TestCase):
 
 
 class TestDoRollbackOrder(unittest.TestCase):
-    """v80 (rollback-order): do_rollback() обязан глушить mita ДО
+    """ (rollback-order): do_rollback() обязан глушить mita ДО
     восстановления config.json и рестарта Xray. Иначе восстановленный
     vless-инбаунд биндится на порт, который mita ещё держит: xray падает,
     systemd крутится в restart-backoff, is-active отвечает «activating»
@@ -679,9 +679,9 @@ class TestDoRollbackOrder(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  v85: домен сервера + свой DNS в клиентских конфигах Karing
+# домен сервера + свой DNS в клиентских конфигах Karing
 # ══════════════════════════════════════════════════════════════════════════════
-class TestV85DetectServerDomain(unittest.TestCase):
+class TestDetectServerDomain(unittest.TestCase):
     """_detect_server_domain — state.json → naiveproxy.json напрямую
     (CLI-безопасно: без импорта chimera._core)."""
 
@@ -718,11 +718,11 @@ class TestV85DetectServerDomain(unittest.TestCase):
             self.assertEqual(ha._detect_server_domain(), "")
 
 
-class TestV85AskClientLinkSettings(unittest.TestCase):
+class TestAskClientLinkSettings(unittest.TestCase):
     """_ask_client_link_settings — Enter=домен если найден, [1]=IP;
-    DNS-меню v87, подсказка домена, опечатка → дефолт Google.
+    DNS-меню, подсказка домена, опечатка → дефолт Google.
 
-    v87: AGH-детект патчу на «нет AGH» — детерминизм (на живом
+    AGH-детект патчу на «нет AGH» — детерминизм (на живом
     /var/lib/xray-installer тест зависел бы от машины)."""
 
     _NO_AGH = {"links": [], "self_signed": False, "status": "no-agh"}
@@ -789,7 +789,7 @@ class TestV85AskClientLinkSettings(unittest.TestCase):
                          "https://panel.example/dns-query")
 
 
-class TestV85ShowMieruClientLinks(unittest.TestCase):
+class TestShowMieruClientLinks(unittest.TestCase):
     """_show_mieru_client_links — Karing-JSON собирается общими билдерами
     из mieru.py: домен в server + domain_resolver + custom-dns через
     туннель. Пишем в фейковый Path, генераторы ссылок — фейки, QR — мьют."""
@@ -858,8 +858,8 @@ class TestV85ShowMieruClientLinks(unittest.TestCase):
         self.assertNotIn("rules", cfg["dns"])
 
 
-class TestV87DnsMenu(unittest.TestCase):
-    """v87: DNS-меню — AGH-детект, умный дефолт, номера, ручной ввод."""
+class TestDnsMenu(unittest.TestCase):
+    """DNS-меню — AGH-детект, умный дефолт, номера, ручной ввод."""
 
     _NO_AGH = {"links": [], "self_signed": False, "status": "no-agh"}
     _AGH = {"links": [
@@ -877,7 +877,7 @@ class TestV87DnsMenu(unittest.TestCase):
 
     def test_agh_found_enter_defaults_to_agh_doh(self):
         """AGH на сервере — Enter выбирает DoH-ссылку (юзеру не нужно
-        прописывать DNS руками — ровно запрос из v87)."""
+        прописывать DNS руками — ровно запрос из)."""
         res = self._ask([""], agh=self._AGH)
         self.assertEqual(res, "https://cdn.example:30443/dns-query")
 
@@ -907,7 +907,7 @@ class TestV87DnsMenu(unittest.TestCase):
         self.assertEqual(res, "")
 
     def test_raw_address_typed_directly(self):
-        """Старое поведение v85: адрес можно ввести сразу, без номера."""
+        """Старое поведение адрес можно ввести сразу, без номера."""
         res = self._ask(["tls://panel.example:853"])
         self.assertEqual(res, "tls://panel.example:853")
 
@@ -925,7 +925,7 @@ class TestV87DnsMenu(unittest.TestCase):
         self.assertEqual(res, "")
 
 
-class TestV87AghEndpoints(unittest.TestCase):
+class TestAghEndpoints(unittest.TestCase):
     """_detect_agh_dns_endpoints — подглядывание в стейт AGH."""
 
     def setUp(self):
@@ -980,8 +980,8 @@ class TestV87AghEndpoints(unittest.TestCase):
                          ("DoH", "https://dns.example.com:30443/dns-query"))
 
 
-class TestV87LinksOutsideFrame(unittest.TestCase):
-    """v87: mierus://-ссылки печатаются ВНЕ рамки — строки со ссылками
+class TestLinksOutsideFrame(unittest.TestCase):
+    """mierus://-ссылки печатаются ВНЕ рамки — строки со ссылками
     не содержат символов рамки (║), рамка закрывается до ссылок."""
 
     def setUp(self):
@@ -1029,8 +1029,8 @@ class TestV87LinksOutsideFrame(unittest.TestCase):
         self.assertLess(bottom_idx, first_link_idx)
 
 
-class TestV86TrafficPatternSingleParam(unittest.TestCase):
-    """v86: Karing-ссылка с blob — ровно ОДИН traffic-pattern=.
+class TestTrafficPatternSingleParam(unittest.TestCase):
+    """Karing-ссылка с blob — ровно ОДИН traffic-pattern=.
 
     До фиксы _gen_client_share_link вставлял preset basic, а вызывающий код
     дописывал blob — в ссылке оказывались ДВА параметра, и первый (basic)
@@ -1061,7 +1061,7 @@ class TestV86TrafficPatternSingleParam(unittest.TestCase):
         """Прогоняет выдачу ссылок с реальными генераторами; возвращает
         Karing-ссылки (отличаются параметром protocol=).
 
-        v87: ссылки печатаются ВНЕ рамки (`print`, одной строкой) —
+        ссылки печатаются ВНЕ рамки (`print`, одной строкой)
         перехватываем stdout и срезаем ANSI, вместо патча _box_link."""
         from chimera.modules import hybrid_addon as ha
         from chimera.modules import mieru
@@ -1096,7 +1096,7 @@ class TestV86TrafficPatternSingleParam(unittest.TestCase):
         self.assertEqual(links[0].count("traffic-pattern="), 1)
 
     def test_blob_saved_to_state(self):
-        """v86: _persist_traffic_pattern_blob пишет blob в state (для
+        """_persist_traffic_pattern_blob пишет blob в state (для
         singbox-подписки nyamebox); пустой blob ничего не трогает."""
         from chimera.modules import hybrid_addon as ha
         saved = {}
@@ -1125,8 +1125,8 @@ class TestV86TrafficPatternSingleParam(unittest.TestCase):
             ha._persist_traffic_pattern_blob("GgQIARAFIgIIAQ==")  # не падает
 
 
-class TestV87_2KaringUdpAddr(unittest.TestCase):
-    """v87.2: _karing_udp_addr (гибрид) — UDP+домен подставляет IP
+class TestKaringUdpAddr(unittest.TestCase):
+    """_karing_udp_addr (гибрид) — UDP+домен подставляет IP
     (баг ядра Karing: mieru-UDP не резолвит домен). TCP/IP — как есть."""
 
     def test_udp_domain_substitutes_ip(self):
@@ -1160,8 +1160,8 @@ class TestV87_2KaringUdpAddr(unittest.TestCase):
             self.assertFalse(ha._is_public_ipv4(bad), bad)
 
 
-class TestV87_2LinksUdpIpIntegration(unittest.TestCase):
-    """v87.2: _show_mieru_client_links с udp+домен — Karing-ссылка и JSON
+class TestLinksUdpIpIntegration(unittest.TestCase):
+    """_show_mieru_client_links с udp+домен — Karing-ссылка и JSON
     с IP (домен+UDP в Karing = 0 байт/с), Nekobox-ссылка с доменом;
     TCP-выдача подстановкой не затронута."""
 

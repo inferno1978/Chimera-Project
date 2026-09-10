@@ -355,7 +355,7 @@ def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
                 info("xray.service: убран ExecStartPre rm -f socket (BUGFIX)")
         except Exception:
             pass  # не критично — _nginx_restart_if_reality восстановит сокет
-    # v56 (start-limit-fix): безопасный рестарт (reset-failed) — apply может
+    # (start-limit-fix): безопасный рестарт (reset-failed) — apply может
     # вызываться в потоках, где xray уже рестартился 2-3 раза за минуту;
     # голый restart упирается в StartLimitBurst=3/60s юнита. Ждём до 90 сек:
     # конфиг с 13 000+ RIPE-правил поднимается 30–60 сек. Если xray не
@@ -365,7 +365,7 @@ def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
     if callable(_safe_restart):
         _xray_active = _safe_restart(wait_active=90, attempts=1)
     else:  # fallback на старое поведение (старое ядро без хелпера)
-        # v57: reset-failed и в fallback-ветке (счётчик StartLimitBurst)
+        # reset-failed и в fallback-ветке (счётчик StartLimitBurst)
         _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         _xray_active = False
@@ -415,7 +415,7 @@ def _ru_subnets_remove_from_xray() -> None:
             _set_config_owner(cfg_path)
         except Exception as e:
             warn(f"Ошибка {cfg_path}: {e}")
-    # v57 (start-limit-fix): безопасный рестарт (reset-failed) — удаление
+    # (start-limit-fix): безопасный рестарт (reset-failed) — удаление
     # правил может идти сразу после их применения (apply уже рестартил xray)
     _safe_restart = getattr(core, "_xray_safe_restart", None)
     if callable(_safe_restart):
@@ -548,7 +548,7 @@ def do_manage_ru_subnet_direct() -> None:
                 continue
             success(f"Получено {len(cidrs)} подсетей РФ")
             _ru_subnets_save(cidrs)
-            # v67: честное предупреждение о downtime — конфиг с 13000+ CIDR
+            # честное предупреждение о downtime — конфиг с 13000+ CIDR
             # грузится 30-60 сек; без этого администратор принимает плановый
             # разрыв за «опция сломала подключение».
             warn("Применяем правила: Xray будет перезапущен — подключение "

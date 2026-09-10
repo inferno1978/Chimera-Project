@@ -987,10 +987,10 @@ class TestCronInstallUninstall(unittest.TestCase):
 
 
 # =============================================================================
-#  v74.1 — обход upstream-дедлока setup_wizard (exit 124)
+# обход upstream-дедлока setup_wizard (exit 124)
 # =============================================================================
 class TestWizardDeadlockWorkaround(unittest.TestCase):
-    """v74.1: upstream setup_wizard ≤ v1.0.33 ДЕДЛОКИТСЯ (однопоточный
+    """upstream setup_wizard ≤ v1.0.33 ДЕДЛОКИТСЯ (однопоточный
     futex на PREDEFINED_PARAMS: времка-MutexGuard из `if let` scrutinee
     живёт весь then-блок в Rust ≤2021, вложенный вызов лочит тот же мьютекс)
     при `--cert-type provided|letsencrypt` в non-interactive. Симптом из
@@ -1140,7 +1140,7 @@ class TestWizardDeadlockWorkaround(unittest.TestCase):
 
 
 class TestInstallWritesLeHostsToml(unittest.TestCase):
-    """v74.1: программная установка trusttunnel_install() после визарда
+    """программная установка trusttunnel_install() после визарда
     перегенерирует hosts.toml на LE-пути (обход дедлока)."""
 
     def setUp(self):
@@ -1166,7 +1166,7 @@ class TestInstallWritesLeHostsToml(unittest.TestCase):
             patch.object(trusttunnel, "_remove_systemd_unit"),
             patch.object(trusttunnel, "_install_cert_renewal_hook"),
             patch.object(trusttunnel, "_remove_cert_renewal_hook"),
-            # v74.1: визард «отработал» — но конфигов НЕ создал (мок);
+            # визард «отработал» — но конфигов НЕ создал (мок);
             # валидация ниже включена в патч Path.exists → True
             patch("subprocess.run", return_value=MagicMock(returncode=0)),
             patch.object(trusttunnel, "_INSTALL_DIR", self.tmpdir / "tt"),

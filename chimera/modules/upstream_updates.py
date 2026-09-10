@@ -1,14 +1,14 @@
 """
 chimera/modules/upstream_updates.py
 ───────────────────────────────────────────────────────────────────────────────
-Единый центр авто/ручного обновления из апстрим-репозиториев (v75) для
-трёх модулей, пострадавших от «тихих» изменений upstream (инцидент v74.2):
+Единый центр авто/ручного обновления из апстрим-репозиториев для
+трёх модулей, пострадавших от «тихих» изменений upstream (инцидент):
 
   • Turnable  — TheAirBlow/Turnable (releases, готовый ELF-бинарник)
   • CSQTT     — amurcanov/csqtt (ветка main, сборка Rust из исходников)
   • qWDTT     — SpaceNeuroX/proxy-turn-vk-android (ветка master, сборка Go)
 
-ПРОБЛЕМА (класс бага v74.2):
+ПРОБЛЕМА (класс бага):
   upstream меняет layout архива и требования toolchain БЕЗ уведомления:
     csqtt-uring → rust-server   (переименование серверной папки)
     server.go → ./server        (модульный layout) + go.mod: go 1.25.0
@@ -16,7 +16,7 @@ chimera/modules/upstream_updates.py
   Химера с зашитыми путями падала на установке. Пользователь узнавал
   о поломке только по красному экрану.
 
-МЕХАНИЗМ (v75):
+МЕХАНИЗМ:
   1. РЕВИЗИИ. Для source-модулей «версия» = HEAD sha ветки (GitHub API);
      для Turnable = тег релиза. ЛЮБОЙ коммит апстрима = «есть обновление».
   2. LAYOUT-PROBE. Пути сборки ищутся в распакованном архиве, а не
@@ -108,7 +108,7 @@ KEEP_BACKUPS = 5
 
 
 # =============================================================================
-#  РЕЕСТР ЦЕЛЕЙ — три модуля из инцидента v74.2
+# РЕЕСТР ЦЕЛЕЙ — три модуля из инцидента 
 # =============================================================================
 UPSTREAM_TARGETS: Dict[str, Dict[str, Any]] = {
     "turnable": {
@@ -287,7 +287,7 @@ def get_installed_version(key: str) -> Optional[str]:
 def installed_revision(key: str) -> Optional[str]:
     """Ревизия установленной сборки (branch-цели) из state.
 
-    Для legacy-установок (до v75) ревизии нет → None. Это осознанный
+    Для legacy-установок (ранее) ревизии нет → None. Это осознанный
     режим: авто-обновление не начинает «пересборку вслепую», пользователь
     один раз обновляет вручную (пункт меню), после чего ревизия
     записывается и дальше всё отслеживается автоматически.
@@ -300,7 +300,7 @@ def installed_revision(key: str) -> Optional[str]:
 def _build_info(key: str) -> Dict[str, Any]:
     """Информация последней сборки из packages-модуля (LAST_BUILD_INFO):
     tarball_sha256, layout, toolchain-требования. Заполняется post_install
-    (layout-probe v75), читается здесь для state/диагностики."""
+    (layout-probe), читается здесь для state/диагностики."""
     try:
         if key == "csqtt":
             from chimera.modules import csqtt_packages
@@ -378,7 +378,7 @@ def _backup_binary(key: str) -> Optional[Path]:
     """Бэкап текущего бинарника → /var/backups/chimera/upstream/{key}_{ts}.
 
     Держим последние KEEP_BACKUPS на цель. Бэкап — основа отката:
-    постулат v74.2 «post_install заменяет бинарник ТОЛЬКО после успешной
+    постулат «post_install заменяет бинарник ТОЛЬКО после успешной
     сборки» уже защищает установку, но smoke-тест сервиса может провалиться
     ПОСЛЕ замены (бинарник собрался, но не заводится) — тогда откат.
     """
@@ -481,7 +481,7 @@ def update_target(key: str, force: bool = False,
         spec = _spec_for(key)
         kwargs: Dict[str, Any] = {}
         if key == "turnable":
-            # ДИНАМИЧЕСКАЯ версия (фикс v75: раньше _run_update обещал
+            # ДИНАМИЧЕСКАЯ версия (фикс раньше _run_update обещал
             # latest, а качал pinned 0.4.1): передаём тег в
             # mirror_urls_builder → URL релиза latest.
             kwargs["version"] = latest
@@ -502,7 +502,7 @@ def update_target(key: str, force: bool = False,
         update_state(key, last_error=f"{_now()} update failed")
         _err(f"{t['title']}: обновление не удалось — прежняя версия на месте")
         if key == "csqtt":
-            # v76.1: сборка CSQTT — самая тяжёлая (Rust+Zig, OOM на слабых
+            # сборка CSQTT — самая тяжёлая (Rust+Zig, OOM на слабых
             # VPS). Подсказываем путь без сборки: готовый бинарь с другой
             # машины → повторная УСТАНОВКА модуля подхватит его сама.
             _info("Альтернатива без сборки: соберите csqtt-server на другой "
@@ -567,14 +567,14 @@ def _record_installed(key: str, latest: str, info: Dict[str, Any]) -> None:
     update_state(key, **kv)
 
 # =============================================================================
-#  АГЕНТ АВТООБНОВЛЕНИЯ — standalone-скрипт + systemd timer (идиома v74)
+# АГЕНТ АВТООБНОВЛЕНИЯ — standalone-скрипт + systemd timer (идиома)
 # =============================================================================
 # Агент генерируется при установке таймера: в шапку подставляется корень
 # репозитория Chimera (найден по расположению этого модуля), чтобы
 # /usr/local/bin/chimera-upstream-update.py мог импортировать chimera.*
 # независимо от того, где стоит Химера (/opt/vless-installer, /opt/chimera...).
 AGENT_PY_TEMPLATE = '''#!/usr/bin/env python3
-# chimera-upstream-update.py — агент автообновления из апстримов (v75).
+# chimera-upstream-update.py — агент автообновления из апстримов.
 # Устанавливается chimera/modules/upstream_updates.py::install_autoupdate().
 # Запуск: systemd timer chimera-upstream-update.timer (04:40) или вручную.
 #
@@ -798,7 +798,7 @@ def do_upstream_update_menu(focus: Optional[str] = None) -> None:
     focus="csqtt"   — одна цель: проверка/обновление/force/авто.
                      Вызывается из меню соответствующего модуля.
 
-    Идиома v74 (dnscrypt DU): статусы читаются из state-кэша → открытие
+    Идиома (dnscrypt DU): статусы читаются из state-кэша → открытие
     меню не дёргает сеть повторно (проверка = раз в 6 ч или по запросу).
     """
     if focus is not None and focus not in UPSTREAM_TARGETS:

@@ -62,7 +62,7 @@ AGHOME_REPO  = "AdGuardHome"
 # блокировка). static.adtidy.org отдаёт latest — тег используется только
 # для GitHub-зеркал; при провале всех version-pinned URL fallback-канал
 # отдаст актуальный release.
-# v60 (2026-08-28): v0.107.62 → v0.107.79 — синхронизировано с release-
+# (2026-08-28): v0.107.62 → v0.107.79 — синхронизировано с release-
 # каналом static.adtidy.org (проверено: отдаёт v0.107.79 от 2026-08-18;
 # инцидент переустановки 203.0.113.109 ставил устаревший v0.107.62).
 AGHOME_FALLBACK_TAG = "v0.107.79"
@@ -120,7 +120,7 @@ def get_aghome_mirrors(tag: str, arch: str = "amd64") -> list[str]:
             f"releases/download/{tag}/{filename}"
         )
 
-    # 2.5) v60: AGH-специфичные доп. прокси (проверены 2026-08-28,
+    # 2.5) AGH-специфичные доп. прокси (проверены 2026-08-28,
     #      отдают корректный tarball того же размера, что github.com)
     for proxy_host in _AGHOME_EXTRA_PROXY_HOSTS:
         if not proxy_host:
@@ -132,7 +132,7 @@ def get_aghome_mirrors(tag: str, arch: str = "amd64") -> list[str]:
 
     # 3) Официальный CDN AdGuard — latest release-канал.
     #    Не зависит от GitHub вообще (главный fallback для РФ).
-    #    v60: поднят на позицию выше GitHub-latest — быстрее и стабильнее
+    # поднят на позицию выше GitHub-latest — быстрее и стабильнее
     #    прокси-хостов (Qrator CDN, Франкфурт).
     urls.append(f"https://static.adtidy.org/adguardhome/release/{filename}")
 

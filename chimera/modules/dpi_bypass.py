@@ -114,12 +114,12 @@ B4_CONFIG_FILE = B4_CONFIG_DIR / "config.json"
 
 
 # ── Geosite.dat для b4 (system.geo.sitedat_path) ──────────────────────────
-# v75.1: путь geosite для b4 — ВСЕГДА собственный /etc/b4/geosite.dat
+# путь geosite для b4 — ВСЕГДА собственный /etc/b4/geosite.dat
 # («как это необходимо B4»). Web UI b4 берёт Destination Directory из
 # dirname(sitedat_path) и качает туда базу при Update; auto_update b4
 # пишет туда же. Наш systemd-юнит (ProtectSystem=strict +
 # ReadWritePaths=/etc/b4) делает /usr read-only для процесса b4 — любой
-# путь в /usr (легаси-хардкод Chimera /usr/share/xray или v72.4-«общий»
+# путь в /usr (легаси-хардкод Chimera /usr/share/xray или «общий»
 # /usr/local/share/xray) ломает Update геосайта: mkdir/write → EROFS →
 # 500 (инциденты на трёх машинах: panel.example, x2, server-old).
 # Шарить один geosite.dat с Xray нельзя: чтение работает, Update — нет.
@@ -547,7 +547,7 @@ def _detect_latest_prerelease_version(timeout: int = 10) -> str:
 # ══════════════════════════════════════════════════════════════════════════
 #  КЭШ ПОСЛЕДНИХ ВЕРСИЙ B4 (release / pre-release) ДЛЯ ШАПКИ МЕНЮ
 # ══════════════════════════════════════════════════════════════════════════
-#  v76: шапка главного меню показывает не только установленную версию,
+# шапка главного меню показывает не только установленную версию,
 #  но и готовые к установке release/pre-release. Чтобы не ходить в
 #  GitHub API при каждой перерисовке меню (меню перерисовывается после
 #  каждого действия), найденные версии кэшируются в ОБЩЕМ state-файле
@@ -984,7 +984,7 @@ def do_b4_update_menu() -> None:
         (sync_b4_version_state) — модули «DPI Bypass» и «YouTube через
         B4» работают с одним binary и одним state-файлом, поэтому
         оба показывают одну и ту же актуальную версию.
-      • v76: после успешного обновления сбрасывается кэш latest-версий
+      • после успешного обновления сбрасывается кэш latest-версий
         (_refresh_b4_latest_cache(force=True)) — шапки главных меню
         обоих модулей сразу показывают честное «актуальная версия»,
         без ожидания TTL.
@@ -1063,7 +1063,7 @@ def do_b4_update_menu() -> None:
                 # Синхронизируем версию в общем state — второй модуль
                 # (DPI Bypass ↔ YouTube через B4) увидит новую версию.
                 sync_b4_version_state()
-                # v76: сбрасываем кэш latest — шапка главного меню
+                # сбрасываем кэш latest — шапка главного меню
                 # сразу показывает «актуальная версия».
                 _refresh_b4_latest_cache(force=True)
                 _info("Версия синхронизирована между модулями B4 "
@@ -1107,7 +1107,7 @@ def do_b4_update_menu() -> None:
             if result.get("updated"):
                 _ok(result["message"])
                 sync_b4_version_state()
-                # v76: сбрасываем кэш latest — шапка главного меню
+                # сбрасываем кэш latest — шапка главного меню
                 # сразу показывает «актуальная версия».
                 _refresh_b4_latest_cache(force=True)
                 _info("Версия синхронизирована между модулями B4 "
@@ -1205,7 +1205,7 @@ def _write_empty_config() -> bool:
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     B4_CONFIG_FILE.chmod(0o644)
-    # v75.1: сеем geosite-базу из общей копии Xray, если она есть —
+    # сеем geosite-базу из общей копии Xray, если она есть
     # категории geosite в сетах работают сразу, без Update в Web UI.
     _seed_b4_geosite()
     _ok(f"Конфиг создан (пустой): {B4_CONFIG_FILE}")
@@ -1236,7 +1236,7 @@ def _write_default_config() -> bool:
     }
     B4_CONFIG_FILE.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     B4_CONFIG_FILE.chmod(0o644)
-    # v75.1: seed geosite-базы из общей копии Xray (см. _write_empty_config).
+    # seed geosite-базы из общей копии Xray (см. _write_empty_config).
     _seed_b4_geosite()
     _ok(f"Конфиг создан: {B4_CONFIG_FILE}")
     return True
@@ -1402,7 +1402,7 @@ def _b4_nginx_install(port: int, use_self_signed: bool, domain) -> tuple:
         websocket_origin_rewrite=False,
         backend_http_scheme="http",  # b4 Web UI — HTTP (нет своего TLS)
         cert_name_slug="chimera-b4",
-        mcp_proxy=True,  # v72.2: location /api/mcp с loopback-Host (go-sdk)
+        mcp_proxy=True, # location /api/mcp с loopback-Host (go-sdk)
     )
     # Также закрываем прямой доступ к 9700 (только через nginx).
     if ok:
@@ -1652,13 +1652,13 @@ def _get_enabled_sets() -> list:
 
 
 def _heal_b4_config() -> bool:
-    """Авто-лечение мёртвых geosite-путей в config.json (v75.1).
+    """Авто-лечение мёртвых geosite-путей в config.json.
 
-    Машины, установленные до v72.4, несли хардкод
+    Машины, установленные ранее, несли хардкод
     system.geo.sitedat_path=/usr/share/xray/geosite.dat (источник —
     Chimera, НЕ b4: в Go-коде b4 пути /usr/share/xray нет, дефолт
     GeoSitePath="" + sanitize лечит только относительные пути).
-    v72.4 чинил путь только при переключении пресета/импорте сета —
+     чинил путь только при переключении пресета/импорте сета
     если юзер после обновления Химеры ни того ни другого не делал,
     конфиг оставался сломанным: Update геосайта в Web UI b4 = 500
     EROFS (третья машина, server.example). Теперь status()
@@ -1704,7 +1704,7 @@ def status() -> dict:
     r = subprocess.run(["systemctl", "is-active", "b4"],
                        capture_output=True, text=True, check=False)
     service_active = (r.returncode == 0 and r.stdout.strip() == "active")
-    #  v75.1: авто-лечение мёртвых geosite-путей (легаси-хардкод и
+    # авто-лечение мёртвых geosite-путей (легаси-хардкод и
     # «общие» пути Xray в read-only /usr). Конфиг, оставшийся от старой
     # Chimera, конвергирует при первом же открытии меню модуля —
     # даже если юзер никогда не переключал пресет/не импортировал сет.
@@ -1886,7 +1886,7 @@ def _b4_clean_legacy_config_keys(cfg: dict) -> int:
         (GeoDatConfig, json-тег sitedat_path);
       • "b4_version" внутри сета — не поле SetConfig, informational-мусор;
       • system.geo.sitedat_path — мёртвый для b4 путь (легаси-хардкод
-        Chimera /usr/share/xray/geosite.dat или v72.4-«общий» путь Xray
+        Chimera /usr/share/xray/geosite.dat или «общий» путь Xray
         /usr/local/share/xray|/usr/share/xray): /usr read-only для b4
         (ProtectSystem=strict), Update геосайта в Web UI падает с 500 —
         путь переводится на собственный /etc/b4/geosite.dat (+URL,
@@ -1912,7 +1912,7 @@ def _b4_clean_legacy_config_keys(cfg: dict) -> int:
         geo = system.setdefault("geo", {})
         if isinstance(geo, dict) and not geo.get("sitedat_path") and legacy_path:
             geo["sitedat_path"] = legacy_path
-    # 2b. Мёртвые для b4 geosite-пути (v75.1): легаси-хардкод Chimera
+    # 2b. Мёртвые для b4 geosite-пути: легаси-хардкод Chimera
     # (/usr/share/xray/geosite.dat) и «общие» пути Xray
     # (B4_GEOSITE_SHARED_PATHS) — ДАЖЕ при живом файле: /usr read-only
     # для процесса b4 (ProtectSystem=strict), Web UI берёт Destination
@@ -2028,7 +2028,7 @@ def _xray_safe_restart() -> bool:
         return _xray_safe_apply_config()
     except ImportError:
         # Fallback — raw restart (менее безопасно, но лучше чем ничего).
-        # v57 (start-limit-fix): reset-failed перед рестартом — импорт b4-сетов
+        # (start-limit-fix): reset-failed перед рестартом — импорт b4-сетов
         # делает несколько apply подряд (routing для каждого сета).
         subprocess.run(["systemctl", "reset-failed", "xray"],
                        capture_output=True, check=False)
@@ -2372,7 +2372,7 @@ def _xray_domain_entries_from_b4(domains: list) -> list:
 #  атомарное сохранение config.json + обновление живого состояния БЕЗ
 #  рестарта сервиса). Импорт через REST не теряет топ-уровневые секции
 #  config.json (queue / ui / system.webserver) — их пишет и читает сам
-#  b4. Web-авторизация (v72.2): если администратор включил username/
+# b4. Web-авторизация: если администратор включил username/
 #  password в b4 Web UI — Chimera логинится через /api/login и
 #  отправляет Bearer-токен (учётка читается из config.json; токен
 #  кэшируется до 401, затем перевыпускается).
@@ -2911,7 +2911,7 @@ def do_dpi_bypass_menu() -> None:
     while True:
         os.system("clear")
         s = status()
-        #  v76: кэш latest-версий (release / pre-release) для шапки.
+        # кэш latest-версий (release / pre-release) для шапки.
         # Сеть — только при устаревшем кэше (TTL 6 ч); при свежем —
         # мгновенно из общего state (меню перерисовывается после каждого
         # действия — GitHub API не должен дёргаться каждый раз).
@@ -2937,7 +2937,7 @@ def do_dpi_bypass_menu() -> None:
             status_str = "active" if s.get("service_active") else "stopped"
             _box_row(f"  Сервис:       {status_col}{status_str}{NC}")
             _box_row(f"  Версия:       {CYAN}{s.get('version', '?')}{NC}")
-            #  v76: доступные release/pre-release сразу в шапке — юзер
+            # доступные release/pre-release сразу в шапке — юзер
             # видит обновления при входе в меню, не заходя в [5].
             _box_row(_b4_update_header_row(str(s.get("version", "") or ""),
                                             _b4_latest))

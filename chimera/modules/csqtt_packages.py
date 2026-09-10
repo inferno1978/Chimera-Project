@@ -28,7 +28,7 @@ _CSQTT_SERVICE_NAME   = "csqtt"
 _CSQTT_SERVICE_FILE   = Path("/etc/systemd/system/csqtt.service")
 _MIN_SOURCE_TARBALL_SIZE = 1000   # 1 KB
 
-# ── v76.1: ГОТОВЫЙ бинарь, собранный на ДРУГОЙ машине ────────────────────────
+# ── ГОТОВЫЙ бинарь, собранный на ДРУГОЙ машине ────────────────────────
 # Юзер, чей сервер не тянет Rust-сборку (OOM/слабый VPS), компилирует
 # csqtt-server где-нибудь ещё, загружает файл на сервер (scp/WinSCP/SFTP)
 # в одну из директорий ниже — и повторный запуск установки подхватывает
@@ -59,7 +59,7 @@ _ELF_MACHINES = {62: "x86_64", 183: "aarch64", 40: "arm", 3: "x86",
 _RUST_VERSION = "1.97.1"
 _RUST_TARGET  = "x86_64-unknown-linux-musl"
 
-# v75 (upstream_updates): информация о последней сборке — заполняется
+# (upstream_updates): информация о последней сборке — заполняется
 # _post_install_csqtt_source, читается upstream_updates._build_info()
 # для state-файла /var/lib/chimera/upstream-updates.json:
 #   tarball_sha256 — детект «зеркало отдало тот же архив»;
@@ -68,7 +68,7 @@ _RUST_TARGET  = "x86_64-unknown-linux-musl"
 LAST_BUILD_INFO: Dict[str, Any] = {}
 
 # Известные имена серверной директории (в порядке приоритета):
-#   rust-server  — upstream с 02.09 (v74.2)
+# rust-server — upstream с 02.09
 #   csqtt-uring  — старый layout (локальные архивы до переезда)
 #   server       — возможное будущее имя (простая эвристика)
 _KNOWN_SERVER_SUBDIRS = ("rust-server", "csqtt-uring", "server")
@@ -97,9 +97,9 @@ def _parse_cargo_toml(cargo: Path) -> Dict[str, Any]:
 
 
 def _probe_csqtt_layout(extract_dir: Path) -> Optional[Dict[str, Any]]:
-    """v75: ищет серверный Rust-крейт CSQTT в распакованном архиве.
+    """ищет серверный Rust-крейт CSQTT в распакованном архиве.
 
-    Три уровня (вместо одного захардкоженного пути до v74.2, который
+    Три уровня (вместо одного захардкоженного пути ранее, который
     ломался при каждом переименовании папки upstream):
 
       1. Канонический layout: <корень>/csqtt-*/{rust-server|csqtt-uring|server}
@@ -122,7 +122,7 @@ def _probe_csqtt_layout(extract_dir: Path) -> Optional[Dict[str, Any]]:
         if pkg and pkg not in names:
             names.append(pkg)
         if "csqtt" not in names:
-            names.append("csqtt")       # легаси-кандидат (до v75)
+            names.append("csqtt") # легаси-кандидат (ранее)
         return {
             "source_dir": cargo_dir,
             "bin_names": names,
@@ -209,7 +209,7 @@ def _check_zig() -> str | None:
 def _ensure_rust_toolchain(version: Optional[str] = None) -> bool:
     """Устанавливает Rust через rustup, если не установлен.
 
-    v75: version — требование upstream из Cargo.toml (rust-version).
+    version — требование upstream из Cargo.toml (rust-version).
     Берётся MAX(требование, пиннинг _RUST_VERSION): если upstream
     поднял минимальную версию, ставим её; если Cargo.toml молчит —
     остаётся проверенный пиннинг проекта.
@@ -501,7 +501,7 @@ def find_manual_binary() -> tuple:
 
 
 def install_manual_binary(verbose: bool = True) -> bool:
-    """v76.1: устанавливает ГОТОВЫЙ бинарь, загруженный юзером вручную.
+    """устанавливает ГОТОВЫЙ бинарь, загруженный юзером вручную.
 
     Приоритет:
       1. Ручные директории (_MANUAL_BIN_DIRS + /home/<юзер>/): файл
@@ -572,7 +572,7 @@ def install_manual_binary(verbose: bool = True) -> bool:
 
 
 def print_manual_binary_hint() -> None:
-    """v76.1: инструкция «как поставить готовый бинарь без сборки».
+    """инструкция «как поставить готовый бинарь без сборки».
 
     Печатается в блоке ошибки установки CSQTT: юзер, чей сервер не
     тянет сборку, собирает бинарь на другой машине, загружает на
@@ -717,14 +717,14 @@ def _ensure_swap_and_pick_jobs() -> int:
 def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
     """Собирает CSQTT сервер из исходников.
 
-    v75: директория исходников и имя бинарника определяются layout-probe
+    директория исходников и имя бинарника определяются layout-probe
     (_probe_csqtt_layout), а не захардкожены — переименование папки
-    upstream (инцидент v74.2: csqtt-uring → rust-server) больше не
+    upstream (инцидент csqtt-uring → rust-server) больше не
     ломает установку. Требуемая версия Rust читается из Cargo.toml.
     """
     import tarfile
 
-    # v75: хэш скачанного tarball — для upstream_updates (детект
+    # хэш скачанного tarball — для upstream_updates (детект
     # «зеркало отдало прежний архив» + диагностика дрейфа layout).
     LAST_BUILD_INFO.clear()
     try:
@@ -749,8 +749,8 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
         print(f"[ERR] Распаковка не удалась: {type(e).__name__}: {e}")
         return False
 
-    # 2. v75: layout-probe — ищем серверный крейт (3 уровня, см.
-    #    _probe_csqtt_layout). До v74.2 путь был захардкожен и ломался
+    # 2. layout-probe — ищем серверный крейт (3 уровня, см.
+    # _probe_csqtt_layout). Ранее путь был захардкожен и ломался
     #    при переименованиях upstream.
     probe = _probe_csqtt_layout(extract_dir)
     if not probe:
@@ -774,7 +774,7 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
         LAST_BUILD_INFO["rust_required"] = probe["rust_required"]
     print(f"[INFO] Layout: {probe['how']} → {csqtt_dir}")
 
-    # 3. Проверяем/устанавливаем Rust (v75: версия из Cargo.toml)
+    # 3. Проверяем/устанавливаем Rust (версия из Cargo.toml)
     print("[INFO] Проверяю/устанавливаю Rust toolchain...")
     try:
         if not _ensure_rust_toolchain(probe.get("rust_required")):
@@ -864,7 +864,7 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
         print(stderr_tail)
         return False
 
-    # 7. v75: Находим собранный binary — кандидаты из probe (имя пакета
+    # 7. Находим собранный binary — кандидаты из probe (имя пакета
     #    / [[bin]] / легаси «csqtt»), оба возможных пути target/.
     built_bin = None
     for name in bin_names:

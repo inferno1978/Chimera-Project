@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tests/test_v64_ingress_port_follow_agh_autostart.py
+tests/test_ingress_port_follow_agh_autostart.py
 ───────────────────────────────────────────────────────────────────────────────
-v64: два контракта.
+: два контракта.
 
 1. ingress_geoip_follow_port(new_port) — перенос ingress-блокировки РФ при
    смене порта Xray (reconfigure). Инцидент-класса: порт Xray меняется
@@ -44,7 +44,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Фейковый chimera._core (паттерн test_v60/test_v61/test_ingress_geoip)."""
+    """Фейковый chimera._core (паттерн test_/test_/test_ingress_geoip)."""
     core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}

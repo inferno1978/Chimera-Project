@@ -772,7 +772,7 @@ def _install_or_update() -> bool:
 #  CONFIG.JSON ГЕНЕРАЦИЯ (точно по гайду)
 # =============================================================================
 def _resolver_for_olcrtc() -> str:
-    """v57 (agh-aware): DNS-резолвер для locations olcrtc-manager.
+    """ (agh-aware): DNS-резолвер для locations olcrtc-manager.
 
     Порядок (как у генераторов Xray — см. agh_probe.py):
       1. AdGuardHome 127.0.0.1:53 — если сервис активен, владеет :53 и
@@ -872,7 +872,7 @@ def _generate_config_json(locations: list, quota_used_bytes: int = 0,
                 "quota_used_bytes": 0,
             })
 
-    # v57 (agh-aware): резолвер locations — через живой AGH (:53), при сбое
+    # (agh-aware): резолвер locations — через живой AGH (:53), при сбое
     # проверки → dnscrypt:5300, без локального стека → 8.8.8.8 (прежний дефолт)
     resolver = _resolver_for_olcrtc()
 

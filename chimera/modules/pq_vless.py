@@ -103,11 +103,11 @@ def _run(cmd: list[str], capture: bool = False, check: bool = False,
 
 
 def _xray_restart_safe(wait_active: int = 15, attempts: int = 2) -> bool:
-    """v57 (start-limit-fix): безопасный рестарт xray (reset-failed + ожидание).
+    """ (start-limit-fix): безопасный рестарт xray (reset-failed + ожидание).
 
     PQ-инбаунд/flow-переключения могут идти в цепочке с другими рестартами
     xray (пересборка конфига, юзеры, b4-сеты) — голый restart упирается в
-    StartLimitBurst юнита. См. _core._xray_safe_restart (v56).
+    StartLimitBurst юнита. См. _core._xray_safe_restart.
     """
     for _attempt in range(1, max(1, attempts) + 1):
         _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
@@ -504,7 +504,7 @@ def enable_pq_vless(
         err = _write_and_test(cfg_path, cfg)
         if err:
             return False, err
-        # v57 (start-limit-fix): безопасный рестарт
+        # (start-limit-fix): безопасный рестарт
         if not _xray_restart_safe():
             return False, "Xray не запустился после добавления PQ-инбаунда — проверьте: journalctl -u xray -n 30"
 
@@ -540,7 +540,7 @@ def disable_pq_vless() -> tuple[bool, str]:
         err = _write_and_test(cfg_path, cfg)
         if err:
             return False, err
-        # v57 (start-limit-fix): безопасный рестарт
+        # (start-limit-fix): безопасный рестарт
         _xray_restart_safe()
 
     pq_state_save({"pq_vless_enabled": False})
@@ -597,7 +597,7 @@ def set_pq_flow(
     err = _write_and_test(cfg_path, cfg)
     if err:
         return False, err
-    # v57 (start-limit-fix): безопасный рестарт
+    # (start-limit-fix): безопасный рестарт
     if not _xray_restart_safe():
         return False, "Xray не запустился после переключения flow — проверьте: journalctl -u xray -n 30"
 

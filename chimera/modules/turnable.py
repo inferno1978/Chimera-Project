@@ -222,9 +222,9 @@ def _print_link_full(link: str, color: str = "") -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 def _run(cmd: list, capture: bool = False, check: bool = False,
          quiet: bool = False) -> subprocess.CompletedProcess:
-    # v74.2 (run-quiet-fix): параметр quiet добавлен для сигнатурной
+    # (run-quiet-fix): параметр quiet добавлен для сигнатурной
     # совместимости с _core._run — вызовы _run(..., quiet=True) из
-    # v57 (start-limit-fix, строки reset-failed) падали с
+    # (start-limit-fix, строки reset-failed) падали с
     # "TypeError: run() got an unexpected keyword argument 'quiet'"
     # на Debian 13 / Python 3.13. Семантически no-op: локальный _run
     # и так глушит вывод (DEVNULL при не-capture).
@@ -837,7 +837,7 @@ def _run_install_inner() -> None:  # noqa: C901
     _box_ok("VLESS-inbound добавлен в Xray.")
 
     _box_info("Перезапускаю Xray...")
-    # v57 (start-limit-fix): reset-failed перед рестартом
+    # (start-limit-fix): reset-failed перед рестартом
     _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
     _run(["systemctl", "restart", "xray"])
     time.sleep(2)
@@ -1029,7 +1029,7 @@ def _full_uninstall(silent: bool = False) -> bool:
             if _xray_remove_inbound(cfg):
                 cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
                 cfg_path.chmod(0o640)
-                # v57 (start-limit-fix): reset-failed перед рестартом
+                # (start-limit-fix): reset-failed перед рестартом
                 _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
                 _run(["systemctl", "restart", "xray"])
                 if not silent: _ok("VLESS-inbound удалён из Xray, Xray перезапущен.")
@@ -1055,16 +1055,16 @@ def _full_uninstall(silent: bool = False) -> bool:
 #  ОБНОВЛЕНИЕ
 # ══════════════════════════════════════════════════════════════════════════════
 def _run_update() -> None:
-    """v75: обновление Turnable через единый центр upstream_updates.
+    """обновление Turnable через единый центр upstream_updates.
 
-    До v75 здесь был собственный флоу с багом: меню обещало «Обновить до
+    Ранее здесь был собственный флоу с багом: меню обещало «Обновить до
     {latest}», но _download_binary() скачивал PINNED _TURNABLE_VERSION
     (0.4.1) — версия в реальности не менялась. Теперь тег latest
     передаётся в fetch_package(TURNABLE_SPEC, version=latest) динамически.
 
     Дополнительно пользователь получает: бэкап+откат, smoke-тест сервиса,
     force-переустановку, вкл/выкл авто и установку таймера 04:40 — всё
-    в едином меню (как DU в dnscrypt v74).
+    в едином меню (как DU в dnscrypt).
     """
     try:
         from chimera.modules.upstream_updates import do_upstream_update_menu
@@ -1172,7 +1172,7 @@ def do_turnable_menu() -> None:
             _box_kv("iptables UDP:",
                     f"{ipt_col}✓ открыт{NC}" if st["ipt_ok"]
                     else f"{YELLOW}⚠ не найдено правило{NC}")
-            # v75: статус обновления из апстрима (из state-кэша, сеть
+            # статус обновления из апстрима (из state-кэша, сеть
             # не дёргается) — как DU-строка в dnscrypt-меню v74.
             try:
                 from chimera.modules.upstream_updates import get_update_status_line

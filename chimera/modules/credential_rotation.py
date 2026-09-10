@@ -152,8 +152,8 @@ if os.path.exists(p):
     with open(p, 'w') as f: json.dump(s, f, indent=2, ensure_ascii=False)
 " "$NEW_UUID" >> "$LOG" 2>&1
 
-        # users.json (v58): ротация ОБЯЗАНА менять uuid и здесь — иначе
-        # следующая регенерация конфига (_users_collect_for_config, v53)
+        # users.json: ротация ОБЯЗАНА менять uuid и здесь — иначе
+        # следующая регенерация конфига (_users_collect_for_config)
         # молча возвращает СТАРЫЙ uuid из users.json, и все ссылки,
         # выданные после ротации, умирают.
         python3 -c "
@@ -175,8 +175,8 @@ if os.path.exists(p):
 
         if /usr/local/bin/xray -test -config /usr/local/etc/xray/config.json >> "$LOG" 2>&1; then
             # Xray 26.x не поддерживает горячий reload через SIGHUP — используем restart.
-            # v58: reset-failed перед restart — защита от start-limit-hit
-            # (см. v56/v57; без него cron-ротация сама может заблокировать xray).
+            # reset-failed перед restart — защита от start-limit-hit
+            # (см. ; без него cron-ротация сама может заблокировать xray).
             systemctl reset-failed xray >> "$LOG" 2>&1 || true
             if systemctl is-active --quiet xray 2>/dev/null; then
                 systemctl restart xray >> "$LOG" 2>&1 \\
@@ -256,7 +256,7 @@ def do_manage_uuid_rotation() -> None:
             if val.returncode != 0:
                 warn("Конфиг невалиден — UUID не применён")
             else:
-                # v57 (start-limit-fix): reset-failed перед рестартом
+                # (start-limit-fix): reset-failed перед рестартом
                 _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
                 _run(["systemctl", "restart", "xray"], check=False, quiet=True)
                 time.sleep(2)
@@ -506,7 +506,7 @@ def do_manage_reality_keys() -> None:
                 input(f"{BLUE}Нажмите Enter...{NC}")
                 continue
 
-            # v57 (start-limit-fix): reset-failed перед рестартом
+            # (start-limit-fix): reset-failed перед рестартом
             _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
             _run(["systemctl", "restart", "xray"], check=False, quiet=True)
             time.sleep(2)

@@ -3,9 +3,9 @@
 
 Поднимает сервер в потоке с фейковыми хранилищами и прогоняет:
 static → login → session → /api/users → POST/PUT/DELETE → /sub/:token (UA)
-+ v82: SSE /api/events (сырой сокет), ротация пароля, rename email,
++ SSE /api/events (сырой сокет), ротация пароля, rename email,
        смена портов naive/mieru, каскад, WARP, /api/logs/:service.
-+ v83.4: /api/stats/users (accounting-фолбэк), /api/settings/hy2 (статус
++ /api/stats/users (accounting-фолбэк), /api/settings/hy2 (статус
        + 501 на мутации), /api/diagnostics, /api/panel/stub (roundtrip),
        /api/status — контракт апстрима ПОЛНОСТЬЮ (services/system/panel).
 """
@@ -36,7 +36,7 @@ www = Path(tmp) / "www"
     '<body><script src="app.js"></script></body></html>')
 (www / "app.js").write_text("console.log('smoke');")
 (www / "locales" / "ru.json").write_text('{"lang":"ru"}')
-# v82: шим вживляется установщиком — проверяем и раздачу
+# шим вживляется установщиком — проверяем и раздачу
 assert tp._inject_sse_shim(www), "shim inject failed"
 
 state_file = Path(tmp) / "state.json"
@@ -53,7 +53,7 @@ web._WWW_DIR = www
 web._svc_active = lambda name: True
 web._egress_ip = lambda timeout=6: "203.0.113.9"
 
-# v83.4: детерминизм новых эндпоинтов (stub/hy2/diagnostics/status —
+# детерминизм новых эндпоинтов (stub/hy2/diagnostics/status
 # в tmp, процессы не спавним — смоук должен быть одинаков везде)
 web._STUB_FILE = Path(tmp) / "panel-stub" / "index.html"
 web._local_ip = lambda: "127.0.0.1"
@@ -175,7 +175,7 @@ core.gen_uuid = lambda: "uuid-generated"
 core._users_apply_to_config = lambda users: True
 sys.modules["chimera._core"] = core
 
-# v82: фейковые port_registry + warp
+# фейковые port_registry + warp
 REG = []
 CONFLICTS = {"ports": set()}
 pr = types.ModuleType("chimera.modules.port_registry")
@@ -250,7 +250,7 @@ def req(path, method="GET", data=None, headers=None, cookies=None):
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
 
-print("── Triple Panel web smoke (v82) ──")
+print("── Triple Panel web smoke ──")
 
 # 1. Статика (+ SSE-шим)
 st, _, body = req("/")
@@ -304,14 +304,14 @@ st, _, body = req("/api/users/new%40x.com", "PUT", {"quotaMB": 5120},
 check("PUT /api/users/:id → 200, квота 5 GiB",
       st == 200 and LIM["new@x.com"]["limit_gb"] == 5)
 
-# v82: ротация пароля (до удаления — на юзере new@x.com фейков нет аккаунтов →
+# ротация пароля (до удаления — на юзере new@x.com фейков нет аккаунтов →
 # проверяем на smoke@x.com после удаления new)
 st, _, body = req("/api/users/new%40x.com", "DELETE", cookies=[cookie])
 check("DELETE /api/users/:id → 200", st == 200)
 check("юзера нет в списке",
       all(u["email"] != "new@x.com" for u in USERS))
 
-# v82: ротация пароля — один пароль в оба протокола
+# ротация пароля — один пароль в оба протокола
 st, _, body = req("/api/users/smoke%40x.com", "PUT",
                   {"password": "rotated-pw-123"}, cookies=[cookie])
 resp = json.loads(body) if st == 200 else {}
@@ -324,7 +324,7 @@ st, _, _ = req("/api/users/smoke%40x.com", "PUT", {"password": "short"},
                cookies=[cookie])
 check("PUT короткий пароль → 400", st == 400)
 
-# v82: rename email (uuid сохраняется, TTL переносится)
+# rename email (uuid сохраняется, TTL переносится)
 TTL["smoke@x.com"] = {"expires_at": "2099-01-01", "days": 30}
 st, _, body = req("/api/users/smoke%40x.com", "PUT",
                   {"email": "renamed@x.com"}, cookies=[cookie])
@@ -364,7 +364,7 @@ check("/sub плохой токен → 404", st == 404)
 st, _, _ = req("/sub/smoketoken?format=singbox")
 check("/sub ?format=singbox → приоритет параметра", st == 200)
 
-# 7. v82: SSE /api/events
+# 7. SSE /api/events
 st, _, _ = req("/api/events")
 check("SSE без сессии → 401", st == 401)
 
@@ -401,7 +401,7 @@ sock.close()
 check("SSE: событие metrics доставлено (контракт WS апстрима)",
       b"event: metrics" in d2 and b"cpu" in d2)
 
-# 8. v82: порты протоколов
+# 8. порты протоколов
 st, _, body = req("/api/settings/naive-port", "POST", {"port": 8443},
                   cookies=[cookie])
 check("POST naive-port 8443 → 200", st == 200 and json.loads(body).get("ok"))
@@ -428,7 +428,7 @@ st, _, _ = req("/api/settings/mieru-ports", "POST",
                {"portStart": 3000, "portEnd": 2999}, cookies=[cookie])
 check("POST mieru-ports невалидный диапазон → 400", st == 400)
 
-# 9. v82: каскад
+# 9. каскад
 st, _, body = req("/api/settings/cascade", cookies=[cookie])
 check("GET cascade → 200, выключен",
       st == 200 and not json.loads(body).get("cascadeEnabled"))
@@ -449,7 +449,7 @@ st, _, body = req("/api/settings/cascade/reset", "POST", cookies=[cookie])
 check("POST cascade/reset → 200 + сброшен",
       st == 200 and not web._cascade_view()["cascadeEnabled"])
 
-# 10. v82: WARP
+# 10. WARP
 st, _, body = req("/api/settings/warp", cookies=[cookie])
 check("GET warp → 200 shape", st == 200 and "ramMB" in json.loads(body))
 st, _, body = req("/api/settings/warp", "POST", {"warpEnabled": True},
@@ -466,7 +466,7 @@ st, _, body = req("/api/settings/warp", "POST", {"warpEnabled": False},
 check("POST warp disable → 200", st == 200 and
       not json.loads(body).get("warpEnabled"))
 
-# 11. v82: логи
+# 11. логи
 st, _, body = req("/api/logs/naive", cookies=[cookie])
 check("GET /api/logs/naive → 200 {logs}", st == 200 and
       "logs" in json.loads(body))
@@ -479,7 +479,7 @@ check("GET /api/logs/bogus → 400", st == 400)
 st, _, body = req("/api/password/generate", cookies=[cookie])
 check("/api/password/generate → 200", st == 200)
 
-# 13. v83.4: недостающие эндпоинты (4 ошибки со скринов юзера)
+# 13. недостающие эндпоинты (4 ошибки со скринов юзера)
 st, _, body = req("/api/stats/users", cookies=[cookie])
 stats = json.loads(body) if st == 200 else {}
 u = (stats.get("users") or [{}])[0]
@@ -549,7 +549,7 @@ check("status: domain из naive state + serverIp",
 
 st, _, body = req("/api/config", cookies=[cookie])
 cfg = json.loads(body)
-check("/api/config → 200 + плоские поля v83.4",
+check("/api/config → 200 + плоские поля ",
       st == 200 and "webPort" in cfg and "mieruPortStart" in cfg and
       "probeMode" in cfg and "serverIp" in cfg)
 st, _, _ = req("/api/logout", "POST", cookies=[cookie])

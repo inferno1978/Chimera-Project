@@ -97,7 +97,7 @@ def awg_peer_rebuild_conf(apply: bool = True, params_override: dict = None) -> b
     """
     core = _core_module()
     state = awgs_state_load()
-    # v58: Anti-Empty Identity Guard — при битом/пустом awg-state.json
+    # Anti-Empty Identity Guard — при битом/пустом awg-state.json
     # server_privkey="" молча попадал в awg0.conf (PrivateKey = ) → конфиг
     # с пустым ключом ПЕРЕЗАПИСЫВАЛ рабочий awg0.conf и валил всех AWG-
     # клиентов. Пустой ключ = отказ от rebuild, рабочий конфиг не трогаем.

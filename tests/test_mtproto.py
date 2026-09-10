@@ -1785,7 +1785,7 @@ class TestReturnRuleIdempotency(unittest.TestCase):
                         return MagicMock(returncode=0, stdout="", stderr="")
                     return MagicMock(returncode=1, stdout="", stderr="not found")
                 # -I (insert) / -A (append) — инкремент count.
-                # v65: _ipt_ensure_single_return_rule использует -A
+                # _ipt_ensure_single_return_rule использует -A
                 # (f794c8f: RETURN должен стоять ПОСЛЕ REDIRECT-правил
                 # TG-подсетей, иначе перехватывает трафик Telemt) — мок
                 # обязан считать оба варианта добавления правила.

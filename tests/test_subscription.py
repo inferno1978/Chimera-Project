@@ -359,8 +359,8 @@ class TestEnsurePepper(unittest.TestCase):
         self.assertTrue(all(c in "0123456789abcdef" for c in result))
 
 
-class TestV86MieruEndpoints(unittest.TestCase):
-    """v86: единый источник mieru-точек — домен из v85-state в ссылках,
+class TestMieruEndpoints(unittest.TestCase):
+    """единый источник mieru-точек — домен из state в ссылках,
     BOTH → TCP и UDP отдельными точками, hybrid + standalone."""
 
     def setUp(self):
@@ -380,7 +380,7 @@ class TestV86MieruEndpoints(unittest.TestCase):
         return {"uuid": "uuid-1", "email": "john@x.com"}
 
     def test_hybrid_domain_in_links(self):
-        """Домен из client_server_addr (v85) попадает в mierus://-ссылки
+        """Домен из client_server_addr попадает в mierus://-ссылки
         подписки — IP больше не приоритетен."""
         from chimera.modules import subscription as sub
         hst = self._write("hybrid_st.json", {
@@ -473,8 +473,8 @@ class TestV86MieruEndpoints(unittest.TestCase):
             self.assertEqual(ob["multiplexing"], "MULTIPLEXING_HIGH")
 
 
-class TestV86SingboxSubscription(unittest.TestCase):
-    """v86: nyamebox/nekobox (format=singbox) получают mieru-outbound'ы;
+class TestSingboxSubscription(unittest.TestCase):
+    """nyamebox/nekobox (format=singbox) получают mieru-outbound'ы;
     VLESS исключается в hybrid-режиме; DNS-блок — только в чистом mieru."""
 
     def setUp(self):
@@ -550,7 +550,7 @@ class TestV86SingboxSubscription(unittest.TestCase):
 
     def test_no_client_dns_no_dns_section(self):
         """client_dns не задан — dns-секции нет (нулевая регрессия для
-        установок без v85-DNS)."""
+        установок без DNS)."""
         hst, mcfg = self._hybrid_state(dns="")
         cfg = json.loads(self._build(hst, mcfg))
         self.assertNotIn("dns", cfg)

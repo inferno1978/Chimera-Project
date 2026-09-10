@@ -551,7 +551,7 @@ def generate_xray_config_chain_entry() -> None:
     • Исходящий — VLESS+REALITY → зарубежный VPS (exit node)
     """
     core = _core_module()
-    # v58: Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи entry-ноды
+    # Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи entry-ноды
     # не должны быть пустыми при регенерации (восстановление из живого
     # config.json/users.json — иначе ссылки юзеров ломаются).
     try:
@@ -624,7 +624,7 @@ def generate_xray_config_chain_entry() -> None:
 
     # AdGuardHome health-check (см. agh_probe.py): AGH жив и держит
     # 127.0.0.1:53 → Xray → AGH → DNSCrypt; сбой проверки → DNSCrypt:5300.
-    # v64 (agh-autostart): установлен, но остановлен → поднимаем перед пробой.
+    # (agh-autostart): установлен, но остановлен → поднимаем перед пробой.
     agh_ok, agh_note = agh_dns_available(run=_run, log_info=info,
                                          log_warn=warn, autostart=True)
 
@@ -638,7 +638,7 @@ def generate_xray_config_chain_entry() -> None:
             dns_servers.append(
                 {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
                  "network": "udp", "skipFallback": False})
-        # v67: последний живой fallback — Quad9 напрямую (UDP:53 anycast).
+        # последний живой fallback — Quad9 напрямую (UDP:53 anycast).
         # Достижим и с зарубежных, и с РФ-хостингов (1.1.1.1/8.8.8.8 в РФ
         # душатся/заблокированы РКН). Срабатывает ТОЛЬКО при падении AGH+DNSCrypt —
         # лучше открытый DNS, чем DNS black-hole для IPIfNonMatch-резолва
@@ -654,7 +654,7 @@ def generate_xray_config_chain_entry() -> None:
         dns_servers = [
             {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
              "network": "udp", "skipFallback": False},
-            # v67: живой Quad9-fallback — достижим из РФ (в отличие от 1.1.1.1/8.8.8.8)
+            # живой Quad9-fallback — достижим из РФ (в отличие от 1.1.1.1/8.8.8.8)
             {"address": "9.9.9.9", "port": 53, "network": "udp", "skipFallback": False},
             {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
             {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
@@ -667,7 +667,7 @@ def generate_xray_config_chain_entry() -> None:
 
     query_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
 
-    # ── BUGFIX (v53): clients — из ЕДИНОГО источника юзеров ──────────
+    # ── BUGFIX: clients — из ЕДИНОГО источника юзеров ──────────
     #    Раньше сюда жёстко подставлялся PARAM_UUID из state.json. При
     #    регенерации конфига (AGH-финализация / «Пересоздать конфиг
     #    Xray» / emergency repair) все остальные юзеры выпадали из
@@ -877,7 +877,7 @@ def generate_xray_config_chain_entry() -> None:
     if r.returncode == 0:
         success("Конфиг Entry Node (Режим B) создан и валиден")
     else:
-        # v68 (geo-self-heal): см. generate_xray_config_chain_entry_multi
+        # (geo-self-heal): см. generate_xray_config_chain_entry_multi
         _healed = False
         try:
             _cfg_h = json.loads(cfg_file.read_text())
@@ -1875,7 +1875,7 @@ def generate_xray_config_chain_entry_multi() -> None:
     Если нода одна — конфиг идентичен оригинальному (без balancer).
     """
     core = _core_module()
-    # v58: Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи entry-ноды
+    # Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи entry-ноды
     # не должны быть пустыми при регенерации (восстановление из живого
     # config.json/users.json — иначе ссылки юзеров ломаются).
     try:
@@ -2003,10 +2003,10 @@ def generate_xray_config_chain_entry_multi() -> None:
     # AGH-AWARE (v37): при живом AdGuard Home на :53 — DNS entry-ноды
     # через AGH (кеш+фильтры). Exit-шаблоны выше НЕ трогаем — они
     # разворачиваются на чужих VPS без AGH.
-    # v55 (agh_probe): health-check углублён — живая проба резолва
+    # (agh_probe): health-check углублён — живая проба резолва
     # (end-to-end AGH → DNSCrypt → интернет) + нейтрализация iptables
     # redirect 53→5300. Сбой любого шага → прежний путь DNSCrypt:5300.
-    # v64 (agh-autostart): AGH установлен, но остановлен → ПОДНИМАЕМ его
+    # (agh-autostart): AGH установлен, но остановлен → ПОДНИМАЕМ его
     # перед пробой («AGH должен запускаться и слушать порты, если он
     # установлен»). Не установлен — autostart безвреден (no-op, rc≠0
     # у systemctl start несуществующего юнита).
@@ -2023,7 +2023,7 @@ def generate_xray_config_chain_entry_multi() -> None:
             dns_servers.append(
                 {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
                  "network": "udp", "skipFallback": False})
-        # v67: последний живой fallback — Quad9 напрямую (UDP:53 anycast).
+        # последний живой fallback — Quad9 напрямую (UDP:53 anycast).
         # Достижим и с зарубежных, и с РФ-хостингов (1.1.1.1/8.8.8.8 в РФ
         # душатся/заблокированы РКН). Срабатывает ТОЛЬКО при падении AGH+DNSCrypt —
         # лучше открытый DNS, чем DNS black-hole для IPIfNonMatch-резолва
@@ -2039,7 +2039,7 @@ def generate_xray_config_chain_entry_multi() -> None:
         dns_servers = [
             {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
              "network": "udp", "skipFallback": False},
-            # v67: живой Quad9-fallback — достижим из РФ (в отличие от 1.1.1.1/8.8.8.8)
+            # живой Quad9-fallback — достижим из РФ (в отличие от 1.1.1.1/8.8.8.8)
             {"address": "9.9.9.9", "port": 53, "network": "udp", "skipFallback": False},
             {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
             {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
@@ -2129,7 +2129,7 @@ def generate_xray_config_chain_entry_multi() -> None:
         outbounds_exit.append(out)
 
     # Inbound от клиента — зависит от PROTOCOL_MODE
-    # ── BUGFIX (v53): clients — из ЕДИНОГО источника юзеров ──────────
+    # ── BUGFIX: clients — из ЕДИНОГО источника юзеров ──────────
     #    Раньше сюда жёстко подставлялся PARAM_UUID из state.json. При
     #    регенерации конфига (AGH-финализация / «Пересоздать конфиг
     #    Xray» / emergency repair) все остальные юзеры выпадали из
@@ -2355,7 +2355,7 @@ def generate_xray_config_chain_entry_multi() -> None:
         else:
             success(f"Конфиг Entry Node (Режим B, {n_nodes} нод, стратегия: {strategy_label}) создан и валиден")
     else:
-        # v68 (geo-self-heal): негрузимые geo-правила = МЁРТВЫЙ Xray (exit 23
+        # (geo-self-heal): негрузимые geo-правила = МЁРТВЫЙ Xray (exit 23
         # + RestartPreventExitStatus=23) = i/o timeout для ВСЕХ клиентов.
         # Убираем geosite:/geoip: правила, ретестим, пишем живой конфиг.
         _healed = False
@@ -2827,7 +2827,7 @@ def do_manage_nodes() -> None:
                         warn(f"Не удалось обновить config.json: {_e3}")
                 ans = input(f"{YELLOW}Перезапустить Xray для применения? [y/N]:{NC} ").strip().lower()
                 if ans == 'y':
-                    # v56 (start-limit-fix): безопасный рестарт — см.
+                    # (start-limit-fix): безопасный рестарт — см.
                     # _core._xray_safe_restart (StartLimitBurst=3/60s)
                     _safe_restart = getattr(core, "_xray_safe_restart", None)
                     if callable(_safe_restart) and _safe_restart():

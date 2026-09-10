@@ -295,7 +295,7 @@ def _xray_apply_warp_outbound(ip_version: str = "auto"):
             warn(f"Ошибка патча {cfg_path}: {e}")
 
     if ok:
-        # v57 (start-limit-fix): reset-failed перед рестартом (StartLimitBurst)
+        # (start-limit-fix): reset-failed перед рестартом (StartLimitBurst)
         _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         core.success(f"YouTube->WARP применено в Xray ({strategy_desc})")
@@ -332,7 +332,7 @@ def _xray_remove_warp_outbound():
             _set_config_owner(cfg_path)
         except Exception:
             pass
-    # v57 (start-limit-fix): reset-failed перед рестартом (StartLimitBurst)
+    # (start-limit-fix): reset-failed перед рестартом (StartLimitBurst)
     _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
     _run(["systemctl", "restart", "xray"], check=False, quiet=True)
 

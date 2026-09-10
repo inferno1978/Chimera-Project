@@ -18,20 +18,20 @@ Unit-тесты для chimera/modules/triple_panel.py + triple_panel_web.py.
   9. Подписка: _sub_response (format routing на фейке subscription.py)
  10. CRUD: _create_panel_user / _delete_panel_user / _update_panel_user
      (фейковые rest_api / ttl_users / user_lifecycle / naiveproxy / mieru)
- 11. v82 SSE: шина (publish/subscribe/unsubscribe/drop) + логи (_logs_response)
- 12. v82 SSE-шим: _inject_sse_shim (до app.js, идемпотентность, фолбэк)
- 13. v82 юзеры: ротация пароля (set_password_full) + rename email
+ 11. SSE: шина (publish/subscribe/unsubscribe/drop) + логи (_logs_response)
+ 12. SSE-шим: _inject_sse_shim (до app.js, идемпотентность, фолбэк)
+ 13. юзеры: ротация пароля (set_password_full) + rename email
      (мост v4.25 + перенос TTL/квот)
- 14. v82 порты: _set_naive_port / _set_mieru_ports (валидация, конфликты,
+ 14. порты: _set_naive_port / _set_mieru_ports (валидация, конфликты,
      port_registry-перерегистрация, откат)
- 15. v82 каскад/WARP: view/apply/reset + normalize_upstream + взаимное
+ 15. каскад/WARP: view/apply/reset + normalize_upstream + взаимное
      исключение (BUG-150) + деградация full→runet без SSH-IP
- 16. v83.2 live-box: _render_box_row/_truncate_ansi/_ansi_wrap (ANSI не
+ 16. live-box: _render_box_row/_truncate_ansi/_ansi_wrap (ANSI не
      рвётся, ровно 68 колонок), _BoxedStdout (print = ДВА write →
      буферизация до \n, длинные — переносом), _box_ask (не-TTY ветка),
      _smoke_check (ProxyHandler({}) — 127.0.0.1 мимо http_proxy),
      _wait_service_http (ретраи, ранний выход при failed)
- 17. v83.4 недостающие эндпоинты: _to_mb/_mita_live_users (парсер таблицы
+ 17. недостающие эндпоинты: _to_mb/_mita_live_users (парсер таблицы
      mita), _stats_users_payload (merge: live→accounting фолбэк, usedMB
      из квот или сумма, naiveServerTotal из IPAccounting), _hy2_view
      (installed/port из unit/config/state), _diagnostics_payload (порты,
@@ -174,7 +174,7 @@ class TestFrontFetch(unittest.TestCase):
 
     def test_mirror_urls_from_tag(self):
         urls = tp._front_mirror_urls("triple-panel-front-v1.11.2.tar.gz")
-        # v83.2: ветка main — ПЕРВОЙ (апстрим не тегает релизы — теговые
+        # ветка main — ПЕРВОЙ (апстрим не тегает релизы — теговые
         # архивы 404-или; на живом инсталле зеркала 1-2 выглядели ошибкой).
         # Теги — последними, задел на будущее.
         self.assertEqual(len(urls), 4)
@@ -191,7 +191,7 @@ class TestFrontFetch(unittest.TestCase):
         self.assertTrue(all("main" in u for u in urls))
 
     def test_mirror_urls_branch_first_tag_fallback(self):
-        """Порядок v83.2: веточные зеркала ДО теговых — первое зеркало
+        """Порядок веточные зеркала ДО теговых — первое зеркало
         живое (инсталл без 404-шума), теги — задел на будущее."""
         urls = tp._front_mirror_urls("triple-panel-front-v1.11.2.tar.gz")
         tag_idx = [i for i, u in enumerate(urls) if "/tags/" in u]
@@ -264,7 +264,7 @@ class TestFrontFetch(unittest.TestCase):
         return tar_path
 
     def test_extract_front_captures_version(self):
-        """v83.1: корневой VERSION → dest/VERSION.upstream (честная книга)."""
+        """корневой VERSION → dest/VERSION.upstream (честная книга)."""
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             tar_path = self._make_front_tarball_with_version(tmpdir, "1.12.0")
@@ -296,7 +296,7 @@ class TestFrontFetch(unittest.TestCase):
 
 
 class TestUpstreamVersionDetection(unittest.TestCase):
-    """v83.1: апстрим не тегает релизы — версия из файла VERSION ветки main."""
+    """апстрим не тегает релизы — версия из файла VERSION ветки main."""
 
     class _Resp:
         def __init__(self, body: bytes):
@@ -761,7 +761,7 @@ class TestStateFunctions(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  11. v82: SSE-ШИНА + ЛОГИ
+# 11. SSE-ШИНА + ЛОГИ
 # ══════════════════════════════════════════════════════════════════════════════
 class TestSSEBus(unittest.TestCase):
 
@@ -845,7 +845,7 @@ class TestLogsResponse(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  12. v82: SSE-ШИМ (инъекция во фронт)
+# 12. SSE-ШИМ (инъекция во фронт)
 # ══════════════════════════════════════════════════════════════════════════════
 class TestSseShimInjection(unittest.TestCase):
 
@@ -880,7 +880,7 @@ class TestSseShimInjection(unittest.TestCase):
             self.assertFalse(tp._inject_sse_shim(Path(tmp)))
 
     def test_update_front_up_to_date_injects_shim(self):
-        """v82: ветка «фронт актуален» до-вживляет шим в v81-инсталлы."""
+        """ветка «фронт актуален» до-вживляет шим в инсталлы."""
         with tempfile.TemporaryDirectory() as tmp:
             www = Path(tmp)
             (www / "index.html").write_text(
@@ -899,9 +899,9 @@ class TestSseShimInjection(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  13. v82: РОТАЦИЯ ПАРОЛЯ + RENAME (расширенные CRUD-фейки)
+# 13. РОТАЦИЯ ПАРОЛЯ + RENAME (расширенные CRUD-фейки)
 # ══════════════════════════════════════════════════════════════════════════════
-class TestV82UserOps(unittest.TestCase):
+class TestUserOps(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -965,7 +965,7 @@ class TestV82UserOps(unittest.TestCase):
         _install_fake("chimera.modules.mieru", mieru)
 
         core = types.ModuleType("chimera._core")
-        core.gen_uuid = lambda: "fake-uuid-v82"
+        core.gen_uuid = lambda: "fake-uuid-"
         core._users_apply_to_config = lambda users: s.applied.append(
             len(users))
         _install_fake("chimera._core", core)
@@ -1034,9 +1034,9 @@ class TestV82UserOps(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  14-15. v82: ПОРТЫ ПРОТОКОЛОВ + КАСКАД/WARP (фейки port_registry и warp)
+# 14-15. ПОРТЫ ПРОТОКОЛОВ + КАСКАД/WARP (фейки port_registry и warp)
 # ══════════════════════════════════════════════════════════════════════════════
-class TestV82Settings(unittest.TestCase):
+class TestSettings(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1337,9 +1337,9 @@ class TestV82Settings(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  16. v83.2: LIVE-BOX — рамка для сырого вывода + _box_ask + ожидание GET /
+# 16. LIVE-BOX — рамка для сырого вывода + _box_ask + ожидание GET /
 # ══════════════════════════════════════════════════════════════════════════════
-class TestV832LiveBox(unittest.TestCase):
+class Test2LiveBox(unittest.TestCase):
     """Сырой вывод (download_manager/journalctl/systemctl) — строками
     бокса; вводы — внутри рамки; GET / — ретраи и без прокси."""
 
@@ -1536,9 +1536,9 @@ class TestV832LiveBox(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  17. v83.3: авто-домен для Let's Encrypt (как в b4 — без ручного ввода)
+# 17. авто-домен для Let's Encrypt (как в b4 — без ручного ввода)
 # ══════════════════════════════════════════════════════════════════════════════
-class TestV833AutoDomain(unittest.TestCase):
+class Test3AutoDomain(unittest.TestCase):
     """Цепочка _detect_panel_domain: PARAM_DOMAIN → state.json →
     naiveproxy.json (домен Naive — его panel_nginx_front не видит)."""
 
@@ -1598,7 +1598,7 @@ class TestV833AutoDomain(unittest.TestCase):
             self.assertEqual(tp._detect_panel_domain(), "naive.example.com")
 
 
-class TestV833AccessMenuFlow(unittest.TestCase):
+class Test3AccessMenuFlow(unittest.TestCase):
     """Пункт «Включить nginx front»: домен подставляется автоматически,
     ask_domain не вызывается; ручной ввод — только если ничего не нашли."""
 
@@ -1692,7 +1692,7 @@ class TestV833AccessMenuFlow(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  17. v83.4 — НЕДОСТАЮЩИЕ ЭНДПОИНТЫ (stats/hy2/diagnostics/stub + статус)
+# 17. НЕДОСТАЮЩИЕ ЭНДПОИНТЫ (stats/hy2/diagnostics/stub + статус)
 # ══════════════════════════════════════════════════════════════════════════════
 
 _MITA_TABLE = "\n".join([
@@ -2024,7 +2024,7 @@ class TestPanelStub(unittest.TestCase):
 class TestStatusViewPayload(unittest.TestCase):
     """Контракт /api/status должен совпадать с апстримом ПОЛНОСТЬЮ —
     loadDashboard/refreshStats фронта читают services.naive.active,
-    system.cpuPercent, panel.userCount и т.д. (в v81 был плоский
+    system.cpuPercent, panel.userCount и т.д. (в был плоский
     services: {name: bool} — фронт рендерил undefined)."""
 
     def _view(self, hy2_inst=False, svc=True):

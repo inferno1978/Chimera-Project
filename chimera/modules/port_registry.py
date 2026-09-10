@@ -142,7 +142,7 @@ SERVICE_WEBDAV_TUNNEL  = "webdav_tunnel"
 SERVICE_PORT_HOPPING   = "port_hopping"
 SERVICE_OLCRTC_MANAGER = "olcrtc_manager"
 SERVICE_B4_WEB         = "b4_web"          # b4 Web UI (loopback, 9700)
-# v49: значение = фактический service_tag, которым b4-модули (dpi_bypass.py,
+# значение = фактический service_tag, которым b4-модули (dpi_bypass.py,
 # youtube_b4.py) регистрируют nginx-front в panel_nginx_front (исторический
 # литерал; константа раньше расходилась с реальностью и нигде не использовалась).
 SERVICE_B4_NGINX       = "chimera-b4-nginx"   # nginx front для b4 Web UI (TLS, 9743)
@@ -488,7 +488,7 @@ def port_register_range(service_tag: str, port_start: int, port_end: int,
                         ) -> "tuple[bool, str]":
     """Массовая регистрация диапазона портов за сервисом (port hopping, Mieru).
 
-    v79: поэлементный вызов port_register() на диапазон 10000-20000 —
+    поэлементный вызов port_register() на диапазон 10000-20000
     это 10001 итераций «lock + полный read/parse + полный dump/write
     реестра», файл при этом растёт → O(N^2): минуты «зависания» TUI
     без единой строчки вывода (bench: 3000 итераций = 24с и замедление).
@@ -575,7 +575,7 @@ def port_unregister_range(service_tag: str, port_start: int, port_end: int,
                           proto: "Optional[str]" = None) -> bool:
     """Снимает регистрацию диапазона портов за сервисом одним заходом.
 
-    v79: парная к port_register_range(). Раньше отключение port hopping
+    парная к port_register_range(). Раньше отключение port hopping
     (смена диапазона / disable) звало port_unregister() на каждый порт —
     тот же O(N^2): 10001 итераций полного rewrite реестра, «TUI завис».
     Здесь — ОДИН lock + ОДИН load + фильтр + ОДИН save.

@@ -43,9 +43,9 @@ sudo python3 main.py
 - [ ] `grep cert_chain_path /opt/trusttunnel/hosts.toml` → `/etc/letsencrypt/live/<домен>/fullchain.pem` (НЕ `certs/cert.pem` — self-signed визарда остаётся только как файловый фолбэк)
 - [ ] `ufw status | grep 8443` → порты 8443/tcp и 8443/udp открыты с комментарием `TRUSTTUNNEL`
 
-> **Если установка упала с «setup_wizard exited 124»** — на релизах до v74.1
+> **Если установка упала с «setup_wizard exited 124»** — на ранних релизах
 > это upstream-дедлок визарда (`--cert-type provided` в non-interactive);
-> v74.1+ запускает визард без cert-флагов и подменяет `hosts.toml` на LE.
+> + запускает визард без cert-флагов и подменяет `hosts.toml` на LE.
 > Лечение: обновить проект (`git pull`) и повторить установку. Подробности:
 > `TROUBLESHOOTING.md` → TrustTunnel → п. 3.
 

@@ -761,11 +761,11 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  BUGFIX (v53): регенерация конфига сохраняет юзеров (anti-EOF)
+# BUGFIX: регенерация конфига сохраняет юзеров (anti-EOF)
 # ══════════════════════════════════════════════════════════════════════════════
 class TestChainEntryMultiPreservesUsers(unittest.TestCase):
     """
-    РЕГРЕССИЯ v53 (реальный инцидент на VPS без IPv6):
+    РЕГРЕССИЯ (реальный инцидент на VPS без IPv6):
     после установки AGH _regenerate_xray_config() перегенерировала
     /etc/xray/config.json с clients=[PARAM_UUID из state.json].
     state.json содержал dc1c190b-... (второй прогон промптов), а

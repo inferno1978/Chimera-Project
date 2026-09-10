@@ -126,7 +126,7 @@ class TestBuildVlessWsCdnInbound(unittest.TestCase):
         self.assertEqual(ib["users"][0]["uuid"], "11111111-1111-1111-1111-111111111111")
 
     def test_users_empty_when_no_uuid(self):
-        """v58: пустой uuid → ValueError (раньше молча давал users: [] —
+        """пустой uuid → ValueError (раньше молча давал users: []
         мёртвый inbound, коннекты есть, авторизация невозможна). Guard
         гарантирует: конфиг с пустыми кредами не генерится вовсе."""
         from chimera.modules.singbox_config import _build_vless_ws_cdn_inbound

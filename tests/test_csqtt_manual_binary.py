@@ -2,7 +2,7 @@
 """
 tests/test_csqtt_manual_binary.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты v76.1: ГОТОВЫЙ бинарь csqtt-server, собранный на другой машине
+Unit-тесты ГОТОВЫЙ бинарь csqtt-server, собранный на другой машине
 и загруженный на сервер вручную (scp/WinSCP).
 
 Покрывает:
@@ -397,7 +397,7 @@ class TestInstallManualBinary(_ManualDirsMixin, unittest.TestCase):
 
     def test_rejects_printed_even_when_not_found(self):
         """Юзер закинул бинарь чужой архитектуры — видит ПРИЧИНУ,
-        а не молчаливый уход в сборку (смоук-находка v76.1)."""
+        а не молчаливый уход в сборку (смоук-находка)."""
         p = _fake_bin(self._root / "csqtt-server", _AARCH64)
         with patch.object(csqtt_packages, "_detect_arch",
                           return_value="x86_64"):

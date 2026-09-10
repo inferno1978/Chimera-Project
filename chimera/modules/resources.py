@@ -227,9 +227,9 @@ def generate_self_signed_cert(domain: str) -> None:
     le_path = Path(f"/etc/letsencrypt/live/{domain}")
     archive_path = Path(f"/etc/letsencrypt/archive/{domain}")
     info(f"Генерация самоподписанного сертификата для {domain}...")
-    # v63: live/<domain>/*.pem у certbot — СИМЛИНКИ в archive/. Прямая
+    # live/<domain>/*.pem у certbot — СИМЛИНКИ в archive/. Прямая
     # запись openssl затирает ВАЛИДНЫЙ LE-сертификат безвозвратно
-    # (инцидент v63: certbot упал на rate-limit → самоподпис затёр
+    # (инцидент certbot упал на rate-limit → самоподпис затёр
     # свежий LE-сертификат через симлинки). Перед записью — бэкап
     # всего lineage в /root/: файлы можно вернуть руками за минуту.
     try:

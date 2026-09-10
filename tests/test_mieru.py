@@ -367,9 +367,9 @@ class TestReUsername(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  v85: домен сервера + свой DNS в клиентских конфигах Karing
+# домен сервера + свой DNS в клиентских конфигах Karing
 # ══════════════════════════════════════════════════════════════════════════════
-class TestV85DnsHostIsDomain(unittest.TestCase):
+class TestDnsHostIsDomain(unittest.TestCase):
     """_dns_host_is_domain — IP / домен / DoH / DoT / DoQ / порт."""
 
     def setUp(self):
@@ -404,14 +404,14 @@ class TestV85DnsHostIsDomain(unittest.TestCase):
         self.assertFalse(_dns_host_is_domain("/"))
 
 
-class TestV85BuildKaringDnsBlock(unittest.TestCase):
+class TestBuildKaringDnsBlock(unittest.TestCase):
     """_build_karing_dns_block — дефолт (Google) / свой DNS / bootstrap-правило."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
     def test_default_google_unchanged(self):
-        """Пустой client_dns — блок ровно как до v85 (нулевая регрессия)."""
+        """Пустой client_dns — блок ровно как ранее (нулевая регрессия)."""
         from chimera.modules.mieru import _build_karing_dns_block
         block = _build_karing_dns_block("", "mieru-u1")
         self.assertEqual(block["servers"][0],
@@ -464,7 +464,7 @@ class TestV85BuildKaringDnsBlock(unittest.TestCase):
         self.assertNotIn("rules", block)
 
 
-class TestV85BuildKaringFullConfig(unittest.TestCase):
+class TestBuildKaringFullConfig(unittest.TestCase):
     """_build_karing_full_config — профиль целиком + domain_resolver."""
 
     def setUp(self):
@@ -512,8 +512,8 @@ class TestV85BuildKaringFullConfig(unittest.TestCase):
         self.assertEqual(cfg["dns"]["servers"][0]["address"], "10.0.0.53")
 
 
-class TestV85DetectServerDomain(unittest.TestCase):
-    """Цепочка: PARAM_DOMAIN → state.json → naiveproxy.json (как v83.3/v84)."""
+class TestDetectServerDomain(unittest.TestCase):
+    """Цепочка: PARAM_DOMAIN → state.json → naiveproxy.json (как)."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -573,7 +573,7 @@ class TestV85DetectServerDomain(unittest.TestCase):
             self.assertEqual(mieru._detect_server_domain(), "")
 
 
-class TestV85EffectiveClientAddr(unittest.TestCase):
+class TestEffectiveClientAddr(unittest.TestCase):
     """_effective_client_addr — домен из state выигрывает, пусто → IP."""
 
     def setUp(self):
@@ -609,8 +609,8 @@ class TestV85EffectiveClientAddr(unittest.TestCase):
             self.assertEqual(mieru._effective_client_addr(), "1.2.3.4")
 
 
-class TestV86BothProtocol(unittest.TestCase):
-    """v86: BOTH (TCP+UDP) — один диапазон портов на оба транспорта,
+class TestBothProtocol(unittest.TestCase):
+    """BOTH (TCP+UDP) — один диапазон портов на оба транспорта,
     ссылки/JSON генерируются на КАЖДЫЙ транспорт (запрос юзера)."""
 
     def setUp(self):
@@ -687,7 +687,7 @@ class TestV86BothProtocol(unittest.TestCase):
         self.assertEqual(cfg["dns"]["servers"][0]["tag"], "google")
 
     def test_share_link_empty_preset_no_pattern(self):
-        """v86: traffic_preset='' — параметра traffic-pattern НЕТ (вызывающий
+        """traffic_preset='' — параметра traffic-pattern НЕТ (вызывающий
         код добавит свой blob; раньше здесь вставался basic — двойной параметр)."""
         from chimera.modules import mieru
         link = mieru._gen_client_share_link("1.2.3.4", 443, 443, "TCP", "u", "p",
@@ -695,7 +695,7 @@ class TestV86BothProtocol(unittest.TestCase):
         self.assertNotIn("traffic-pattern=", link)
 
     def test_share_link_default_preset_keeps_pattern(self):
-        """Регресс: дефолтный preset — параметр на месте (как в v85 и раньше)."""
+        """Регресс: дефолтный preset — параметр на месте (как в и раньше)."""
         from chimera.modules import mieru
         link = mieru._gen_client_share_link("1.2.3.4", 443, 443, "TCP", "u", "p")
         self.assertEqual(link.count("traffic-pattern="), 1)
@@ -712,9 +712,9 @@ class TestV86BothProtocol(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  v87: DNS-меню + AGH-детект + мульти-адреса + ссылки вне рамки
+# DNS-меню + AGH-детект + мульти-адреса + ссылки вне рамки
 # ═════════════════════════════════════════════════════════════════════════════
-class TestV87ParseDnsAddresses(unittest.TestCase):
+class TestParseDnsAddresses(unittest.TestCase):
     """_parse_dns_addresses — списки через запятую/плюс (пункт «Google +
     Cloudflare» и ручной ввод)."""
 
@@ -744,10 +744,10 @@ class TestV87ParseDnsAddresses(unittest.TestCase):
         self.assertEqual(_parse_dns_addresses("bad dns com"), ["bad dns com"])
 
 
-class TestV87PlausibleDns(unittest.TestCase):
+class TestPlausibleDns(unittest.TestCase):
     """_is_plausible_dns_address — что прошло валидацию, что опечатка.
 
-    v85 отвергала tls:// и quic:// (слэш без http-префикса) — баг, v87
+     отвергала tls:// и quic:// (слэш без http-префикса) — баг, 
     легализует DoT/DoQ и списки адресов."""
 
     def _ok(self, s):
@@ -767,7 +767,7 @@ class TestV87PlausibleDns(unittest.TestCase):
             self.assertFalse(self._ok(s), s)
 
 
-class TestV87BuildKaringDnsBlockMulti(unittest.TestCase):
+class TestBuildKaringDnsBlockMulti(unittest.TestCase):
     """_build_karing_dns_block — несколько адресов (пункт «Google +
     Cloudflare»): первый — дефолтный custom-dns, остальные — допы."""
 
@@ -795,7 +795,7 @@ class TestV87BuildKaringDnsBlockMulti(unittest.TestCase):
         self.assertEqual(block["servers"][1]["address_resolver"], "local")
 
     def test_single_address_bytes_unchanged(self):
-        """Регресс v85: одиночный адрес — блок побайтово как раньше."""
+        """Регресс одиночный адрес — блок побайтово как раньше."""
         from chimera.modules.mieru import _build_karing_dns_block
         block = _build_karing_dns_block("10.0.0.53", "mieru-u1")
         self.assertEqual(block["servers"][0],
@@ -808,7 +808,7 @@ class TestV87BuildKaringDnsBlockMulti(unittest.TestCase):
         self.assertEqual(len(block["servers"]), 3)
 
 
-class TestV87DetectAghDnsEndpoints(unittest.TestCase):
+class TestDetectAghDnsEndpoints(unittest.TestCase):
     """_detect_agh_dns_endpoints — подглядывание DoH/DoT/DoQ в стейт AGH."""
 
     def setUp(self):
@@ -863,7 +863,7 @@ class TestV87DetectAghDnsEndpoints(unittest.TestCase):
         self.assertEqual(r["links"][1], ("DoT", "tls://dns.example.com:8853"))
 
 
-class TestV87AskClientDns(unittest.TestCase):
+class TestAskClientDns(unittest.TestCase):
     """_ask_client_dns (standalone) — то же меню, что в гибриде, но на
     proto_ask; Enter-дефолты, номера, ручной ввод, опечатки."""
 
@@ -917,7 +917,7 @@ class TestV87AskClientDns(unittest.TestCase):
         self.assertEqual(self._ask([""], old_dns="10.0.0.53"), "10.0.0.53")
 
 
-class TestV87PrintLinkPairsOutside(unittest.TestCase):
+class TestPrintLinkPairsOutside(unittest.TestCase):
     """_print_link_pairs_outside — ссылки ВНЕ рамки, одной строкой каждая:
     в строках-ссылках нет символов рамки (║), все mierus://-ссылки целые."""
 
@@ -947,8 +947,8 @@ class TestV87PrintLinkPairsOutside(unittest.TestCase):
         self.assertIn("Nekobox / Nyamebox (UDP):", lines)
 
 
-class TestV87_2KaringUdpAddr(unittest.TestCase):
-    """v87.2: _karing_link_addr — UDP+домен подставляет IP (баг ядра
+class TestKaringUdpAddr(unittest.TestCase):
+    """_karing_link_addr — UDP+домен подставляет IP (баг ядра
     Karing: mieru-UDP не резолвит домен — NilDNSResolver, а
     BypassDialerDNS у mieru действует только на TCP-underlay).
     TCP/IP-выдача не трогается."""
@@ -991,8 +991,8 @@ class TestV87_2KaringUdpAddr(unittest.TestCase):
             self.assertFalse(mieru._is_public_ipv4(a), a)
 
 
-class TestV87_2KaringUdpLinksAndJson(unittest.TestCase):
-    """v87.2: ссылочная выдача и JSON — Karing-UDP с IP, домен в TCP
+class TestKaringUdpLinksAndJson(unittest.TestCase):
+    """ссылочная выдача и JSON — Karing-UDP с IP, домен в TCP
     и Nekobox/Nyamebox; domain_resolver — только доменным outbound'ам."""
 
     def test_both_pairs_udp_karing_gets_ip(self):

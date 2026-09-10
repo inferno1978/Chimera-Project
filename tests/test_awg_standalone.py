@@ -143,7 +143,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         )
         self.assertIn("I1 = deadbeef", conf)
 
-    def test_empty_i1_to_i5_commented_v54(self):
+    def test_empty_i1_to_i5_commented(self):
         """v5.4: Пустые I1-I5 КОММЕНТИРУЮТСЯ (как в эталонном конфиге Amnezia).
 
         КОРЕНЬ ПРОБЛЕМЫ (подтверждено zvshka): старые amneziawg-tools падают
@@ -169,7 +169,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
             # Не должно быть незакомментированной пустой строки
             # (т.е. 'I2 = ' без '#' перед ней — это ломает старые tools)
 
-    def test_non_empty_i1_to_i5_uncommented_v54(self):
+    def test_non_empty_i1_to_i5_uncommented(self):
         """v5.4: Непустые I1-I5 пишутся БЕЗ комментария (как раньше)."""
         from chimera.modules.awg_standalone import awgs_build_server_conf
         params = _default_params()
@@ -188,7 +188,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         self.assertIn("# I4 = ", conf)
         self.assertIn("# I5 = ", conf)
 
-    def test_no_bare_empty_i_keys_v54(self):
+    def test_no_bare_empty_i_keys(self):
         """v5.4: Regression — НЕ должно быть 'I2 = ' без '#' (ломает старые tools).
 
         Это КЛЮЧЕВОЙ regression-тест на жалобу zvshka: пустая строка

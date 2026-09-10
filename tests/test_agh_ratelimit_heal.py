@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tests/test_v65_agh_ratelimit_heal.py
+tests/test_agh_ratelimit_heal.py
 ───────────────────────────────────────────────────────────────────────────────
-v65: «Клиент сыпал EOFами — убрал AGH, всё заработало».
+: «Клиент сыпал EOFами — убрал AGH, всё заработало».
 
 КОРНЕВАЯ ПРИЧИНА (доказана эмпирически на живом AdGuardHome v0.107.79):
   • dns.ratelimit: 20 + ratelimit_subnet_len_ipv4: 24 → ВЕСЬ DNS-трафик
@@ -82,7 +82,7 @@ class TestBuildDnsSectionV65(unittest.TestCase):
 
     def test_no_cidr_in_whitelist_field(self):
         """CIDR в ratelimit_whitelist = FATAL AGH (ParseAddr). Генератор
-        обязан писать пустой список — эмпирика v65 (тест t2)."""
+        обязан писать пустой список — эмпирика (тест t2)."""
         s = aghome_setup.build_dns_section(5300, "1.2.3.4", False)
         self.assertIn("ratelimit_whitelist: []", s)
         self.assertNotIn("ratelimit_whitelist:\n    - 127", s)
@@ -500,7 +500,7 @@ class TestUninstallAghDetect(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 class TestCronScriptAghProbe(unittest.TestCase):
     def _build_payload(self):
-        """Достаём python-payload cron-скрипта из модуля (как test_v62)."""
+        """Достаём python-payload cron-скрипта из модуля (как test)."""
         import chimera.modules.health_report as hr
         import inspect
         # payload живёт внутри install-функции — берём из исходника
@@ -526,7 +526,7 @@ class TestCronScriptAghProbe(unittest.TestCase):
         return None
 
     def test_cron_payload_contains_live_probe(self):
-        """v65: cron-скрипт обязан делать живую пробу резолва AGH
+        """cron-скрипт обязан делать живую пробу резолва AGH
         (сервис+порт ≠ работающий DNS)."""
         src = (_PROJECT_ROOT / "chimera/modules/health_report.py").read_text()
         self.assertIn("'dig','@127.0.0.1'", src.replace(" ", ""))

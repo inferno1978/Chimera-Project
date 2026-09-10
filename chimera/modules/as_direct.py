@@ -527,7 +527,7 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
             warn((_dry.stdout + _dry.stderr)[:300])
             return False
 
-    # v56 (start-limit-fix): безопасный рестарт (reset-failed) — apply может
+    # (start-limit-fix): безопасный рестарт (reset-failed) — apply может
     # идти в цепочке с другими рестартами; StartLimitBurst=3/60s юнита xray
     # отклоняет 4-й start за минуту (start-limit-hit). Ждём до 90 сек —
     # тот же RIPE-конфиг, те же 30–60 сек на валидацию.
@@ -535,7 +535,7 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
     if callable(_safe_restart):
         _xray_active = _safe_restart(wait_active=90, attempts=1)
     else:  # fallback на старое поведение (старое ядро без хелпера)
-        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)  # v57
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True) # 
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         _xray_active = False
         for _wi in range(90):
@@ -587,7 +587,7 @@ def _as_direct_remove_from_xray(asn: str) -> None:
             _set_config_owner(cfg_path)
         except Exception as e:
             warn(f"  Ошибка {cfg_path}: {e}")
-    _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)  # v57
+    _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True) # 
     _run(["systemctl", "restart", "xray"], check=False, quiet=True)
     _nginx_restart_if_reality()
     success(f"Правила {asn} удалены из Xray")

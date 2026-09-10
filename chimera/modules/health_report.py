@@ -81,7 +81,7 @@ def do_health_report(send_tg_flag: bool = True) -> str:
     nginx_ok = r.stdout.strip() == "active"
     lines.append(f"{'✅' if nginx_ok else '❌'} Nginx: {'активен' if nginx_ok else 'НЕ АКТИВЕН'}")
 
-    # v62: фактический DNS-путь Xray — config.json + живой DNS-стек.
+    # фактический DNS-путь Xray — config.json + живой DNS-стек.
     # Одна строка закрывает «через что идут DNS-запросы»: конфиг «через
     # AGH» + мёртвый AGH = запросы молча в fallback, фильтры обходятся.
     try:
@@ -227,7 +227,7 @@ try:
     pct = float(p[4].replace('%',''))
     lines.append(f'{{chr(9989) if pct<80 else chr(9888)}} Диск: {{p[2]}}/{{p[1]}} ({{pct:.0f}}%)')
 except: pass
-# v62: фактический DNS-путь Xray (config.json + живой DNS-стек)
+# фактический DNS-путь Xray (config.json + живой DNS-стек)
 try:
     _servers = []
     for _cp in ('/etc/xray/config.json','/usr/local/etc/xray/config.json'):
@@ -251,7 +251,7 @@ try:
                            for _l in _ss.splitlines())
             _agh_resolves = None
             if _agh:
-                # v65: сервис+порт ≠ работающий DNS — живая проба резолва
+                # сервис+порт ≠ работающий DNS — живая проба резолва
                 try:
                     _r = _run(['dig','@127.0.0.1','ya.ru','+time=2','+tries=1','+short'])
                     _agh_resolves = bool((_r.stdout or '').strip())

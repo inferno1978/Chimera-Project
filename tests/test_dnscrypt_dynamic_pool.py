@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tests/test_v74_dnscrypt_dynamic_pool.py
+tests/test_dnscrypt_dynamic_pool.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit + integration тесты v74 (динамический пул DNSCrypt):
+Unit + integration тесты (динамический пул DNSCrypt):
 
   1. Пул 245: счётчики, уникальность, отсутствие мёртвых из кладбища
   2. Маршруты: DoH-серверы не маршрутятся; релеи маршрутов — из wildcard/набора;
@@ -63,11 +63,11 @@ class TestPoolV74(unittest.TestCase):
         self.assertFalse(doh_names & set(routes),
                          "DoH-серверы не должны быть в маршрутах")
 
-    def test_security_params_v74(self):
+    def test_security_params(self):
         self.assertNotIn("http3_probe", adv._SECURITY_PARAMS)
         self.assertIn("bootstrap_resolvers", adv._SECURITY_PARAMS)
 
-    def test_sources_v74(self):
+    def test_sources(self):
         secs = re.findall(r'\[sources\.([^\]]+)\]', adv._EXTRA_SOURCES)
         self.assertEqual(secs, ["odoh-servers", "odoh-relays"])
         self.assertNotIn("dnscry.pt", " ".join(secs))
@@ -75,7 +75,7 @@ class TestPoolV74(unittest.TestCase):
 
     def test_wildcard_relays(self):
         self.assertEqual(len(adv._WILDCARD_RELAYS), 30)
-        # мёртвые релеи v73 не должны попасть в wildcard
+        # мёртвые релеи не должны попасть в wildcard
         for dead in ("anon-cs-ch6", "anon-cs-swe6",
                      "dnscry.pt-anon-frankfurt-ipv4"):
             self.assertNotIn(dead, adv._WILDCARD_RELAYS)

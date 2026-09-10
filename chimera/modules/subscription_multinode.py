@@ -1542,7 +1542,7 @@ TELEGRAM_TAG  = "✈️ Telegram"
 AI_TAG        = "🤖 AI"
 DIRECT_TAG    = "direct"
 
-# v69: блокирующие outbounds ("block"/"dns") выпилены из sing-box 1.12+
+# блокирующие outbounds ("block"/"dns") выпилены из sing-box 1.12+
 # (legacy special outbounds: deprecated в 1.11, FATAL с 1.12.25+ — конфиг
 # умирает на старте). Их роль выполняют route-actions: reject / hijack-dns,
 # которые в правилах уже используются.
@@ -1557,7 +1557,7 @@ def _singbox_vless_outbound(nd: dict) -> dict:
         "server_port": nd["port"],
         "uuid": nd["uuid"],
     }
-    # v69: доменный адрес ноды — обязателен domain_resolver (sing-box 1.12+:
+    # доменный адрес ноды — обязателен domain_resolver (sing-box 1.12+:
     # без него разрешение адреса уходит в deprecated-путь/петлю).
     if _is_domain(nd["host"]):
         ob["domain_resolver"] = "local-dns"
@@ -1585,7 +1585,7 @@ def _singbox_vless_outbound(nd: dict) -> dict:
 
 
 # ── Rule-sets (sing-box 1.11.x+, .srs формат) ─────────────────────────────
-# v69: каждый URL проверен HTTP-пробой (200). ВАЖНО:
+# каждый URL проверен HTTP-пробой (200). ВАЖНО:
 #   • SagerNet/sing-geosite@rule-set — только geosite-<name>;
 #     категории «ru» там НЕТ (404) → «category-ru»
 #   • SagerNet/sing-geoip@rule-set — только страны;
@@ -1607,7 +1607,7 @@ _SINGBOX_RULESET_DEFS = [
     ("geoip-telegram",    f"{_METACUBE_GEO}/geoip/telegram.srs"),
     # AI
     ("geosite-openai",    f"{_SAGERNET_GEOSITE}/geosite-openai.srs"),
-    # РФ-direct (v69: «ru» не существует в sing-geosite → category-ru)
+    # РФ-direct («ru» не существует в sing-geosite → category-ru)
     ("geosite-category-ru", f"{_SAGERNET_GEOSITE}/geosite-category-ru.srs"),
     ("geosite-category-ads-all", f"{_SAGERNET_GEOSITE}/geosite-category-ads-all.srs"),
     ("geoip-ru",          _SB_JSDELIVR + "/SagerNet/sing-geoip@rule-set/geoip-ru.srs"),
@@ -1618,7 +1618,7 @@ _SINGBOX_RULESET_DEFS = [
 
 def _singbox_ruleset_definitions() -> list[dict]:
     """Генерирует route.rule_set[] — remote .srs.
-    download_detour убран (v69): «detour к пустому direct-outbound» = FATAL
+    download_detour убран: «detour к пустому direct-outbound» = FATAL
     на старте sing-box 1.13+; без поля загрузка идёт напрямую — как и нужно."""
     return [{
         "type": "remote",
@@ -1681,7 +1681,7 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
       • DNS: fake-ip + DoH 1.1.1.1 (через proxy) + локальная
         для доменов нод и default_domain_resolver (чтобы ноды могли
         резолвить свои домены).
-      • Inbounds: TUN mixed (auto_route; strict_route отключён — v69).
+      • Inbounds: TUN mixed (auto_route; strict_route отключён —).
       • Outbounds: все ноды (vless Reality/xHTTP) + сателлиты +
         selector «🎯 Chimera» + urltest «auto» + Streaming/Telegram/AI
         (каждая со своим urltest «*-auto») + direct.
@@ -1697,7 +1697,7 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
     Возвращает "" если нод нет вообще — caller откатывается на старый
     single-outbound конфиг.
 
-    Совместимость (v69):
+    Совместимость:
       • sing-box 1.12+ / 1.13+ — целевые версии (новый формат DNS-серверов
         type/server; fakeip-диапазоны внутри сервера; без legacy special
         outbounds; route.default_domain_resolver).
@@ -1733,7 +1733,7 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
         node_tags = [nd["name"] for nd in nodes]
         exit_tags = [nd["name"] for nd in reg["exits"]] or node_tags
         first_tag = node_tags[0]
-        # v69: default селектора — ENTRY-нода (каскад). Exit-ноды напрямую
+        # default селектора — ENTRY-нода (каскад). Exit-ноды напрямую
         # из РФ недоступны (для того и каскад) — дефолт "первый exit" убивал
         # весь трафик и DNS (detour remote-dns через selector) на старте.
         entry_tag = reg["entry"]["name"] if reg.get("entry") else None
@@ -1767,7 +1767,7 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
                                 ("✈️ Telegram",  TELEGRAM_TAG),
                                 ("🤖 AI",         AI_TAG)):
                 auto_tag = gname + " (auto)"
-                # v69: в группу включается и entry-каскад (дефолт): из РФ
+                # в группу включается и entry-каскад (дефолт): из РФ
                 # exit-ноды напрямую недоступны — стриминг через прямой exit
                 # был мёртв по умолчанию.
                 members = (([entry_tag] if entry_tag else [])
@@ -1850,16 +1850,16 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
                     {
                         "type": "udp",
                         "tag": "local-dns",
-                        # v69: Yandex вместо AliDNS (223.5.5.5 — Китай:
+                        # Yandex вместо AliDNS (223.5.5.5 — Китай:
                         # из РФ таймауты «context deadline exceeded»;
                         # это DNS для доменов нод и default_domain_resolver).
-                        # v69: БЕЗ detour — «detour к пустому direct-outbound»
+                        # БЕЗ detour — «detour к пустому direct-outbound»
                         # = FATAL на старте sing-box 1.13+ (без detour DNS-транспорт
                         # и так ходит напрямую).
                         "server": "77.88.8.8",
                     },
                     {
-                        # v69: fakeip-диапазоны — внутри сервера (легаси-блок
+                        # fakeip-диапазоны — внутри сервера (легаси-блок
                         # dns.fakeip.* — FATAL на sing-box 1.13+).
                         "type": "fakeip",
                         "tag": "fakeip-dns",
@@ -1868,7 +1868,7 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
                     },
                 ],
                 "rules": (
-                    # v69: домены нод — ТОЛЬКО реальный DNS (никогда fakeip):
+                    # домены нод — ТОЛЬКО реальный DNS (никогда fakeip):
                     # легаси-правило outbound:any выпилено в 1.13+; без этого
                     # domain-нода может получить fake-ip → петля → i/o timeout.
                     ([{"domain_suffix": list(node_domains), "server": "local-dns"}]
@@ -1888,7 +1888,7 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
                     "address": ["172.18.0.1/30", "fdfe:dcba:9876::1/126"],
                     "mtu": 9000,
                     "auto_route": True,
-                    # v69: strict_route выключен — на Windows его WFP-правила
+                    # strict_route выключен — на Windows его WFP-правила
                     # рвут СОБСТВЕННЫЕ dial sing-box (симптом: dial tcp
                     # <entry>:443: i/o timeout при живом TCP снаружи).
                     "strict_route": False,
@@ -1909,7 +1909,7 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
                 "rules": all_rules,
                 "final": SELECTOR_TAG,
                 "auto_detect_interface": True,
-                # v69: обязательный resolver для outbounds с доменным адресом
+                # обязательный resolver для outbounds с доменным адресом
                 # (легаси-правило outbound:any в DNS удалено в 1.13+).
                 "default_domain_resolver": "local-dns",
             },

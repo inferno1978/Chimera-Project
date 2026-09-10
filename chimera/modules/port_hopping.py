@@ -221,7 +221,7 @@ def _ufw_allow_range(range_start: int, range_end: int, proto: str) -> None:
     """Добавляет правило UFW для диапазона портов.
 
      миграция на port_registry (с backward compat fallback).
-     v79: регистрация диапазона — ОДНИМ заходом (port_register_range),
+     регистрация диапазона — ОДНИМ заходом (port_register_range),
     а не циклом port_register() на каждый порт: на диапазоне 10000-20000
     поэлементный цикл = O(N^2) перезаписей реестра (минуты без вывода,
     TUI выглядит зависшим — bench: 3000 итераций = 24с с замедлением).
@@ -251,7 +251,7 @@ def _ufw_delete_range(range_start: int, range_end: int, proto: str) -> None:
     """Удаляет правило UFW для диапазона портов.
 
      миграция на port_registry (с legacy comment для backward compat).
-     v79: снятие регистрации — ОДНИМ заходом (port_unregister_range),
+     снятие регистрации — ОДНИМ заходом (port_unregister_range),
     не поэлементным port_unregister() (тот же O(N^2)-завис).
     """
     protos = ["tcp", "udp"] if proto == "both" else [proto]
@@ -354,7 +354,7 @@ def _enable_hopping(range_start: int, range_end: int, real_port: int, proto: str
     # Сначала чистим старые правила (если были)
     _remove_rules()
 
-    # v49: смена диапазона — СТАРЫЙ диапазон закрываем целиком (UFW-правило
+    # смена диапазона — СТАРЫЙ диапазон закрываем целиком (UFW-правило
     # диапазона + записи реестра за каждый порт), иначе они утекают навсегда.
     old = _load_ph()
     if old.get("enabled") and old.get("range_start") and old.get("range_end"):
@@ -399,7 +399,7 @@ def _disable_hopping() -> bool:
     ph = _load_ph()
     _remove_rules()
 
-    # v49: чистим UFW-правило + записи реестра БЕЗусловно. Раньше всё
+    # чистим UFW-правило + записи реестра БЕЗусловно. Раньше всё
     # было за `if _ufw_active()` — при выключенном UFW записи реестра
     # оставались жить (stale entries).
     if ph.get("range_start") and ph.get("range_end"):

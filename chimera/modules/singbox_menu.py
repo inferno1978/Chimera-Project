@@ -1430,7 +1430,7 @@ def _switch_cdn_provider() -> None:
             remove_cdn_allowlist(old_port)
         except Exception:
             pass  # не критично — порт больше не слушается
-        # v49: смена порта при смене CDN — старый порт закрываем в UFW и
+        # смена порта при смене CDN — старый порт закрываем в UFW и
         # реестре, новый открываем/регистрируем. Раньше старое правило
         # vless_ws_cdn оставалось жить (orphaned UFW + stale запись
         # SERVICE_SINGBOX), а новый порт не открывался вовсе.

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tests/test_v68_geo_asset_path.py
+tests/test_geo_asset_path.py
 ───────────────────────────────────────────────────────────────────────────────
-v68: регрессионные тесты гео-активов Xray.
+: регрессионные тесты гео-активов Xray.
 
 ИНЦИДЕНТ («в каскадном режиме не работает НИЧЕГО, i/o timeout»):
   • Xray-core ищет geoip/geosite ТОЛЬКО в: env xray.location.asset →
@@ -16,7 +16,7 @@ v68: регрессионные тесты гео-активов Xray.
     закрыт → i/o timeout для ВСЕХ клиентов. Режим A без split не содержит
     geo-правил — потому «Режим A работает, Режим B нет».
 
-Фиксы v68:
+Фиксы 
   1. create_xray_service: Environment=xray.location.asset=/etc/xray
      (когда оба .dat в /etc/xray и >1 МБ).
   2. _geo_files_available: зеркалирование в /usr/local/share/xray

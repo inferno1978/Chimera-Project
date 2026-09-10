@@ -7,7 +7,7 @@ chimera/modules/health.py
   • health_check_nginx()  — проверяет активность Nginx
   • health_check_ssl()    — проверяет срок действия TLS-сертификата
   • health_check_ports()  — проверяет доступность портов 22, 80, SERVER_PORT
-  • health_check_dns_path() — фактический DNS-путь Xray (v62: config.json
+  • health_check_dns_path() — фактический DNS-путь Xray (config.json
                             + живой DNS-стек: AGH:53 / DNSCrypt / публичный)
   • run_full_health_check() — запускает все проверки и пишет статус
   • do_check_tls_cert()   — интерактивный просмотр информации о сертификате
@@ -318,7 +318,7 @@ def health_check_ports() -> bool:
 
 
 def health_check_dns_path() -> bool:
-    """v62: фактический DNS-путь Xray — config.json + живой DNS-стек.
+    """фактический DNS-путь Xray — config.json + живой DNS-стек.
 
     Одна строка в health-отчёте закрывает вопрос «через что идут
     DNS-запросы Xray»: читаем ФАКТИЧЕСКИЙ config.json (dns.servers[0])

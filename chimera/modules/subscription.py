@@ -240,7 +240,7 @@ def _build_vless_uri(user: dict, state: dict) -> Optional[str]:
         return None
     proto      = state.get("protocol_mode", "reality")
     port       = int(state.get("server_port", 443))
-    # v58: pbk/sid/spx — с fallback на живой config.json. При частично
+    # pbk/sid/spx — с fallback на живой config.json. При частично
     # повреждённом state.json (domain/uuid на месте, ключи потеряны)
     # ссылки получали pbk=&sid= и молча ломались. Источник истины для
     # выданных ссылок — realitySettings текущего конфига.
@@ -407,12 +407,12 @@ def _build_mieru_uris(user: dict, server_ip: str) -> list[str]:
 
 
 def _mieru_client_endpoints(user: dict, server_ip: str) -> list[dict]:
-    """v86: единый источник mieru-точек для ссылок и singbox-outbound'ов.
+    """единый источник mieru-точек для ссылок и singbox-outbound'ов.
 
     Возвращает список {addr, port, proto, username, password, client_dns,
     pattern_b64}: hybrid (порт на транспорт; tcp и udp — ОТДЕЛЬНЫЕ точки)
     + standalone (протоколы из state, BOTH → TCP и UDP). addr — домен из
-    client_server_addr (v85) важнее переданного server_ip: ссылки и
+    client_server_addr важнее переданного server_ip: ссылки и
     конфиги переживают смену IP сервера. pattern_b64 — client-side
     traffic-pattern ('' — не задан, ссылкам не нужен).
     """
@@ -451,7 +451,7 @@ def _mieru_client_endpoints(user: dict, server_ip: str) -> list[dict]:
                 if match:
                     addr = (st.get("client_server_addr") or "").strip() or server_ip
                     client_dns = (st.get("client_dns") or "").strip()
-                    # v86: BOTH — отдельная точка на каждый транспорт
+                    # BOTH — отдельная точка на каждый транспорт
                     proto = (st.get("protocol") or "TCP").upper()
                     protos = ("TCP", "UDP") if proto == "BOTH" else (proto,)
                     pattern_b64 = ""
@@ -474,11 +474,11 @@ def _mieru_client_endpoints(user: dict, server_ip: str) -> list[dict]:
 
 
 def _collect_mieru_json_outbounds(user: dict, server_ip: str) -> tuple:
-    """v86: mieru-outbound'ы для singbox-подписки (nyamebox/nekobox/sing-box).
+    """mieru-outbound'ы для singbox-подписки (nyamebox/nekobox/sing-box).
 
     Возвращает (outbounds, meta). outbounds — по одному на транспорт
     (hybrid both и standalone BOTH → и TCP, и UDP); tag уникален
-    (суффикс -tcp/-udp при коллизии); addr — домен из v85-state;
+    (суффикс -tcp/-udp при коллизии); addr — домен из state;
     traffic_pattern — blob/preset, если известен. meta = {client_dns,
     server_domain, first_tag} — для dns-секции конфига подписки."""
     meta = {"client_dns": "", "server_domain": "", "first_tag": ""}
@@ -821,7 +821,7 @@ def build_subscription_singbox_config(user: dict) -> str:
     outbounds: list[dict] = []
 
     # 1. VLESS outbound — переиспользуем логику из rest_api.
-    # v86: в hybrid-режиме внешний вход ушёл с VLESS на Mieru (SOCKS-петля
+    # в hybrid-режиме внешний вход ушёл с VLESS на Mieru (SOCKS-петля
     # 127.0.0.1) — такой outbound снаружи мёртв. Исключаем, паритет с
     # base64-подпиской (is_hybrid_mieru_active там делает то же самое).
     vless_outbounds: list[dict] = []
@@ -841,9 +841,9 @@ def build_subscription_singbox_config(user: dict) -> str:
     registry_outbounds = _collect_registry_json_outbounds(user)
     outbounds.extend(registry_outbounds)
 
-    # 2.5 v86: mieru-outbound'ы (TCP и UDP — отдельными нодами) — раньше
+    # 2.5 mieru-outbound'ы (TCP и UDP — отдельными нодами) — раньше
     # mierus:// жил только в base64-формате, а nyamebox/nekobox/sing-box
-    # (format=singbox) mieru не получали вовсе. Адрес — домен из v85-state,
+    # (format=singbox) mieru не получали вовсе. Адрес — домен из state,
     # traffic-pattern — blob/preset, домен резолвится через domain_resolver.
     _st = _load_state() or {}
     _srv = _get_server_ip("4") or _st.get("domain", "")
@@ -866,7 +866,7 @@ def build_subscription_singbox_config(user: dict) -> str:
         },
     }
 
-    # 3.5 v86: DNS-секция — ТОЛЬКО когда mieru есть, client_dns задан (v85)
+    # 3.5 DNS-секция — ТОЛЬКО когда mieru есть, client_dns задан
     # и других прокси-outbound'ов нет. В смешанной конфигурации (VLESS+mieru
     # в standalone) DNS через mieru создавал бы зависимость: mieru упал —
     # и VLESS-домен перестал бы резолвиться. Чистый hybrid-профиль (mieru —

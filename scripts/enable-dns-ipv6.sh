@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  Chimera Project — enable-dns-ipv6.sh (v72.1)
+# Chimera Project — enable-dns-ipv6.sh
 # ============================================================================
 #  Включает IPv6 в DNS-стеке на ЖИВОМ сервере (AGH + dnscrypt):
 #
@@ -11,20 +11,20 @@
 #    3. UFW: проверяет DoT :853/DoH :30443 (уже публичны по дизайну,
 #       ufw-правило покрывает v4+v6 автоматически).
 #
-#  ЧЕГО СКРИПТ НЕ ДЕЛАЕТ (осознанно, дизайн проекта v65):
+# ЧЕГО СКРИПТ НЕ ДЕЛАЕТ (осознанно, дизайн проекта):
 #    НЕ открывает :53 наружу в UFW — иначе open resolver (усиление DDoS).
 #    Публичный IPv6-доступ к DNS — через DoT :853 и DoH :30443, которые
 #    уже открыты. IPv6-клиенты появляются в статистике AGH при DoT/DoH.
 #
-#  v72.1 (инцидент <node-2> 30.08: «AGH упал или DNS мёртв — ОТКАТ» →
+# (инцидент <node-2> 30.08: «AGH упал или DNS мёртв — ОТКАТ» →
 #  «DNS мёртв даже после отката»):
 #    - dns_alive был ОДНИМ системным getent без settle — во время
 #      bootstrap AGH+dnscrypt после рестарта (DoH/TLS handshake, prefetch
-#      сертификатов) это ложный «мёртв» (урок v60 из aghome_setup).
+# сертификатов) это ложный «мёртв» (урок из aghome_setup).
 #      Теперь: ПРЯМАЯ проба к AGH (dig @127.0.0.1 / python3-UDP, любой
 #      ответ = жив) + settle-повторы 4×2с + запасной пробел на [v6]:53.
 #    - systemctl reset-failed перед КАЖДЫМ рестартом (start-limit,
-#      паттерн v57) — двойной рестарт за минуту мог оставить AGH
+# паттерн) — двойной рестарт за минуту мог оставить AGH
 #      в start-limit-hit навсегда.
 #    - Лестница отката: конфиг AGH → +рестарт dnscrypt (upstream) →
 #      полный откат к до-скриптовому состоянию (включая dnscrypt) →
@@ -74,7 +74,7 @@ wait_svc() {  # wait_svc <имя> <сек>
     return 1
 }
 
-restart_svc() {  # v72.1: reset-failed + restart (start-limit, паттерн v57)
+restart_svc() { # reset-failed + restart (start-limit, паттерн)
     systemctl reset-failed "$1" >/dev/null 2>&1 || true
     systemctl restart "$1"
 }
@@ -108,7 +108,7 @@ finally:
 PYEOF
 }
 
-dns_alive() {  # v72.1: прямые пробы к AGH с settle-повторами (урок v60)
+dns_alive() { # прямые пробы к AGH с settle-повторами (урок)
     local i
     for ((i=1; i<=4; i++)); do
         probe_dns_at "127.0.0.1" && return 0
@@ -187,7 +187,7 @@ PYEOF
     if [ $RC -eq 0 ]; then
         [ -n "$OUT" ] && echo -e "  $OUT"
         restart_svc "$DNS_SVC"
-        # v72.1: settle — слушатель появляется на 1-3с позже active
+        # settle — слушатель появляется на 1-3с позже active
         DC_UP=0
         for ((i=1; i<=15; i++)); do
             if systemctl is-active --quiet "$DNS_SVC" && \
@@ -252,7 +252,7 @@ PYEOF
             bad "AGH не поднялся с IPv6 или DNS не отвечает — откат"
             echo "    причина (журнал AGH):"
             journalctl -u "$AGH_SVC" -n 8 --no-pager 2>/dev/null | tail -6 | sed 's/^/      /'
-            # ── Лестница отката (v72.1) ──
+            # ── Лестница отката ──
             # Ступень 1: вернуть конфиг AGH
             cp -a "$BAK" "$AGHYAML"
             restart_svc "$AGH_SVC"
@@ -311,7 +311,7 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
     if ufw status | grep -qE "^\s*53[/ ]"; then
         echo -e "  ${Y}[i]${N} :53 открыт в UFW вручную — open resolver! Проверь, твоё ли это правило."
     else
-        ok ":53 наружу закрыт (дизайн v65 — нет open resolver; IPv6-клиенты ходят через DoT/DoH)"
+        ok ":53 наружу закрыт (дизайн нет open resolver; IPv6-клиенты ходят через DoT/DoH)"
     fi
 else
     skip "UFW неактивен — порты не трогаю"

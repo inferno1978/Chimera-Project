@@ -79,7 +79,7 @@ def _core_module():
 #  ВСПОМОГАТЕЛЬНАЯ: проверка geo-файлов во всех директориях Xray
 # =============================================================================
 
-# ── v68: РЕАЛЬНЫЙ порядок поиска geo-файлов Xray-core ─────────────────────────
+# ── РЕАЛЬНЫЙ порядок поиска geo-файлов Xray-core ─────────────────────────
 # ПРОВЕРЕНО по исходникам Xray-core (common/platform/others.go, GetAssetLocation):
 #   1. env  xray.location.asset (или XRAY_LOCATION_ASSET)
 #   2. каталог БИНАРНИКА (/usr/local/bin — где живёт бинарник Chimera)
@@ -96,7 +96,7 @@ def _core_module():
 #     подключения (клиент видит полностью мёртвый сервер).
 # Каноническое хранилище Chimera — /etc/xray (сюда пишут все загрузчики),
 # поэтому юнит выставляет Environment=xray.location.asset=/etc/xray
-# (create_xray_service, v68), а _geo_files_available ЗЕРКАЛИТ файлы в
+# (create_xray_service), а _geo_files_available ЗЕРКАЛИТ файлы в
 # /usr/local/share/xray — для юнитов без env и для ручных запусков.
 XRAY_REAL_ASSET_DIRS = [
     Path("/usr/local/share/xray"),   # путь поиска №3 Xray-core
@@ -106,12 +106,12 @@ XRAY_REAL_ASSET_DIRS = [
 
 
 def _mirror_geo_to_share_dir(geosite_src: Path, geoip_src: Path) -> bool:
-    """v68: зеркалит канонические geo-файлы в /usr/local/share/xray —
+    """зеркалит канонические geo-файлы в /usr/local/share/xray
     РЕАЛЬНЫЙ путь поиска Xray-core (когда env xray.location.asset не задан).
 
     Гарантирует, что файл, который ПРОВЕРЯЕТ проект (grep по /etc/xray),
     и файл, который ЗАГРУЖАЕТ Xray (/usr/local/share/xray), — идентичны.
-    Инцидент (v68): /etc/xray содержал runetfreedom-geosite (73 МБ, с
+    Инцидент: /etc/xray содержал runetfreedom-geosite (73 МБ, с
     категорией ru-available-only-inside), а /usr/local/share/xray — стоковый
     geosite.dat из zip XTLS (без категории) → правило добавлено по grep'у
     /etc/xray → Xray загрузил стоковый файл → «code not found in
@@ -146,7 +146,7 @@ def _mirror_geo_to_share_dir(geosite_src: Path, geoip_src: Path) -> bool:
 
 
 def strip_geo_rules(config: dict) -> bool:
-    """v68: удаляет из routing.rules правила с geosite:/geoip: ссылками и
+    """удаляет из routing.rules правила с geosite:/geoip: ссылками и
     geoDataBasePath. Возвращает True если что-то удалено.
 
     ПОЧЕМУ: если geosite.dat/geoip.dat не загрузились (нет в пути поиска
@@ -228,7 +228,7 @@ def _geo_files_available(auto_copy: bool = True) -> bool:
         return False
 
     # Если файлы найдены но НЕ в /etc/xray/ — копируем туда (каноническое
-    # хранилище; юнит v68 указывает xray.location.asset=/etc/xray).
+    # хранилище; юнит указывает xray.location.asset=/etc/xray).
     if auto_copy and geosite_src != GEOSITE_DAT:
         try:
             GEOSITE_DAT.parent.mkdir(parents=True, exist_ok=True)
@@ -242,7 +242,7 @@ def _geo_files_available(auto_copy: bool = True) -> bool:
         except Exception:
             pass
 
-    # v68: зеркалим канонические копии в /usr/local/share/xray — РЕАЛЬНЫЙ
+    # зеркалим канонические копии в /usr/local/share/xray — РЕАЛЬНЫЙ
     # путь поиска Xray-core для юнитов без xray.location.asset. Поле
     # geoDataBasePath Xray игнорирует, /etc/xray сам по себе НЕ ищется.
     if auto_copy:

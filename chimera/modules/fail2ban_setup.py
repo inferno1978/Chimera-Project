@@ -179,7 +179,7 @@ def _watchdog_install() -> None:
         if [ "$is_active" != "active" ] || [ "$port_listening" != "yes" ]; then
             echo "[$DATE] WATCHDOG: xray=$is_active port=$PORT listening=$port_listening — перезапуск" >> "$LOG"
             python3 {sys.argv[0]} --tg-event xray_down "🔴 Watchdog: xray=$is_active port=$PORT — перезапуск" >> "$LOG" 2>&1 || true
-            # v57 (start-limit-fix): reset-failed ОБЯЗАТЕЛЕН — если xray упал с
+            # (start-limit-fix): reset-failed ОБЯЗАТЕЛЕН — если xray упал с
             # start-limit-hit (счётчик StartLimitBurst юнита исчерпан), то
             # сам restart без сброса failed-состояния тоже отклоняется, и
             # watchdog не может поднять сервис. reset-failed снимает блок.

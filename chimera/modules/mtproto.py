@@ -557,7 +557,7 @@ def _get_local_primary_ipv4() -> str:
         pass
     return ""
 
-# v65: TEST-NET (RFC 5737) — НЕ NAT-адреса: в регрессионных тестах и
+# TEST-NET (RFC 5737) — НЕ NAT-адреса: в регрессионных тестах и
 # стендах используются как публичные заглушки (Mode B local).
 _TEST_NETS_V4 = ("192.0.2.", "198.51.100.", "203.0.113.")
 
@@ -586,7 +586,7 @@ def _get_public_ip() -> tuple:
     """
     Возвращает (ipv4, ipv6) для использования в tg:// ссылках.
 
-    Логика выбора IPv4 (v65 — восстановлена семантика _is_direct_ip,
+    Логика выбора IPv4 (восстановлена семантика _is_direct_ip,
     утерянная в 6af113b, + сохранён его NAT-фикс):
       1. Читаем IP локального интерфейса (тот, на котором слушает telemt).
          Это единственно правильный адрес для tg:// ссылки — пользователь
@@ -1780,7 +1780,7 @@ def xray_enable_tproxy_for_telemt(port: int = XRAY_TPROXY_PORT) -> tuple:
             _xray_remove_dokodemo(cfg)
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             return False, err
-        # v56 (start-limit-fix): reset-failed перед рестартом — сбрасывает
+        # (start-limit-fix): reset-failed перед рестартом — сбрасывает
         # счётчик start-rate-limit (StartLimitBurst=3/60s в юните xray).
         # tproxy-restore вызывается из _rebuild_and_restart_xray ТРЕТЬИМ
         # рестартом подряд (после YouTube и IP-pin) — без сброса лимита
@@ -1847,7 +1847,7 @@ def xray_disable_tproxy_for_telemt() -> tuple:
             if _xray_remove_dokodemo(cfg):
                 cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
                 cfg_path.chmod(0o640)
-                # v56 (start-limit-fix): reset-failed перед рестартом —
+                # (start-limit-fix): reset-failed перед рестартом
                 # сброс счётчика start-rate-limit юнита xray (см. выше).
                 _run(["systemctl", "reset-failed", XRAY_SERVICE_NAME])
                 _run(["systemctl", "restart", XRAY_SERVICE_NAME])
@@ -2213,7 +2213,7 @@ def _full_uninstall(silent: bool = False) -> bool:
     #  миграция на port_registry (с legacy comment).
     _mtproto_ufw_close(port)
 
-    # v49: iOS-фикс (ext_port) — его UFW/реестр не чистились при полном
+    # iOS-фикс (ext_port) — его UFW/реестр не чистились при полном
     # удалении Telemt (orphaned allow + stale запись SERVICE_TELEMT_IOS_FIX)
     try:
         from chimera.modules import telemt_ios_fix as _ios

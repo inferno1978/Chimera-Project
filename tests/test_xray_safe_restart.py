@@ -2,7 +2,7 @@
 """
 tests/test_xray_safe_restart.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для v56 (start-limit-fix):
+Unit-тесты для (start-limit-fix):
 
   1. _core._xray_safe_restart — безопасный рестарт xray:
      • reset-failed вызывается ДО restart (сброс счётчика start-rate-limit);
@@ -42,7 +42,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 def _setup_core_in_sysmodules():
     """Загружает chimera._core через exec ПРЯМО в __dict__ фейкового модуля.
 
-    v56: exec в __dict__ модуля (а не в отдельный dict с копированием) —
+    exec в __dict__ модуля (а не в отдельный dict с копированием)
     мутации ``core._run = MagicMock(...)`` из тестов видны функциям ядра
     через их __globals__.
     """

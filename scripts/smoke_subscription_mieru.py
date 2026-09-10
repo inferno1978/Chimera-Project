@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-scripts/smoke_v86_subscription_mieru.py
+scripts/smoke_subscription_mieru.py
 ───────────────────────────────────────────────────────────────────────────────
-Смоук v86: подписка видит mieru как юзер nyamebox/karing.
+Смоук подписка видит mieru как юзер nyamebox/karing.
 
 Сценарий — кейс юзера: Hybrid Addon, транспорт both (TCP 443 + UDP 444),
 домен cdn.example, DNS panel.example, traffic-pattern blob.
@@ -147,7 +147,7 @@ def main() -> int:
     for name, res in checks:
         print(f"  {'✓' if res else '✗'}  {name}")
         ok = ok and res
-    print(f"\n{'SMOKE v86 OK' if ok else 'SMOKE v86 FAILED'} "
+    print(f"\n{'SMOKE OK' if ok else 'SMOKE FAILED'} "
           f"({sum(1 for _, r in checks if r)}/{len(checks)})")
     return 0 if ok else 1
 

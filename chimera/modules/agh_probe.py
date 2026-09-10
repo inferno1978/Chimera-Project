@@ -335,7 +335,7 @@ def agh_dns_available(run: Optional[Callable] = None,
     # Шаг 4: end-to-end проба резолва
     ok_probe, note = agh_probe_resolve()
     if ok_probe:
-        # v65 (ratelimit-heal): санация ЖИВОГО конфига AGH. Эмпирика:
+        # (ratelimit-heal): санация ЖИВОГО конфига AGH. Эмпирика:
         # ratelimit>0 в AGH v0.107.79 = ТИХИЙ DROP сверх лимита (без
         # REFUSED и без логов), whitelist-поле мёртво, весь DNS Xray =
         # один /24-бакет 20 rps → EOF-шторм у клиентов. Проба на 1-2 qps
@@ -394,7 +394,7 @@ def _xray_dns_servers_from_config() -> list:
 
 
 def xray_dns_path_report(run: Optional[Callable] = None) -> dict:
-    """v62: фактический DNS-путь Xray одной строкой — для health-отчёта
+    """фактический DNS-путь Xray одной строкой — для health-отчёта
     меню (health.py / health_report.py) и emergency repair.
 
     Читает ФАКТИЧЕСКИЙ config.json (dns.servers[0] — генераторы ставят

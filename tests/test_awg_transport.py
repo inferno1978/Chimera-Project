@@ -541,10 +541,10 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
         self.assertIn(f"I1 = {_i1_val}", conf,
                       f"I1 должен быть в conf когда задан, фактически:\n{conf}")
 
-    def test_server_conf_writes_i_lines_commented_v54(self):
+    def test_server_conf_writes_i_lines_commented(self):
         """v5.4: _awg_server_conf_text пишет пустые I1-I5 ЗАКОММЕНТИРОВАННЫМИ.
 
-        См. test_empty_i1_to_i5_commented_v54 в test_awg_standalone.py.
+        См. test_empty_i1_to_i5_commented_ в test_awg_standalone.py.
         Коротко: старые amneziawg-tools падают на 'I2 = ' (пустая),
         но игнорируют '# I2 = '.
         """
@@ -652,7 +652,7 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
             conf = awg_transport._awg_server_conf_for_node(node)
         self.assertIn(f"I1 = {_i1_val}", conf)
 
-    def test_server_conf_for_node_writes_i_lines_commented_v54(self):
+    def test_server_conf_for_node_writes_i_lines_commented(self):
         """v5.4: _awg_server_conf_for_node пишет пустые I1-I5 ЗАКОММЕНТИРОВАННЫМИ."""
         from chimera.modules import awg_transport
         node = self._mock_node()

@@ -259,7 +259,7 @@ def _xray_try_local_zip(zip_name: str, xray_arch: str, chk_url: str, latest_tag:
 
 def _max_version_tag(tags: list) -> str:
     """
-    v70 (stale-mirror-guard): возвращает МАКСИМАЛЬНЫЙ тег из списка
+     (stale-mirror-guard): возвращает МАКСИМАЛЬНЫЙ тег из списка
     (semver-подобное сравнение: v26.10.3 > v26.7.28 > v26.3.27).
     Некорректные теги игнорируются; при пустом результате — ''.
     """
@@ -347,7 +347,7 @@ def install_xray() -> None:
             XRAY_INSTALLER_SPEC, print_hint_on_failure=False,
         )
     except Exception as ex:
-        # v60: метод 2 (прямой zip + SHA256) — штатный разработанный
+        # метод 2 (прямой zip + SHA256) — штатный разработанный
         # fallback, деградации нет — info вместо warn.
         info(f"Официальный установщик недоступен ({ex}) — перехожу к прямой загрузке")
         installer_ok = False
@@ -366,7 +366,7 @@ def install_xray() -> None:
             xray_installed = True
             success("Xray установлен через официальный установщик")
     else:
-        # v60: штатный fallback на метод 2 — info вместо warn.
+        # штатный fallback на метод 2 — info вместо warn.
         info("Официальный установщик недоступен — перехожу к прямой загрузке")
 
     # Метод 2: прямой zip с GitHub + SHA256 (несколько зеркал)
@@ -382,7 +382,7 @@ def install_xray() -> None:
             "https://api.github.com/repos/XTLS/Xray-core/releases/latest",
             "https://ghproxy.net/https://api.github.com/repos/XTLS/Xray-core/releases/latest",
         ]
-        # v70 (stale-mirror-guard): зеркала gh-proxy КЭШИРУЮТ ответы API на
+        # (stale-mirror-guard): зеркала gh-proxy КЭШИРУЮТ ответы API на
         # недели/месяцы. Инцидент: установка 28.08 с РФ получила от ghproxy
         # закэшированный "latest" = v26.3.27 (на 4 месяца старее реального
         # v26.7.28) → всё скачалось самосогласованно по старому тегу (zip+
@@ -411,7 +411,7 @@ def install_xray() -> None:
                     pass
             if _collected_tags:
                 break
-            # v60: транзиентный флап API, ретрай внутри цикла — info.
+            # транзиентный флап API, ретрай внутри цикла — info.
             info(f"  latest: попытка {attempt}/3 не удалась, повтор...")
             time.sleep(2)
         if _collected_tags:
@@ -612,7 +612,7 @@ def install_xray() -> None:
 
     r = _run([str(XRAY_BIN), "version"], capture=True, check=False)
     xray_ver = r.stdout.splitlines()[0] if r.stdout else "unknown"
-    # v70 (stale-mirror-guard): сверяем РЕАЛЬНУЮ версию бинарника с той,
+    # (stale-mirror-guard): сверяем РЕАЛЬНУЮ версию бинарника с той,
     # что собирались поставить. Расхождение = зеркало подсунуло не тот zip
     # (кэш) или локальный файл оказался другой версии.
     try:
@@ -745,7 +745,7 @@ def _detect_xhttp_mode_support() -> None:
             if major >= 25:
                 XHTTP_MODE_SUPPORTED = False
                 setattr(core, "XHTTP_MODE_SUPPORTED", XHTTP_MODE_SUPPORTED)
-                # v60: date-based нумерация — НОРМА для актуальных релизов
+                # date-based нумерация — НОРМА для актуальных релизов
                 # Xray (25.x.x+); поле корректно опускается — info вместо warn.
                 info(f"Xray {ver_line.split()[1]} — date-based версия, "
                      "поле \"mode\" в xhttpSettings не поддерживается, будет опущено")
@@ -767,7 +767,7 @@ def _detect_xhttp_mode_support() -> None:
 
 def generate_xray_config() -> None:
     core = _core_module()
-    # v58: Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи не должны
+    # Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи не должны
     # быть пустыми при регенерации (state.json битый/утерян → восстановление
     # из живого config.json/users.json; иначе ссылки юзеров ломаются).
     try:
@@ -863,7 +863,7 @@ def generate_xray_config() -> None:
     if not IS_IPV6_AVAILABLE:
         query_strategy = "UseIPv4"
 
-    # BUGFIX (v53): clients — из единого источника юзеров
+    # BUGFIX: clients — из единого источника юзеров
     # (_users_collect_for_config), а не только PARAM_UUID. Регенерация
     # конфига (AGH-финализация, «Пересоздать конфиг Xray», emergency
     # repair) не должна выкидывать существующих юзеров из inbound —
@@ -884,11 +884,11 @@ def generate_xray_config() -> None:
     # AGH-AWARE (v37): если AdGuard Home владеет 127.0.0.1:53 — DNS Xray
     # идёт через AGH (кеш + фильтры + DoT-upstream dnscrypt), иначе —
     # напрямую в dnscrypt:5300 (как раньше).
-    # v55 (agh_probe): health-check углублён — обязательная живая проба
+    # (agh_probe): health-check углублён — обязательная живая проба
     # резолва (end-to-end AGH → DNSCrypt → интернет) + нейтрализация
     # iptables redirect 53→5300 (он молча уводил локальный DNS в обход
     # AGH). Сбой любого шага → прежний путь DNSCrypt:5300.
-    # v64 (agh-autostart): AGH установлен, но остановлен → ПОДНИМАЕМ его
+    # (agh-autostart): AGH установлен, но остановлен → ПОДНИМАЕМ его
     # перед пробой («AGH должен запускаться и слушать порты, если он
     # установлен»). Не установлен — autostart безвреден (no-op).
     agh_ok, agh_note = agh_dns_available(run=_run, log_info=info,
@@ -909,7 +909,7 @@ def generate_xray_config() -> None:
             dns_servers.append(
                 {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
                  "network": "udp", "skipFallback": False})
-        # v67: последний живой fallback — Quad9 напрямую (UDP:53 anycast).
+        # последний живой fallback — Quad9 напрямую (UDP:53 anycast).
         # Достижим и с зарубежных, и с РФ-хостингов (1.1.1.1/8.8.8.8 в РФ
         # душатся/заблокированы РКН). Срабатывает ТОЛЬКО при падении AGH+DNSCrypt —
         # лучше открытый DNS, чем DNS black-hole для IPIfNonMatch-резолва
@@ -927,7 +927,7 @@ def generate_xray_config() -> None:
         dns_servers = [
             {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
              "network": "udp", "skipFallback": False},
-            # v67: живой Quad9-fallback — достижим из РФ (в отличие от 1.1.1.1/8.8.8.8)
+            # живой Quad9-fallback — достижим из РФ (в отличие от 1.1.1.1/8.8.8.8)
             {"address": "9.9.9.9", "port": 53, "network": "udp", "skipFallback": False},
             {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
             {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
@@ -971,7 +971,7 @@ def generate_xray_config() -> None:
             "listen":   "::",
             "protocol": "vless",
             "settings": {
-                # BUGFIX (v53): clients — из единого источника юзеров
+                # BUGFIX: clients — из единого источника юзеров
                 # (_users_collect_for_config), а не только PARAM_UUID:
                 # регенерация конфига не должна выкидывать существующих
                 # юзеров из inbound (иначе — «invalid request user id»
@@ -1113,7 +1113,7 @@ def generate_xray_config() -> None:
         else:
             success("DNS: IPv4-режим (1.1.1.1 → 8.8.8.8 → 9.9.9.9)")
     else:
-        # v68 (geo-self-heal): негрузимые geo-правила = МЁРТВЫЙ Xray (exit 23
+        # (geo-self-heal): негрузимые geo-правила = МЁРТВЫЙ Xray (exit 23
         # + RestartPreventExitStatus=23) = i/o timeout для ВСЕХ клиентов.
         _healed = False
         try:
@@ -1140,7 +1140,7 @@ def generate_xray_config_xhttp() -> None:
     """
     Генерация конфига Xray для VLESS + xHTTP + TLS (Режим A).
 
-    v58: в начале — Anti-Empty Identity Guard (UUID и параметры доступа
+    в начале — Anti-Empty Identity Guard (UUID и параметры доступа
     не должны остаться пустыми при регенерации — см. _core.
     _identity_params_recover).
 
@@ -1154,7 +1154,7 @@ def generate_xray_config_xhttp() -> None:
     Это позволяет одновременно держать рабочий сайт-заглушку и прокси на одном :443.
     """
     core = _core_module()
-    # v58: Anti-Empty Identity Guard — UUID и параметры доступа не должны
+    # Anti-Empty Identity Guard — UUID и параметры доступа не должны
     # остаться пустыми при регенерации (см. _core._identity_params_recover).
     try:
         core._identity_params_recover()
@@ -1198,7 +1198,7 @@ def generate_xray_config_xhttp() -> None:
     if not IS_IPV6_AVAILABLE:
         query_strategy = "UseIPv4"
 
-    # BUGFIX (v53): clients — из единого источника юзеров
+    # BUGFIX: clients — из единого источника юзеров
     # (_users_collect_for_config), а не только PARAM_UUID — регенерация
     # конфига не должна выкидывать существующих юзеров из inbound
     # («invalid request user id» → EOF у клиентов со старыми ссылками).
@@ -1216,10 +1216,10 @@ def generate_xray_config_xhttp() -> None:
     # DNS серверы
     # AGH-AWARE (v37): аналогично generate_xray_config() — при живом AGH
     # DNS Xray идёт через 127.0.0.1:53 (AGH), а не напрямую в dnscrypt.
-    # v55 (agh_probe): health-check углублён — живая проба резолва
+    # (agh_probe): health-check углублён — живая проба резолва
     # (end-to-end AGH → DNSCrypt → интернет) + нейтрализация iptables
     # redirect 53→5300. Сбой любого шага → прежний путь DNSCrypt:5300.
-    # v64 (agh-autostart): AGH установлен, но остановлен → поднимаем перед пробой.
+    # (agh-autostart): AGH установлен, но остановлен → поднимаем перед пробой.
     agh_ok, agh_note = agh_dns_available(run=_run, log_info=info,
                                          log_warn=warn, autostart=True)
 
@@ -1237,7 +1237,7 @@ def generate_xray_config_xhttp() -> None:
             dns_servers.append(
                 {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
                  "network": "udp", "skipFallback": False})
-        # v73 (синхрон с generate_xray_config v67): последний живой fallback —
+        # (синхрон с generate_xray_config): последний живой fallback
         # Quad9 напрямую (UDP:53 anycast, достижим и из РФ, и из-за рубежа).
         # Срабатывает ТОЛЬКО при падении AGH+DNSCrypt — лучше открытый DNS,
         # чем black-hole для IPIfNonMatch-резолва. 1.1.1.1/8.8.8.8 ниже —
@@ -1253,7 +1253,7 @@ def generate_xray_config_xhttp() -> None:
         dns_servers = [
             {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
              "network": "udp", "skipFallback": False},
-            # v73 (синхрон с generate_xray_config v67): живой Quad9-fallback —
+            # (синхрон с generate_xray_config): живой Quad9-fallback
             # достижим из РФ (1.1.1.1/8.8.8.8 ниже — skipFallback, отрава в РФ).
             {"address": "9.9.9.9", "port": 53, "network": "udp", "skipFallback": False},
             {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
@@ -1340,7 +1340,7 @@ def generate_xray_config_xhttp() -> None:
             "listen":   "127.0.0.1",         # только loopback — извне не доступно
             "protocol": "vless",
             "settings": {
-                # BUGFIX (v53): clients — из единого источника юзеров
+                # BUGFIX: clients — из единого источника юзеров
                 # (_users_collect_for_config), а не только PARAM_UUID
                 # (регенерация не выкидывает существующих юзеров).
                 "clients": _cfg_clients_no_flow,
@@ -1445,7 +1445,7 @@ def generate_xray_config_xhttp() -> None:
                 f"(mode={XHTTP_MODE}, path={XHTTP_PATH}, "
                 f"backend=127.0.0.1:{XHTTP_BACKEND_PORT}, TLS=Nginx:{SERVER_PORT})")
     else:
-        # v68 (geo-self-heal): см. generate_xray_config
+        # (geo-self-heal): см. generate_xray_config
         _healed = False
         try:
             _cfg_h = json.loads(cfg_file.read_text())
@@ -1528,7 +1528,7 @@ def create_xray_service() -> None:
 
     pre_block = f"\n        {pre_cmds}\n" if pre_cmds else ""
 
-    # ── v68: пин пути geo-файлов ─────────────────────────────────────────────
+    # ── пин пути geo-файлов ─────────────────────────────────────────────
     # Xray-core ищет geoip/geosite ТОЛЬКО в: env xray.location.asset →
     # каталог бинарника → /usr/local/share/xray → /usr/share/xray →
     # /opt/share/xray. Поле routing.geoDataBasePath Xray НЕ поддерживает,
@@ -1543,7 +1543,7 @@ def create_xray_service() -> None:
         if _gs.exists() and _gi.exists() \
                 and _gs.stat().st_size > 1024 * 1024 \
                 and _gi.stat().st_size > 1024 * 1024:
-            # v70: имя env-переменной с ТОЧКАМИ systemd ОТКАЗЫВАЕТСЯ
+            # имя env-переменной с ТОЧКАМИ systemd ОТКАЗЫВАЕТСЯ
             # парсить ("Invalid environment assignment, ignoring") — юнит
             # молча терял строку. Xray принимает обе формы (EnvFlag AltName:
             # xray.location.asset ↔ XRAY_LOCATION_ASSET) — используем
@@ -1559,7 +1559,7 @@ def create_xray_service() -> None:
         {after_line}
         {wants_line}
         StartLimitIntervalSec=60s
-        # v56 (start-limit-fix): было StartLimitBurst=3 — пересборка конфига
+        # (start-limit-fix): было StartLimitBurst=3 — пересборка конфига
         # (YouTube restore → IP-pin → tproxy → финальный рестарт) делает
         # 3-5 start'ов за несколько секунд, и 4-й отклонялся: start-limit-hit,
         # xray мёртв при валидном конфиге. Код теперь зовёт reset-failed
@@ -2135,7 +2135,7 @@ def _xray_restart_all_services() -> bool:
     success = core.success
 
     info("Перезапуск Xray...")
-    # v57 (start-limit-fix): reset-failed перед рестартом (см. v56/v57 —
+    # (start-limit-fix): reset-failed перед рестартом (см.
     # вызовы после обновления бинарника идут в цепочке с другими рестартами)
     _safe_restart = getattr(core, "_xray_safe_restart", None)
     _xray_active = False
@@ -2234,7 +2234,7 @@ def _xray_config_rollback(backup_cfg: Path, cfg: Path) -> None:
         warn(f"Не удалось откатить конфиг: {e}")
         log_to_file("ERROR", f"Откат конфига провалился: {e}")
         return
-    # v57 (start-limit-fix): это ВТОРОЙ рестарт подряд после провала apply —
+    # (start-limit-fix): это ВТОРОЙ рестарт подряд после провала apply
     # без reset-failed именно здесь чаще всего ловится start-limit-hit
     _safe_restart = getattr(core, "_xray_safe_restart", None)
     if callable(_safe_restart):
@@ -2376,7 +2376,7 @@ def _xray_safe_apply_config(cfg: Path | None = None,
         backup_cfg.unlink(missing_ok=True)
         return True
 
-    # v57 (start-limit-fix): голый restart здесь — самый частый источник
+    # (start-limit-fix): голый restart здесь — самый частый источник
     # start-limit-hit: _xray_safe_apply_config вызывается цепочками
     # (юзер добавлен → b4-сет импорт → routing-правило), каждый вызов =
     # restart. reset-failed через _core._xray_safe_restart снимает
@@ -2384,7 +2384,7 @@ def _xray_safe_apply_config(cfg: Path | None = None,
     _safe_restart = getattr(core, "_xray_safe_restart", None)
     if callable(_safe_restart):
         restarted = _safe_restart(wait_active=15, attempts=2)
-    else:  # fallback для старого ядра без хелпера (v56)
+    else: # fallback для старого ядра без хелпера
         _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         restarted = False
@@ -2756,7 +2756,7 @@ def _install_autoupdate_service() -> None:
             cp "$DAT_FILE" "$DEST" 2>/dev/null || true
         done
 
-        # v57 (start-limit-fix): reset-failed — автообновление может совпасть
+        # (start-limit-fix): reset-failed — автообновление может совпасть
         # с другими рестартами xray в том же окне StartLimitBurst
         systemctl reset-failed xray 2>/dev/null || true
         systemctl restart xray 2>/dev/null || true

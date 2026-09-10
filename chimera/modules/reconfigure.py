@@ -337,7 +337,7 @@ def do_reconfigure() -> None:
     #  миграция на port_registry (с backward compat для legacy comments).
     if new_port != old_port:
         _vless_reconfigure_ufw_port_change(core, new_port, old_port)
-        # v64 (ingress-follow-port): блокировка входящих РФ переносится на
+        # (ingress-follow-port): блокировка входящих РФ переносится на
         # новый порт автоматически (DROP-правило + clients_wl whitelist +
         # ingress_geoip.json). Раньше здесь был только WARN — защита
         # оставалась на старом порту, недельный cron тоже переприменял её
@@ -391,7 +391,7 @@ def do_reconfigure() -> None:
                            capture=True, check=False, quiet=True)
             if _r_ngx2.stdout.strip() != "active":
                 warn("nginx не запущен после реконфигурации! Проверьте: nginx -t")
-            # v57 (start-limit-fix): безопасный рестарт (reset-failed) —
+            # (start-limit-fix): безопасный рестарт (reset-failed)
             # реконфигурация рестартит nginx и xray в цепочке с certbot
             _safe_restart = getattr(core, "_xray_safe_restart", None)
             if callable(_safe_restart):
@@ -453,7 +453,7 @@ def _vless_reconfigure_ufw_port_change(core, new_port: int, old_port: int) -> No
         ufw_close_port(old_port, "tcp", SERVICE_VLESS,
                        legacy_comments=_LEGACY_COMMENTS)
         port_unregister(SERVICE_VLESS, old_port, "tcp")
-        # v49→v64: зависимые модули держат ссылку на СТАРЫЙ порт.
+        # →: зависимые модули держат ссылку на СТАРЫЙ порт.
         # ingress_geoip теперь переносится автоматически (см. хук в
         # do_reconfigure); port hopping — остаётся ручной проверкой.
         try:

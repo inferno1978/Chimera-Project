@@ -496,7 +496,7 @@ def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
         return False
 
     # Restart xray, wait for it to come up (mirror ru_subnets).
-    # v56 (start-limit-fix): безопасный рестарт — этот apply вызывается
+    # (start-limit-fix): безопасный рестарт — этот apply вызывается
     # внутри _rebuild_and_restart_xray и идёт ПЕРВЫМ в серии рестартов
     # (YouTube → IP-pin → tproxy → финальный); голые restarts упираются
     # в StartLimitBurst=3/60s юнита xray и последний start отклоняется.
@@ -504,7 +504,7 @@ def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
     if callable(_safe_restart):
         _restart_ok = _safe_restart()
     else:  # fallback на старое поведение (старое ядро без хелпера)
-        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)  # v57
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True) # 
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         _restart_ok = False
         for _ in range(30):
@@ -749,14 +749,14 @@ def _youtube_apply_fragment_to_xray(
     time.sleep(0.5)
 
     # Restart xray, wait for it to come up.
-    # v56 (start-limit-fix): безопасный рестарт (reset-failed) — вызывается
+    # (start-limit-fix): безопасный рестарт (reset-failed) — вызывается
     # в цепочке пересборки, где несколько рестартов подряд упираются в
     # StartLimitBurst=3/60s юнита xray. См. _core._xray_safe_restart.
     _safe_restart = getattr(core, "_xray_safe_restart", None)
     if callable(_safe_restart):
         _restart_ok = _safe_restart()
     else:  # fallback на старое поведение (старое ядро без хелпера)
-        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)  # v57
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True) # 
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         _restart_ok = False
         for _ in range(30):
@@ -855,7 +855,7 @@ def _youtube_remove_from_xray() -> bool:
         # Но всё равно перезапускаем xray чтобы конфиг был consistent.
         success("Правило YouTube→RU не найдено в конфиге — уже выключено.")
     else:
-        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)  # v57
+        _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True) # 
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         r = None
         for _ in range(30):

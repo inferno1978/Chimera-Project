@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""smoke_v76_1_csqtt_manual_binary.py — смоук v76.1.
+"""smoke_csqtt_manual_binary.py — смоук v76.1.
 
 Эмулирует сценарий юзера дословно:
   1. «Сервер не тянет сборку» → бинарь собран на другой машине и
