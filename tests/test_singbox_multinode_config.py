@@ -80,6 +80,13 @@ class TestSingboxMultinodeConfig(unittest.TestCase):
         cls._saved = {k: sys.modules.get(k) for k in
                       ("chimera._core", "chimera.modules.subscription_multinode")}
         cls.sm, cls.fake_core = _make_module()
+        # Патчим функциональные зависимости. ВАЖНО: если модуль уже был в
+        # sys.modules (например, его импортировал chimera.modules.subscription
+        # из более раннего теста), cls.sm — ТОТ ЖЕ общий объект, и monkey-
+        # патчи обязаны сниматься в tearDownClass, иначе они протекут в
+        # test_subscription_multinode и любые другие тесты этого процесса.
+        cls._orig_load_state = cls.sm._load_state
+        cls._orig_geo_lookup = cls.sm._geo_lookup
         cls.sm._load_state = lambda: dict(STATE)
         cls.sm._geo_lookup = lambda host: "NL"
         raw = cls.sm.build_singbox_config({"uuid": USER_UUID, "name": "t"})
@@ -92,7 +99,10 @@ class TestSingboxMultinodeConfig(unittest.TestCase):
         # Полная гигиена: недостаточно pop из sys.modules — пакет
         # chimera.modules держит АТРИБУТ submodule, и последующий
         # `from chimera.modules import subscription_multinode` достанет
-        # СТАРЫЙ объект (с нашими monkey-patch _load_state/_geo_lookup).
+        # СТАРЫЙ объект. Поэтому: (1) снимаем свои monkey-патчи, (2)
+        # восстанавливаем sys.modules/атрибуты пакета как было.
+        cls.sm._load_state = cls._orig_load_state
+        cls.sm._geo_lookup = cls._orig_geo_lookup
         import chimera.modules as _pkg
         for name, mod in cls._saved.items():
             short = name.rsplit(".", 1)[-1]
