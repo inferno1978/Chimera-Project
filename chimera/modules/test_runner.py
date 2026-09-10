@@ -49,7 +49,8 @@ TEST_GROUPS: dict[str, dict] = {
         "description": "Установка, пользователи, ссылки, REST API",
         "tests": [
             "health", "proto_common", "users_manager",
-            "client_config_export", "xray_install", "chain_nodes",
+            "client_config_export", "xray_install", "xray_downgrade",
+            "min_client_ver", "chain_nodes",
             "rest_api", "rest_api_auth",
         ],
     },

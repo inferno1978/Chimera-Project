@@ -9,7 +9,7 @@ Unit-тесты для даунгрейда ядра Xray-core — пункт м
   1. Чистые хелперы: parse_version / era_for_version /
      required_min_client_ver / era_label / era_client_rows
      (эпохи: до-гейт ≤26.6.27 / гейт 26.7.11–26.7.28 / MLKEM 26.9.8+)
-  2. DOWNGRADE_TARGETS: ровно две цели, значения согласованы с эпохами
+  2. DOWNGRADE_TARGETS: ровно три цели, значения согласованы с эпохами
   3. state.json: read_min_client_ver_from_state / save_min_client_ver
      (flock read-modify-write, чужие ключи, синк глобали _core)
   4. apply_min_client_ver_to_live_configs: патч REALITY-инбаундов,
@@ -99,6 +99,35 @@ def _fake_xray_install(current="26.9.9", final=None, upgrade_result=True,
 
     m._xray_restart_all_services = _restart
     return m
+
+
+def _install_fake_xray_install(fake_xi):
+    """Ставит фейковый xray_install в sys.modules И в атрибут пакета.
+
+    Форма «from chimera.modules import xray_install» (ею пользуется
+    do_xray_downgrade_interactive) берёт АТРИБУТ пакета, если реальный
+    модуль уже импортирован в процессе: без подмены атрибута групповой
+    прогон test_runner'а (группа «1 VLESS Core»: xray_install идёт
+    раньше xray_downgrade, один процесс) ловил бы реальный модуль —
+    и _xray_do_upgrade выходил бы в сеть. Возвращает restore-функцию
+    (вызвать обязательно, лучше в finally).
+    """
+    import chimera.modules as pkg
+    had_attr = hasattr(pkg, "xray_install")
+    saved_attr = getattr(pkg, "xray_install", None)
+    sys.modules["chimera.modules.xray_install"] = fake_xi
+    pkg.xray_install = fake_xi
+
+    def _restore():
+        if had_attr:
+            pkg.xray_install = saved_attr
+        else:
+            try:
+                del pkg.xray_install
+            except AttributeError:
+                pass
+
+    return _restore
 
 
 def _reality_cfg(mcv="") -> dict:
@@ -244,12 +273,15 @@ class TestPureHelpers(unittest.TestCase):
 
 
 class TestTargets(unittest.TestCase):
-    """Целей даунгрейда ровно две, значения согласованы с эпохами."""
+    """Целей даунгрейда ровно три, значения согласованы с эпохами."""
 
-    def test_exactly_two_targets(self):
-        self.assertEqual(len(xdg.DOWNGRADE_TARGETS), 2)
+    def test_exactly_three_targets(self):
+        self.assertEqual(len(xdg.DOWNGRADE_TARGETS), 3)
         self.assertEqual({t["tag"] for t in xdg.DOWNGRADE_TARGETS},
-                         {"v26.7.28", "v26.3.27"})
+                         {"v26.7.28", "v26.6.27", "v26.3.27"})
+        # порядок в меню — от новейшей к старейшей
+        self.assertEqual([t["tag"] for t in xdg.DOWNGRADE_TARGETS],
+                         ["v26.7.28", "v26.6.27", "v26.3.27"])
 
     def test_values_match_eras(self):
         for t in xdg.DOWNGRADE_TARGETS:
@@ -262,6 +294,7 @@ class TestTargets(unittest.TestCase):
     def test_prerelease_flags(self):
         flags = {t["tag"]: t["is_prerelease"] for t in xdg.DOWNGRADE_TARGETS}
         self.assertTrue(flags["v26.7.28"])   # теги с 26.4.x помечены Pre-release
+        self.assertTrue(flags["v26.6.27"])   # июньский пререлиз (GitHub API)
         self.assertFalse(flags["v26.3.27"])  # GitHub stable-latest
 
     def test_no_mlkim_target(self):
@@ -469,7 +502,8 @@ class TestSync(_TmpBase):
 
 
 class TestAutoupdateGuard(unittest.TestCase):
-    """autoupdate_timer_enabled / disable (таймер сравнивает версии на ==)."""
+    """autoupdate_timer_enabled / disable (скрипт таймера обновляет ядро
+    только «вверх» — сравнение «старше»; гард 5c страхует смену stable)."""
 
     def test_enabled(self):
         with patch("subprocess.run",
@@ -497,14 +531,18 @@ class TestMenuFlow(_TmpBase):
     """do_xray_downgrade_interactive — полный флоу пункта 5c."""
 
     def _run_menu(self, inputs, fake_xi):
-        sys.modules["chimera.modules.xray_install"] = fake_xi
-        patcher = patch.object(xdg, "autoupdate_timer_enabled",
-                               return_value=False)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        buf = io.StringIO()
-        with patch("builtins.input", side_effect=inputs), redirect_stdout(buf):
-            xdg.do_xray_downgrade_interactive()
+        restore_xi = _install_fake_xray_install(fake_xi)
+        try:
+            patcher = patch.object(xdg, "autoupdate_timer_enabled",
+                                   return_value=False)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            buf = io.StringIO()
+            with patch("builtins.input", side_effect=inputs), \
+                 redirect_stdout(buf):
+                xdg.do_xray_downgrade_interactive()
+        finally:
+            restore_xi()
         return buf.getvalue()
 
     def test_happy_path_26728(self):
@@ -528,11 +566,28 @@ class TestMenuFlow(_TmpBase):
         self._write_state({"domain": "x.com", "min_client_ver": "1.8.0"})
         self.cfg_a.write_text(json.dumps(_reality_cfg("1.8.0")))
         fake_xi = _fake_xray_install(current="26.9.9", final="26.3.27")
-        out = self._run_menu(["2", "y"], fake_xi)
+        out = self._run_menu(["3", "y"], fake_xi)
         self.assertEqual(fake_xi._upgrade_calls, [("v26.3.27", False)])
         self.assertEqual(
             json.loads(self.state_file.read_text())["min_client_ver"], "")
         self.assertIn("ДАУНГРЕЙД ВЫПОЛНЕН", out)
+
+    def test_happy_path_26627(self):
+        # [2] — июньская до-гейт-цель: эпоха-управляемый "1.8.0"
+        # сбрасывается в "" (до-гейт — гейт не нужен)
+        self._write_state({"domain": "x.com", "min_client_ver": "1.8.0"})
+        self.cfg_a.write_text(json.dumps(_reality_cfg("1.8.0")))
+        fake_xi = _fake_xray_install(current="26.9.9", final="26.6.27")
+        out = self._run_menu(["2", "y"], fake_xi)
+        self.assertEqual(fake_xi._upgrade_calls, [("v26.6.27", True)])
+        self.assertEqual(
+            json.loads(self.state_file.read_text())["min_client_ver"], "")
+        cfg = json.loads(self.cfg_a.read_text())
+        self.assertEqual(
+            cfg["inbounds"][0]["streamSettings"]["realitySettings"]["minClientVer"],
+            "")
+        self.assertIn("ДАУНГРЕЙД ВЫПОЛНЕН", out)
+        self.assertIn("26.6.27", out)
 
     def test_cancel_at_confirm(self):
         self._write_state({"domain": "x.com"})
@@ -573,32 +628,38 @@ class TestMenuFlow(_TmpBase):
     def test_autoupdate_guard_disable(self):
         self._write_state({"domain": "x.com"})
         fake_xi = _fake_xray_install(current="26.9.9", final="26.7.28")
-        sys.modules["chimera.modules.xray_install"] = fake_xi
+        restore_xi = _install_fake_xray_install(fake_xi)
         disabled = []
-        with patch.object(xdg, "autoupdate_timer_enabled", return_value=True), \
-             patch.object(xdg, "disable_autoupdate_timer",
-                          side_effect=lambda: disabled.append(True) or True):
-            buf = io.StringIO()
-            with patch("builtins.input", side_effect=["1", "y", "y"]), \
-                 redirect_stdout(buf):
-                xdg.do_xray_downgrade_interactive()
+        try:
+            with patch.object(xdg, "autoupdate_timer_enabled", return_value=True), \
+                 patch.object(xdg, "disable_autoupdate_timer",
+                              side_effect=lambda: disabled.append(True) or True):
+                buf = io.StringIO()
+                with patch("builtins.input", side_effect=["1", "y", "y"]), \
+                     redirect_stdout(buf):
+                    xdg.do_xray_downgrade_interactive()
+        finally:
+            restore_xi()
         self.assertEqual(disabled, [True])
         self.assertEqual(fake_xi._upgrade_calls, [("v26.7.28", True)])
 
     def test_autoupdate_guard_keep_timer(self):
         self._write_state({"domain": "x.com"})
         fake_xi = _fake_xray_install(current="26.9.9", final="26.7.28")
-        sys.modules["chimera.modules.xray_install"] = fake_xi
+        restore_xi = _install_fake_xray_install(fake_xi)
         disabled = []
-        with patch.object(xdg, "autoupdate_timer_enabled", return_value=True), \
-             patch.object(xdg, "disable_autoupdate_timer",
-                          side_effect=lambda: disabled.append(True) or True):
-            buf = io.StringIO()
-            with patch("builtins.input", side_effect=["1", "y", "n"]), \
-                 redirect_stdout(buf):
-                xdg.do_xray_downgrade_interactive()
+        try:
+            with patch.object(xdg, "autoupdate_timer_enabled", return_value=True), \
+                 patch.object(xdg, "disable_autoupdate_timer",
+                              side_effect=lambda: disabled.append(True) or True):
+                buf = io.StringIO()
+                with patch("builtins.input", side_effect=["1", "y", "n"]), \
+                     redirect_stdout(buf):
+                    xdg.do_xray_downgrade_interactive()
+        finally:
+            restore_xi()
         self.assertEqual(disabled, [])
-        self.assertIn("молча сменит", buf.getvalue())
+        self.assertIn("поднимет ядро", buf.getvalue())
 
     def test_restart_failure_shows_rollback_hints(self):
         self._write_state({"domain": "x.com"})

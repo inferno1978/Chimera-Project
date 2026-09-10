@@ -2472,7 +2472,9 @@ def do_xray_update_interactive() -> None:
     """
     Интерактивное обновление Xray из меню.
     Проверяет ветку latest И prerelease.
-    Cron-задача использует только latest (xray-autoupdate.sh).
+    Cron-задача (xray-autoupdate.sh) использует только latest и с этой
+    версии обновляет ядро исключительно «вверх» (сравнение «старше»):
+    установленная версия новее stable-latest — не трогается.
     """
     core = _core_module()
     _box_top    = core._box_top
@@ -2729,10 +2731,18 @@ def _install_autoupdate_service() -> None:
         [[ -z "$LATEST" ]] && log "WARN: Не удалось получить latest" && exit 0
         log "Последняя: $LATEST"
 
+        # Апгрейд — ТОЛЬКО если установленная версия СТАРШЕ stable-latest
+        # (сравнение «старше», не «равно»). Прежняя проверка на равенство
+        # даунгрейдила ядро: любая версия новее GitHub-stable (флот 26.9.9
+        # при stable v26.3.27, даунгрейд из меню 5c) молча перетягивалась
+        # вниз ближайшей ночью (03:30). Нормализация %05d×3 даёт строки
+        # равной длины — лексикографическое «>» в [[ ]] равно числовому.
         _norm() { echo "$1" | sed 's/^v//' | tr '.' ' ' | awk '{printf "%05d%05d%05d\n", $1, $2, $3}'; }
-        [[ "$(_norm "$CURRENT")" == "$(_norm "$LATEST")" ]] && log "INFO: Версия актуальна" && exit 0
+        CUR_N=$(_norm "$CURRENT"); LAT_N=$(_norm "$LATEST")
+        [[ "$CUR_N" == "$LAT_N" ]] && log "INFO: Версия актуальна" && exit 0
+        [[ "$CUR_N" > "$LAT_N" ]] && log "INFO: Установленная $CURRENT новее stable-latest $LATEST — без изменений (авто-даунгрейд исключён)" && exit 0
 
-        log "INFO: Обновление $CURRENT → $LATEST"
+        log "INFO: Обновление $CURRENT → $LATEST (установленная старше stable)"
         ARCH=$(uname -m)
         case "$ARCH" in
             x86_64)  XRAY_ARCH="64" ;;
