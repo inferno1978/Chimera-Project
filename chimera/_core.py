@@ -3077,10 +3077,12 @@ def do_rebuild_xray_config() -> None:
     """Перегенерировать /etc/xray/config.json из state.json без переустановки.
 
     Полезно когда:
-      • Обновился Xray-core до новой мажорной версии и в код инсталлятора добавили
-        новые обязательные поля (например явный minClientVer="" для Xray 26.7.11+,
-        отключающий гейт версий клиента). В уже существующем config.json этих
-        полей нет, а полная переустановка не нужна — нужен только rebuild конфига.
+      • Обновился Xray-core и в генераторах появились поля, которые
+        теперь пишутся явно (например minClientVer=""/maxClientVer="":
+        на Xray 26.9.8+ пустое значение = гейт версий клиента ВЫКЛ —
+        дефолт-гейт 26.3.27 эпохи 26.7.11–26.7.28 в новых ядрах убран,
+        см. VLESS_FAQ.md §18). В уже существующем config.json этих
+        полей нет, а полная переустановка не нужна — нужен только rebuild.
       • Конфиг был повреждён / частично изменён вручную и нужно вернуть его
         к каноническому виду с сохранением всех параметров из state.json.
 
@@ -3103,7 +3105,8 @@ def do_rebuild_xray_config() -> None:
     _box_row(f"  с текущими параметрами (домен, ключи REALITY, UUID).")
     _box_row()
     _box_row(f"  Применение — добавить поля, которых нет в старом конфиге,")
-    _box_row(f"  но которые теперь обязательны (напр. {BOLD}minClientVer{NC} для Xray 26.7.11+).")
+    _box_row(f"  но которые теперь пишутся явно (напр. {BOLD}minClientVer=""{NC} — на Xray")
+    _box_row(f"  26.9.8+ это выключенный гейт версий; см. VLESS_FAQ.md §18).")
     _box_row()
     _box_row(f"  {YELLOW}⚠  Текущий config.json будет забэкаплен и заменён.{NC}")
     _box_row(f"  {DIM}Пользователи, RIPE-правила, Telemt tproxy, PQ-VLESS, fragment{NC}")
@@ -3141,10 +3144,15 @@ def do_rebuild_xray_config() -> None:
         return
 
     # Проверить итоговое значение minClientVer (если REALITY-режим).
-    # Семантика Xray 26.7.11+: "" — гейт версий выключен (mihomo-семейство
-    # работает); непустое значение (в т.ч. "1.0.0") — гейт включён, клиенты
-    # без версии Xray (Clash Verge / FlClash) отвергаются с декоем (Timeout);
-    # отсутствующее поле — наследуется дефолт 26.3.27 (то же самое).
+    # Механика по факту стенда 2026-09-10 (docs/faq/VLESS_FAQ.md §18):
+    # ClientVer в хендшейке отчитывают ВСЕ — sing-box → [1,8,1],
+    # mihomo → [1,8,2], Xray-клиент → версия ядра. Xray 26.7.11–
+    # 26.7.28: ""/unset = ДЕФОЛТ-гейт 26.3.27 (mihomo/sing-box валятся,
+    # лечится явным "1.8.0" — рецепт podkop). Xray 26.9.8+ (наш
+    # флот): ""/unset = гейт ВЫКЛ (дефолт убран); непустой порог
+    # жив — mihomo проходит пороги ≤ "1.8.2"; sing-box против
+    # 26.9.8+ не пройдёт ни при каком гейте (барьер — MLKEM-чек
+    # ClientHello, не версия).
     if PROTOCOL_MODE == "reality" and PROTOCOL_MODE != "xhttp":
         try:
             cfg = json.loads((CONFIG_DIR / "config.json").read_text())
@@ -3153,16 +3161,20 @@ def do_rebuild_xray_config() -> None:
                 if rs:
                     mcv = rs.get("minClientVer")
                     if mcv == "":
-                        success(f"minClientVer = \"\"  ✓  (гейт версий выключен, "
-                                f"mihomo / Clash Verge совместимы)")
+                        success(f"minClientVer = \"\"  ✓  (на Xray 26.9.8+ гейт версий "
+                                f"выключен — дефолт-гейт эпохи 26.7.x убран; "
+                                f"mihomo/Xray-клиенты совместимы)")
                     elif mcv is None:
-                        warn("minClientVer отсутствует — Xray 26.7.11+ применит "
-                             "дефолт 26.3.27, mihomo-клиенты отвалятся; "
-                             "проверьте generate_xray_config()")
+                        warn("minClientVer отсутствует: на 26.7.11–26.7.28 это "
+                             "дефолт-гейт 26.3.27 (mihomo/sing-box отвалятся), "
+                             "на 26.9.8+ — гейт выключен; поле лучше писать "
+                             "явно — проверьте generate_xray_config()")
                     else:
-                        warn(f"minClientVer = {mcv} — непустой гейт версий; клиенты "
-                             f"без версии Xray (mihomo-семейство) не пройдут "
-                             f"аутентификацию REALITY (Timeout)")
+                        warn(f"minClientVer = {mcv} — непустой гейт версий (жив на "
+                             f"любых ядрах): mihomo (ClientVer [1,8,2]) пройдёт "
+                             f"пороги ≤ \"1.8.2\", Xray-клиенты — по версии ядра; "
+                             f"но против Xray 26.9.8+ sing-box не пройдёт при "
+                             f"любом гейте — барьер MLKEM, см. VLESS_FAQ §18")
                     break
         except Exception:
             pass
@@ -7333,7 +7345,7 @@ def _menu_install_system() -> None:
         _box_item("3", f"📦 Миграция  {DIM}(Экспорт / Импорт конфигурации){NC}")
         _box_item("4", f"⚡ Оптимизация системы  {DIM}(Sysctl / Limits){NC}")
         _box_item("5", "🔧 Обновить Xray-core")
-        _box_item("5b", f"♻️  Перегенерировать конфиг Xray  {DIM}(из state.json; minClientVer=\"\" — гейт версий выкл., mihomo-совместимо){NC}")
+        _box_item("5b", f"♻️  Перегенерировать конфиг Xray  {DIM}(из state.json; minClientVer=\"\" — гейт версий выкл на Xray 26.9.8+){NC}")
         _box_item("6", f"🛠️  Аварийное восстановление  {DIM}(из state.json, без переустановки){NC}")
         _box_item("7", "🗑️  Удалить установку")
         _box_item("8", "🧪 Запустить unit-тесты")

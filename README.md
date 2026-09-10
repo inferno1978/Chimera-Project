@@ -118,7 +118,7 @@ sudo python3 main.py
 | FAQ | Описание |
 |---|---|
 | [`TELEMT_FAQ.md`](docs/faq/TELEMT_FAQ.md) | Telemt (MTProto Proxy) — установка, режимы Middle Proxy / Direct, xray-интеграция, SYN Limiter, фрагментация TLS |
-| [`VLESS_FAQ.md`](docs/faq/VLESS_FAQ.md) | VLESS/Reality — установка, конфигурация, XOR/CDN-маскировка, разбор типовых проблем |
+| [`VLESS_FAQ.md`](docs/faq/VLESS_FAQ.md) | VLESS/Reality — установка, конфигурация, XOR/CDN-маскировка, разбор типовых проблем; §18 — матрица совместимости клиентских ядер (sing-box/mihomo/Xray × версии Xray-core: гейт версий, X25519MLKEM768/рецепт B) |
 | [`HYSTERIA2.md`](docs/faq/HYSTERIA2.md) | Hysteria2 транспорт — UDP-протокол на базе QUIC, выбор при установке |
 | [`SECURITY_BAN_FAQ.md`](docs/faq/SECURITY_BAN_FAQ.md) | AutoBan / Honeypot / IP-Ban / GeoIP Block / РФ-блокировка — пять модулей защиты от сканеров и DPI-зондов: сравнительная таблица, комбинации, диагностика, бан ASN |
 | [`DNSCRYPT_FAQ.md`](docs/faq/DNSCRYPT_FAQ.md) | DNSCrypt-proxy — зашифрованный DNS: установка, конфигурация, выбор резолверов, анонимизация, ODoH/DNSSEC, принудительный DNS REDIRECT, диагностика утечек DNS |
