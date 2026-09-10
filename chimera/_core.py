@@ -3110,6 +3110,12 @@ def do_rebuild_xray_config() -> None:
 
     Точки входа:
         Вызывается из _menu_install_system() — пункт "5b".
+
+    Связанное:
+        даунгрейд самого ядра — пункт "5c" (do_xray_downgrade_interactive,
+        chimera/modules/xray_downgrade.py): подгоняет minClientVer под
+        эпоху выбранной версии автоматически (26.7.28 → "1.8.0",
+        26.3.27/26.9.8+ → "").
     """
     print()
     _box_top("🔧  Перегенерация конфига Xray")
@@ -3122,6 +3128,8 @@ def do_rebuild_xray_config() -> None:
     _box_row(f"  26.9.8+ это выключенный гейт версий; см. VLESS_FAQ.md §18).")
     _box_row(f"  Опция в этом пункте: выставить {BOLD}minClientVer{NC} без ручной правки")
     _box_row(f"  конфига (для даунгрейд-ядер 26.7.11–26.7.28, см. шпаргалку ниже).")
+    _box_row(f"  Само ядро под клиентов меняется пунктом {BOLD}[5c]{NC} — там")
+    _box_row(f"  minClientVer подгоняется под эпоху автоматически.")
     _box_row()
     _box_row(f"  {YELLOW}⚠  Текущий config.json будет забэкаплен и заменён.{NC}")
     _box_row(f"  {DIM}Пользователи, RIPE-правила, Telemt tproxy, PQ-VLESS, fragment{NC}")
@@ -7491,6 +7499,7 @@ def _menu_install_system() -> None:
         _box_item("4", f"⚡ Оптимизация системы  {DIM}(Sysctl / Limits){NC}")
         _box_item("5", "🔧 Обновить Xray-core")
         _box_item("5b", f"♻️  Перегенерировать конфиг Xray  {DIM}(из state.json; опция выставить minClientVer — гейт для ядер 26.7.x и sing-box/mihomo-клиентов){NC}")
+        _box_item("5c", f"⬇️  Даунгрейд ядра Xray  {DIM}(26.7.28 / 26.3.27 — конфиг подгоняется под эпоху автоматически; вернуть sing-box-клиентов){NC}")
         _box_item("6", f"🛠️  Аварийное восстановление  {DIM}(из state.json, без переустановки){NC}")
         _box_item("7", "🗑️  Удалить установку")
         _box_item("8", "🧪 Запустить unit-тесты")
@@ -7522,6 +7531,13 @@ def _menu_install_system() -> None:
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "5b":
             do_rebuild_xray_config()
+            input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "5c":
+            try:
+                from chimera.modules.xray_downgrade import do_xray_downgrade_interactive
+                do_xray_downgrade_interactive()
+            except ImportError as _e:
+                warn(f"Модуль даунгрейда ядра не найден: {_e}")
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "6":
             do_emergency_repair()
