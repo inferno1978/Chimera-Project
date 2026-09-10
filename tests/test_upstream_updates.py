@@ -2,7 +2,7 @@
 """
 tests/test_upstream_updates.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для chimera/modules/upstream_updates.py (v75) + layout-probe
+Unit-тесты для chimera/modules/upstream_updates.py + layout-probe
 функций csqtt_packages.py / wdtt_packages.py.
 
 Покрывает:
@@ -11,11 +11,11 @@ Unit-тесты для chimera/modules/upstream_updates.py (v75) + layout-probe
   3. check_target: не установлен / legacy-ревизия / доступно / актуален /
      API недоступен.
   4. update_target: отказ без бинарника; turnable скачивает ДИНАМИЧЕСКИЙ
-     latest (регрессия v75: раньше качался pinned 0.4.1).
+     latest (регрессия раньше качался pinned 0.4.1).
   5. _record_installed: тот же tarball-sha → ревизия НЕ поднимается
      (CDN отдал старый архив); другой sha → поднимается.
   6. run_agent: skip неустановленных и auto=off; обновляет доступное.
-  7. Layout-probe CSQTT: rust-server (v74.2), csqtt-uring (легаси),
+  7. Layout-probe CSQTT: rust-server, csqtt-uring (легаси),
      переименованная будущая папка (rglob), клиентский крейт игнорируется.
   8. Layout-probe qWDTT: ./server, ./server.go (легаси), будущий корневой
      main.go, cmd/-конвенция, go.mod-требование.
@@ -201,7 +201,7 @@ class TestCheckTarget(_TmpStateMixin, unittest.TestCase):
 
 
 class TestUpdateTarget(_TmpStateMixin, unittest.TestCase):
-    """Ядро v75: fetch_package получает ДИНАМИЧЕСКУЮ версию latest."""
+    """Ядро fetch_package получает ДИНАМИЧЕСКУЮ версию latest."""
 
     def setUp(self):
         super().setUp()
@@ -221,7 +221,7 @@ class TestUpdateTarget(_TmpStateMixin, unittest.TestCase):
         self.assertFalse(ok)
 
     def test_turnable_fetches_dynamic_latest(self):
-        """Регрессия v75: до фикса _run_update качал pinned 0.4.1,
+        """Регрессия до фикса _run_update качал pinned 0.4.1,
         обещая latest. Теперь fetch_package получает version=latest."""
         seen = {}
 
@@ -333,7 +333,7 @@ class TestRunAgent(_TmpStateMixin, unittest.TestCase):
 
 
 class TestCsqttLayoutProbe(unittest.TestCase):
-    """v75: _probe_csqtt_layout — три уровня + игнор клиентского крейта."""
+    """_probe_csqtt_layout — три уровня + игнор клиентского крейта."""
 
     def setUp(self):
         self._tmpdir = Path(tempfile.mkdtemp())
@@ -411,7 +411,7 @@ class TestCsqttLayoutProbe(unittest.TestCase):
 
 
 class TestWdttLayoutProbe(unittest.TestCase):
-    """v75: _probe_wdtt_build_targets + _go_mod_requirement."""
+    """_probe_wdtt_build_targets + _go_mod_requirement."""
 
     def setUp(self):
         self._tmpdir = Path(tempfile.mkdtemp())

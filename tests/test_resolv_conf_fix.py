@@ -446,7 +446,7 @@ class TestAghAwareFix(_BaseTest):
         self.assertTrue(agh_actions, f"нет action про AGH: {result['actions']}")
 
     def test_fix_keeps_redirect_when_agh_serves_53_but_broken(self):
-        """v55: AGH слушает :53, но живая проба резолва провалилась →
+        """AGH слушает :53, но живая проба резолва провалилась →
         redirect НЕ снимается (это обход сломанного AGH), а ставится
         (обе ветки: dns.servers xray уже откатятся на 5300, glibc пойдёт
         через redirect) — DNS остаётся живым."""
@@ -573,18 +573,18 @@ class TestAghAwareFix(_BaseTest):
                           return_value=(True, "www.example.com → 1 ответ, 5 мс")):
             diag = resolv_conf_fix.diagnose_resolv_conf()
         self.assertTrue(diag["aghome_serving_53"])
-        self.assertTrue(diag["agh_resolves"])   # v55: проба ОК (мок)
+        self.assertTrue(diag["agh_resolves"]) # проба ОК (мок)
         self.assertFalse(diag["dns_redirect_active"],
                          "tcp-only redirect присутствует → ворует трафик у AGH")
         self.assertTrue(any("обходят AGH" in r for r in diag["leak_reasons"]))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  v46: DNS-WATCHDOG — системный DNS не должен умирать НАДОЛГО
+# DNS-WATCHDOG — системный DNS не должен умирать НАДОЛГО
 # ══════════════════════════════════════════════════════════════════════════════
 class TestDnsWatchdog(_BaseTest):
     """<node-2>: AGH умер ЧАС спустя после финализации (креш/OOM) → :53 без
-    слушателя, redirect уже снят → системный DNS мёртв. v46: timer каждую
+    слушателя, redirect уже снят → системный DNS мёртв. timer каждую
     минуту пробует 127.0.0.1:53 и сам чинит (рестарт AGH → dnscrypt-redirect)."""
 
     def setUp(self):

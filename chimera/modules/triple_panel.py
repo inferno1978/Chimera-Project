@@ -72,7 +72,7 @@ from chimera.modules.text_width import wlen as _wlen, plain as _plain
 # Конвенция проекта (как в naiveproxy/mieru): локальный алиас, чтобы
 # `except _Cancelled:` работал без изменений. ВАЖНО: proto_common НЕ
 # экспортирует имя `_Cancelled` — импорт «from proto_common import
-# _Cancelled» падает ImportError (латентный баг v81, пойманный тестом
+# _Cancelled» падает ImportError (латентный баг, пойманный тестом
 # test_update_front_up_to_date_injects_shim).
 _Cancelled = ProtoCancelled
 
@@ -97,7 +97,7 @@ DEFAULT_NGINX_PORT = 9761
 _UPSTREAM_REPO     = "cwash797-cmd/Panel-Naive-Mieru-by-RIXXX"
 _UPSTREAM_API_LATEST = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases/latest"
 _UPSTREAM_VERSIONS_URL = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases"
-# v83.1: апстрим не тегает релизы — версия живёт в файле VERSION ветки main.
+# апстрим не тегает релизы — версия живёт в файле VERSION ветки main.
 # raw — первоисточник, jsDelivr — зеркало (доступен при блокировке raw).
 _UPSTREAM_VERSION_URLS = (
     f"https://raw.githubusercontent.com/{_UPSTREAM_REPO}/main/VERSION",
@@ -174,7 +174,7 @@ def _save_state(state: dict) -> None:
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  BOX-РЕНДЕРИНГ (канон проекта: naiveproxy.py / mieru.py, 1:1)
-#  v83: собственная реализация через len() ломала рамку (ANSI/эмодзи
+# собственная реализация через len() ломала рамку (ANSI/эмодзи
 #  считались колонками) и выбивалась цветом (bright 9x vs 0;3x).
 # ══════════════════════════════════════════════════════════════════════════════
 def _box_top(title: str = "") -> None:
@@ -190,7 +190,7 @@ def _box_bot() -> None: print(f"{CYAN}╚{'═' * _BOX_W}╝{NC}")
 def _truncate_ansi(text: str, max_w: int) -> str:
     """Обрезает text до видимой ширины max_w-1 + «…», не рвя ANSI-коды.
 
-    v83 резала по индексу plain-строки — ESC-последовательности могли
+     резала по индексу plain-строки — ESC-последовательности могли
     разрезаться посередине (мусор в терминале). Здесь ширина считается
     по исходной строке, CSI-коды нулевой ширины копируются целиком.
     """
@@ -248,7 +248,7 @@ def _box_link(link: str, color: str = "") -> None:
         i += max_w
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  v83.2: LIVE-BOX — сырой вывод стороннего кода строками бокса
+# LIVE-BOX — сырой вывод стороннего кода строками бокса
 #  download_manager / journalctl / nginx-front печатают «голым» print() —
 #  эти строки разрывали открытый бокс. Прокси sys.stdout рендерит каждую
 #  ПОЛНУЮ строку как строку бокса: длинные — переносом (информация не
@@ -390,7 +390,7 @@ def _redraw_ask_row(label: str, value: str) -> None:
         pass
 
 def _box_ask(label: str, default: str = "") -> str:
-    """Интерактивный ввод СТРОКОЙ ВНУТРИ бокса (v83.2).
+    """Интерактивный ввод СТРОКОЙ ВНУТРИ бокса.
 
     TTY: приглашение печатается левой половиной строки бокса (║ + метка),
     ввод эхом терминала ложится в ту же строку; после Enter строка
@@ -453,7 +453,7 @@ def _service_active() -> bool:
 def _detect_upstream_version(timeout: int = 10) -> str:
     """Версия апстрима. '' при ошибке.
 
-    v83.1: GitHub API /releases/latest 404-ит вечно — апстрим НЕ делает
+    GitHub API /releases/latest 404-ит вечно — апстрим НЕ делает
     релизов и НЕ тегает репо (git ls-remote --tags пуст). Канонический
     источник версии — файл VERSION в корне ветки main (+ panel/package.json,
     синхронизируются scripts/sync-version.sh). Лестница: raw → jsDelivr
@@ -529,7 +529,7 @@ def _update_header_row() -> str:
 def _front_mirror_urls(filename: str) -> list:
     """Лестница зеркал для тарболла исходников апстрима.
 
-    v83.2: ветка main — ПЕРВОЙ. Апстрим не тегает релизы (git ls-remote
+    ветка main — ПЕРВОЙ. Апстрим не тегает релизы (git ls-remote
     --tags пуст), теговые архивы дают вечный 404 — на живой установке
     юзера первые два зеркала падали 404 и выглядели ошибкой, хотя ветка
     main ниже была гарантированно живой. Теги — последними, задел на
@@ -569,7 +569,7 @@ def _extract_front(tar_path: Path, dest: Path) -> bool:
     отбрасываются (tarfile extractall filter — актуально для Python 3.12+,
     здесь ручной guard для совместимости с 3.8+).
 
-    v83.1: попутно захватывает корневой VERSION апстрима → dest/VERSION.upstream
+    попутно захватывает корневой VERSION апстрима → dest/VERSION.upstream
     (архив ветки main может быть новее запрошенной версии — книга ведётся
     по фактической версии вендореного фронта, а не по запрошенной).
     """
@@ -627,13 +627,13 @@ def _front_actual_version(www_dir: "Optional[Path]" = None) -> str:
         return ""
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  v82: SSE-ШИМ (фронт-патч поверх апстримного app.js)
+# SSE-ШИМ (фронт-патч поверх апстримного app.js)
 #  Апстрим общается с бэкендом по WebSocket (только метрики). У нас SSE —
 #  шим подменяет window.WebSocket классом поверх EventSource, поэтому
 #  app.js не меняется и «WS-точка» в шапке живой. Плюс live-обновления
 #  таблицы юзеров и логов (сверх WS-контракта апстрима).
 # ══════════════════════════════════════════════════════════════════════════════
-_SSE_SHIM_JS = """/* Chimera Triple Panel - SSE live-updates (port v82).
+_SSE_SHIM_JS = """/* Chimera Triple Panel - SSE live-updates (port).
  * Upstream app.js talks to the backend via WebSocket (metrics only:
  * msg.type === 'metrics'). The Chimera backend is stdlib - no WS;
  * instead it serves /api/events (text/event-stream). This shim replaces
@@ -733,7 +733,7 @@ _SSE_SHIM_JS = """/* Chimera Triple Panel - SSE live-updates (port v82).
 """
 
 def _inject_sse_shim(www_dir: Path) -> bool:
-    """v82: пишет triple-sse.js и вставляет его в index.html ДО app.js.
+    """пишет triple-sse.js и вставляет его в index.html ДО app.js.
 
     Идемпотентно: повторная установка/обновление фронта не дублирует тег.
     Возвращает True если шим на месте.
@@ -764,10 +764,10 @@ def _inject_sse_shim(www_dir: Path) -> bool:
 def _fetch_front(version: str, quiet: bool = False) -> bool:
     """Скачивает и вендорит фронт версии version → _WWW_DIR (atomic swap).
 
-    v83.1: зеркало может отдать архив ветки main (новее запрошенной
+    зеркало может отдать архив ветки main (новее запрошенной
     version) — фактическая версия вендореного фронта доступна после
     успеха через _front_actual_version().
-    v83.2: весь сырой вывод download_manager (лестница зеркал, прогресс,
+    весь сырой вывод download_manager (лестница зеркал, прогресс,
     диагностика ручного файла, curl/scp-подсказка) идёт через
     _boxed_output — строками бокса с переносом, рамка не разрывается.
     """
@@ -792,7 +792,7 @@ def _fetch_front(version: str, quiet: bool = False) -> bool:
             tar_path.unlink(missing_ok=True)
         except Exception:
             pass
-        # v82: SSE-шим поверх EventSource (подменяет WS апстрима во фронте)
+        # SSE-шим поверх EventSource (подменяет WS апстрима во фронте)
         _inject_sse_shim(_WWW_DIR)
         ok = _WWW_DIR.exists() and (_WWW_DIR / "index.html").exists()
     if ok and not quiet:
@@ -831,7 +831,7 @@ def _ask_web_port(default: int = _DEFAULT_PORT) -> "Optional[int]":
     Enter строка перерисовывается целиком), конфликты — строками бокса,
     повторный ввод — в том же боксе. None = отмена.
 
-    v83.2: раньше — сиротские строки рамки без top/bot и приглашение
+    раньше — сиротские строки рамки без top/bot и приглашение
     вне бокса. Теперь самостоятельный бокс: вызывается и из установки
     (между интро- и прогресс-боксом), и из смены порта (пункт 5).
     """
@@ -912,7 +912,7 @@ WantedBy=multi-user.target
 def _smoke_check(port: int, timeout: int = 5) -> bool:
     """GET / на локальный порт — фронт отдаётся? (контракто-смоук v1).
 
-    v83.2: (1) запрос идёт через ProxyHandler({}) — на серверах с
+    (1) запрос идёт через ProxyHandler({}) — на серверах с
     http_proxy/https_proxy в окружении urllib гнал 127.0.0.1 ЧЕРЕЗ
     прокси и живой сервис выглядел «не отвечающим»; (2) timeout 5с —
     функция теперь вызывается в ретрай-цикле _wait_service_http.
@@ -933,7 +933,7 @@ def _wait_service_http(port: int, attempts: int = 30, delay: float = 1.0,
     питон-импорт бэкенда (chimera.* — десятки модулей) на слабом VPS
     занимает секунды. Один мгновенный GET после enable --now ловил
     connection refused → ложное «GET / не отвечает» на живом инсталле
-    юзера (v83.1). Ретраи до attempts, ранний выход при failed.
+    юзера. Ретраи до attempts, ранний выход при failed.
     """
     for i in range(attempts):
         if _smoke_check(port):
@@ -975,7 +975,7 @@ def _install() -> bool:
         return False
 
     # Бокс 3: прогресс — фронт → креды → port_registry → сервис → итог.
-    # v83.2: весь вывод (download_manager, systemctl, journalctl) —
+    # весь вывод (download_manager, systemctl, journalctl)
     # строками бокса, вводы — через _box_ask; сырых строк вне рамки нет.
     _box_top("🧩  УСТАНОВКА  •  TRIPLE PANEL")
     _box_row()
@@ -993,7 +993,7 @@ def _install() -> bool:
     # 3. Креды (пароль показывается ОДИН раз)
     state = _load_state()
     state["web_port"] = port
-    # v83.1: фактическая версия вендореного фронта (зеркало могло отдать main)
+    # фактическая версия вендореного фронта (зеркало могло отдать main)
     state["front_version"] = _front_actual_version() or upstream
     state["language"] = state.get("language", "ru")
     _box_row()
@@ -1027,7 +1027,7 @@ def _install() -> bool:
         except Exception as e:
             _box_warn(f"port_registry недоступен: {e}")
 
-    # 5. Юнит + старт (v83.2: вывод systemctl — под capture, «Created
+    # 5. Юнит + старт (вывод systemctl — под capture, «Created
     # symlink …» больше не рвёт бокс; ожидание ответа GET / — с ретраями)
     _write_service_unit()
     state["installed"] = True
@@ -1081,7 +1081,7 @@ def _update_front() -> bool:
     _box_top("⬆️  ОБНОВЛЕНИЕ ФРОНТА  •  TRIPLE PANEL")
     _box_row()
     if not upstream:
-        # v83.2: раньше — сиротская строка рамки без top/bot
+        # раньше — сиротская строка рамки без top/bot
         _box_err("Не удалось получить версию апстрима (raw/jsDelivr/API).")
         _box_row(f"  {DIM}Повторите позже — фронт не тронут.{NC}")
         _box_row()
@@ -1093,12 +1093,12 @@ def _update_front() -> bool:
     _box_row()
     if current and _version_key(current) >= _version_key(upstream):
         _box_ok(f"Фронт актуален: v{current}.")
-        # v82: даже без обновления фронта — до-вживляем SSE-шим (идемпотентно):
-        # установки эпохи v81 получили бы его только с переустановкой фронта.
+        # даже без обновления фронта — до-вживляем SSE-шим (идемпотентно):
+        # установки эпохи получили бы его только с переустановкой фронта.
         if _WWW_DIR.exists():
             had_shim = (_WWW_DIR / "triple-sse.js").exists()
             if _inject_sse_shim(_WWW_DIR) and not had_shim:
-                _box_ok("SSE-шим (v82) вживлён во фронт — live-обновления "
+                _box_ok("SSE-шим вживлён во фронт — live-обновления "
                         "включены.")
                 if _service_active():
                     _run(["systemctl", "restart", _SERVICE_NAME],
@@ -1134,7 +1134,7 @@ def _update_front() -> bool:
         if backup.exists():
             shutil.rmtree(backup, ignore_errors=True)
         shutil.copytree(_WWW_DIR, backup)
-    # v83.2: quiet больше не нужен — вывод download_manager теперь
+    # quiet больше не нужен — вывод download_manager теперь
     # строками бокса (live-frame), лестница зеркал видна и при обновлении
     if not _fetch_front(upstream):
         _box_err("Скачивание не удалось.")
@@ -1304,7 +1304,7 @@ def _access_menu() -> None:
             break
         if ch == "1":
             if st.get("enabled"):
-                # v83.2: результат — в собственном боксе, вывод nginx — в рамке
+                # результат — в собственном боксе, вывод nginx — в рамке
                 _box_top("🌐  ДОСТУП  •  TRIPLE PANEL")
                 _box_row()
                 with _boxed_output():
@@ -1320,7 +1320,7 @@ def _access_menu() -> None:
                 domain = None
                 domain_auto = False
                 if not use_self_signed:
-                    # v83.3: домен — автоматически (как в b4): PARAM_DOMAIN →
+                    # домен — автоматически (как в b4): PARAM_DOMAIN →
                     # state.json → домен Naive. Ручной ввод — только если
                     # нигде не нашли.
                     domain = _detect_panel_domain()
@@ -1357,7 +1357,7 @@ def _change_web_port() -> bool:
 
     Порт читается бэкендом из state при старте (не из юнита), поэтому
     смена порта = правка state + port_registry + рестарт сервиса.
-    v83.2: порт — мини-боксом (_ask_web_port), результат — в боксе,
+    порт — мини-боксом (_ask_web_port), результат — в боксе,
     ожидание ответа GET / — с ретраями (не sleep(2)+одна попытка).
     """
     state = _load_state()
@@ -1428,7 +1428,7 @@ def _uninstall() -> bool:
         return False
     if confirm != "y":
         return False
-    # v83.2: процесс удаления — в боксе, вывод nginx/systemctl — в рамке
+    # процесс удаления — в боксе, вывод nginx/systemctl — в рамке
     _box_top("🗑️  УДАЛЕНИЕ  •  TRIPLE PANEL")
     _box_row()
     with _boxed_output():

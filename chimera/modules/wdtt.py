@@ -615,7 +615,7 @@ def _go_required_version(gomod: Path) -> str:
                 return m.group(1)
         except Exception:
             pass
-    # v74.2 (wdtt-layout-fix): дефолт поднят 1.21.0 → 1.25.0 —
+    # (wdtt-layout-fix): дефолт поднят 1.21.0 → 1.25.0
     # upstream SpaceNeuroX/proxy-turn-vk-android (master от 02.09)
     # в go.mod требует go 1.25.0. Если на сервере уже стоит старый Go
     # (1.21-1.24), он проходил проверку, но go build падал с
@@ -711,7 +711,7 @@ def _build_wdtt_server() -> bool:
     # _ensure_go() сам вызывает _install_go_toolchain → fetch_package(GO_TOOLCHAIN_SPEC)
     # если текущий Go старее требуемого или отсутствует.
     # Используем _go_required_version с пустым go.mod Path — вернёт дефолт
-    # "1.25.0" (v74.2: под go.mod нового апстрима SpaceNeuroX, ./server- layout).
+    # "1.25.0" (под go.mod нового апстрима SpaceNeuroX,./server- layout).
     required = _go_required_version(Path("/nonexistent/go.mod"))
     go = _ensure_go(required)
     if not go:
@@ -1632,7 +1632,7 @@ def do_wdtt_menu() -> None:
             tg = "✓ настроен" if state.get("bot_token") else "не настроен"
             tg_col = GREEN if state.get("bot_token") else DIM
             _box_kv("Telegram-бот:", f"{tg_col}{tg}{NC}")
-            # v75: статус обновления из апстрима (state-кэш, без сети).
+            # статус обновления из апстрима (state-кэш, без сети).
             try:
                 from chimera.modules.upstream_updates import get_update_status_line
                 _box_kv("Обновление:", get_update_status_line("wdtt"))
@@ -1707,7 +1707,7 @@ def do_wdtt_menu() -> None:
             _show_status()
 
         elif ch == "u" and installed:
-            # v75: единое меню обновления из апстрима
+            # единое меню обновления из апстрима
             # (SpaceNeuroX/proxy-turn-vk-android).
             try:
                 from chimera.modules.upstream_updates import do_upstream_update_menu

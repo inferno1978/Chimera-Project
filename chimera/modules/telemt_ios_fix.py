@@ -288,7 +288,7 @@ def _setup_ufw(port: int) -> None:
 
 
 def _teardown_ufw(port: int) -> None:
-    """Закрывает порт iOS-фикса в UFW и снимает регистрацию (v49).
+    """Закрывает порт iOS-фикса в UFW и снимает регистрацию.
 
     Раньше disable-путь удалял только iptables-правила — UFW allow и
     запись port_registry оставались жить (orphaned rule + stale entry).
@@ -544,7 +544,7 @@ def ios_fix_menu() -> None:
                 if _strip_client_mss():
                     _box_ok("client_mss удалён из конфига.")
 
-            # v49: смена порта — старый UFW/реестр закрываем до нового
+            # смена порта — старый UFW/реестр закрываем до нового
             if cfg.enabled and cfg.ext_port and cfg.ext_port != ext_port:
                 _teardown_ufw(cfg.ext_port)
 
@@ -571,7 +571,7 @@ def ios_fix_menu() -> None:
                 _box_info("iOS-фикс уже не активен."); _pause(); continue
             removed = _remove_rules()
             _persist_rules()
-            _teardown_ufw(cfg.ext_port if cfg.ext_port else 0)  # v49
+            _teardown_ufw(cfg.ext_port if cfg.ext_port else 0) # 
             _save_state(IosFixConfig(enabled=False))
             _run(["systemctl", "restart", _SERVICE_NAME])
             print()

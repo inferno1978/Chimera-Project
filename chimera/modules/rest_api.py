@@ -2525,7 +2525,7 @@ def install_web_service(port: int = None, admin_user: str = None,
     # Открываем порт в ufw ТОЛЬКО при явном внешнем доступе (host=0.0.0.0).
     # По умолчанию (127.0.0.1) — не открываем, доступ через SSH-туннель.
     #  миграция на port_registry (с backward compat fallback).
-    # v49: port_register — ВСЕГДА (и loopback): конфликт-детекция должна
+    # port_register — ВСЕГДА (и loopback): конфликт-детекция должна
     # видеть панель (webdav_tunnel тоже дефолтит на 8443). UFW — только
     # при 0.0.0.0.
     try:

@@ -6,7 +6,7 @@ Unit-тесты для chimera/modules/csqtt_packages.py.
 
 Покрывает:
   1. _post_install_csqtt_source — выбор серверной директории:
-     v74.2 (csqtt-layout-fix): upstream amurcanov/csqtt переименовал
+      (csqtt-layout-fix): upstream amurcanov/csqtt переименовал
      csqtt-uring → rust-server; поддерживаются оба layout.
   2. Диагностика ошибки: сообщение показывает содержимое архива.
 """
@@ -41,7 +41,7 @@ def _setup_core():
 
 
 class TestPostInstallLayout(unittest.TestCase):
-    """v74.2: rust-server (новый upstream) и csqtt-uring (старый) собираются."""
+    """rust-server (новый upstream) и csqtt-uring (старый) собираются."""
 
     def setUp(self):
         _setup_core()

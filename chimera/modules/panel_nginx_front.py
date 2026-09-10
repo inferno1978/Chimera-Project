@@ -605,7 +605,7 @@ def panel_nginx_front_remove(
     """
     core = _core_module()
     info, success = core.info, core.success
-    # v65: warn/CYAN/NC/YELLOW использовались ниже (шаг port_registry),
+    # warn/CYAN/NC/YELLOW использовались ниже (шаг port_registry),
     # но НЕ были определены → NameError: (1) info(f"{CYAN}…") падал,
     # (2) except-обработчик звал warn(f"{YELLOW}…") — тоже NameError,
     # уже НЕПЕРЕХВАЧЕННЫЙ → удаление панели в продакшене роняло

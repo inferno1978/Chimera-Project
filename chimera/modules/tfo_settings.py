@@ -366,9 +366,9 @@ def _tfo_apply(enabled: bool) -> None:
 def _test_and_restart_xray(backup: Path | None) -> bool:
     """xray run -test → systemctl restart xray; откат из backup при неудаче.
 
-    v72.1: reset-failed перед каждым рестартом (паттерн v57 — двойной
+    reset-failed перед каждым рестартом (паттерн двойной
     рестарт при откате без сброса ловит start-limit-hit, guard-тест
-    test_v57_...::test_no_bare_xray_restarts).
+    test__...::test_no_bare_xray_restarts).
     """
     core = _core_module()
     warn = core.warn

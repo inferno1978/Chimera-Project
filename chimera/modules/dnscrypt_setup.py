@@ -62,7 +62,7 @@ def _get_dnscrypt_port() -> int:
 
 
 # ============================================================================
-#  LISTEN-ADDRESSES (IPv6-aware, v72)
+# LISTEN-ADDRESSES (IPv6-aware)
 # ============================================================================
 def _toml_listen_addresses(addr: str, port: int, ipv6: bool) -> str:
     """Строка listen_addresses для dnscrypt-proxy.toml.
@@ -174,7 +174,7 @@ def install_dnscrypt() -> None:
     success(f"Бинарник DNSCrypt-proxy установлен: {DNSCRYPT_BIN}")
     DNSCRYPT_CONF_DIR.mkdir(parents=True, exist_ok=True)
 
-    # v67: гео-резистентный набор резолверов. Режим B подразумевает Entry-ноду
+    # гео-резистентный набор резолверов. Режим B подразумевает Entry-ноду
     # В РФ — а оттуда cloudflare (1.1.1.1) душится, google DoH (dns.google)
     # заблокирован. DNSCrypt-протокол Quad9 (порт 8443, БЕЗ SNI) переживает
     # DPI-фильтрацию и не фильтруется РКН → lb_estimator сам выбирает живой
@@ -189,7 +189,7 @@ def install_dnscrypt() -> None:
     DNSCRYPT_CONF.write_text(textwrap.dedent(f"""\
         ## dnscrypt-proxy.toml — сгенерирован Chimera Project v4.12.10
         ## Слушает на {DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT}
-        ## v72: при IPv6 на сервере дополнительно слушаем [::1] — DNS-путь
+        ## при IPv6 на сервере дополнительно слушаем [::1] — DNS-путь
         ## IPv6-готов (redirect 53→{DNSCRYPT_LISTEN_PORT} в dns_redirect включается автоматически).
 
         listen_addresses = {_toml_listen_addresses(DNSCRYPT_LISTEN_ADDR, DNSCRYPT_LISTEN_PORT, IS_IPV6_AVAILABLE)}
@@ -219,7 +219,7 @@ def install_dnscrypt() -> None:
 
         cert_refresh_delay = 240
 
-        ## v67: bootstrap/fallback обязаны быть достижимы И с зарубежных, И с
+        ## bootstrap/fallback обязаны быть достижимы И с зарубежных, И с
         ## РФ-хостингов. 8.8.8.8:53 заблокирован в РФ (РКН, 2024), 1.1.1.1:53
         ## душится TSPU. Quad9 + Яндекс-резолвер работают отовсюду (используются
         ## ТОЛЬКО для резолва имён DoH-серверов, не для клиентских запросов).
@@ -403,7 +403,7 @@ def apply_dnscrypt_tuning() -> None:
         "timeout":            "1500",
         "netprobe_timeout":   "5",
         "reject_ttl":         "10",
-        # v73 = v67-канон (шаблон install_dnscrypt): 1.1.1.1/8.8.8.8 в РФ
+        # = канон (шаблон install_dnscrypt): 1.1.1.1/8.8.8.8 в РФ
         # отравлены (DNAT→НСДИ, NXDomain-spoof) — тюнинг [T] не должен
         # возвращать отраву в уже вычищенный конфиг.
         "fallback_resolvers": "['9.9.9.9:53', '77.88.8.8:53']",

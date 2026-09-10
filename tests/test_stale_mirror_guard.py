@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-v70 (stale-mirror-guard): защита от устаревших кэшей зеркал при установке Xray.
+ (stale-mirror-guard): защита от устаревших кэшей зеркал при установке Xray.
 
 Первопричина инцидента 28-29.08 (сервер vds-old, Режим B «мёртв» при живом
 Mode-профиле): установщик получил от ghproxy.net ЗАКЭШИРОВАННЫЙ ответ
@@ -16,7 +16,7 @@ Mode-профиле): установщик получил от ghproxy.net ЗА�
   1. _max_version_tag: выбор максимального тега (анти-stale).
   2. Сбор тегов со ВСЕХ зеркал (не первый ответ).
   3. Юнит-файл: Environment=XRAY_LOCATION_ASSET (systemd-валидная форма;
-     форма с точками молча отбрасывается systemd — баг v68).
+     форма с точками молча отбрасывается systemd — баг).
   4. Пост-установочная сверка версии бинарника с ожидаемой.
 """
 import re
@@ -76,10 +76,10 @@ class TestMaxVersionTag(unittest.TestCase):
 class TestMirrorCollection(unittest.TestCase):
     def test_collects_all_mirrors_no_early_break(self):
         """Теги собираются со ВСЕХ зеркал: нет break по первому успеху
-        внутри цикла по _API_MIRRORS (v70)."""
+        внутри цикла по _API_MIRRORS."""
         src = (_PROJECT_ROOT / "chimera" / "modules" /
                "xray_install.py").read_text()
-        # фрагмент цикла v70
+        # фрагмент цикла 
         seg = src[src.index("_collected_tags: list = []"):
                   src.index("Шаг B: stable недоступен")]
         self.assertIn("_collected_tags.append(_tag)", seg)

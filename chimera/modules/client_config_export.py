@@ -92,7 +92,7 @@ def do_generate_client_config() -> None:
     domain    = state.get("domain", "")
     port      = state.get("server_port", 443)
     vuuid     = state.get("uuid", "")
-    # v58: pbk/sid — с fallback на живой config.json (частично битый
+    # pbk/sid — с fallback на живой config.json (частично битый
     # state.json больше не выдаёт Clash/vless-конфиги с пустыми ключами).
     try:
         import importlib as _il
@@ -605,7 +605,7 @@ def do_share_config_server() -> None:
         if not links:
             domain   = state.get("domain", "")
             vuuid    = state.get("uuid", "")
-            # v58: pbk/sid с fallback на живой config.json
+            # pbk/sid с fallback на живой config.json
             try:
                 pub_key, short_id, _spx2 = core._reality_transport_params_from_state(state)
             except Exception:

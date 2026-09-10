@@ -501,7 +501,7 @@ def get_subscription_uris(user: dict) -> list:
 def _build_csqtt_server() -> bool:
     """Устанавливает csqtt-server: готовый ручной бинарь → исходники.
 
-    v76.1: сначала ищем ГОТОВЫЙ бинарь, загруженный юзером вручную
+    сначала ищем ГОТОВЫЙ бинарь, загруженный юзером вручную
     (scp/WinSCP в /root, /tmp, /opt, /usr/local/src, /home/<юзер>/).
     Если найден (ELF + архитектура сервера) — устанавливаем его
     БЕЗ сборки: серверу, который не тянет Rust-компиляцию, это
@@ -512,7 +512,7 @@ def _build_csqtt_server() -> bool:
     from chimera.modules.download_manager import fetch_package
     from chimera.modules import csqtt_packages
 
-    # v76.1: шаг 1 — готовый бинарь, если юзер его принёс.
+    # шаг 1 — готовый бинарь, если юзер его принёс.
     print(f"  {CYAN}→{NC}  Проверяю готовый бинарь csqtt-server "
           f"(ручное размещение)...")
     try:
@@ -814,7 +814,7 @@ def _run_install() -> None:
         _pause()
 
 def _print_install_failure_box() -> None:
-    """v76.1: блок ошибки установки бинарника + инструкция.
+    """блок ошибки установки бинарника + инструкция.
 
     Порядок подсказок = порядок «стоимости» для юзера:
       1. ГОТОВЫЙ бинарь с другой машины (без сборки вообще) — самый
@@ -828,7 +828,7 @@ def _print_install_failure_box() -> None:
     _box_err("Не удалось собрать csqtt-server.")
     _box_err("Убедитесь что доступны Rust, Zig и интернет.")
     _box_row()
-    # v76.1 — приоритетная подсказка: готовый бинарь без сборки
+    # приоритетная подсказка: готовый бинарь без сборки
     _box_row(f"  {BOLD}Без сборки — готовый бинарь с другой машины:{NC}")
     _box_row(f"  {DIM}соберите на другой машине и загрузите на сервер (scp/WinSCP){NC}")
     _box_row(f"  {DIM}под именем csqtt-server — установщик сам найдёт его{NC}")
@@ -969,7 +969,7 @@ def _run_install_inner() -> None:
     _box_top("🚀  УСТАНОВКА  •  CSQTT")
     _box_row()
 
-    # 1. Бинарник (v76.1: готовый ручной бинарь → потом сборка из исходников)
+    # 1. Бинарник (готовый ручной бинарь → потом сборка из исходников)
     _box_info("Бинарь csqtt-server: готовый (если найден) или сборка (Rust + Zig)...")
     _box_bot(); print()
 
@@ -1574,7 +1574,7 @@ def do_csqtt_menu() -> None:
             _box_kv("Data порт:",   str(state.get("data_port", "—")))
             _box_kv("Web Panel:",   f"https://127.0.0.1:{state.get('web_port', '—')}")
             _box_kv("Паролей:",     str(pw_count))
-            # v75: статус обновления из апстрима (state-кэш, без сети).
+            # статус обновления из апстрима (state-кэш, без сети).
             try:
                 from chimera.modules.upstream_updates import get_update_status_line
                 _box_kv("Обновление:", get_update_status_line("csqtt"))
@@ -1631,7 +1631,7 @@ def do_csqtt_menu() -> None:
             server_ip = _get_server_ip()
             data_port = state.get("data_port", _DEFAULT_DATA_PORT)
             main_pass = state.get("main_password", "")
-            # v58: guard — ссылка с ПУСТЫМ паролем (битый/усечённый state.json)
+            # guard — ссылка с ПУСТЫМ паролем (битый/усечённый state.json)
             # нерабоча и вводит в заблуждение; показываем ошибку вместо битой ссылки.
             if not main_pass:
                 _box_top("🔗  ССЫЛКА  •  ГЛАВНЫЙ ПАРОЛЬ")
@@ -1748,7 +1748,7 @@ def do_csqtt_menu() -> None:
             except _Cancelled: print(f"  {DIM}Отменено.{NC}"); _pause()
 
         elif ch == "u" and installed:
-            # v75: единое меню обновления из апстрима (amurcanov/csqtt):
+            # единое меню обновления из апстрима (amurcanov/csqtt):
             # проверка ревизии / обновление / force / авто / таймер.
             try:
                 from chimera.modules.upstream_updates import do_upstream_update_menu

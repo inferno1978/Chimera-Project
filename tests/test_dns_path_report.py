@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-tests/test_v62_dns_path_report.py
+tests/test_dns_path_report.py
 ───────────────────────────────────────────────────────────────────────────────
-v62: фактический DNS-путь Xray в health-отчёте меню и emergency repair.
+: фактический DNS-путь Xray в health-отчёте меню и emergency repair.
 
-Запрос пользователя (после v61): «добавь вывод DNS-пути в итоговый
+Запрос пользователя (): «добавь вывод DNS-пути в итоговый
 health-отчёт меню и в emergency_repair». Один вопрос — «через что идут
 DNS-запросы Xray: AGH / DNSCrypt / системный резольвер?» — теперь виден
 везде: строка строится по ФАКТИЧЕСКОМУ config.json (dns.servers[0]) +
 живому состоянию стека.
 
-Контракт v62:
+Контракт 
   1. agh_probe.xray_dns_path_report — единый источник строки:
      • конфиг «AGH:53» + AGH жив (сервис + владение :53 + проба резолва)
        → ok ✅ «Xray → AGH:53 → DNSCrypt:5300 — AGH отвечает (…)»;
@@ -44,7 +44,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Фейковый chimera._core (паттерн test_health/test_v60)."""
+    """Фейковый chimera._core (паттерн test_health/test)."""
     core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
@@ -392,7 +392,7 @@ class TestCronScriptDnsBlock(unittest.TestCase):
                 out = ("udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:* "
                        'users:(("AdGuardHome",pid=1,fd=6))\n')
             elif cmd[:1] == ["dig"]:
-                # v65: живая проба резолва AGH в cron-скрипте — отвечает IP
+                # живая проба резолва AGH в cron-скрипте — отвечает IP
                 out = "77.88.55.77\n"
             elif cmd[0] == "curl":
                 # tg_send: '-d', 'text=<msg>'

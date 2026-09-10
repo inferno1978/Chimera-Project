@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/smoke_v77_dpi_censor_update.py
+scripts/smoke_dpi_censor_update.py
 ───────────────────────────────────────────────────────────────────────────────
 End-to-end смоук автообновления модуля «Проверка цензуры провайдера»
 (Runnin4ik/dpi-detector) — v77.
@@ -45,7 +45,7 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 def main() -> int:
     import chimera.modules.dpi_censor_check as m
 
-    tmp = Path(tempfile.mkdtemp(prefix="smoke-v77-"))
+    tmp = Path(tempfile.mkdtemp(prefix="smoke--"))
     rt_root = tmp / "rt"
     state_file = tmp / "dpi_censor_check.json"
     # старая версия + мусор — должны быть вычищены после установки
@@ -194,7 +194,7 @@ def main() -> int:
         for f in FAIL:
             print(f"  ✗ {f}")
         return 1
-    print("SMOKE v77: ВСЁ ЗЕЛЁНОЕ ✅")
+    print("SMOKE ВСЁ ЗЕЛЁНОЕ ✅")
     return 0
 
 

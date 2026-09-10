@@ -476,7 +476,7 @@ def do_manage_traffic_limits() -> None:
                     limits[email].pop("disabled", None)
                     limits[email].pop("disabled_at", None)
                 _limits_save(limits)
-                # v57 (start-limit-fix): reset-failed перед рестартом
+                # (start-limit-fix): reset-failed перед рестартом
                 _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
                 _run(["systemctl", "restart", "xray"], check=False, quiet=True)
                 time.sleep(2)

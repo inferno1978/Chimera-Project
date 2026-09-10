@@ -327,7 +327,7 @@ python3 -m chimera.modules.youtube_b4 install
    `system.geo.sitedat_path` — путь к geosite.dat: сеты с
    geosite-категориями (в т.ч. из Discovery) валидируются b4 только при
    заданном пути. Путь — всегда собственный `/etc/b4/geosite.dat`
-   (v75.1): это дефолтная Destination Directory Web UI b4 и единственный
+: это дефолтная Destination Directory Web UI b4 и единственный
    каталог гео-баз в ReadWritePaths systemd-юнита — /usr для процесса
    b4 read-only, и любой путь в /usr ломал Update геосайта в Web UI
    (500 EROFS; три машины). Geosite-базы у Xray и b4 больше НЕ шарятся:

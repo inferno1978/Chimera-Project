@@ -434,9 +434,9 @@ if __name__ == "__main__":
 
 
 class TestRunQuietCompat(unittest.TestCase):
-    """v74.2 (run-quiet-fix): _run(..., quiet=True) не должен падать TypeError.
+    """ (run-quiet-fix): _run(..., quiet=True) не должен падать TypeError.
 
-    Regression-тест: вызовы _run(..., quiet=True) из v57 (start-limit-fix,
+    Regression-тест: вызовы _run(..., quiet=True) из (start-limit-fix,
     systemctl reset-failed) падали на Debian 13 / Python 3.13 с
     "TypeError: run() got an unexpected keyword argument 'quiet'",
     потому что локальный turnable._run не принимал quiet (в отличие от

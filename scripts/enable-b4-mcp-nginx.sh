@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  Chimera Project — enable-b4-mcp-nginx.sh (v72.3)
+# Chimera Project — enable-b4-mcp-nginx.sh
 # ============================================================================
 #  Добавляет location /api/mcp в существующий nginx front b4 Web UI
 #  (порт 9743) — чтобы MCP-клиенты (Claude, Cursor и др.) могли ходить
@@ -17,7 +17,7 @@
 #  ВАЖНО: MCP-сервер b4 должен быть включён в самом b4:
 #    b4 Web UI → Settings → API → MCP → Enable (+ сгенерировать токен).
 #
-#  v72.3: бэкапы больше НЕ пишутся в sites-enabled — nginx подключает
+# бэкапы больше НЕ пишутся в sites-enabled — nginx подключает
 #  /etc/nginx/sites-enabled/* ЦЕЛИКОМ (все файлы, включая .bak), и бэкап
 #  с оригинальным server-блоком давал на каждый nginx -t warning
 #  «conflicting server name ... ignored». Теперь бэкапы живут в
@@ -25,7 +25,7 @@
 #  .preMCP.bak из sites-enabled/conf.d (+ nginx -t + reload).
 #
 #  Идемпотентен: повторный запуск ничего не меняет в конфиге сайта
-#  (если локация есть) и заодно вычищает бэкапы v72.2 из sites-enabled.
+# (если локация есть) и заодно вычищает бэкапы из sites-enabled.
 #  Безопасен: бэкап конфига + nginx -t + авточтобыоткат.
 #
 #  Запуск:  sudo bash scripts/enable-b4-mcp-nginx.sh
@@ -77,7 +77,7 @@ hdr "2/4  Чистка бэкапов и проверка состояния"
 
 # nginx подключает sites-enabled/* ЦЕЛИКОМ — .bak-файлы в нём грузятся
 # как дубликаты server-блоков («conflicting server name ... ignored»).
-# Выносим старые бэкапы (оставались там до v72.3) в BAKDIR.
+# Выносим старые бэкапы (оставались там ранее) в BAKDIR.
 MOVED_LIST=""
 for d in /etc/nginx/sites-enabled /etc/nginx/conf.d; do
     [ -d "$d" ] || continue
@@ -136,7 +136,7 @@ if not m:
 indent = m.group(1)          # отступ блока location /
 block = f"""{indent}# MCP (Model Context Protocol) — b4 control plane. Host обязан быть
 {indent}# loopback (go-sdk DNS-rebinding protection). НЕ редактировать вручную.
-{indent}# Добавлено scripts/enable-b4-mcp-nginx.sh (v72.2).
+{indent}# Добавлено scripts/enable-b4-mcp-nginx.sh.
 {indent}location /api/mcp {{
 {indent}    proxy_pass http://127.0.0.1:9700;
 {indent}    proxy_http_version 1.1;
@@ -218,4 +218,4 @@ echo -e '        "headers": { "Authorization": "Bearer <MCP-токен из b4>"
 echo -e '      }'
 echo -e '    }'
 echo -e "  После переустановки nginx front через TUI локация сохранится"
-echo -e "  (модули v72.2 генерируют её сами — обнови /opt/chimera: git pull)."
+echo -e " (модули генерируют её сами — обнови /opt/chimera: git pull)."

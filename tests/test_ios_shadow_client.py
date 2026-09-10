@@ -469,7 +469,7 @@ class TestDeleteWithAndWithoutShadow(unittest.TestCase):
                  patch.object(users_manager, "_users_apply_config", lambda cfg: None), \
                  patch.object(users_manager, "_core_module", return_value=self._fake_core), \
                  patch.object(Path, "unlink", lambda self, *a, **kw: None), \
-                 patch("builtins.input", side_effect=["alice@example.com", "y"]):  # v65: подтверждение удаления
+                 patch("builtins.input", side_effect=["alice@example.com", "y"]): # подтверждение удаления
                 try:
                     users_manager.do_user_delete()
                 except Exception:
@@ -497,7 +497,7 @@ class TestDeleteWithAndWithoutShadow(unittest.TestCase):
                  patch.object(users_manager, "_users_apply_config", lambda cfg: None), \
                  patch.object(users_manager, "_core_module", return_value=self._fake_core), \
                  patch.object(Path, "unlink", lambda self, *a, **kw: None), \
-                 patch("builtins.input", side_effect=["alice@example.com", "y"]):  # v65: подтверждение удаления
+                 patch("builtins.input", side_effect=["alice@example.com", "y"]): # подтверждение удаления
                 try:
                     users_manager.do_user_delete()
                 except Exception:
@@ -751,7 +751,7 @@ class TestStep0Closure(unittest.TestCase):
         состоянию, когда iOS-маршрут был закомментирован (патч №2)."""
         src = (_PROJECT_ROOT / "chimera" / "modules" / "subscription.py").read_text()
         # Активная (не закомментированная) строка с url_ios
-        # v65: после выноса схемы в url_base (подписка за TLS-фронтом)
+        # после выноса схемы в url_base (подписка за TLS-фронтом)
         # url_ios строится от url_base — сканируем оба паттерна.
         found = False
         for line in src.split("\n"):

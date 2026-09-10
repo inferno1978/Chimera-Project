@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v69: регресс-тесты клиентского sing-box-конфига мульти-ноды (Режим B).
+"""регресс-тесты клиентского sing-box-конфига мульти-ноды (Режим B).
 
 Первопричина инцидента «каскад не работает НИЧЕГО»: build_singbox_config()
 генерировал конфиг, который НЕ ЗАПУСКАЛСЯ на актуальных sing-box:
@@ -70,7 +70,7 @@ STATE = {
 }
 
 
-class TestV69SingboxMultinodeConfig(unittest.TestCase):
+class TestSingboxMultinodeConfig(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # Гигиена sys.modules: сохраняем то, что подменим (chimera._core и

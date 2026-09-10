@@ -34,7 +34,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 def _setup_core_in_sysmodules(awg_enabled: bool = False):
     """Загружает chimera._core через exec и регистрирует в sys.modules.
 
-    v56: exec выполняется ПРЯМО в __dict__ фейкового модуля (раньше — в
+    exec выполняется ПРЯМО в __dict__ фейкового модуля (раньше — в
     отдельный dict g, копируемый в модуль). Теперь мутации вида
     ``core._run = MagicMock(...)`` из тестов видны функциям ядра через
     их __globals__ — без этого _xray_safe_restart и другие функции,
@@ -221,7 +221,7 @@ class TestYoutubeApplyToXray(unittest.TestCase):
         core._set_config_owner = lambda p: None
         # systemctl is-active возвращает 'failed'.
         core._run = MagicMock(return_value=_make_completed("failed"))
-        # v56: рестарт идёт через _xray_safe_restart — мокаем, чтобы не
+        # рестарт идёт через _xray_safe_restart — мокаем, чтобы не
         # крутить два 45-секундных wait-цикла с реальным time.sleep.
         core._xray_safe_restart = MagicMock(return_value=False)
         core._nginx_restart_if_reality = MagicMock()

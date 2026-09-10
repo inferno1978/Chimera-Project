@@ -8,7 +8,7 @@ Unit-тесты для chimera/modules/dpi_censor_check.py.
   1. _deps_missing — проверка отсутствующих Python-модулей
   2. _build_args — сборка CLI аргументов
   3. _REQUIRED_MODULES — список зависимостей
-  4. v77 — автообновление апстрима Runnin4ik/dpi-detector:
+  4. автообновление апстрима Runnin4ik/dpi-detector:
      • _version_key — семвер-ключ (числа как числа, v-префикс, rc-суффиксы)
      • _parse_entry_version / _vendor_version — версия с диска
      • _installed_copy — активная копия = новейшая из (вендорная, runtime)
@@ -208,7 +208,7 @@ class TestBuildArgs(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  v77: версии
+# версии
 # ══════════════════════════════════════════════════════════════════════════
 
 class TestVersionKey(unittest.TestCase):
@@ -389,7 +389,7 @@ class TestInstalledCopy(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  v77: последняя версия на GitHub
+# последняя версия на GitHub
 # ══════════════════════════════════════════════════════════════════════════
 
 class TestFetchLatestLsremote(unittest.TestCase):
@@ -529,7 +529,7 @@ class TestUpdateAvailable(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  v77: скачивание и установка runtime-копии
+# скачивание и установка runtime-копии
 # ══════════════════════════════════════════════════════════════════════════
 
 class TestDownloadAndInstall(unittest.TestCase):
@@ -566,7 +566,7 @@ class TestDownloadAndInstall(unittest.TestCase):
             return self.m._download_and_install(version)
 
     def _make_files_only_root(self, dest: Path) -> Path:
-        """Регистресс v77.1: распакованный «архив» из ОДНИХ ФАЙЛОВ.
+        """Регистресс распакованный «архив» из ОДНИХ ФАЙЛОВ.
 
         Порядок iterdir() зависит от ФС (tmpfs — порядок создания,
         ext4 — hash-порядок). Без директорий ПЕРВЫЙ скопированный элемент
@@ -588,7 +588,7 @@ class TestDownloadAndInstall(unittest.TestCase):
         return root
 
     def test_regression_files_only_upstream_no_staging_crash(self):
-        """v77.1: файл-первым (нет директорий) — staging создаётся явно,
+        """файл-первым (нет директорий) — staging создаётся явно,
         установка не падает FileNotFoundError (прод-репорт Errno 2)."""
         ok, msg = self._run_install_root("4.1.0", self._make_files_only_root)
         self.assertTrue(ok, msg)
@@ -598,7 +598,7 @@ class TestDownloadAndInstall(unittest.TestCase):
         self.assertFalse(list(self.rt_root.glob(".staging-*")))
 
     def test_regression_staging_exists_before_any_copy(self):
-        """v77.1: staging существует ДО первого копирования файла."""
+        """staging существует ДО первого копирования файла."""
         # _make_files_only_root: все элементы — файлы; в момент copy2
         # staging-каталог уже должен существовать (проверяем в пробе).
         staging_at_copy = {}
@@ -628,7 +628,7 @@ class TestDownloadAndInstall(unittest.TestCase):
                         "staging-каталог должен существовать до копирования")
 
     def test_regression_final_exists_as_file_replaced(self):
-        """v77.1: мусор-ФАЙЛ с именем версии на месте final — заменяется,
+        """мусор-ФАЙЛ с именем версии на месте final — заменяется,
         rmtree(NotADirectoryError) не роняет установку."""
         self.rt_root.mkdir(parents=True, exist_ok=True)
         (self.rt_root / "4.1.0").write_text("файл-обманка")
@@ -737,7 +737,7 @@ class TestPruneRuntime(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  v77: UI — шапка меню, пункт [4], предложение перед запуском
+# UI — шапка меню, пункт [4], предложение перед запуском
 # ══════════════════════════════════════════════════════════════════════════
 
 class TestVersionRows(unittest.TestCase):
