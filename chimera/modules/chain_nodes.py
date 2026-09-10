@@ -743,10 +743,18 @@ def generate_xray_config_chain_entry() -> None:
                     "privateKey":  PARAM_PRIVATE_KEY,
                     "publicKey":   PARAM_PUBLIC_KEY,
                     "shortIds":    [PARAM_SHORTID],
-                    # Xray-core 26.7.11+ ужесточил проверку REALITY-клиента.
-                    # Mihomo / sing-box / старые Xray-клиенты НЕ проходят авторизацию
-                    # без этого поля. См. https://github.com/XTLS/REALITY/blob/main/README.md
-                    "minClientVer": "1.0.0",
+                    # Xray-core 26.7.11+ по умолчанию ставит minClientVer=26.3.27
+                    # (гейт версий клиента в REALITY). Клиенты семейства mihomo
+                    # (Clash Verge / FlClash / mihomo-роутеры) версию Xray в хендшейке
+                    # НЕ отчитывают вовсе — они не проходят НИКАКОЙ непустой порог,
+                    # включая "1.0.0" (подтверждено на 26.9.9: REALITY Authentication:
+                    # false, соединение молча уводится в декой = Timeout в клиенте).
+                    # Пустая строка — документированное значение «проверка выключена»;
+                    # поля пишем ЯВНО, иначе отсутствующее поле наследует дефолт.
+                    # Источники: XTLS docs (transports/reality), MetaCubeX/mihomo#3042,
+                    # MHSanaei/3x-ui#5922.
+                    "minClientVer": "",
+                    "maxClientVer": "",
                 },
             },
         }
@@ -993,10 +1001,18 @@ def _make_exit_node_config(nd: dict) -> dict:
                     "privateKey":  "<ВСТАВЬТЕ_PRIVATE_KEY_EXIT_NODE>",
                     "publicKey":   nd["pubkey"],
                     "shortIds":    [nd["shortid"]],
-                    # Xray-core 26.7.11+ ужесточил проверку REALITY-клиента.
-                    # Mihomo / sing-box / старые Xray-клиенты НЕ проходят авторизацию
-                    # без этого поля. См. https://github.com/XTLS/REALITY/blob/main/README.md
-                    "minClientVer": "1.0.0",
+                    # Xray-core 26.7.11+ по умолчанию ставит minClientVer=26.3.27
+                    # (гейт версий клиента в REALITY). Клиенты семейства mihomo
+                    # (Clash Verge / FlClash / mihomo-роутеры) версию Xray в хендшейке
+                    # НЕ отчитывают вовсе — они не проходят НИКАКОЙ непустой порог,
+                    # включая "1.0.0" (подтверждено на 26.9.9: REALITY Authentication:
+                    # false, соединение молча уводится в декой = Timeout в клиенте).
+                    # Пустая строка — документированное значение «проверка выключена»;
+                    # поля пишем ЯВНО, иначе отсутствующее поле наследует дефолт.
+                    # Источники: XTLS docs (transports/reality), MetaCubeX/mihomo#3042,
+                    # MHSanaei/3x-ui#5922.
+                    "minClientVer": "",
+                    "maxClientVer": "",
                 },
             },
         }
@@ -2210,10 +2226,18 @@ def generate_xray_config_chain_entry_multi() -> None:
                     "privateKey":  PARAM_PRIVATE_KEY,
                     "publicKey":   PARAM_PUBLIC_KEY,
                     "shortIds":    [PARAM_SHORTID],
-                    # Xray-core 26.7.11+ ужесточил проверку REALITY-клиента.
-                    # Mihomo / sing-box / старые Xray-клиенты НЕ проходят авторизацию
-                    # без этого поля. См. https://github.com/XTLS/REALITY/blob/main/README.md
-                    "minClientVer": "1.0.0",
+                    # Xray-core 26.7.11+ по умолчанию ставит minClientVer=26.3.27
+                    # (гейт версий клиента в REALITY). Клиенты семейства mihomo
+                    # (Clash Verge / FlClash / mihomo-роутеры) версию Xray в хендшейке
+                    # НЕ отчитывают вовсе — они не проходят НИКАКОЙ непустой порог,
+                    # включая "1.0.0" (подтверждено на 26.9.9: REALITY Authentication:
+                    # false, соединение молча уводится в декой = Timeout в клиенте).
+                    # Пустая строка — документированное значение «проверка выключена»;
+                    # поля пишем ЯВНО, иначе отсутствующее поле наследует дефолт.
+                    # Источники: XTLS docs (transports/reality), MetaCubeX/mihomo#3042,
+                    # MHSanaei/3x-ui#5922.
+                    "minClientVer": "",
+                    "maxClientVer": "",
                 },
             },
         }
