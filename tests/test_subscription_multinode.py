@@ -362,6 +362,123 @@ class TestMihomoConfig(unittest.TestCase):
         self.assertEqual(cfg, "")
 
 
+class TestMihomoMlkemRecipeB(unittest.TestCase):
+    """Рецепт B (Xray-core 26.9.8+, 2026-09-10): REALITY-ноды в mihomo-конфиге.
+
+    Серверная библиотека xtls/reality (пин Xray v26.9.8/26.9.9) требует
+    keyShare X25519MLKEM768 ДО X25519 в ClientHello. В utls-форке mihomo
+    MLKEM768 есть только в HelloChrome_Auto, а опция
+    support-x25519mlkem768 (ВНУТРИ reality-opts) запрещает его вырезание.
+    Поэтому генератор:
+      • REALITY-ноды  → support-x25519mlkem768: true + client-fingerprint: chrome
+        (форсирован, независимо от state/chain fp — живой тест: chrome+флаг
+        проходит и против 26.9.9, и против старых ядер; firefox — нет);
+      • xHTTP-ноды    → без флага, client-fingerprint из state (MLKEM не
+        участвует — обычный TLS);
+      • vless:// URI  → fp из state (источник правды не трогаем: Xray-семья
+        клиентов выбирает FP по версии своего ядра)."""
+
+    @classmethod
+    def setUpClass(cls):
+        _setup_core()
+        _fresh_multinode()
+        cls._tmpdir = Path(tempfile.mkdtemp())
+        cls._state_file = cls._tmpdir / "state.json"
+        cls._sub_conf = cls._tmpdir / "subscription.json"
+        cls._mirrors = cls._tmpdir / "entry_mirrors.json"
+        from chimera.modules import subscription_multinode as mn
+        cls._mn = mn
+
+    def _build(self, state):
+        self._state_file.write_text(json.dumps(state))
+        self._sub_conf.write_text(json.dumps({}))
+        self._mirrors.write_text(json.dumps({"mirrors": []}))
+        with patch.object(self._mn, "_STATE_FILE", self._state_file), \
+             patch.object(self._mn, "_SUB_CONF", self._sub_conf), \
+             patch.object(self._mn, "_MIRRORS_FILE", self._mirrors), \
+             patch.object(self._mn, "_geo_lookup", return_value=""):
+            return self._mn.build_mihomo_config(_TEST_USER)
+
+    def _state_firefox(self):
+        """Mode B, но ВСЕ fp = firefox — проверяем форсирование chrome."""
+        st = json.loads(json.dumps(_TEST_STATE_MODE_B))
+        st["fingerprint"] = "firefox"
+        for nd in st["chain_nodes"]:
+            nd["fp"] = "firefox"
+        return st
+
+    def test_reality_nodes_flag_and_forced_chrome(self):
+        cfg = self._build(self._state_firefox())
+        self.assertTrue(cfg)
+        # 3 REALITY-ноды (2 exit + entry) → флаг и chrome в каждой
+        self.assertEqual(cfg.count("support-x25519mlkem768: true"), 3)
+        self.assertEqual(cfg.count("client-fingerprint: chrome"), 3)
+        # firefox из state не должен просочиться в mihomo-прокси
+        self.assertNotIn("client-fingerprint: firefox", cfg)
+
+    def test_flag_inside_reality_opts_before_client_fingerprint(self):
+        """Порядок: reality-opts: → public-key → short-id → флаг →
+        client-fingerprint (флаг — поле RealityOptions, живёт ВНУТРИ
+        reality-opts, проверено по исходникам mihomo adapter/outbound/
+        reality.go: `proxy:"support-x25519mlkem768,omitempty"`)."""
+        cfg = self._build(self._state_firefox())
+        first_block = cfg.split("- name: \"")[1]  # первый proxy-блок
+        i_ro  = first_block.index("reality-opts:")
+        i_pk  = first_block.index("public-key:")
+        i_sid = first_block.index("short-id:")
+        i_flg = first_block.index("support-x25519mlkem768: true")
+        i_cf  = first_block.index("client-fingerprint: chrome")
+        self.assertLess(i_ro, i_pk)
+        self.assertLess(i_pk, i_sid)
+        self.assertLess(i_sid, i_flg)
+        self.assertLess(i_flg, i_cf)
+
+    def test_vless_uris_keep_state_fp(self):
+        """get_multinode_uris (base64-подписка) — fp из state (firefox),
+        источник правды не переопределяется генератором mihomo."""
+        self._state_file.write_text(json.dumps(self._state_firefox()))
+        self._sub_conf.write_text(json.dumps({}))
+        self._mirrors.write_text(json.dumps({"mirrors": []}))
+        with patch.object(self._mn, "_STATE_FILE", self._state_file), \
+             patch.object(self._mn, "_SUB_CONF", self._sub_conf), \
+             patch.object(self._mn, "_MIRRORS_FILE", self._mirrors), \
+             patch.object(self._mn, "_geo_lookup", return_value=""), \
+             patch.object(self._mn, "_core_call",
+                          side_effect=lambda fn, *a, **k: _fake_vless_link(*a, **k)):
+            uris = self._mn.get_multinode_uris(_TEST_USER)
+        self.assertEqual(len(uris), 2)
+        for u in uris:
+            self.assertIn("fp=firefox", u)
+
+    def test_xhttp_node_no_flag_keeps_fp(self):
+        """xHTTP-нода (обычный TLS, MLKEM не участвует): флага нет,
+        client-fingerprint из state сохраняется."""
+        nd = {
+            "name": "🪞 XHTTP node", "kind": "mirror", "host": "xh.example.com",
+            "port": 443, "uuid": "uuid-xh", "pbk": "pbk-xh", "sid": "",
+            "sni": "xh.example.com", "fp": "safari",
+            "proto": "xhttp", "path": "/xh", "xhttp_mode": "stream-up",
+        }
+        lines = self._mn._mihomo_proxy_block(nd)
+        block = "\n".join(lines)
+        self.assertNotIn("support-x25519mlkem768", block)
+        self.assertNotIn("reality-opts", block)
+        self.assertIn("client-fingerprint: safari", block)
+
+    def test_reality_block_unit_fp_override(self):
+        """Unit-уровень: REALITY-блок с fp=safari → chrome + флаг."""
+        nd = {
+            "name": "🇩🇪 DE", "kind": "exit", "host": "1.2.3.4",
+            "port": 443, "uuid": "u1", "pbk": "pbk1", "sid": "aa11",
+            "sni": "de.example.com", "fp": "safari", "proto": "reality",
+        }
+        lines = self._mn._mihomo_proxy_block(nd)
+        block = "\n".join(lines)
+        self.assertIn("support-x25519mlkem768: true", block)
+        self.assertIn("client-fingerprint: chrome", block)
+        self.assertNotIn("client-fingerprint: safari", block)
+
+
 class TestSingboxConfig(unittest.TestCase):
     """Генератор мульти-нодового sing-box JSON."""
 

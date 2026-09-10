@@ -4621,6 +4621,7 @@ def _fp_remove_cron() -> None:
 
 def do_manage_fingerprint() -> None:
     """Меню управления авто-сменой TLS fingerprint."""
+    global PARAM_FINGERPRINT  # синхронизируем после ручной смены (ссылки в этой же сессии)
     cron_path = Path(f"/etc/cron.d/{_FP_CRON_TAG}")
 
     while True:
@@ -4637,6 +4638,11 @@ def do_manage_fingerprint() -> None:
         print()
         _box_top(f"Авто-смена TLS Fingerprint")
         _box_row(f"  Текущий fingerprint:  {CYAN}{current_fp}{NC}")
+        # Рецепт B (Xray-core 26.9.8+): xtls/reality требует в ClientHello
+        # keyShare X25519MLKEM768; из FP mihomo его содержит только chrome.
+        # Пункт 1 меняет FP и в ссылках (state.json) — для mihomo-семьи
+        # нужен chrome.
+        _box_row(f"  {DIM}Xray ≥ 26.9.8: mihomo-семья — только fp=chrome (MLKEM768){NC}")
         _box_row(f"  Авто-ротация:         {''+GREEN+'ВКЛЮЧЕНА'+NC if cron_active else ''+YELLOW+'ОТКЛЮЧЕНА'+NC}")
         if cron_str:
             _box_row(f"  Cron:                 {DIM}{cron_str}{NC}")
@@ -4669,6 +4675,18 @@ def do_manage_fingerprint() -> None:
                 new_fp = random.choice(_fp_real)
                 info(f"Random → выбран: {new_fp}")
 
+            # REALITY-guard (v9): randomized несовместим с REALITY —
+            # auth-proof передаётся в session_id ClientHello, сервер не
+            # может извлечь его из randomized-Hello, соединение молча
+            # уходит на сайт-приманку. Тот же гард, что в
+            # user_fp_manager.apply_fp и TG-боте /setfp.
+            if new_fp == "randomized":
+                from chimera.modules.fingerprint_manager import reality_fp_warning
+                _w = reality_fp_warning(new_fp)
+                warn(f"  {_w or 'FP randomized несовместим с REALITY.'}")
+                input(f"{BLUE}Нажмите Enter...{NC}")
+                continue
+
             # Патчим конфиг
             ok = _fp_patch_config(new_fp)
             if not ok:
@@ -4687,6 +4705,11 @@ def do_manage_fingerprint() -> None:
                 # (start-limit-fix): безопасный рестарт (reset-failed)
                 if _xray_safe_restart(wait_active=15, attempts=2):
                     success(f"Fingerprint изменён на: {new_fp}, Xray перезапущен")
+                    # Синхронизация глобала: _fp_patch_config уже обновил
+                    # state.json (fingerprint + chain_nodes[*].fp), но
+                    # PARAM_FINGERPRINT живёт с старта меню — без этого
+                    # ссылки в этой же сессии генерировались бы со старым FP.
+                    PARAM_FINGERPRINT = new_fp
                 else:
                     warn("Fingerprint изменён, но Xray не поднялся — journalctl -u xray -n 30")
             input(f"{BLUE}Нажмите Enter...{NC}")
@@ -5344,6 +5367,7 @@ def do_unified_user_manager() -> None:
             _box_item("K", f"📱 iOS/Karing-ссылка для пользователя  {DIM}(без Vision flow){NC}")
             _box_item("E", f"Экспорт всех пользователей (ZIP с QR-кодами)")
             _box_item("I", f"Информация: ограничение доступа по устройствам")
+            _box_item("F", f"🔑 Смена TLS Fingerprint → перегенерация ссылок")
             _box_item("Q", f"Назад")
             _box_bottom()
             ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -5657,6 +5681,23 @@ def do_unified_user_manager() -> None:
 
             elif ch == "i":
                 _show_device_limit_info_core()
+
+            elif ch == "f":
+                # Смена TLS Fingerprint без переустановки (user_fp_manager):
+                # патчит fingerprint в config.json (outbounds/inbounds) +
+                # state.json (+ chain_nodes[*].fp), валидирует и перезапускает
+                # Xray, синхронизирует PARAM_FINGERPRINT и сразу показывает
+                # перегенерированные ссылки (fp= в vless://). Список FP —
+                # тот же, что в установочном флоу (XRAY_FP_LIST), с
+                # REALITY-гардом на random/randomized.
+                try:
+                    from chimera.modules.user_fp_manager import (
+                        do_change_fp_interactive,
+                    )
+                    do_change_fp_interactive()
+                except ImportError as e:
+                    warn(f"Модуль user_fp_manager не найден: {e}")
+                    time.sleep(2)
 
             elif ch in ("q", ""):
                 break
