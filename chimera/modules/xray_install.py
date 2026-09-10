@@ -1004,18 +1004,26 @@ def generate_xray_config() -> None:
                     "privateKey":  PARAM_PRIVATE_KEY,
                     "publicKey":   PARAM_PUBLIC_KEY,
                     "shortIds":    [PARAM_SHORTID],
-                    # Xray-core 26.7.11+ по умолчанию ставит minClientVer=26.3.27
-                    # (гейт версий клиента в REALITY). Клиенты семейства mihomo
-                    # (Clash Verge / FlClash / mihomo-роутеры) версию Xray в хендшейке
-                    # НЕ отчитывают вовсе — они не проходят НИКАКОЙ непустой порог,
-                    # включая "1.0.0" (подтверждено на 26.9.9: REALITY Authentication:
-                    # false, соединение молча уводится в декой = Timeout в клиенте).
-                    # Пустая строка — документированное значение «проверка выключена»;
-                    # поля пишем ЯВНО, иначе отсутствующее поле наследует дефолт.
-                    # Источники: XTLS docs (transports/reality, пример minClientVer=""),
-                    # MetaCubeX/mihomo#3042, MHSanaei/3x-ui#5922, doc-note mihomo
-                    # «mihomo-based clients cannot connect to Xray-core v26.7.11+
-                    # with default settings».
+                    # Гейт версий клиента (minClientVer) — механика по факту
+                    # стенда 2026-09-10 (docs/faq/VLESS_FAQ.md §18): ClientVer
+                    # в хендшейке отчитывают ВСЕ — sing-box → [1,8,1], mihomo
+                    # → [1,8,2] (mihomo проходит непустые пороги ≤ "1.8.2";
+                    # прежний комментарий «не отчитывают вовсе и не проходят
+                    # НИКАКОЙ порог» был неверен — те тесты валил MLKEM-чек
+                    # ClientHello ядра 26.9.8+, не гейт), Xray-клиент →
+                    # версию ядра. Xray 26.7.11–26.7.28: unset/"" =
+                    # ДЕФОЛТ-гейт 26.3.27, валит mihomo/sing-box, лечится
+                    # явным minClientVer="1.8.0" (рецепт podkop). Xray
+                    # 26.9.8+ (наш флот): дефолт-гейт УБРАН — unset/"" =
+                    # гейт выключен, непустые пороги живут ("2.0.0" валит
+                    # mihomo [1,8,2], "1.8.0"/"1.0.0" пропускает; sing-box
+                    # против 26.9.8+ не пройдёт ни при каком гейте — барьер
+                    # MLKEM, не версия). "" остаётся правильным значением;
+                    # поля пишем ЯВНО, чтобы поведение не зависело от
+                    # дефолтов ядра при смене версии. Источники: XTLS/
+                    # Xray-core #6477 (RPRX) + PR #6507, MetaCubeX/
+                    # mihomo#3042, MHSanaei/3x-ui#5922, стенд 2 ядра ×
+                    # 4 гейта × 3 клиента.
                     "minClientVer": "",
                     "maxClientVer": "",
                 },

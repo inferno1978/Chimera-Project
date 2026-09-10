@@ -347,10 +347,13 @@ def _rotate_reality_keys() -> dict:
                 rs["privateKey"] = new_priv
                 rs["publicKey"]  = new_pub
                 rs["shortIds"]   = [new_sid]
-                # Самозалечивание старых конфигов: Xray 26.7.11+ при ОТСУТСТВИИ
-                # minClientVer применяет дефолт 26.3.27 — mihomo-семейство
-                # (Clash Verge / FlClash) тогда не проходит REALITY-auth.
-                # setdefault: не трогаем явные значения, добавляем только пустые.
+                # Самозалечивание старых конфигов: minClientVer="" явно.
+                # Для флота (26.9.8+) это «гейт выкл» — дефолт-гейт 26.3.27
+                # эпохи 26.7.11–26.7.28 в новых ядрах убран; на самих 26.7.x
+                # "" не лечило бы (там нужен явный "1.8.0" — mihomo/sing-box
+                # отчитывают [1,8,2]/[1,8,1] и проходят порог 1.8.0), но эти
+                # версии на флоте не используются. setdefault: не трогаем
+                # явные значения. Механика: docs/faq/VLESS_FAQ.md §18.
                 rs.setdefault("minClientVer", "")
                 rs.setdefault("maxClientVer", "")
                 changed = True
