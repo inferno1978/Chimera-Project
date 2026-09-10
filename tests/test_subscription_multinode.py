@@ -48,6 +48,28 @@ def _setup_core():
     return fake_core
 
 
+def _fresh_multinode():
+    """Гарантирует СВЕЖУЮ пару subscription + subscription_multinode.
+
+    Другие тест-файлы этого же pytest-процесса могут оставлять модули
+    в sys.modules со своими monkey-патчами (например, заменены
+    _load_state), которые патчами путей (_STATE_FILE) не перебиваются.
+    Выкидываем закешированные объекты и атрибуты пакета — следующий
+    `from ... import` исполняет исходники заново и связывает lazy
+    _core_call с НАШИМ fake _core из _setup_core(). subscription.py
+    сбрасывается вместе с multinode: он держит ссылку
+    `from ... import subscription_multinode as _mn` со времён СВОЕГО
+    импорта — без сброса он продолжит звать СТАРЫЙ объект мимо наших
+    патчей (симптом: пустой state, multinode enabled=False)."""
+    for _name in ("chimera.modules.subscription_multinode",
+                  "chimera.modules.subscription"):
+        sys.modules.pop(_name, None)
+    import chimera.modules as _pkg
+    for _short in ("subscription_multinode", "subscription"):
+        if _short in vars(_pkg):
+            delattr(_pkg, _short)
+
+
 # ── Тестовые данные ────────────────────────────────────────────────────────
 _TEST_USER = {
     "uuid": "11111111-2222-3333-4444-555555555555",
@@ -105,6 +127,7 @@ class TestMultinodeRegistry(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_core()
+        _fresh_multinode()
         cls._tmpdir = Path(tempfile.mkdtemp())
         cls._state_file = cls._tmpdir / "state.json"
         cls._sub_conf = cls._tmpdir / "subscription.json"
@@ -201,6 +224,7 @@ class TestMihomoConfig(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_core()
+        _fresh_multinode()
         cls._tmpdir = Path(tempfile.mkdtemp())
         cls._state_file = cls._tmpdir / "state.json"
         cls._sub_conf = cls._tmpdir / "subscription.json"
@@ -344,6 +368,7 @@ class TestSingboxConfig(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_core()
+        _fresh_multinode()
         cls._tmpdir = Path(tempfile.mkdtemp())
         cls._state_file = cls._tmpdir / "state.json"
         cls._sub_conf = cls._tmpdir / "subscription.json"
@@ -412,6 +437,7 @@ class TestMultinodeUris(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_core()
+        _fresh_multinode()
         cls._tmpdir = Path(tempfile.mkdtemp())
         cls._state_file = cls._tmpdir / "state.json"
         cls._sub_conf = cls._tmpdir / "subscription.json"
@@ -454,6 +480,7 @@ class TestSubscriptionIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_core()
+        _fresh_multinode()
         cls._tmpdir = Path(tempfile.mkdtemp())
         cls._state_file = cls._tmpdir / "state.json"
         cls._sub_conf = cls._tmpdir / "subscription.json"
@@ -562,6 +589,7 @@ class TestSubscriptionHttpE2E(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_core()
+        _fresh_multinode()
         cls._tmpdir = Path(tempfile.mkdtemp())
         cls._state_file = cls._tmpdir / "state.json"
         cls._sub_conf = cls._tmpdir / "subscription.json"
@@ -684,6 +712,7 @@ class TestPortalHelpers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _setup_core()
+        _fresh_multinode()
         cls._tmpdir = Path(tempfile.mkdtemp())
         cls._state_file = cls._tmpdir / "state.json"
         cls._sub_conf = cls._tmpdir / "subscription.json"

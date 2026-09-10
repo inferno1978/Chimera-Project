@@ -125,7 +125,13 @@ class TestStateAndHeaders(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 def _fixture_lists(tmp: Path, live_extra: list | None = None,
                    drop: list | None = None):
-    """Мини-фикстуры живых списков из РЕАЛЬНОГО снапшота."""
+    """Мини-фикстуры живых списков из РЕАЛЬНОГО снапшота.
+
+    Снапшоты — локальные файлы вне репо (скачивались при разработке);
+    на чистой машине их нет, поэтому fallback строит «всё живо»-снапшот
+    из ПОЛНОГО пула модуля: pool-sync требует ≥ MIN_LIVE_SECTIONS (200)
+    живых секций, иначе отказывается трогать конфиг, и интеграционные
+    тесты падают. Релеев в fallback — все из маршрутов и wildcard."""
     src_srv = Path("/home/z/my-project/scripts/public-resolvers.md")
     src_rel = Path(
         "/home/z/my-project/scripts/ra-test/cache-B3-pool-clean/relays.md")
@@ -136,8 +142,11 @@ def _fixture_lists(tmp: Path, live_extra: list | None = None,
         rel_names = [l[3:].strip() for l in src_rel.read_text(errors="replace")
                      .splitlines() if l.startswith("## ")]
     else:
-        srv_names = list(adv._SERVER_NAMES[:50])
-        rel_names = list(adv._WILDCARD_RELAYS)
+        # детерминированный fallback: весь пул жив + все известные релеи
+        srv_names = list(adv._SERVER_NAMES)
+        rel_names = sorted(
+            {r for relays in upd._routes_from_advanced().values()
+             for r in relays} | set(adv._WILDCARD_RELAYS))
 
     keep_srv = [n for n in srv_names if n not in (drop or [])]
     keep_srv = keep_srv + (live_extra or [])
