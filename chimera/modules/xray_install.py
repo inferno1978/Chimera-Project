@@ -102,6 +102,22 @@ def _core_module():
     return importlib.import_module("chimera._core")
 
 
+# Гейт версий клиента REALITY (minClientVer) читается лениво из state.json
+# (ставится меню 5b; "" = выкл — норма для Xray 26.9.8+; "1.8.0" — даунгрейд-
+# рецепт для 26.7.11–26.7.28; VLESS_FAQ.md §18). Ридер безопасен к мок-ядрам
+# в тестах: не-строка/исключение → "".
+def _min_client_ver_reader(core):
+    fn = getattr(core, "_min_client_ver_from_state", None)
+
+    def _read() -> str:
+        try:
+            val = fn() if callable(fn) else ""
+            return val if isinstance(val, str) else ""
+        except Exception:
+            return ""
+    return _read
+
+
 # =============================================================================
 #  ШАГ 4: УСТАНОВКА XRAY + SHA256
 # =============================================================================
@@ -799,6 +815,10 @@ def generate_xray_config() -> None:
     PARAM_PRIVATE_KEY = core.PARAM_PRIVATE_KEY
     PARAM_PUBLIC_KEY = core.PARAM_PUBLIC_KEY
     PARAM_SHORTID = core.PARAM_SHORTID
+    # Гейт версий клиента REALITY — лениво из state.json (меню 5b):
+    # "" = выкл (норма для Xray 26.9.8+), "1.8.0" — даунгрейд-рецепт
+    # для 26.7.11–26.7.28 (VLESS_FAQ §18).
+    _min_client_ver = _min_client_ver_reader(core)
     AWG_FWMARK = core.AWG_FWMARK
     SPLIT_TUNNEL_ENABLED = core.SPLIT_TUNNEL_ENABLED
     build_split_tunnel_routing_rules = core.build_split_tunnel_routing_rules
@@ -1018,13 +1038,14 @@ def generate_xray_config() -> None:
                     # гейт выключен, непустые пороги живут ("2.0.0" валит
                     # mihomo [1,8,2], "1.8.0"/"1.0.0" пропускает; sing-box
                     # против 26.9.8+ не пройдёт ни при каком гейте — барьер
-                    # MLKEM, не версия). "" остаётся правильным значением;
-                    # поля пишем ЯВНО, чтобы поведение не зависело от
-                    # дефолтов ядра при смене версии. Источники: XTLS/
-                    # Xray-core #6477 (RPRX) + PR #6507, MetaCubeX/
-                    # mihomo#3042, MHSanaei/3x-ui#5922, стенд 2 ядра ×
-                    # 4 гейта × 3 клиента.
-                    "minClientVer": "",
+                    # MLKEM, не версия). Значение берётся из state.json
+                    # ("min_client_ver", ставится меню 5b; дефолт "" —
+                    # правильно для 26.9.8+); поля пишем ЯВНО, чтобы
+                    # поведение не зависело от дефолтов ядра при смене
+                    # версии. Источники: XTLS/Xray-core #6477 (RPRX) +
+                    # PR #6507, MetaCubeX/mihomo#3042, MHSanaei/3x-ui#5922,
+                    # стенд 2 ядра × 4 гейта × 3 клиента.
+                    "minClientVer": _min_client_ver(),
                     "maxClientVer": "",
                 },
             },

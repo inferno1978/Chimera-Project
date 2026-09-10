@@ -53,6 +53,7 @@ import socket
 import subprocess
 import tempfile
 import textwrap
+import fcntl
 import grp
 import pwd
 from pathlib import Path
@@ -947,6 +948,13 @@ PARAM_REALITY_DEST:    str  = ""   # dest/sni для REALITY при AWG-тран
 PARAM_DOMAIN_STRATEGY: str  = ""
 PARAM_SITE_TEMPLATE:   str  = "0"   # индекс шаблона сайта (0-15), дефолт "0" — должен быть int-конвертируемой строкой
 PARAM_FINGERPRINT:     str  = "chrome"   # TLS/uTLS fingerprint, выбирается при установке
+# Гейт версий клиента REALITY (minClientVer). "" = гейт ВЫКЛ — правильное
+# значение для Xray-core 26.9.8+ (дефолт-гейт 26.3.27 эпохи 26.7.11–26.7.28
+# в новых ядрах убран). "1.8.0" — рецепт для серверов, даунгрейднутых до
+# 26.7.11–26.7.28 ради sing-box/mihomo-клиентов (порог проходят sing-box
+# [1,8,1] и mihomo [1,8,2]). Ставится из меню 5b, хранится в state.json
+# ("min_client_ver"), генераторы читают лениво. Матрица: VLESS_FAQ §18.
+PARAM_MIN_CLIENT_VER:  str  = ""
 PRIVATE_KEY_MODE:      str  = "auto"
 
 ROLLBACK_AVAILABLE: bool = False
@@ -3088,8 +3096,13 @@ def do_rebuild_xray_config() -> None:
 
     Делает:
       1. Бэкап текущего /etc/xray/config.json (через backup_xray_config()).
-      2. Загружает state.json в глобали (PARAM_DOMAIN, PARAM_PRIVATE_KEY и т.д.).
-      3. Вызывает _rebuild_and_restart_xray() — та сама пересоздаёт конфиг
+      2. (опция) Выставить/сбросить гейт версий клиента minClientVer —
+         значение сохраняется в state.json ("min_client_ver") и
+         подхватывается ВСЕМИ генераторами (xray_install / chain_nodes /
+         pq_vless / credential_rotation) — ручная правка config.json
+         больше не нужна и не сбрасывается при следующем rebuild.
+      3. Загружает state.json в глобали (PARAM_DOMAIN, PARAM_PRIVATE_KEY и т.д.).
+      4. Вызывает _rebuild_and_restart_xray() — та сама пересоздаёт конфиг
          (через generate_xray_config / generate_xray_config_xhttp /
          generate_xray_config_chain_entry_multi в зависимости от режима),
          восстанавливает пользователей / RIPE-правила / Telemt / PQ-VLESS /
@@ -3107,6 +3120,8 @@ def do_rebuild_xray_config() -> None:
     _box_row(f"  Применение — добавить поля, которых нет в старом конфиге,")
     _box_row(f"  но которые теперь пишутся явно (напр. {BOLD}minClientVer=""{NC} — на Xray")
     _box_row(f"  26.9.8+ это выключенный гейт версий; см. VLESS_FAQ.md §18).")
+    _box_row(f"  Опция в этом пункте: выставить {BOLD}minClientVer{NC} без ручной правки")
+    _box_row(f"  конфига (для даунгрейд-ядер 26.7.11–26.7.28, см. шпаргалку ниже).")
     _box_row()
     _box_row(f"  {YELLOW}⚠  Текущий config.json будет забэкаплен и заменён.{NC}")
     _box_row(f"  {DIM}Пользователи, RIPE-правила, Telemt tproxy, PQ-VLESS, fragment{NC}")
@@ -3124,6 +3139,16 @@ def do_rebuild_xray_config() -> None:
     if not STATE_FILE.exists():
         warn(f"state.json не найден ({STATE_FILE}) — сначала выполните установку (пункт 1).")
         return
+
+    # Подпункт: гейт версий клиента REALITY. Спрашиваем ПОСЛЕ подтверждения
+    # rebuild и ДО перегенерации — сохранённое значение сразу же применяется
+    # генераторами ниже (и переживает все последующие rebuild/ротации).
+    try:
+        ans_mcv = input(f"{CYAN}Выставить minClientVer (гейт версий клиента REALITY)? [y/N]:{NC} ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        ans_mcv = ""
+    if ans_mcv == "y":
+        _prompt_min_client_ver(_min_client_ver_from_state())
 
     _load_state_into_globals()
     info("Параметры загружены из state.json.")
@@ -3148,14 +3173,15 @@ def do_rebuild_xray_config() -> None:
     # ClientVer в хендшейке отчитывают ВСЕ — sing-box → [1,8,1],
     # mihomo → [1,8,2], Xray-клиент → версия ядра. Xray 26.7.11–
     # 26.7.28: ""/unset = ДЕФОЛТ-гейт 26.3.27 (mihomo/sing-box валятся,
-    # лечится явным "1.8.0" — рецепт podkop). Xray 26.9.8+ (наш
-    # флот): ""/unset = гейт ВЫКЛ (дефолт убран); непустой порог
-    # жив — mihomo проходит пороги ≤ "1.8.2"; sing-box против
-    # 26.9.8+ не пройдёт ни при каком гейте (барьер — MLKEM-чек
-    # ClientHello, не версия).
+    # лечится явным "1.8.0" — рецепт podkop, теперь ставится из этого же
+    # пункта 5b и хранится в state.json). Xray 26.9.8+ (наш флот):
+    # ""/unset = гейт ВЫКЛ (дефолт убран); непустой порог жив — mihomo
+    # проходит пороги ≤ "1.8.2"; sing-box против 26.9.8+ не пройдёт ни
+    # при каком гейте (барьер — MLKEM-чек ClientHello, не версия).
     if PROTOCOL_MODE == "reality" and PROTOCOL_MODE != "xhttp":
         try:
             cfg = json.loads((CONFIG_DIR / "config.json").read_text())
+            _mcv_want = _min_client_ver_from_state()
             for ib in cfg.get("inbounds", []):
                 rs = ib.get("streamSettings", {}).get("realitySettings", {})
                 if rs:
@@ -3169,12 +3195,20 @@ def do_rebuild_xray_config() -> None:
                              "дефолт-гейт 26.3.27 (mihomo/sing-box отвалятся), "
                              "на 26.9.8+ — гейт выключен; поле лучше писать "
                              "явно — проверьте generate_xray_config()")
+                    elif mcv == _mcv_want:
+                        success(f"minClientVer = \"{mcv}\"  ✓  (гейт выставлен из "
+                                f"state.json — норма для даунгрейд-ядер "
+                                f"26.7.11–26.7.28: порог проходят sing-box "
+                                f"[1,8,1] и mihomo [1,8,2]; на 26.9.8+ mihomo/"
+                                f"Xray пройдут, sing-box — нет, MLKEM; §18)")
                     else:
-                        warn(f"minClientVer = {mcv} — непустой гейт версий (жив на "
-                             f"любых ядрах): mihomo (ClientVer [1,8,2]) пройдёт "
-                             f"пороги ≤ \"1.8.2\", Xray-клиенты — по версии ядра; "
-                             f"но против Xray 26.9.8+ sing-box не пройдёт при "
-                             f"любом гейте — барьер MLKEM, см. VLESS_FAQ §18")
+                        warn(f"minClientVer = {mcv} — не совпадает со state.json "
+                             f"({_mcv_want!r}): конфиг правился вручную? "
+                             f"Непустой гейт жив на любых ядрах: mihomo "
+                             f"(ClientVer [1,8,2]) пройдёт пороги ≤ \"1.8.2\", "
+                             f"Xray-клиенты — по версии ядра; но против Xray "
+                             f"26.9.8+ sing-box не пройдёт при любом гейте — "
+                             f"барьер MLKEM, см. VLESS_FAQ §18")
                     break
         except Exception:
             pass
@@ -3250,6 +3284,117 @@ def _fp_from_state() -> str:
         return _st.get("fingerprint", "chrome") or "chrome"
     except Exception:
         return "chrome"
+
+
+def _min_client_ver_from_state() -> str:
+    """Возвращает minClientVer (гейт версий клиента REALITY) — глобаль или state.json.
+
+    "" — гейт ВЫКЛ, правильное значение для Xray-core 26.9.8+ (дефолт-гейт
+    26.3.27 эпохи 26.7.11–26.7.28 в новых ядрах убран). Непустое значение
+    (например "1.8.0") — рецепт для серверов, даунгрейднутых до 26.7.11–
+    26.7.28 ради sing-box/mihomo-клиентов: дефолт-гейт там валит их
+    (sing-box заявляет [1,8,1], mihomo [1,8,2] — оба < 26.3.27), а порог
+    "1.8.0" оба проходят. Ставится из меню 5b (do_rebuild_xray_config),
+    хранится в state.json ("min_client_ver"). Генераторы серверных конфигов
+    (xray_install / chain_nodes / pq_vless / credential_rotation) читают
+    значение лениво через эту функцию — оверрайд переживёт любой rebuild.
+    Матрица совместимости: docs/faq/VLESS_FAQ.md §18.
+    """
+    if PARAM_MIN_CLIENT_VER:
+        return PARAM_MIN_CLIENT_VER
+    try:
+        _st = json.loads(STATE_FILE.read_text())
+        return _st.get("min_client_ver", "") or ""
+    except Exception:
+        return ""
+
+
+def _save_min_client_ver_to_state(value: str) -> bool:
+    """Сохраняет min_client_ver в state.json (read-modify-write под flock)
+    и синхронизирует глобаль PARAM_MIN_CLIENT_VER.
+
+    Тот же паттерн атомарности, что pq_state_save(): перечитывает файл под
+    эксклюзивной блокировкой — не затирает ключи, изменённые конкурентно
+    (UUID юзеров, ключи REALITY, PQ-VLESS и т.д.).
+    """
+    global PARAM_MIN_CLIENT_VER
+    value = (value or "").strip()
+    PARAM_MIN_CLIENT_VER = value
+    if not STATE_FILE.exists():
+        warn(f"{STATE_FILE} не найден — значение сохранено только в памяти сессии")
+        return False
+    try:
+        with STATE_FILE.open("r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read()
+                state = json.loads(content) if content else {}
+                state["min_client_ver"] = value
+                f.seek(0)
+                f.truncate()
+                f.write(json.dumps(state, indent=2, ensure_ascii=False))
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        return True
+    except Exception as e:
+        warn(f"Не удалось сохранить min_client_ver в state.json: {e}")
+        return False
+
+
+def _prompt_min_client_ver(current: str) -> None:
+    """Интерактивный ввод minClientVer (подпункт меню 5b) с шпаргалкой.
+
+    Шпаргалка отвечает на три вопроса юзера одним экраном: какое ядро
+    Xray на сервере → какое значение; какой клиент → какая связка нужна;
+    почему. Enter = "1.8.0" (самый частый сценарий — даунгрейд ради
+    sing-box/mihomo), "-" = сброс в "" (гейт выкл, норма для 26.9.8+).
+    """
+    print()
+    _box_top("🚪  Гейт версий клиента REALITY (minClientVer)")
+    _box_row()
+    _box_row("  Ядро Xray на сервере → правильное значение:")
+    _box_row(f"   • 26.9.8+  (текущий флот)      → {BOLD}\"\"{NC} — гейт выкл (норма)")
+    _box_row(f"   • 26.7.11–26.7.28 (даунгрейд)  → {BOLD}\"1.8.0\"{NC} — иначе дефолт-гейт")
+    _box_row( "     26.3.27 завалит sing-box и mihomo клиентов")
+    _box_row(f"   • 26.6.27 и старше             → {BOLD}\"\"{NC} — гейта нет вовсе")
+    _box_row()
+    _box_row( "  Клиенты (кто подключается):")
+    _box_row( "   • sing-box (Nyamebox, Karing) — ТОЛЬКО сервер 26.7.11–26.7.28")
+    _box_row( "     + \"1.8.0\"; на 26.9.8+ не работают ВООБЩЕ (MLKEM-чек")
+    _box_row( "     ClientHello, гейтом не лечится)")
+    _box_row( "   • mihomo (Clash Verge / FlClash / роутеры) — любые ядра,")
+    _box_row( "     но на 26.7.x без \"1.8.0\" отвалятся от дефолт-гейта")
+    _box_row( "   • чистый Xray (Incy и др.) — любые ядра, любое значение")
+    _box_row()
+    _box_row( "  Подробно и с матрицей: VLESS_FAQ.md §18")
+    _box_bottom()
+    print()
+    try:
+        raw = input(f'{CYAN}minClientVer [Enter = "1.8.0" | "-" = сброс в "" '
+                    f'(гейт выкл)]:{NC} ').strip()
+    except (KeyboardInterrupt, EOFError):
+        info("Ввод отменён — значение не менялось.")
+        return
+    if raw == "":
+        value = "1.8.0"
+    elif raw in ("-", "off", "none", "сброс", "reset"):
+        value = ""
+    else:
+        value = raw
+    if value and not re.fullmatch(r"\d+(?:\.\d+){0,2}", value):
+        warn(f"«{value}» не похоже на версию (формат: 1.8.0 / 26.3.27 / 1.0) — "
+             "значение не сохранено")
+        return
+    if value == current:
+        info(f"minClientVer уже {value!r} — изменений нет")
+        return
+    if _save_min_client_ver_to_state(value):
+        if value:
+            success(f'minClientVer = "{value}" сохранён — применится при перегенерации')
+            info("  Порог проходят: sing-box [1,8,1], mihomo [1,8,2]; Xray — всегда")
+        else:
+            success('minClientVer = "" (гейт выкл) сохранён — норма для Xray 26.9.8+')
 
 
 # (_users_get_config, _users_apply_config, _users_gen_link, do_user_list,
@@ -7345,7 +7490,7 @@ def _menu_install_system() -> None:
         _box_item("3", f"📦 Миграция  {DIM}(Экспорт / Импорт конфигурации){NC}")
         _box_item("4", f"⚡ Оптимизация системы  {DIM}(Sysctl / Limits){NC}")
         _box_item("5", "🔧 Обновить Xray-core")
-        _box_item("5b", f"♻️  Перегенерировать конфиг Xray  {DIM}(из state.json; minClientVer=\"\" — гейт версий выкл на Xray 26.9.8+){NC}")
+        _box_item("5b", f"♻️  Перегенерировать конфиг Xray  {DIM}(из state.json; опция выставить minClientVer — гейт для ядер 26.7.x и sing-box/mihomo-клиентов){NC}")
         _box_item("6", f"🛠️  Аварийное восстановление  {DIM}(из state.json, без переустановки){NC}")
         _box_item("7", "🗑️  Удалить установку")
         _box_item("8", "🧪 Запустить unit-тесты")
@@ -9335,6 +9480,7 @@ def _load_state_into_globals() -> None:
     global H2_EXIT_ENABLED
     global XTLS_FLOW
     global PARAM_FINGERPRINT
+    global PARAM_MIN_CLIENT_VER
     # YouTube routing toggle (youtube_route.py).
     global YOUTUBE_VIA_RU
     # FIX: PARAM_SOCKET_PATH и PARAM_SPIDERX раньше не загружались из state,
@@ -9380,6 +9526,9 @@ def _load_state_into_globals() -> None:
         PARAM_PRIVATE_KEY = state.get("private_key", PARAM_PRIVATE_KEY)
         PARAM_SHORTID    = state.get("short_id",    PARAM_SHORTID)
         PARAM_FINGERPRINT = state.get("fingerprint", PARAM_FINGERPRINT) or "chrome"
+        # Гейт версий клиента REALITY (меню 5b, VLESS_FAQ §18):
+        # "" = выкл (норма для Xray 26.9.8+), "1.8.0" — даунгрейд-рецепт.
+        PARAM_MIN_CLIENT_VER = state.get("min_client_ver", "") or ""
         IPV6_PREFLIGHT   = state.get("ipv6",        IPV6_PREFLIGHT)
         INSTALL_MODE     = state.get("install_mode", "A")
         # FIX: Раньше IS_IPV6_AVAILABLE = True ставилось безусловно, если в state

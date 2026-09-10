@@ -55,6 +55,22 @@ def _core_module():
     return importlib.import_module("chimera._core")
 
 
+# Гейт версий клиента REALITY (minClientVer) читается лениво из state.json
+# (ставится меню 5b; "" = выкл — норма для Xray 26.9.8+; "1.8.0" — даунгрейд-
+# рецепт для 26.7.11–26.7.28; VLESS_FAQ.md §18). Ридер безопасен к мок-ядрам
+# в тестах: не-строка/исключение → "".
+def _min_client_ver_reader(core):
+    fn = getattr(core, "_min_client_ver_from_state", None)
+
+    def _read() -> str:
+        try:
+            val = fn() if callable(fn) else ""
+            return val if isinstance(val, str) else ""
+        except Exception:
+            return ""
+    return _read
+
+
 # =============================================================================
 #  UUID РОТАЦИЯ ПО РАСПИСАНИЮ
 # =============================================================================
@@ -305,6 +321,10 @@ def _rotate_reality_keys() -> dict:
     log_to_file      = core.log_to_file
     _tg_notify_event = core._tg_notify_event
     XRAY_BIN         = core.XRAY_BIN
+    # Гейт версий клиента REALITY — лениво из state.json (меню 5b):
+    # "" = выкл (норма для Xray 26.9.8+), "1.8.0" — даунгрейд-рецепт
+    # для 26.7.11–26.7.28 (VLESS_FAQ §18).
+    _min_client_ver = _min_client_ver_reader(core)
 
     # Генерируем новую пару ключей
     r = _run([str(XRAY_BIN), "x25519"], capture=True, check=False)
@@ -347,14 +367,14 @@ def _rotate_reality_keys() -> dict:
                 rs["privateKey"] = new_priv
                 rs["publicKey"]  = new_pub
                 rs["shortIds"]   = [new_sid]
-                # Самозалечивание старых конфигов: minClientVer="" явно.
-                # Для флота (26.9.8+) это «гейт выкл» — дефолт-гейт 26.3.27
-                # эпохи 26.7.11–26.7.28 в новых ядрах убран; на самих 26.7.x
-                # "" не лечило бы (там нужен явный "1.8.0" — mihomo/sing-box
-                # отчитывают [1,8,2]/[1,8,1] и проходят порог 1.8.0), но эти
-                # версии на флоте не используются. setdefault: не трогаем
-                # явные значения. Механика: docs/faq/VLESS_FAQ.md §18.
-                rs.setdefault("minClientVer", "")
+                # Самозалечивание старых конфигов: minClientVer пишем
+                # явно, значением из state.json ("min_client_ver", меню 5b
+                # — дефолт "" = гейт выкл, норма для флота 26.9.8+; если
+                # админ выставил оверрайд "1.8.0" под даунгрейд-ядро
+                # 26.7.11–26.7.28 — ротация его применит и не затрёт).
+                # setdefault: существующие явные значения не трогаем.
+                # Механика: docs/faq/VLESS_FAQ.md §18.
+                rs.setdefault("minClientVer", _min_client_ver())
                 rs.setdefault("maxClientVer", "")
                 changed = True
             if changed:
