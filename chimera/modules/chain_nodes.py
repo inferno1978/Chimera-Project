@@ -544,6 +544,23 @@ def prompt_chain_params_multi() -> None:
 # =============================================================================
 #  ГЕНЕРАЦИЯ КОНФИГА XRAY ДЛЯ РЕЖИМА B — российский (entry) VPS
 # =============================================================================
+# Гейт версий клиента REALITY (minClientVer) читается лениво из state.json
+# (ставится меню 5b; "" = выкл — норма для Xray 26.9.8+; "1.8.0" — даунгрейд-
+# рецепт для 26.7.11–26.7.28; VLESS_FAQ.md §18). Ридер безопасен к мок-ядрам
+# в тестах: не-строка/исключение → "" (иначе MagicMock попадал в конфиг и
+# ломал json.dumps).
+def _min_client_ver_reader(core):
+    fn = getattr(core, "_min_client_ver_from_state", None)
+
+    def _read() -> str:
+        try:
+            val = fn() if callable(fn) else ""
+            return val if isinstance(val, str) else ""
+        except Exception:
+            return ""
+    return _read
+
+
 def generate_xray_config_chain_entry() -> None:
     """
     Режим B, Entry node (российский VPS):
@@ -551,6 +568,10 @@ def generate_xray_config_chain_entry() -> None:
     • Исходящий — VLESS+REALITY → зарубежный VPS (exit node)
     """
     core = _core_module()
+    # Гейт версий клиента REALITY — лениво из state.json (меню 5b):
+    # "" = выкл (норма для Xray 26.9.8+), "1.8.0" — даунгрейд-рецепт
+    # для 26.7.11–26.7.28 (VLESS_FAQ §18).
+    _min_client_ver = _min_client_ver_reader(core)
     # Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи entry-ноды
     # не должны быть пустыми при регенерации (восстановление из живого
     # config.json/users.json — иначе ссылки юзеров ломаются).
@@ -757,11 +778,12 @@ def generate_xray_config_chain_entry() -> None:
                     # непустые пороги живут ("2.0.0" валит mihomo [1,8,2],
                     # "1.8.0"/"1.0.0" пропускает; sing-box против 26.9.8+
                     # не пройдёт ни при каком гейте — барьер MLKEM, не
-                    # версия). "" остаётся правильным значением; поля
-                    # пишем ЯВНО, чтобы поведение не зависело от дефолтов
+                    # версия). Значение лениво из state.json ("min_client_ver",
+                    # ставится меню 5b; дефолт "" — норма для 26.9.8+);
+                    # поля пишем ЯВНО, чтобы поведение не зависело от дефолтов
                     # ядра. Источники: XTLS/Xray-core #6477 (RPRX) +
                     # PR #6507, MetaCubeX/mihomo#3042, MHSanaei/3x-ui#5922.
-                    "minClientVer": "",
+                    "minClientVer": _min_client_ver(),
                     "maxClientVer": "",
                 },
             },
@@ -923,6 +945,10 @@ def _make_exit_node_config(nd: dict) -> dict:
     core = _core_module()
     _build_exit_xhttp_settings = core._build_exit_xhttp_settings
     _build_sockopt = core._build_sockopt
+    # Гейт версий клиента REALITY — лениво из state.json (меню 5b):
+    # "" = выкл (норма для Xray 26.9.8+), "1.8.0" — даунгрейд-рецепт
+    # для 26.7.11–26.7.28 (VLESS_FAQ §18).
+    _min_client_ver = _min_client_ver_reader(core)
     XHTTP_TCP_NO_DELAY = getattr(core, "XHTTP_TCP_NO_DELAY", False)
     XHTTP_ENABLE_SESSION_RESUMPTION = getattr(core, "XHTTP_ENABLE_SESSION_RESUMPTION", False)
     XTLS_FLOW = getattr(core, "XTLS_FLOW", "")
@@ -1023,11 +1049,12 @@ def _make_exit_node_config(nd: dict) -> dict:
                     # непустые пороги живут ("2.0.0" валит mihomo [1,8,2],
                     # "1.8.0"/"1.0.0" пропускает; sing-box против 26.9.8+
                     # не пройдёт ни при каком гейте — барьер MLKEM, не
-                    # версия). "" остаётся правильным значением; поля
-                    # пишем ЯВНО, чтобы поведение не зависело от дефолтов
+                    # версия). Значение лениво из state.json ("min_client_ver",
+                    # ставится меню 5b; дефолт "" — норма для 26.9.8+);
+                    # поля пишем ЯВНО, чтобы поведение не зависело от дефолтов
                     # ядра. Источники: XTLS/Xray-core #6477 (RPRX) +
                     # PR #6507, MetaCubeX/mihomo#3042, MHSanaei/3x-ui#5922.
-                    "minClientVer": "",
+                    "minClientVer": _min_client_ver(),
                     "maxClientVer": "",
                 },
             },
@@ -1907,6 +1934,10 @@ def generate_xray_config_chain_entry_multi() -> None:
     Если нода одна — конфиг идентичен оригинальному (без balancer).
     """
     core = _core_module()
+    # Гейт версий клиента REALITY — лениво из state.json (меню 5b):
+    # "" = выкл (норма для Xray 26.9.8+), "1.8.0" — даунгрейд-рецепт
+    # для 26.7.11–26.7.28 (VLESS_FAQ §18).
+    _min_client_ver = _min_client_ver_reader(core)
     # Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи entry-ноды
     # не должны быть пустыми при регенерации (восстановление из живого
     # config.json/users.json — иначе ссылки юзеров ломаются).
@@ -2256,11 +2287,12 @@ def generate_xray_config_chain_entry_multi() -> None:
                     # непустые пороги живут ("2.0.0" валит mihomo [1,8,2],
                     # "1.8.0"/"1.0.0" пропускает; sing-box против 26.9.8+
                     # не пройдёт ни при каком гейте — барьер MLKEM, не
-                    # версия). "" остаётся правильным значением; поля
-                    # пишем ЯВНО, чтобы поведение не зависело от дефолтов
+                    # версия). Значение лениво из state.json ("min_client_ver",
+                    # ставится меню 5b; дефолт "" — норма для 26.9.8+);
+                    # поля пишем ЯВНО, чтобы поведение не зависело от дефолтов
                     # ядра. Источники: XTLS/Xray-core #6477 (RPRX) +
                     # PR #6507, MetaCubeX/mihomo#3042, MHSanaei/3x-ui#5922.
-                    "minClientVer": "",
+                    "minClientVer": _min_client_ver(),
                     "maxClientVer": "",
                 },
             },

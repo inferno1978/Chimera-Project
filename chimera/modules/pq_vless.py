@@ -145,6 +145,22 @@ _PQ_STATE_KEYS = (
 # =============================================================================
 #  СОСТОЯНИЕ — общий state.json проекта, свои ключи, read-modify-write с flock
 # =============================================================================
+def _min_client_ver_from_state_file() -> str:
+    """minClientVer (гейт версий клиента REALITY) из общего state.json.
+
+    Тот же источник правды, что у _core._min_client_ver_from_state():
+    "" = гейт выкл (норма для Xray 26.9.8+), "1.8.0" — рецепт для
+    даунгрейд-ядер 26.7.11–26.7.28. Ставится меню 5b, хранится в
+    "min_client_ver". inject_pq_inbound() остаётся чистой функцией —
+    значение читаем здесь, на уровне I/O-обёрток. VLESS_FAQ.md §18.
+    """
+    try:
+        state = json.loads(STATE_FILE.read_text())
+        return state.get("min_client_ver", "") or ""
+    except Exception:
+        return ""
+
+
 def pq_state_load() -> dict:
     """Возвращает только pq_vless_*-ключи из общего state.json (если есть)."""
     if not STATE_FILE.exists():
@@ -322,6 +338,7 @@ def inject_pq_inbound(
     users: list[dict],
     xtls_flow: str = "",
     mldsa65_seed: str = "",
+    min_client_ver: str = "",
 ) -> bool:
     """Добавляет/обновляет изолированный PQ VLESS+REALITY инбаунд в cfg
     (мутирует cfg на месте). Возвращает True, если конфиг изменён.
@@ -352,14 +369,15 @@ def inject_pq_inbound(
         "privateKey":  private_key,
         "publicKey":   public_key,
         "shortIds":    [shortid],
-        # Гейт версий REALITY (minClientVer): "" — правильное значение
-        # для Xray 26.9.8+ (дефолт-гейт 26.3.27 эпохи 26.7.11–26.7.28
-        # в новых ядрах УБРАН = гейт выкл). На самих 26.7.x "" бы НЕ
-        # лечило (нужен явный "1.8.0": mihomo отчитывает [1,8,2],
+        # Гейт версий REALITY (minClientVer): значение приходит из
+        # state.json через вызывающие обёртки (меню 5b): "" = гейт выкл
+        # — правильное значение для Xray 26.9.8+ (дефолт-гейт 26.3.27
+        # эпохи 26.7.11–26.7.28 в новых ядрах УБРАН). На самих 26.7.x ""
+        # бы НЕ лечило (нужен явный "1.8.0": mihomo отчитывает [1,8,2],
         # sing-box [1,8,1] — версию ОТЧИТЫВАЮТ, прежний комментарий
         # был неверен). Поля пишем явно. Механика и матрица —
         # docs/faq/VLESS_FAQ.md §18.
-        "minClientVer": "",
+        "minClientVer": min_client_ver,
         "maxClientVer": "",
     }
     if mldsa65_seed:
@@ -507,6 +525,7 @@ def enable_pq_vless(
         private_key=private_key, public_key=public_key, spiderx=spiderx,
         users=users, xtls_flow=xtls_flow,
         mldsa65_seed=mldsa65_seed if with_mldsa65 else "",
+        min_client_ver=_min_client_ver_from_state_file(),
     )
 
     if changed:
@@ -597,6 +616,7 @@ def set_pq_flow(
         users=_read_users(primary_uuid), xtls_flow=xtls_flow,
         mldsa65_seed=(state.get("pq_vless_mldsa65_seed", "") or "")
                      if state.get("pq_vless_mldsa65_enabled") else "",
+        min_client_ver=_min_client_ver_from_state_file(),
     )
 
     if not changed:
@@ -669,6 +689,7 @@ def restore_pq_vless_if_enabled(
         users=_read_users(primary_uuid), xtls_flow=effective_flow,
         mldsa65_seed=(state.get("pq_vless_mldsa65_seed", "") or "")
                      if state.get("pq_vless_mldsa65_enabled") else "",
+        min_client_ver=_min_client_ver_from_state_file(),
     )
     if not changed:
         return True, "PQ-инбаунд не требовал изменений"
