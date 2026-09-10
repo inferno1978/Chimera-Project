@@ -167,6 +167,33 @@ class TestGenerateClientConfig(unittest.TestCase):
         self.assertIn("abcd1234", clash)
         self.assertIn("xtls-rprx-vision", clash)
 
+    def test_clash_reality_mlkem_recipe_b(self):
+        """Рецепт B (Xray-core 26.9.8+): clash-meta.yaml REALITY-ветка —
+        support-x25519mlkem768: true ВНУТРИ reality-opts и
+        client-fingerprint: chrome (форсирован — фиксура state имеет
+        fingerprint=firefox, но MLKEM768 есть только в HelloChrome mihomo).
+        vless-link.txt сохраняет fp из state (Xray-семья клиентов)."""
+        written = self._run_generate(_FAKE_STATE_REALITY)
+        clash = written.get("clash-meta.yaml", "")
+        if not clash:
+            self.skipTest("clash-meta.yaml not captured")
+        self.assertIn("support-x25519mlkem768: true", clash)
+        self.assertIn("client-fingerprint: chrome", clash)
+        self.assertNotIn("client-fingerprint: firefox", clash)
+        # Порядок: флаг — поле RealityOptions (внутри reality-opts,
+        # после short-id), client-fingerprint — уровень прокси
+        i_ro  = clash.index("reality-opts:")
+        i_sid = clash.index("short-id:")
+        i_flg = clash.index("support-x25519mlkem768: true")
+        i_cf  = clash.index("client-fingerprint: chrome")
+        self.assertLess(i_ro, i_sid)
+        self.assertLess(i_sid, i_flg)
+        self.assertLess(i_flg, i_cf)
+        # Источник правды для vless://-ссылок не тронут
+        vless_link = written.get("vless-link.txt", "")
+        if vless_link:
+            self.assertIn("fp=firefox", vless_link)
+
     def test_singbox_config_valid_json(self):
         written = self._run_generate(_FAKE_STATE_REALITY)
         singbox_str = written.get("sing-box.json", "")

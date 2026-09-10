@@ -17,13 +17,20 @@ user_fp_manager.py
     apply_fp(new_fp)            — применить без диалога (вызов из TG-бота)
     current_fp()                → str  — текущий FP из state.json/config.json
 
-Интеграция в _core.py
----------------------
-Добавить пункт «F» в do_unified_user_manager() и do_manage_users():
+Интеграция в _core.py (2026-09-10 — АКТИВНА, не инструкция)
+----------------------------------------------------
+do_unified_user_manager() («Управление Пользователями», меню 2 → 1):
+пункт «F» — Смена TLS Fingerprint → перегенерация ссылок:
 
     elif ch == "f":
         from chimera.modules.user_fp_manager import do_change_fp_interactive
         do_change_fp_interactive()
+
+После успешной apply_fp синхронизируется in-memory глобал
+_core.PARAM_FINGERPRINT (_sync_core_global_fp) — ссылки, QR и подписки
+генерируются с новым fp= уже в ТОЙ ЖЕ сессии меню, без перезапуска.
+Список FP — единый XRAY_FP_LIST из fingerprint_manager.py (тот же,
+что в установочном флоу prompt_fingerprint()).
 
 Интеграция в tg_bot.py (_generate_bot_script)
 ----------------------------------------------
@@ -43,6 +50,7 @@ __all__ = [
     "current_fp",
     "apply_fp",
     "do_change_fp_interactive",
+    "_show_regenerated_links",
     "patch_tg_bot_script",
     "TG_FP_COMMANDS_BLOCK",
 ]
@@ -258,7 +266,32 @@ def apply_fp(new_fp: str) -> tuple[bool, str]:
         return False, f"Xray не принял конфиг: {err2}"
 
     _update_state_fp(new_fp)
+    _sync_core_global_fp(new_fp)
     return True, f"Fingerprint изменён на {new_fp!r}, Xray перезапущен."
+
+
+def _sync_core_global_fp(new_fp: str) -> bool:
+    """Синхронизирует in-memory глобал PARAM_FINGERPRINT в chimera._core.
+
+    Без этого после смены FP (state.json уже обновлён) ссылки в ТОЙ ЖЕ
+    сессии меню генерировались бы со старым FP: ``_fp_from_state()``
+    сначала смотрит PARAM_FINGERPRINT, а он заполняется один раз при
+    старте меню (``_load_state_into_globals``). Аналогично его читают
+    chain_nodes (getattr в момент вызова) и pq_vless — все лениво,
+    поэтому setattr на модуле достаточен.
+
+    Отдельная функция — чтобы юнит-тест мог проверить синхронизацию,
+    не поднимая весь интерактивный флоу.
+    """
+    try:
+        import importlib
+        core = importlib.import_module("chimera._core")
+        setattr(core, "PARAM_FINGERPRINT", new_fp)
+        return True
+    except Exception:
+        # standalone-контекст (тесты без _core) — глобала нет, не критично:
+        # state.json уже обновлён, новый FP подхватится при след. старте меню.
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +336,14 @@ def do_change_fp_interactive() -> None:
     else:
         _box_row(f"  Режим A: FP обновляется в config.json.")
     _box_row()
+    # Рецепт B (Xray-core 26.9.8+): серверная xtls/reality требует
+    # X25519MLKEM768 в ClientHello; у mihomo он есть только в HelloChrome.
+    # mihomo-подписка Химеры всегда отдаёт chrome для REALITY-нод, а
+    # vless://-ссылки берут FP как раз отсюда — поэтому для mihomo-семьи
+    # (Clash Verge / FlClash / роутеры) нужен fp=chrome.
+    _box_row(f"  {DIM}Xray ≥ 26.9.8 на сервере: mihomo-клиенты (Clash Verge,{NC}")
+    _box_row(f"  {DIM}FlClash) работают только с fp=chrome (MLKEM768).{NC}")
+    _box_row()
 
     for i, fp in enumerate(FP_LIST, 1):
         marker = f"  {GREEN}← текущий{NC}" if fp == cur else ""
@@ -337,10 +378,45 @@ def do_change_fp_interactive() -> None:
     ok, msg = apply_fp(new_fp)
     if ok:
         success(msg)
+        # Перегенерированные ссылки — сразу на экран (fp= обновлён в
+        # state.json; _unified_show_links читает его напрямую, поэтому
+        # «Показать ссылку / QR» [3] тоже уже показывает новый FP).
+        _show_regenerated_links()
     else:
         warn(msg)
 
     input(f"{BLUE}Нажмите Enter...{NC}")
+
+
+# ---------------------------------------------------------------------------
+#  Показ перегенерированных ссылок (после смены FP)
+# ---------------------------------------------------------------------------
+
+def _show_regenerated_links() -> None:
+    """Показывает перегенерированные ссылки всех активных пользователей.
+
+    Ссылки собираются заново из state.json (новый fp=), QR-коды
+    перегенерируются, /root/vless_link_<имя>.txt перезаписывается —
+    то есть ровно то, что показывает пункт меню «Показать ссылку / QR».
+
+    Никогда не бросает исключение: любые сбои (нет users.json,
+    нет state.json) тихо пропускаются — смена FP уже состоялась.
+    """
+    try:
+        from chimera.modules.users_manager import (
+            _unified_load_users, _unified_show_links,
+        )
+        users = _unified_load_users()
+    except Exception:
+        return
+    active = [u for u in users
+              if u.get("uuid") and not u.get("disabled")
+              and not u.get("is_ios_shadow")]
+    for u in active:
+        try:
+            _unified_show_links(u, print_output=True)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

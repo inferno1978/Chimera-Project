@@ -287,5 +287,155 @@ class TestUpdateStateFp(unittest.TestCase):
             self.assertEqual(node["fp"], "firefox")
 
 
+class TestApplyFpGlobalSync(unittest.TestCase):
+    """(2026-09-10) apply_fp синхронизирует in-memory глобал
+    _core.PARAM_FINGERPRINT — иначе ссылки в ТОЙ ЖЕ сессии меню
+    генерировались бы со старым FP (_fp_from_state смотрит глобал
+    первым; chain_nodes/pq_vless читают его getattr-ом)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _core(self):
+        import sys
+        return sys.modules["chimera._core"]
+
+    def test_success_syncs_global(self):
+        from chimera.modules import user_fp_manager as ufm
+        core = self._core()
+        core.PARAM_FINGERPRINT = "firefox"
+        with patch.object(ufm, "_patch_config_fp", return_value=(True, "")), \
+             patch.object(ufm, "_validate_and_restart", return_value=(True, "")), \
+             patch.object(ufm, "_update_state_fp") as mock_state:
+            ok, msg = ufm.apply_fp("safari")
+        self.assertTrue(ok, msg)
+        # глобал обновлён в той же сессии
+        self.assertEqual(core.PARAM_FINGERPRINT, "safari")
+        mock_state.assert_called_once_with("safari")
+
+    def test_failed_restart_no_global_sync(self):
+        """Xray не принял конфиг → глобал НЕ трогаем (откат по смыслу)."""
+        from chimera.modules import user_fp_manager as ufm
+        core = self._core()
+        core.PARAM_FINGERPRINT = "firefox"
+        with patch.object(ufm, "_patch_config_fp", return_value=(True, "")), \
+             patch.object(ufm, "_validate_and_restart",
+                          return_value=(False, "xray dead")):
+            ok, msg = ufm.apply_fp("safari")
+        self.assertFalse(ok)
+        self.assertEqual(core.PARAM_FINGERPRINT, "firefox")
+
+    def test_sync_core_global_fp_direct(self):
+        from chimera.modules import user_fp_manager as ufm
+        core = self._core()
+        core.PARAM_FINGERPRINT = "firefox"
+        self.assertTrue(ufm._sync_core_global_fp("edge"))
+        self.assertEqual(core.PARAM_FINGERPRINT, "edge")
+
+
+class TestShowRegeneratedLinks(unittest.TestCase):
+    """_show_regenerated_links — показ перегенерированных ссылок после
+    смены FP: только активные пользователи, без disabled и ios-shadow."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_shows_only_active_users(self):
+        import sys
+        from chimera.modules import user_fp_manager as ufm
+        core = sys.modules["chimera._core"]
+        users = [
+            {"uuid": "u1", "name": "Alice", "email": "a@x"},
+            {"uuid": "u2", "name": "Bob", "email": "b@x", "disabled": True},
+            {"uuid": "u3", "name": "shadow", "email": "s@x",
+             "is_ios_shadow": True},
+            {"name": "no-uuid"},
+        ]
+        shown = []
+        with patch("chimera.modules.users_manager._unified_load_users",
+                   return_value=users), \
+             patch("chimera.modules.users_manager._unified_show_links",
+                   side_effect=lambda u, print_output=True:
+                       shown.append((u["uuid"], print_output))):
+            ufm._show_regenerated_links()
+        self.assertEqual(shown, [("u1", True)])
+
+    def test_no_users_no_calls_no_raise(self):
+        from chimera.modules import user_fp_manager as ufm
+        with patch("chimera.modules.users_manager._unified_load_users",
+                   return_value=[]), \
+             patch("chimera.modules.users_manager._unified_show_links") as m:
+            ufm._show_regenerated_links()  # не бросает
+        m.assert_not_called()
+
+    def test_show_links_error_does_not_raise(self):
+        """Сбой показа одного юзера не должен валить весь показ."""
+        from chimera.modules import user_fp_manager as ufm
+        users = [{"uuid": "u1"}, {"uuid": "u2"}]
+        calls = []
+
+        def _boom(u, print_output=True):
+            calls.append(u["uuid"])
+            if u["uuid"] == "u1":
+                raise RuntimeError("QR renderer died")
+
+        with patch("chimera.modules.users_manager._unified_load_users",
+                   return_value=users), \
+             patch("chimera.modules.users_manager._unified_show_links",
+                   side_effect=_boom):
+            ufm._show_regenerated_links()  # не бросает
+        self.assertEqual(calls, ["u1", "u2"])
+
+
+class TestFingerprintMenuWiring(unittest.TestCase):
+    """Статические проверки _core.py — пункт F активен в
+    do_unified_user_manager и вызывает do_change_fp_interactive;
+    старое меню Ротации Fingerprint получило тот же REALITY-гард и
+    синхронизацию глобала (единая семантика с user_fp_manager)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _extract_block(self, func_name):
+        import re
+        src = (_PROJECT_ROOT / "chimera" / "_core.py").read_text()
+        m = re.search(
+            rf'def {func_name}\(\).*?(?=\ndef [a-z_])',
+            src, re.DOTALL
+        )
+        self.assertIsNotNone(m, f"{func_name} не найдена в _core.py")
+        return m.group(0)
+
+    def test_f_item_active_in_unified_menu(self):
+        block = self._extract_block("do_unified_user_manager")
+        found = any(
+            line.strip().startswith('_box_item("F"')
+            for line in block.split("\n")
+        )
+        self.assertTrue(
+            found,
+            "Пункт F должен быть активен в do_unified_user_manager "
+            "(Смена TLS Fingerprint → перегенация ссылок)")
+
+    def test_f_handler_calls_interactive(self):
+        block = self._extract_block("do_unified_user_manager")
+        self.assertIn('elif ch == "f":', block)
+        self.assertIn("do_change_fp_interactive", block)
+
+    def test_fp_rotate_menu_syncs_global(self):
+        """do_manage_fingerprint: global PARAM_FINGERPRINT + присваивание
+        после успешной смены — ссылки в той же сессии видят новый FP."""
+        block = self._extract_block("do_manage_fingerprint")
+        self.assertIn("global PARAM_FINGERPRINT", block)
+        self.assertIn("PARAM_FINGERPRINT = new_fp", block)
+
+    def test_fp_rotate_menu_randomized_guard(self):
+        """do_manage_fingerprint: randomized (REALITY-несовместимый)
+        отклоняется — тот же гард, что в apply_fp/TG-боте."""
+        block = self._extract_block("do_manage_fingerprint")
+        self.assertIn('new_fp == "randomized"', block)
+        self.assertIn("reality_fp_warning", block)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
