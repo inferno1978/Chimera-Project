@@ -25,6 +25,7 @@
 | Файл | За что отвечает |
 |---|---|
 | `xray_install.py` | Скачивание/установка Xray, генерация config.json (REALITY/xHTTP), `generate_reality_keys`, обновление, geo-файлы, автообновление (27 функций) |
+| `xray_downgrade.py` | Даунгрейд ядра Xray под эпоху совместимости (пункт 5c): эпохи/матрица клиентов, цели 26.7.28/26.3.27, авто-подгонка minClientVer (state.json + живые конфиги), гард автапдейта |
 | `install_prompts.py` | Интерактивные запросы параметров установки — `prompt_parameters/prompt_install_mode/prompt_protocol_mode/prompt_awg_exit_mode` |
 | `nginx_setup.py` | Настройка Nginx: `create_website` (6 шаблонов), `setup_nginx_temp/final` (xHTTP TLS / AWG / REALITY+Unix-сокет), `setup_nginx_systemd_override` |
 | `ssl_certbot.py` | Получение SSL-сертификата через certbot, `fix_letsencrypt_permissions`, `setup_cert_renewal`, мониторинг certbot renew (cron 2×/день) |

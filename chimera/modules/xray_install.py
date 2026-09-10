@@ -2599,6 +2599,18 @@ def do_xray_update_interactive() -> None:
         warn("Обновление завершилось с ошибкой. Бинарник не заменён.")
         return
 
+    # Гейт версий клиента (minClientVer) следует за эпохой установленного
+    # ядра (VLESS_FAQ.md §18): гейт-эпоха 26.7.11–26.7.28 требует явного
+    # "1.8.0", MLKEM/до-гейт эпохи — "". Эпоха-управляемые значения
+    # ("", "1.8.0") мигрируют автоматически (обратная сторона даунгрейда
+    # из 5c: возврат на 26.9.8+ сбросит гейт в ""), кастомное значение
+    # юзера не трогается. Конфигы патчатся ДО рестарта — один рестарт.
+    try:
+        from chimera.modules.xray_downgrade import sync_min_client_ver_for_core
+        sync_min_client_ver_for_core(target_tag, verbose=True)
+    except Exception as _mcv_err:
+        warn(f"Подгонка minClientVer под эпоху ядра пропущена: {_mcv_err}")
+
     xray_started = _xray_restart_all_services()
     new_ver = _xray_current_version()
 
