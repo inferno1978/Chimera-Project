@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tests/test_v58_identity_guard.py
+tests/test_identity_guard.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для v58 (Anti-Empty Identity Guard):
+Unit-тесты для (Anti-Empty Identity Guard):
 
   A. _identity_params_recover (ядро):
      • все параметры на месте → ничего не меняется, [] возвращён;
@@ -26,7 +26,7 @@ Unit-тесты для v58 (Anti-Empty Identity Guard):
        generate_xray_config_chain_entry / generate_xray_config_chain_entry_multi
        содержат вызов _identity_params_recover до чтения параметров.
 
-  D. Мини-фиксы v58:
+  D. Мини-фиксы 
      • awg_peer_rebuild_conf: пустой server_privkey → False, конфиг не пишется;
      • singbox _build_vless_ws_cdn_inbound: пустой uuid → ValueError
        (и генерация не пишет users: []);
@@ -37,7 +37,7 @@ Unit-тесты для v58 (Anti-Empty Identity Guard):
 Контекст: регенерация конфига при частично повреждённом state.json
 оставляла UUID/ShortID/REALITY-ключи пустыми — xray стартовал с битым
 REALITY, а генераторы ссылок выдавали vless://...?pbk=&sid=. Все выданные
-пользователям ссылки умирали. v58 — гарантия непустых параметров во всех
+пользователям ссылки умирали. гарантия непустых параметров во всех
 точках генерации/регенерации.
 ───────────────────────────────────────────────────────────────────────────────
 """
@@ -105,7 +105,7 @@ def _make_core_with(state_json=None, live_config=None, users_json=None,
     """Собирает фейковый _core с изолированной ФС (tmp_path)."""
     fake_core = _setup_core_in_sysmodules()
     import tempfile
-    tmp = tempfile.mkdtemp(prefix="v58_test_")
+    tmp = tempfile.mkdtemp(prefix="_test_")
     tmp_path = Path(tmp)
 
     state_file = tmp_path / "state.json"
@@ -333,7 +333,7 @@ class TestGeneratorsCallGuard(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  D. Мини-фиксы v58
+# D. Мини-фиксы 
 # ═════════════════════════════════════════════════════════════════════════════
 class TestMiniFixes(unittest.TestCase):
 

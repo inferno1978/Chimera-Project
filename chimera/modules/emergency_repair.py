@@ -651,7 +651,7 @@ def do_emergency_repair() -> None:
                 _box_warn(f"AWG Multi-Node: {_mne}")
         # === END PATCH v2 ===
 
-    # ── DNSCrypt: поднять ДО AGH и пересборки конфига (v65) ───────────────
+    # ── DNSCrypt: поднять ДО AGH и пересборки конфига ───────────────
     # Раньше dnscrypt рестартился ПОСЛЕ пересборки: генераторы конфига
     # делают живую пробу AGH → dnscrypt → интернет, и при лежащем
     # dnscrypt проба проваливалась — конфиг молча получал fallback
@@ -762,7 +762,7 @@ def do_emergency_repair() -> None:
         _box_warn(f"Telemt tproxy: {_tp_e}")
 
     # Запуск Xray
-    # v56 (start-limit-fix): reset-failed обязателен перед каждым start —
+    # (start-limit-fix): reset-failed обязателен перед каждым start
     # если восстановление запущено вскоре после неудачной пересборки
     # (3+ рестарта подряд), счётчик start-rate-limit юнита xray
     # (StartLimitBurst=3/60s) ещё не остыл и первый же start был бы
@@ -1014,7 +1014,7 @@ def do_emergency_repair() -> None:
         if r_dc2.returncode == 0:
             svcs_check.insert(0, ("dnscrypt-proxy", "DNSCrypt-proxy"))
 
-    # v56: AdGuardHome — если установлен, это звено DNS-цепочки
+    # AdGuardHome — если установлен, это звено DNS-цепочки
     # «Xray → AGH(127.0.0.1:53) → DNSCrypt(5300)»: шагом выше восстановление
     # уже поднимает его (agh_ensure_running), здесь — финальный контроль.
     # Не установлен → строка не выводится (как у DNSCrypt при is-enabled != 0).
@@ -1058,7 +1058,7 @@ def do_emergency_repair() -> None:
         else:
             _box_warn(f"{svc_label}: ○ {status}")
 
-    # v62: фактический DNS-путь Xray — config.json + живой DNS-стек.
+    # фактический DNS-путь Xray — config.json + живой DNS-стек.
     # Одна строка закрывает «через что идут DNS-запросы Xray» после
     # восстановления: конфиг «через AGH» + не поднявшийся AGH = запросы
     # молча уходят в fallback, фильтры AGH обходятся. all_ok не трогаем —

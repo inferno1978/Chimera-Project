@@ -1,7 +1,7 @@
 """
 chimera/modules/dnscrypt_update.py
 ───────────────────────────────────────────────────────────────────────────────
-Единый центр обновления/синхронизации DNSCrypt-proxy (v74):
+Единый центр обновления/синхронизации DNSCrypt-proxy:
   • версия: установленная / latest (GitHub API) / обновление бинарника
   • авто-обновление: systemd timer (ежедневно 04:10) + bash-агент
   • синк пула серверов/релеев с живым списком: cron каждые 6 ч
@@ -14,7 +14,7 @@ chimera/modules/dnscrypt_update.py
     читают статус из него → информация всегда синхронизирована между
     меню: обновил в одном — во всех остальных актуальна сразу.
 
-ЗАЩИТА «СЕРВЕР БЕЗ DNS» (v74):
+ЗАЩИТА «СЕРВЕР БЕЗ DNS»:
   • обновление бинарника: бэкап → замена → рестарт → резолв-тест →
     цепочка-тест; провал → откат бинарника → рестарт → повторный тест
   • синк пула: конфиг меняется ТОЛЬКО при фактическом дрейфе пула;
@@ -449,7 +449,7 @@ def update_dnscrypt(interactive: bool = True) -> bool:
 #  АВТО-ОБНОВЛЕНИЕ (systemd timer 04:10 + bash-агент)
 # =============================================================================
 AUTOPD_SH = r'''#!/usr/bin/env bash
-# dnscrypt-autoupdate.sh — авто-обновление dnscrypt-proxy (v74).
+# dnscrypt-autoupdate.sh — авто-обновление dnscrypt-proxy.
 # Устанавливается chimera/modules/dnscrypt_update.py::install_autoupdate().
 # Аналог xray-autoupdate.sh: бэкап → зеркала → замена → тест → откат.
 set -euo pipefail
@@ -631,7 +631,7 @@ def autoupdate_enabled() -> bool:
 #  СИНК ПУЛА (cron каждые 6 ч, standalone-скрипт)
 # =============================================================================
 POOL_SYNC_SH = r'''#!/usr/bin/env python3
-# chimera-dnscrypt-pool-sync.py — синк пула dnscrypt с живым списком (v74).
+# chimera-dnscrypt-pool-sync.py — синк пула dnscrypt с живым списком.
 # Устанавливается chimera/modules/dnscrypt_update.py::install_pool_sync().
 # Запуск: cron /etc/cron.d/xray-dnscrypt-pool-sync (каждые 6 ч) или вручную.
 #
@@ -760,7 +760,7 @@ cache_file    = 'odoh-relays.md'
 minisign_key  = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
 refresh_delay = 25
 """ if with_odoh else ""
-    return f"""## dnscrypt-proxy.toml — Chimera Project (pool-sync v74)
+    return f"""## dnscrypt-proxy.toml — Chimera Project (pool-sync)
 ## Синхронизирован: {datetime.now():%Y-%m-%d %H:%M:%S}
 ## {len(server_names)} серверов · {len(route_lines)} маршрутов · ODoH · DNSSEC
 ## Пул = шаблон ∩ живой public-resolvers.md + воскрешения из кладбища
@@ -1009,7 +1009,7 @@ def install_pool_sync() -> bool:
         POOL_SYNC_BIN.write_text(POOL_SYNC_SH.lstrip(), encoding="utf-8")
         POOL_SYNC_BIN.chmod(0o755)
         POOL_CRON.write_text(
-            "# v74: синк пула dnscrypt с живым списком (Chimera Project)\n"
+            "# синк пула dnscrypt с живым списком (Chimera Project)\n"
             "SHELL=/bin/bash\n"
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
             "0 */6 * * * root /usr/bin/python3 "

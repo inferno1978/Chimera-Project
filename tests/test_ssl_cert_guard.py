@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tests/test_v63_ssl_cert_guard.py
+tests/test_ssl_cert_guard.py
 ───────────────────────────────────────────────────────────────────────────────
-v63: защита LE-сертификата + устойчивая DNS-проверка (инцидент 91.224.87.154).
+: защита LE-сертификата + устойчивая DNS-проверка (инцидент 91.224.87.154).
 
 Хронология инцидента (переустановка на новой ВМ, DNSCrypt без AGH):
   1. [WARN] «Домен chimeravpn.online НЕ резолвится в IP сервера» — ЛОЖНЫЙ:
@@ -16,7 +16,7 @@ v63: защита LE-сертификата + устойчивая DNS-пров�
      ВАЛИДНЫЙ LE-сертификат (выпущен часом ранее, 90 дней) затёрт насмерть.
   4. nginx/xray остановлены atexit-обработчиком упавшей установки.
 
-Контракт v63:
+Контракт 
   1. domain_points_to_server — локальный (2 попытки) → getaddrinfo →
      внешние 1.1.1.1/8.8.8.8/77.88.8.8; WARN только если не резолвится НИГДЕ
   2. existing_cert_status — (exists, self_signed, days_left, expiry, issuer)
@@ -41,7 +41,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Фейковый chimera._core (паттерн test_v60)."""
+    """Фейковый chimera._core (паттерн test)."""
     core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
@@ -109,7 +109,7 @@ class TestDomainPointsToServer(unittest.TestCase):
         self.assertEqual(counter["n"], 2)
 
     def test_local_dead_external_ok_no_false_warn(self):
-        # ЯДРО v63: локальный резолвер мёртв, но 1.1.1.1 подтверждает —
+        # ЯДРО локальный резолвер мёртв, но 1.1.1.1 подтверждает
         # раньше это давало ЛОЖНЫЙ WARN «домен НЕ резолвится»
         self._dig({"1.1.1.1": ["91.224.87.154"]})
         with patch("time.sleep"), \
@@ -373,7 +373,7 @@ class TestObtainSslCertFlow(unittest.TestCase):
             self.sc.obtain_ssl_cert()
         self.assertEqual(self.calls["certbot"], [])
 
-    # --- защита валидного LE при провале certbot (ЯДРО v63) ---
+    # --- защита валидного LE при провале certbot (ЯДРО) ---
 
     def test_certbot_fail_valid_le_reused_not_destroyed(self):
         # rate-limit + валидный LE на диске → REUSE, самоподпис НЕ генерится
@@ -424,7 +424,7 @@ class TestObtainSslCertFlow(unittest.TestCase):
         self.assertEqual(self.calls["certbot"], [])  # умерли ДО certbot
 
     def test_dns_external_ok_no_warn(self):
-        # локальный мёртв, внешний подтвердил → НИ warn, НИ промпта (v63)
+        # локальный мёртв, внешний подтвердил → НИ warn, НИ промпта
         self._fake_run(certbot_rc=0)
         self._dns_result = (True, "1.1.1.1")
         inputs = []

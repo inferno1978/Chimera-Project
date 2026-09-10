@@ -19,13 +19,13 @@ triple_panel_state.json) — наружу панель экспонируетс�
     GET    /api/me                   — кто в сессии
     GET    /api/users                — unified-таблица юзеров
     POST   /api/users                — создать (VLESS + sync contract v4.25)
-    PUT    /api/users/:id            — v82: password (ротация протоколов) +
+    PUT /api/users/:id — password (ротация протоколов) +
                                         email/username (rename через мост) +
                                         expiry/quota/protocols
     DELETE /api/users/:id            — удалить (везде: VLESS+naive+mieru+TTL+лимит)
     GET    /api/config               — панельные настройки (без секретов)
     POST   /api/config               — language
-    GET    /api/status               — v83.4: контракт апстрима ПОЛНОСТЬЮ
+    GET /api/status — контракт апстрима ПОЛНОСТЬЮ
                                         (services.{naive,mieru,hy2,panel},
                                         system.{cpu,ram,disk,uptime,os,arch},
                                         panel.{userCount,version}, domain,
@@ -33,7 +33,7 @@ triple_panel_state.json) — наружу панель экспонируетс�
                                         мониторинг фронта читают эти поля
     GET    /api/apply-status         — исход последнего apply (фронт поллит)
     GET    /api/password/generate    — генератор пароля
-    GET    /api/stats/users          — v83.4: трафик по юзерам (апстрим-контракт:
+    GET /api/stats/users — трафик по юзерам (апстрим-контракт:
                                         users[{uploadMB,downloadMB,usedMB,
                                         naiveMB,mieruMB,hy2MB,lastSeen}],
                                         naiveServerTotalMB, naivePerUser);
@@ -44,15 +44,15 @@ triple_panel_state.json) — наружу панель экспонируетс�
                                         квотосчётчик traffic_limits;
                                         серверный итог Naive — systemd
                                         IPAccounting caddy-naive
-    GET    /api/settings/hy2         — v83.4: статус Hysteria2 (installed/
+    GET /api/settings/hy2 — статус Hysteria2 (installed/
                                         active/port/stack/hy2UserCount);
                                         управление Hy2 — TUI Химеры (из UI —
                                         честный 501 с указанием пути)
-    GET    /api/diagnostics          — v83.4: порты слушаются (ss), версия
+    GET /api/diagnostics — порты слушаются (ss), версия
                                         caddy-naive, Caddyfile-юзеры,
                                         mita status/describe, синхронизация
                                         времени, probe_secret
-    GET/POST /api/panel/stub         — v83.4: заглушка-страница (файл
+    GET/POST /api/panel/stub — заглушка-страница (файл
                                         /var/www/panel-stub/index.html,
                                         атомарная запись, лимит 256 KiB) —
                                         контракт апстрима; раздача —
@@ -62,7 +62,7 @@ triple_panel_state.json) — наружу панель экспонируетс�
                                         subscription.py: base64 / base64_safe /
                                         singbox / clash) + Subscription-Userinfo
 
-v82 (SSE + настройки сервера):
+ (SSE + настройки сервера):
     GET    /api/events               — SSE-стрим live-событий: metrics (контракт
                                         WS апстрима), users, status, log.
                                         Шим triple-sse.js (вживляется во фронт
@@ -97,7 +97,7 @@ WS (заменён SSE-шимом).
     ttl_users.py       — expiry
     user_lifecycle.py  — квоты (traffic_limits.json)
     subscription.py    — единая подписка + UA-детект + токены (pepper)
-    traffic_accounting.py — v83.4: накопительный per-user трафик
+    traffic_accounting.py — накопительный per-user трафик
                             (mieru — journalctl mita, naiveproxy — access.log)
 """
 from __future__ import annotations
@@ -136,7 +136,7 @@ _BODY_LIMIT     = 1_048_576  # 1 МБ
 _NO_QUOTA_MB = 0
 _NO_EXPIRY = None
 
-# ── v83.4: бинари/пути для stats/hy2/diagnostics/stub (синхронизированы
+# ── бинари/пути для stats/hy2/diagnostics/stub (синхронизированы
 #    с naiveproxy.py / mieru.py / hysteria2_common.py) ────────────────────────
 _MITA_BIN     = Path("/usr/local/bin/mita")
 _CADDY_BIN    = Path("/usr/local/bin/caddy-naive")
@@ -159,7 +159,7 @@ def _load_state() -> dict:
     except Exception:
         return {}
 
-_SSE_LOG_RING: list = []       # v82: последние строки лога (для /api/logs/panel)
+_SSE_LOG_RING: list = [] # последние строки лога (для /api/logs/panel)
 _SSE_LOG_RING_MAX = 200
 
 def _log(level: str, msg: str) -> None:
@@ -170,7 +170,7 @@ def _log(level: str, msg: str) -> None:
             f.write(line + "\n")
     except Exception:
         pass
-    # v82: кольцо для /api/logs/panel + live-событие 'log' (SSE)
+    # кольцо для /api/logs/panel + live-событие 'log' (SSE)
     try:
         _SSE_LOG_RING.append(line)
         if len(_SSE_LOG_RING) > _SSE_LOG_RING_MAX:
@@ -485,7 +485,7 @@ def _delete_panel_user(email: str) -> "tuple[int, dict]":
     return 200, {"status": "deleted", "id": email}
 
 def _update_panel_user(email: str, payload: dict) -> "tuple[int, dict]":
-    """PUT /api/users/:id — v82: password (ротация протоколов), email/username
+    """PUT /api/users/:id — password (ротация протоколов), email/username
     (rename через юзер-мост v4.25), expiry / квота / чекбоксы протоколов.
 
     Один пароль юзера применяется в оба протокола (модель апстрима);
@@ -649,7 +649,7 @@ def _update_panel_user(email: str, payload: dict) -> "tuple[int, dict]":
                  "changed": changed, "servicesReloading": True}
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  v82: SSE LIVE-ОБНОВЛЕНИЯ + НАСТРОЙКИ СЕРВЕРА (порты/каскад/WARP/логи)
+# SSE LIVE-ОБНОВЛЕНИЯ + НАСТРОЙКИ СЕРВЕРА (порты/каскад/WARP/логи)
 #  Апстримный фронт общается с бэкендом по WS (только метрики).
 #  Chimera-бэкенд — stdlib: вместо WS — /api/events (SSE). Шим
 #  triple-sse.js (вживляется во фронт при установке) подменяет
@@ -815,7 +815,7 @@ def _logs_response(service: str, lines: int) -> "tuple[int, dict]":
     return 200, {"logs": _journal_tail(unit, lines)}
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  v83.4: /api/stats/users + /api/settings/hy2 + /api/diagnostics + /api/panel/stub
+# /api/stats/users + /api/settings/hy2 + /api/diagnostics + /api/panel/stub
 #  (все источники изолированы — один умерший источник НЕ зануляет остальные,
 #   паттерн BUG-160 апстрима)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -976,7 +976,7 @@ def _stats_users_payload() -> dict:
             "naiveServerTotalMB": _naive_server_total_mb(),
             "naivePerUser": False}
 
-# ── v83.4: Hysteria2 статус ──────────────────────────────────────────────
+# ── Hysteria2 статус ──────────────────────────────────────────────
 
 def _hy2_installed() -> bool:
     """Юнит есть / конфиг есть / секция state включена."""
@@ -1039,7 +1039,7 @@ def _hy2_view() -> dict:
                        "поддерживается (exit-node архитектура)",
     }
 
-# ── v83.4: системные метрики для /api/status (контракт апстрима) ─────────
+# ── системные метрики для /api/status (контракт апстрима) ─────────
 
 def _os_pretty() -> str:
     try:
@@ -1156,7 +1156,7 @@ def _status_view_payload() -> dict:
         "language": state.get("language", "ru"),
     }
 
-# ── v83.4: /api/diagnostics ──────────────────────────────────────────────
+# ── /api/diagnostics ──────────────────────────────────────────────
 
 def _port_listening(port: int) -> bool:
     """Слушается ли порт (TCP/UDP) — ss, как у апстрима."""
@@ -1223,7 +1223,7 @@ def _diagnostics_payload() -> dict:
         "probeMode": "secret" if probe else "bare",
     }
 
-# ── v83.4: /api/panel/stub (заглушка-страница) ────────────────────────────
+# ── /api/panel/stub (заглушка-страница) ────────────────────────────
 
 def _stub_get() -> dict:
     html = ""
@@ -1937,39 +1937,39 @@ class _TripleHandler(BaseHTTPRequestHandler):
             self._send_json({"password": proto_gen_password()})
             return
 
-        # v83.4: трафик по юзерам (вкладки Пользователи/Мониторинг)
+        # трафик по юзерам (вкладки Пользователи/Мониторинг)
         if path == "/api/stats/users":
             self._send_json(_stats_users_payload())
             return
 
-        # v83.4: статус Hysteria2 (вкладка Настройки)
+        # статус Hysteria2 (вкладка Настройки)
         if path == "/api/settings/hy2":
             self._send_json(_hy2_view())
             return
 
-        # v83.4: диагностика (вкладка Диагностика)
+        # диагностика (вкладка Диагностика)
         if path == "/api/diagnostics":
             self._send_json(_diagnostics_payload())
             return
 
-        # v83.4: заглушка-страница (вкладка Настройки)
+        # заглушка-страница (вкладка Настройки)
         if path == "/api/panel/stub":
             self._send_json(_stub_get())
             return
 
-        # v83.4: генерация webBasePath — фронт вызывает перед Apply;
+        # генерация webBasePath — фронт вызывает перед Apply;
         # раздача base-path — v2, но генератор честный
         if path == "/api/panel/webbasepath/generate":
             import secrets as _secrets
             self._send_json({"webBasePath": _secrets.token_urlsafe(8)})
             return
 
-        # v82: SSE-стрим live-событий (вместо WS апстрима)
+        # SSE-стрим live-событий (вместо WS апстрима)
         if path == "/api/events":
             self._handle_sse()
             return
 
-        # v82: настройки сервера (GET-часть)
+        # настройки сервера (GET-часть)
         if path == "/api/settings/cascade":
             self._send_json(_cascade_view())
             return
@@ -1983,7 +1983,7 @@ class _TripleHandler(BaseHTTPRequestHandler):
             self._send_json(_warp_status_view())
             return
 
-        # v82: журналы сервисов
+        # журналы сервисов
         m = re.match(r"^/api/logs/([a-z0-9\-]+)$", path)
         if m:
             try:
@@ -2064,7 +2064,7 @@ class _TripleHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             return
 
-        # v82: настройки сервера (мутации)
+        # настройки сервера (мутации)
         if path == "/api/settings/naive-port":
             body = self._read_body()
             if body is None:
@@ -2111,7 +2111,7 @@ class _TripleHandler(BaseHTTPRequestHandler):
             self._send_json(payload, status)
             return
 
-        # v83.4: заглушка-страница — атомарная запись
+        # заглушка-страница — атомарная запись
         if path == "/api/panel/stub":
             body = self._read_body()
             if body is None:
@@ -2121,7 +2121,7 @@ class _TripleHandler(BaseHTTPRequestHandler):
             self._send_json(payload, status)
             return
 
-        # v83.4: мутации Hy2 из UI — честный отказ с указанием пути в TUI
+        # мутации Hy2 из UI — честный отказ с указанием пути в TUI
         if path in ("/api/settings/hy2/install", "/api/settings/hy2-port",
                     "/api/settings/hy2/enroll-all"):
             self._send_json({
@@ -2189,8 +2189,8 @@ class _TripleHandler(BaseHTTPRequestHandler):
             "language": state.get("language", "ru"),
             "domain": domain,
             "serverIp": _local_ip(),
-            # v83.4: плоские поля апстрима (loadSettings читает их без
-            # вложенности) + вложенный mieruPorts (наш v81) для обратной
+            # плоские поля апстрима (loadSettings читает их без
+            # вложенности) + вложенный mieruPorts (наш) для обратной
             # совместимости
             "naivePort": naive.get("port", 443),
             "mieruPortStart": mieru.get("port_start", 2012),

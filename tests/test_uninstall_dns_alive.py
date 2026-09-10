@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tests/test_v59_uninstall_dns_alive.py
+tests/test_uninstall_dns_alive.py
 ───────────────────────────────────────────────────────────────────────────────
-Regression-тесты инцидента v59 (bright-lynx): ПОЛНОЕ удаление Chimera
+Regression-тесты инцидента (bright-lynx): ПОЛНОЕ удаление Chimera
 (с установленным AdGuard Home) убивало системный DNS — SERVFAIL от
 systemd-resolved stub (127.0.0.53), ping/nslookup не резолвили.
 
@@ -441,8 +441,8 @@ class TestUninstallStaticGuards(unittest.TestCase):
         self.assertIn('Path("/var/lib/xray-installer")', self.src)
         self.assertIn('shutil.rmtree(state_dir', self.src)
 
-    def test_do_uninstall_wires_all_v59_steps(self):
-        """do_uninstall вызывает все v59-шаги в правильном порядке:
+    def test_do_uninstall_wires_all_steps(self):
+        """do_uninstall вызывает все шаги в правильном порядке:
         ports → AGH → dns_redirect → DNS hard restore → state cleanup."""
         body = self.src.split("def do_uninstall")[1]
         idx_ports = body.index("_close_chimera_ports()")

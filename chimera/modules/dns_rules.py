@@ -228,7 +228,7 @@ def _dns_remove_routing_rule(domain: str) -> bool:
 
 def _dns_reload_xray() -> None:
     # Xray 26.x не поддерживает SIGHUP reload — используем restart напрямую.
-    # v57 (start-limit-fix): reset-failed перед рестартом — юзер может
+    # (start-limit-fix): reset-failed перед рестартом — юзер может
     # добавить/удалить несколько правил подряд, каждый раз = restart;
     # 4-й рестарт за 60с без reset-failed ловит start-limit-hit.
     _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)

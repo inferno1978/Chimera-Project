@@ -14,7 +14,7 @@ urllib.request.urlretrieve + tar + go build + atomic-replace.
       2. Поиск директории proxy-turn-vk-android-*
       3. go mod tidy (с GOSUMDB=off fallback — go.sum не в репозитории)
       4. go build -o wdtt-server -ldflags "-s -w" — ./server (новый layout
-         upstream от 02.09, v74.2) с фолбэком на ./server.go (старые архивы)
+         upstream от 02.09) с фолбэком на./server.go (старые архивы)
          (env: CGO_ENABLED=0, GOOS=linux, GOARCH=amd64 — как в старом коде)
       5. Atomic-replace /usr/local/bin/wdtt-server:
          - stop wdtt service если активен (защита от ETXTBSY)
@@ -74,10 +74,10 @@ _WDTT_SERVICE_FILE = Path("/etc/systemd/system/wdtt.service")
 _MIN_SOURCE_TARBALL_SIZE = 1000
 
 # Дефолтная требуемая версия Go (когда go.mod недоступен до скачивания).
-# v74.2: поднята 1.21.0 → 1.25.0 (upstream go.mod требует 1.25.0).
+# поднята 1.21.0 → 1.25.0 (upstream go.mod требует 1.25.0).
 _GO_REQUIRED_DEFAULT = "1.25.0"
 
-# v75 (upstream_updates): информация о последней сборке — заполняется
+# (upstream_updates): информация о последней сборке — заполняется
 # _post_install_wdtt_source, читается upstream_updates._build_info():
 #   tarball_sha256 — детект «зеркало отдало тот же архив»;
 #   layout         — какой набор build-таргетов сработал;
@@ -98,13 +98,13 @@ def _wdtt_source_mirror_urls(filename: str, **kw) -> list[str]:
 
 
 # ============================================================================
-#  v75: layout-probe — build-таргеты и требования go.mod читаются из архива
+# layout-probe — build-таргеты и требования go.mod читаются из архива
 # ============================================================================
 def _go_mod_requirement(src_dir: Path) -> str:
     """Версия Go из директивы 'go X.Y[.Z]' в go.mod распакованных исходников.
 
     Фолбэк _GO_REQUIRED_DEFAULT — если go.mod не читается. Именно так
-    «изменение требований апстрима» (инцидент v74.2: go 1.21 → 1.25)
+    «изменение требований апстрима» (инцидент go 1.21 → 1.25)
     перестаёт быть сюрпризом: требование читается из upstream-файла,
     а не захардкожено в Chimera.
     """
@@ -133,11 +133,11 @@ def _go_version_tuple(go: str) -> Optional[tuple]:
 
 
 def _probe_wdtt_build_targets(src_dir: Path) -> List[str]:
-    """v75: упорядоченные go-build таргеты для wdtt-server.
+    """упорядоченные go-build таргеты для wdtt-server.
 
-    Три уровня (вместо двух захардкоженных до v75):
+    Три уровня (вместо двух захардкоженных ранее):
       1. Известные layout'ы (в порядке приоритета):
-           ./server      — модульный layout upstream с 02.09 (v74.2)
+./server — модульный layout upstream с 02.09
            ./server.go   — корневой файл (старые архивы)
       2. Корневые *.go с 'package main' → файловые таргеты
          (main.go / любой root-файл main-пакета — будущие переименования).
@@ -146,7 +146,7 @@ def _probe_wdtt_build_targets(src_dir: Path) -> List[str]:
          (стандартная go-конвенция будущих версий upstream).
 
     Возврат — уникальный список; go build пробует их по очереди
-    (первый успешный выигрывает — как в v74.2, но список шире).
+    (первый успешный выигрывает — как в, но список шире).
     """
     targets: List[str] = []
 
@@ -226,7 +226,7 @@ def _ensure_go_meets(required: str) -> Optional[str]:
       • Go отсутствует → ставим latest (go.dev, фолбэк go{required}).
       • Go есть, версия >= required → используем как есть.
       • Go есть, версия < required → ставим свежий (драйф требований
-        upstream, инцидент v74.2: go 1.21 при требовании 1.25).
+        upstream, инцидент go 1.21 при требовании 1.25).
       • Go есть, но версия не определилась (экзотика) → НЕ качаем
         60 MB вслепую: используем существующий, реальную пригодность
         покажет go build с диагностикой.
@@ -298,7 +298,7 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
       2. Поиск proxy-turn-vk-android-* директории
       3. go mod tidy (с GOSUMDB=off fallback — go.sum отсутствует в репо)
       4. go build -o wdtt-server -ldflags "-s -w" — ./server (новый layout
-         upstream от 02.09, v74.2) с фолбэком на ./server.go (старые архивы)
+         upstream от 02.09) с фолбэком на./server.go (старые архивы)
          env: CGO_ENABLED=0, GOOS=linux, GOARCH=amd64 (как в старом коде —
          намеренно hardcoded amd64, см. комментарий в wdtt.py)
       5. Atomic-replace:
@@ -309,10 +309,10 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
       6. cleanup временной директории
 
     Go toolchain должен быть установлен ДО этого вызова — вызывающий код
-    отвечает за _ensure_go(). НО v75: если go.mod распакованных исходников
+    отвечает за _ensure_go(). НО если go.mod распакованных исходников
     требует БОЛЬШЕ, чем установлено (драйф требований upstream), post_install
     сам догоняет toolchain через download_manager (_ensure_go_meets) —
-    именно так класс бага v74.2 («go.mod requires go >= 1.25.0» при
+    именно так класс бага («go.mod requires go >= 1.25.0» при
     установленном 1.21) закрыт навсегда.
 
     Возвращает True при успехе, False при любой ошибке (даёт fetch_package
@@ -321,7 +321,7 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
     """
     import os
 
-    # v75: хэш tarball — для upstream_updates (детект «зеркало отдало
+    # хэш tarball — для upstream_updates (детект «зеркало отдало
     # прежний архив» + диагностика).
     LAST_BUILD_INFO.clear()
     try:
@@ -344,7 +344,7 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
             return False
 
         # 2. Поиск директории с исходниками.
-        #    v75: кроме канонического proxy-turn-vk-android-* — фолбэк на
+        # кроме канонического proxy-turn-vk-android-* — фолбэк на
         #    ЛЮБУЮ верхнюю директорию с go.mod (если upstream переименует
         #    репозиторий, имя папки в архиве изменится, а сборка выживет).
         src_dirs = list(tmp.glob("proxy-turn-vk-android-*"))
@@ -358,7 +358,7 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
             return False
         src_dir = src_dirs[0]
 
-        # 3. v75: требование go.mod → гарантируем подходящий Go.
+        # 3. требование go.mod → гарантируем подходящий Go.
         #    _ensure_go_meets сам ставит свежий Go через download_manager,
         #    если установленный старее требуемого.
         required = _go_mod_requirement(src_dir)
@@ -387,8 +387,8 @@ def _post_install_wdtt_source(src: Path, install_dests: list[Path]) -> bool:
             if r2.returncode != 0:
                 return False
 
-        # 5. v75: build-таргеты — layout-probe (_probe_wdtt_build_targets):
-        #    известные ./server и ./server.go (v74.2) + корневые main-файлы
+        # 5. build-таргеты — layout-probe (_probe_wdtt_build_targets):
+        # известные./server и./server.go + корневые main-файлы
         #    + поддиректории package main + cmd/*. Будущие переезды upstream
         #    подхватываются автоматически, первый успешный таргет выигрывает.
         env = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"}

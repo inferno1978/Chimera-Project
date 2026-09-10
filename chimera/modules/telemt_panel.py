@@ -76,7 +76,7 @@ SERVICE_FILE    = Path("/etc/systemd/system/telemt-panel.service")
 LOG_FILE        = Path("/var/log/telemt_panel_install.log")
 
 # Стейт ядра Chimera (state.json, naiveproxy.json) — источник домена для
-# авто-детекта в Let's Encrypt (v84 — порт идеи v83.3 из triple_panel.py).
+# авто-детекта в Let's Encrypt (порт идеи из triple_panel.py).
 STATE_DIR       = Path("/var/lib/xray-installer")
 
 SERVICE_NAME    = "telemt-panel"
@@ -641,7 +641,7 @@ def _run_install() -> None:
     _box_bot()
     print()
 
-    # v49: loopback-бэкенд :8080 регистрируем в port_registry (паттерн
+    # loopback-бэкенд :8080 регистрируем в port_registry (паттерн
     # b4_web/csqtt_web/web_panel — конфликт-детекция видит слушателя)
     try:
         from chimera.modules.port_registry import (
@@ -775,7 +775,7 @@ def _run_install() -> None:
         domain = None
         domain_auto = False
         if not use_ss:
-            # v84: домен — автоматически (как в b4 и Triple Panel v83.3):
+            # домен — автоматически (как в b4 и Triple Panel):
             # PARAM_DOMAIN → state.json → домен Naive. Ручной ввод —
             # только если нигде не нашли.
             domain = _detect_panel_domain()
@@ -957,7 +957,7 @@ def _core_module():
 
 def _detect_panel_domain() -> str:
     """Домен сервера для Let's Encrypt — АВТОМАТИЧЕСКИ, руками вводить
-    не нужно (v84 — порт идеи v83.3 из triple_panel.py; паттерн b4:
+    не нужно (порт идеи из triple_panel.py; паттерн b4:
     ask_domain(default=PARAM_DOMAIN), но с расширенной цепочкой).
 
     Цепочка: PARAM_DOMAIN (глобаль ядра — домен VLESS) → state.json →
@@ -1022,7 +1022,7 @@ def _toggle_direct_access() -> None:
         use_ss, _ = ask_tls_mode(panel_name="Telemt Panel")
         domain = None
         if not use_ss:
-            # v84: домен — автоматически (порт v83.3 из Triple Panel):
+            # домен — автоматически (порт из Triple Panel):
             # PARAM_DOMAIN → state.json → домен Naive. Ручной ввод —
             # только если нигде не нашли.
             domain = _detect_panel_domain()

@@ -1077,7 +1077,7 @@ def apply_reality_sni_dispatch_patch(
 
     # 11. systemctl restart xray + active-check
     if restart_xray:
-        # v57 (start-limit-fix): reset-failed перед рестартом
+        # (start-limit-fix): reset-failed перед рестартом
         _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)
         time.sleep(3)
@@ -1090,7 +1090,7 @@ def apply_reality_sni_dispatch_patch(
             if backup_path.exists():
                 try:
                     cfg_path.write_text(backup_path.read_text())
-                    # v57 (start-limit-fix): reset-failed — это ВТОРОЙ рестарт
+                    # (start-limit-fix): reset-failed — это ВТОРОЙ рестарт
                     # подряд (после провала первого) — старт-лимит вероятен
                     _run(["systemctl", "reset-failed", "xray"],
                          check=False, quiet=True)
@@ -1203,7 +1203,7 @@ def revert_reality_sni_dispatch_patch(
 
     # 5. systemctl restart xray + active-check
     if restart_xray:
-        # v57 (start-limit-fix): reset-failed перед рестартом (это рестарт
+        # (start-limit-fix): reset-failed перед рестартом (это рестарт
         # после отката конфига — второй за короткое окно)
         _run(["systemctl", "reset-failed", "xray"], check=False, quiet=True)
         _run(["systemctl", "restart", "xray"], check=False, quiet=True)

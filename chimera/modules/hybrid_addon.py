@@ -449,8 +449,8 @@ def load_state() -> dict:
 
 
 def _persist_traffic_pattern_blob(blob) -> None:
-    """v86: blob traffic-pattern в state — singbox-подписка (nyamebox)
-    встраивает его в mieru-outbound'ы; до v86 blob не сохранялся и
+    """blob traffic-pattern в state — singbox-подписка (nyamebox)
+    встраивает его в mieru-outbound'ы; ранее blob не сохранялся и
     терялся сразу после установки. Ошибка записи не фатальна: клиентские
     ссылки/JSON к этому моменту уже напечатаны."""
     if not blob:
@@ -629,7 +629,7 @@ def validate_xray_config(path: Path) -> bool:
 
 
 def restart_service(name: str) -> bool:
-    # v57 (start-limit-fix): reset-failed перед рестартом — rollback-механика
+    # (start-limit-fix): reset-failed перед рестартом — rollback-механика
     # apply_xray_change() может сделать 2+ рестарта подряд (apply → откат),
     # а юнит xray имеет StartLimitBurst — без сброса счётчика 3-й рестарт
     # за 60с отклоняется systemd'ом (start-limit-hit).
@@ -998,13 +998,13 @@ def detect_firewall() -> str:
 def open_port(fw: str, port: int, proto: str) -> str:
     """Возвращает строку-команду отката (или '' если открывать не пришлось).
 
-    v49: порт регистрируется в port_registry (SERVICE_HYBRID_ADDON) и
+    порт регистрируется в port_registry (SERVICE_HYBRID_ADDON) и
     открывается tagged-правилом UFW (comment chimera-hybrid_addon) —
     раньше raw `ufw allow` без comment и без записи в реестре делал порты
     невидимыми для conflict-детекции и аудита. Fallback на прежние
     raw-команды сохранён (iptables/firewalld и UFW-недоступность).
     """
-    # v49: сначала port_registry + tagged UFW-правило
+    # сначала port_registry + tagged UFW-правило
     try:
         from chimera.modules.port_registry import (
             port_register, ufw_open_port, SERVICE_HYBRID_ADDON,
@@ -1089,7 +1089,7 @@ def do_rollback() -> None:
         backup_path = Path(state["backup_path"])
         owner_mode = state.get("config_owner_mode")
 
-        # v80 (rollback-order): СНАЧАЛА глушим mita, ПОТОМ поднимаем Xray.
+        # (rollback-order): СНАЧАЛА глушим mita, ПОТОМ поднимаем Xray.
         # mita в момент отката слушает бывший VLESS-порт (TCP) и порт+1 (UDP) —
         # если рестартовать Xray до её остановки, восстановленный vless-инбаунд
         # не сможет забиндиться на занятый порт: xray падает, systemd крутится
@@ -1116,7 +1116,7 @@ def do_rollback() -> None:
         else:
             c_red(f"Бэкап {backup_path} не найден — config.json НЕ восстановлен, проверь руками.")
 
-        # v49: закрытие портов через port_registry (tagged-правила)
+        # закрытие портов через port_registry (tagged-правила)
         closed_reg = False
         try:
             from chimera.modules.port_registry import (
@@ -1166,7 +1166,7 @@ def get_public_ip() -> str:
 
 
 def _is_public_ipv4(addr: str) -> bool:
-    """v87.2: IPv4 и публичный (не loopback/приватный/link-local) —
+    """IPv4 и публичный (не loopback/приватный/link-local)
     для подстановки IP в Karing-выдачу UDP вместо домена."""
     parts = (addr or "").strip().split(".")
     if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
@@ -1189,7 +1189,7 @@ def _is_public_ipv4(addr: str) -> bool:
 
 
 def _karing_udp_server_ip() -> str:
-    """v87.2: публичный IPv4 для Karing-выдачи UDP, '' — не нашли.
+    """публичный IPv4 для Karing-выдачи UDP, '' — не нашли.
 
     UDP-сокет до 8.8.8.8 (мгновенно, без трафика — адрес исходящего
     интерфейса) → фолбэк get_public_ip(). Приватный/невалидный — ''
@@ -1209,7 +1209,7 @@ def _karing_udp_server_ip() -> str:
 
 def _karing_udp_addr(transport: str, client_addr: str,
                       is_domain=None) -> tuple:
-    """v87.2: адрес для Karing-ссылки/JSON на ДАННЫЙ транспорт (гибрид).
+    """адрес для Karing-ссылки/JSON на ДАННЫЙ транспорт (гибрид).
 
     Баг ядра Karing (karing_v1.13.x/v1.14.x, проверено по исходникам
     KaringX/sing-box, protocol/mieru/outbound.go): в mieru-outbound не
@@ -1242,14 +1242,14 @@ def _karing_udp_addr(transport: str, client_addr: str,
 
 
 def _detect_server_domain() -> str:
-    """Домен сервера для клиентской выдачи (v85), '' — не нашли.
+    """Домен сервера для клиентской выдачи, '' — не нашли.
 
     Читает state.json / naiveproxy.json напрямую (без импорта chimera —
     CLI-режим `sudo python3 hybrid_addon.py` работает на голом stdlib).
     Гибрид-аддону домен почти всегда доступен: он ставится только на
     сервер с живым VLESS-инбаундом, а домен VLESS живёт в state.json
     (фолбэк — домен Naive). Тот же порядок, что в _detect_panel_domain
-    (v83.3/v84) — единая конвенция проекта."""
+единая конвенция проекта."""
     for fname in ("state.json", "naiveproxy.json"):
         try:
             data = json.loads((STATE_DIR / fname).read_text(encoding="utf-8"))
@@ -1262,7 +1262,7 @@ def _detect_server_domain() -> str:
 
 
 def _parse_dns_addresses(client_dns: str) -> list:
-    """v87: список DNS-адресов из строки «через запятую/плюс» — локальная
+    """список DNS-адресов из строки «через запятую/плюс» — локальная
     копия mieru._parse_dns_addresses (CLI-режим работает без пакета
     chimera, см. _detect_server_domain выше)."""
     raw = (client_dns or "").strip()
@@ -1272,7 +1272,7 @@ def _parse_dns_addresses(client_dns: str) -> list:
 
 
 def _is_plausible_dns_address(client_dns: str) -> bool:
-    """v87: правдоподобный DNS-адрес(а) — локальная копия
+    """правдоподобный DNS-адрес(а) — локальная копия
     mieru._is_plausible_dns_address (IP / домен / DoH / DoT / DoQ,
     списки через запятую; пробел внутри токена — опечатка)."""
     raw = (client_dns or "").strip()
@@ -1288,7 +1288,7 @@ def _is_plausible_dns_address(client_dns: str) -> bool:
 
 
 def _detect_agh_dns_endpoints() -> dict:
-    """v87: публичные DoH/DoT/DoQ-эндпоинты ЛОКАЛЬНОГО AdGuard Home —
+    """публичные DoH/DoT/DoQ-эндпоинты ЛОКАЛЬНОГО AdGuard Home
     локальная копия mieru._detect_agh_dns_endpoints (тот же формат).
 
     Подглядывает в стейт AGH (aghome_state.json, пишет aghome_setup.py) —
@@ -1315,7 +1315,7 @@ def _detect_agh_dns_endpoints() -> dict:
 
 
 def _ask_client_dns(old_dns: str = "") -> str:
-    """v87: меню выбора DNS для клиентских конфигов Karing (гибрид).
+    """меню выбора DNS для клиентских конфигов Karing (гибрид).
 
     Те же пункты, что в mieru._ask_client_dns (Google / Cloudflare /
     оба / DoH-DoT-DoQ локального AdGuard Home / ручной ввод), но на голом
@@ -1402,7 +1402,7 @@ def _ask_client_dns(old_dns: str = "") -> str:
             c_green(f"DNS в выдаче: {val} (через mieru-туннель).")
         return val
 
-    # произвольная строка — принимаем как адрес (старое поведение v85)
+    # произвольная строка — принимаем как адрес (старое поведение)
     if _is_plausible_dns_address(raw):
         c_green(f"DNS в выдаче: {raw} (через mieru-туннель).")
         return raw
@@ -1411,12 +1411,12 @@ def _ask_client_dns(old_dns: str = "") -> str:
 
 
 def _ask_client_link_settings() -> dict:
-    """v85/v87: адрес и DNS клиентской выдачи — интерактивные вопросы для
+    """: адрес и DNS клиентской выдачи — интерактивные вопросы для
     меню-установки. Возвращает {client_server_addr, client_dns}; Enter —
     домен если найден (иначе IP-режим) и «умный» дефолт DNS: AGH (DoH),
     если найден на сервере, иначе Google — как раньше.
 
-    v87: оба вопроса — короткими строками через _box_row (правая граница
+    оба вопроса — короткими строками через _box_row (правая граница
     рамки установки больше не ломается; раньше вопрос про адрес и
     DNS-подсказка были одной строкой на 100+ символов); DNS — меню:
     Google / Cloudflare / оба / DoH-DoT-DoQ локального AdGuard Home
@@ -1434,7 +1434,7 @@ def _ask_client_link_settings() -> dict:
     client_server_addr = ""
     if domain_hint:
         default_opt = old_addr or "2"
-        # v87: вопрос короткими строками — раньше одна длинная строка
+        # вопрос короткими строками — раньше одна длинная строка
         # «[1] IP / [2] домен … / или свой домен [Enter=…]» ломала рамку
         _box_row(f"  {BOLD}Адрес сервера в клиентских ссылках:{NC}")
         _box_row(f"     {DIM}[1]{NC} IP сервера (как раньше)")
@@ -1460,7 +1460,7 @@ def _ask_client_link_settings() -> dict:
             c_green(f"В ссылках/JSON будет домен {client_server_addr} "
                     f"(IP меняется — ссылки живут).")
 
-    # v87: DNS — меню (AGH-детект + подглядывание ссылок) вместо одной
+    # DNS — меню (AGH-детект + подглядывание ссылок) вместо одной
     # строки с длинной подсказкой
     client_dns = _ask_client_dns(old_dns)
 
@@ -1520,14 +1520,14 @@ def main() -> None:
                               "интерактивный вопрос (Enter = basic). Custom-режим (вставка "
                               "своего JSON) доступен только интерактивно, без флага.")
     parser.add_argument("--client-dns", type=str, default=None,
-                         help="v85/v87: DNS в клиентских конфигах Karing (вместо Google 8.8.8.8): "
+                         help=": DNS в клиентских конфигах Karing (вместо Google 8.8.8.8): "
                               "IP, домен, https://…/dns-query (DoH), tls://… (DoT), quic://… (DoQ) "
                               "или список через запятую (например 8.8.8.8,1.1.1.1). "
                               "Запросы пойдут ЧЕРЕЗ mieru-туннель. Без флага — меню (в --yes — "
                               "тихий дефолт Google). В меню ещё DoH/DoT/DoQ локального "
                               "AdGuard Home, если найден на сервере.")
     parser.add_argument("--client-server-addr", type=str, default=None,
-                         help="v85: адрес сервера в клиентских ссылках/JSON — домен вместо IP "
+                         help=": адрес сервера в клиентских ссылках/JSON — домен вместо IP "
                               "(домен должен резолвиться на этот сервер; смена IP не ломает "
                               "клиентские конфиги). Пустая строка = IP, как раньше. "
                               "Без флага — вопрос (в --yes — IP).")
@@ -1627,7 +1627,7 @@ def main() -> None:
         effective_tp_mode = "basic" if (args.yes and args.traffic_pattern is None) else args.traffic_pattern
         traffic_pattern = _ask_traffic_pattern_mode(effective_tp_mode)
 
-        # v85: адрес (IP/домен) и DNS клиентской выдачи. Флаги --client-dns /
+        # адрес (IP/домен) и DNS клиентской выдачи. Флаги --client-dns /
         # --client-server-addr имеют приоритет; без флагов в интерактиве —
         # вопросы; в --yes-режиме — тихие дефолты (IP + Google, как раньше).
         if args.client_dns is not None or args.client_server_addr is not None:
@@ -1675,11 +1675,11 @@ def main() -> None:
             "tcp_port": tcp_port if want_tcp else None,
             "udp_port": udp_port if want_udp else None,
             "created": datetime.now().isoformat(),
-            # v85: настройки клиентской выдачи (ссылки в CLI-режиме не
+            # настройки клиентской выдачи (ссылки в CLI-режиме не
             # печатаются, но state нужен для выдачи через меню позже)
             "client_server_addr": _link_settings["client_server_addr"],
             "client_dns": _link_settings["client_dns"],
-            # v86: blob traffic-pattern — для singbox-подписки (nyamebox)
+            # blob traffic-pattern — для singbox-подписки (nyamebox)
             "traffic_pattern_blob": (_export_traffic_pattern_blob()
                                       if traffic_pattern else "") or "",
         })
@@ -1814,7 +1814,7 @@ def _menu_install(default_port: int = 443) -> None:
 
             traffic_pattern = _ask_traffic_pattern_mode()  # в меню флага нет — всегда интерактив
 
-            # v85: адрес (IP/домен) и DNS клиентской выдачи
+            # адрес (IP/домен) и DNS клиентской выдачи
             _link_settings = _ask_client_link_settings()
 
             mita_config, mita_creds = build_mita_config(transport, tcp_port, udp_port,
@@ -1854,7 +1854,7 @@ def _menu_install(default_port: int = 443) -> None:
                 "tcp_port": tcp_port if want_tcp else None,
                 "udp_port": udp_port if want_udp else None,
                 "created": datetime.now().isoformat(),
-                # v85: настройки клиентской выдачи
+                # настройки клиентской выдачи
                 "client_server_addr": _link_settings["client_server_addr"],
                 "client_dns": _link_settings["client_dns"],
             })
@@ -1873,9 +1873,9 @@ def _menu_install(default_port: int = 443) -> None:
     print_summary(creds)
     _print_traffic_pattern_snippet(traffic_pattern)
     traffic_pattern_blob = _export_traffic_pattern_blob() if traffic_pattern else None
-    # v86: blob в state — для singbox-подписки (nyamebox)
+    # blob в state — для singbox-подписки (nyamebox)
     _persist_traffic_pattern_blob(traffic_pattern_blob)
-    # v85: адрес выдачи — домен из state (если выбран) или публичный IP
+    # адрес выдачи — домен из state (если выбран) или публичный IP
     client_addr = _link_settings["client_server_addr"] or get_public_ip()
     _show_mieru_client_links(creds, client_addr,
                              client_dns=_link_settings["client_dns"],
@@ -1889,9 +1889,9 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
     """Доп. клиентская выдача (только для пути через меню установщика):
     mierus:// для Karing/sing-box, mierus:// для Nekobox, sing-box JSON
     для Karing (запасной вариант для старых версий Karing) и QR.
-    v87.1: импорт mierus://-ссылки в Karing проверен живьём — TCP-вариант
-    Hybrid Addon подключился сразу; до v86 ссылку с обфускацией ломал
-    двойной traffic-pattern= (багфикс v86, теперь параметр один).
+    импорт mierus://-ссылки в Karing проверен живьём — TCP-вариант
+    Hybrid Addon подключился сразу; ранее ссылку с обфускацией ломал
+    двойной traffic-pattern= (багфикс, теперь параметр один).
 
     Переиспользует уже проверенные форматы из modules/mieru.py — лениво
     импортирует их прямо здесь, а не в шапке файла. main() (CLI-режим)
@@ -1900,7 +1900,7 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
     stdlib — ломается только эта, чисто меню-шная надстройка, если
     что-то пойдёт не так, и то лишь с понятным предупреждением.
 
-    v85: server_ip — фактический адрес выдачи (IP или домен из state),
+    server_ip — фактический адрес выдачи (IP или домен из state),
     client_dns — свой DNS для Karing-JSON ('' = Google, как раньше);
     dns-секция и domain_resolver собираются общим билдером из mieru.py
     (_build_karing_full_config) — один формат на оба пути установки.
@@ -1926,7 +1926,7 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
         return
 
     client_dns = (client_dns or "").strip()
-    # v87.2: server_domain больше не нужен на уровне функции — для JSON
+    # server_domain больше не нужен на уровне функции — для JSON
     # домен определяется по фактическому адресу каждого транспорта
     # (UDP идёт с IP — см. _karing_udp_addr)
 
@@ -1936,10 +1936,10 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
         password = data["password"]
         proto = transport.upper()  # "TCP" / "UDP"
 
-        # v86: при blob — preset-параметр не вставляем: до фиксы ссылка
+        # при blob — preset-параметр не вставляем: до фиксы ссылка
         # получала ДВА traffic-pattern= (basic-пресет + blob), и первый
         # мог перебивать реальный паттерн сервера
-        # v87.2: Karing-ссылка/JSON для UDP — с IP: домен+UDP в ядре
+        # Karing-ссылка/JSON для UDP — с IP: домен+UDP в ядре
         # Karing не резолвится (NilDNSResolver) — «подключено, 0 байт/с».
         # Nekobox/Nyamebox-ссылка домен сохраняет. TCP не затронут.
         karing_addr, karing_udp_ip = _karing_udp_addr(transport, server_ip)
@@ -1958,7 +1958,7 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
             # (snake_case, как server_port) и докам mihomo/sing-box ("base64 string,
             # см. официальную документацию mieru"). Сам JSON-файл живьём не проверялся
             # (юзер ходит ссылкой), но импорт mierus:// с &traffic-pattern= подтверждён
-            # живьём в Karing (v87.1, TCP) — URL-параметр и поле несут один blob.
+            # живьём в Karing (TCP) — URL-параметр и поле несут один blob.
             outbound["traffic_pattern"] = traffic_pattern_blob
         full_config = _build_karing_full_config(
             outbound, client_dns,
@@ -1968,8 +1968,8 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
         box_header(f"КЛИЕНТСКАЯ ВЫДАЧА — {proto}")
         cfg_saved = False
         try:
-            # v87: сами ссылки — ВНЕ рамки, под ней, целиком одной строкой
-            # (до v87 _box_link резал их по ширине — рамки «ломались», а
+            # сами ссылки — ВНЕ рамки, под ней, целиком одной строкой
+            # (ранее _box_link резал их по ширине — рамки «ломались», а
             # копирование требовало склейки строк)
             _box_row(f"  {BOLD}Karing (sing-box core):{NC} ссылка — ПОД рамкой")
             _box_row(f"  {BOLD}Nekobox / Nyamebox:{NC} ссылка — ПОД рамкой")
@@ -1986,9 +1986,9 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
         finally:
             _box_bottom()
 
-        # v87: ссылки — вне рамки, ОДНОЙ строкой каждая: рамка закрыта,
+        # ссылки — вне рамки, ОДНОЙ строкой каждая: рамка закрыта,
         # мягкий перенос терминала не вставляет \n при копировании.
-        # v87.1: Karing принимает mierus://-ссылку напрямую (проверено
+        # Karing принимает mierus://-ссылку напрямую (проверено
         # живьём, TCP) — JSON-файл остаётся запасным вариантом для старых
         # версий Karing; его путь тоже ВНЕ рамки (длинный, ломал бы границы)
         print()

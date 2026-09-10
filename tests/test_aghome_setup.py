@@ -15,7 +15,7 @@ Unit-тесты для AdGuard Home стека Chimera:
   10. DNS-ALIVE гарантия: probe dig/getent + лестница восстановления (v44)
   11. HEADLESS-мастер: POST /control/install/configure на loopback (v44)
   12. uninstall: DNS проверяется фактическим запросом после удаления (v44)
-  13. v47 anti-duplicate-keys: дубли top-level ключей YAML = crash-loop AGH
+  13. anti-duplicate-keys: дубли top-level ключей YAML = crash-loop AGH
       (инцидент vds13195: «whitelist_filters already defined», рестарт-каунтер 390+)
       + _wait_service: флапающий crash-loop не считается успехом
 """
@@ -210,10 +210,10 @@ class TestYamlReplaceSections(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  v47: ANTI-DUPLICATE-KEYS (инцидент vds13195 — crash-loop AGH)
+# ANTI-DUPLICATE-KEYS (инцидент vds13195 — crash-loop AGH)
 # ─────────────────────────────────────────────────────────────────────────────
 class TestYamlNoDuplicateTopKeys(unittest.TestCase):
-    """Regression v47: финализация писала в AdGuardHome.yaml дубли
+    """Regression финализация писала в AdGuardHome.yaml дубли
     whitelist_filters/user_rules (секция filters тащила их внутри себя,
     а мастерские копии оставались) — строгий YAML-парсер AGH падал:
     «mapping key whitelist_filters already defined at line 108».
@@ -295,7 +295,7 @@ class TestYamlNoDuplicateTopKeys(unittest.TestCase):
 
 
 class TestWaitServiceStable(unittest.TestCase):
-    """v47: crash-loop флап (systemd active на ~0.5с каждые 5с) не должен
+    """crash-loop флап (systemd active на ~0.5с каждые 5с) не должен
     считаться успехом — иначе self-heal откат конфига не срабатывал и
     AGH оставался в crash-loop (рестарт-каунтер 390+ на vds13195).
     """
@@ -372,7 +372,7 @@ class TestBuildSections(unittest.TestCase):
         self.assertIn("- 127.0.0.1:5300", s)
         # upstream + bootstrap содержат порт dnscrypt
         self.assertGreaterEqual(s.count("127.0.0.1:5300"), 2)
-        # fallback: Quad9 x2 (v67 — 1.1.1.1 душится из РФ, заменён на
+        # fallback: Quad9 x2 (1.1.1.1 душится из РФ, заменён на
         # второй anycast Quad9 149.112.112.112)
         self.assertIn("- 9.9.9.9:53", s)
         self.assertIn("- 149.112.112.112:53", s)
@@ -384,7 +384,7 @@ class TestBuildSections(unittest.TestCase):
         self.assertIn("cache_size: 4194304", s)
         self.assertIn("cache_optimistic: true", s)
         self.assertIn("enable_dnssec: true", s)
-        # v65: ratelimit 0 (тихие дропы лимита убивали DNS Xray — EOF-шторм)
+        # ratelimit 0 (тихие дропы лимита убивали DNS Xray — EOF-шторм)
         self.assertIn("ratelimit: 0", s)
         self.assertNotIn("ratelimit: 20", s)
         self.assertIn("upstream_timeout: 3s", s)
@@ -418,15 +418,15 @@ class TestBuildSections(unittest.TestCase):
                       self.mod.build_http_section(self.mod.AGH_WEB_HTTP_PUB))
         self.assertIn("address: 127.0.0.1:3000",
                       self.mod.build_http_section(self.mod.AGH_WEB_LOOPBACK))
-        # v48: TLS-режимы биндят 0.0.0.0 — HTTPS :30443 следует хосту
+        # TLS-режимы биндят 0.0.0.0 — HTTPS :30443 следует хосту
         # http.address, иначе Web UI снаружи требует SSH-туннель
         self.assertIn("address: 0.0.0.0:3000",
                       self.mod.build_http_section(self.mod.AGH_WEB_HTTPS_LE))
         self.assertIn("address: 0.0.0.0:3000",
                       self.mod.build_http_section(self.mod.AGH_WEB_HTTPS_SELF))
 
-    def test_http_section_tls_bind_follows_v48(self):
-        """Regression v48: https-режимы НЕ должны уходить в loopback —
+    def test_http_section_tls_bind_follows(self):
+        """Regression https-режимы НЕ должны уходить в loopback
         AGH биндит port_https на хост http.address (web.go:
         netip.AddrPortFrom(BindAddr, portHTTPS)), loopback-бинд оставлял
         :30443 недоступным снаружи при открытом UFW.
@@ -440,8 +440,8 @@ class TestBuildSections(unittest.TestCase):
         self.assertIn("address: 127.0.0.1:3000",
                       self.mod.build_http_section(self.mod.AGH_WEB_LOOPBACK))
 
-    def test_http_section_custom_port_v49(self):
-        """v49: кастомный порт Web UI применяется во всех режимах."""
+    def test_http_section_custom_port(self):
+        """кастомный порт Web UI применяется во всех режимах."""
         self.assertIn("address: 0.0.0.0:8081",
                       self.mod.build_http_section(self.mod.AGH_WEB_HTTP_PUB, 8081))
         self.assertIn("address: 0.0.0.0:8081",
@@ -452,8 +452,8 @@ class TestBuildSections(unittest.TestCase):
         self.assertIn("address: 0.0.0.0:3000",
                       self.mod.build_http_section(self.mod.AGH_WEB_HTTP_PUB))
 
-    def test_validate_web_port_v49(self):
-        """v49: валидация кастомного порта — диапазон/служебные/занятость."""
+    def test_validate_web_port(self):
+        """валидация кастомного порта — диапазон/служебные/занятость."""
         # привилегированные (<1024) отклоняются диапазоном —
         # это покрывает и системные 22/53/80/443
         for bad in (22, 53, 80, 443, 853):   # 853 тоже < 1024
@@ -519,7 +519,7 @@ class TestMigrateDnscryptOff53(unittest.TestCase):
         core.info = lambda *a, **k: None
         core.warn = lambda *a, **k: None
         core.success = lambda *a, **k: None
-        # v72: явное значение — иначе MagicMock-атрибут truthy и миграция
+        # явное значение — иначе MagicMock-атрибут truthy и миграция
         # считает IPv6 доступным (добавляет '[::1]')
         core.IS_IPV6_AVAILABLE = ipv6
         return core
@@ -564,7 +564,7 @@ class TestMigrateDnscryptOff53(unittest.TestCase):
         content = self.toml.read_text()
         self.assertIn("listen_addresses = ['127.0.0.1:5300']", content)
         self.assertNotIn(":53'", content)
-        # v72: без IPv6 — только v4-loopback
+        # без IPv6 — только v4-loopback
         self.assertNotIn("[::1]", content)
         # бэкап создан
         baks = list(self.toml.parent.glob("dnscrypt-proxy.toml.*.preAGH.bak"))
@@ -577,8 +577,8 @@ class TestMigrateDnscryptOff53(unittest.TestCase):
         self.assertTrue(restarts, "restart dnscrypt должен быть вызван")
         self.assertLess(safety_calls.index((5300, False)), restarts[0])
 
-    def test_strips_53_adds_ipv6_listen_v72(self):
-        """v72: при живом IPv6 миграция добавляет '[::1]:5300' вторым
+    def test_strips_53_adds_ipv6_listen(self):
+        """при живом IPv6 миграция добавляет '[::1]:5300' вторым
         слушателем (127.0.0.1 всегда первый)."""
         self.toml.write_text(
             "listen_addresses = ['127.0.0.1:53', '127.0.0.1:5300']\n"
@@ -889,7 +889,7 @@ class TestWizardAccess(unittest.TestCase):
 #  resolv_conf_fix — AGH-aware ветки
 # ─────────────────────────────────────────────────────────────────────────────
 class TestWebPortLifecycleV49(unittest.TestCase):
-    """v49: кастомный порт Web UI — открытие/смена/закрытие через
+    """кастомный порт Web UI — открытие/смена/закрытие через
     port_registry (register на установке, close+unregister на удалении,
     при смене порта старый не течёт)."""
 
@@ -1006,7 +1006,7 @@ class TestResolvConfAghAware(unittest.TestCase):
             self.assertFalse(self.mod._is_aghome_serving_53())
 
     def test_diag_no_false_reason_when_agh_serves(self):
-        """AGH служит :53 (и резолвит — v55 мок пробы), redirect отсутствует →
+        """AGH служит :53 (и резолвит — мок пробы), redirect отсутствует →
         НЕТ причины 'redirect не активен' (DNS жив через AGH), fix не требуется."""
         with patch.object(self.mod, "_run", self._mock_run(True, False)), \
              patch.object(self.mod, "agh_probe_resolve",
@@ -1027,7 +1027,7 @@ class TestResolvConfAghAware(unittest.TestCase):
         self.assertFalse(has_dead_dns_reason)
 
     def test_diag_reason_when_redirect_steals_agh_traffic(self):
-        """AGH служит :53 (и резолвит — v55 мок пробы), НО redirect активен →
+        """AGH служит :53 (и резолвит — мок пробы), НО redirect активен →
         причина 'запросы обходят AGH', fix_required → фикс снимет redirect."""
         with patch.object(self.mod, "_run", self._mock_run(True, True)), \
              patch.object(self.mod, "agh_probe_resolve",
@@ -1099,7 +1099,7 @@ class TestIntegrationSourceChecks(unittest.TestCase):
                     "chimera/modules/chain_nodes.py"):
             src = self._read(rel)
             self.assertIn("agh_dns_available", src,
-                          f"{rel}: нет AGH-ветки DNS (v55: agh_dns_available "
+                          f"{rel}: нет AGH-ветки DNS (agh_dns_available "
                           f"— глубокий health-check, заменил aghome_dns_ready)")
             self.assertIn('"port": 53', src,
                           f"{rel}: нет DNS-сервера 127.0.0.1:53")
@@ -1283,9 +1283,9 @@ schema_version: 29
 
         # 2. канонические секции применены
         self.assertIn("- 127.0.0.1:5300", text)          # upstream → dnscrypt
-        self.assertIn("ratelimit: 0", text)              # v65: без лимита
+        self.assertIn("ratelimit: 0", text) # без лимита
         self.assertIn("cache_size: 4194304", text)
-        self.assertIn("address: 0.0.0.0:3000", text)      # v48: TLS-режим биндит 0.0.0.0 (UFW снаружи закрыт)
+        self.assertIn("address: 0.0.0.0:3000", text) # TLS-режим биндит 0.0.0.0 (UFW снаружи закрыт)
         self.assertIn("port_https: 30443", text)         # DoH+UI TLS
         self.assertIn("port_dns_over_tls: 853", text)
         self.assertIn("adguardteam.github.io/AdGuardSDNSFilter", text)
@@ -1314,7 +1314,7 @@ schema_version: 29
         self.assertEqual(len(baks), 1)
 
     def test_finalize_selfheal0_drops_ipv6_keeps_ipv4(self):
-        """v72.1 (инцидент vds13195): AGH не стартует с IPv6 в bind_hosts →
+        """ (инцидент vds13195): AGH не стартует с IPv6 в bind_hosts →
         self-heal #0 снимает ТОЛЬКО IPv6 — публичный IPv4 (DoT/DoH) и
         loopback остаются. Прежний путь сразу ронял всё до loopback-only.
         """
@@ -1396,7 +1396,7 @@ schema_version: 29
         # ровно два ожидания сервиса: старт с IPv6 (fail) + без IPv6 (ok)
         self.assertEqual(len(wait_calls), 2, wait_calls)
 
-        # v57-паттерн: reset-failed перед рестартами (start-limit)
+        # паттерн: reset-failed перед рестартами (start-limit)
         resets = [c for c in calls["cmds"]
                   if c[:3] == ["systemctl", "reset-failed", "AdGuardHome"]]
         self.assertGreaterEqual(len(resets), 2, calls["cmds"])
@@ -1468,7 +1468,7 @@ class TestDnsAliveGuarantee(unittest.TestCase):
             em.assert_not_called()
 
     def test_ensure_no_action_when_provider_dns_alive(self):
-        """v60: чистая установка — системный DNS провайдера жив, :53 пуст:
+        """чистая установка — системный DNS провайдера жив, :53 пуст:
         выход молча, БЕЗ resolv-фикса (старый код ломал DNS провайдера)."""
         with patch.object(self.mod, "_system_dns_ok", return_value=True) as sysok, \
              patch.object(self.mod, "_dns_probe_ok", return_value=False), \
@@ -1480,7 +1480,7 @@ class TestDnsAliveGuarantee(unittest.TestCase):
         fix.assert_not_called()
 
     def test_ensure_flap_protection(self):
-        """v60: единичный таймаут системного резолва ≠ мёртвый DNS —
+        """единичный таймаут системного резолва ≠ мёртвый DNS
         вторая проба проходит, восстановление не запускается."""
         with patch.object(self.mod, "_system_dns_ok",
                           side_effect=[False, True]) as sysok, \
@@ -1539,7 +1539,7 @@ class TestDnsAliveGuarantee(unittest.TestCase):
         self.assertTrue(all("--to-ports 5300" in a for a in adds))
 
     def test_ensure_public_dns_last_resort(self):
-        """v60: локальный стек не поднялся — публичный DNS в resolv.conf,
+        """локальный стек не поднялся — публичный DNS в resolv.conf,
         установка продолжается (DNS жив любой ценой)."""
         with patch.object(self.mod, "_system_dns_ok",
                           side_effect=[False, False,
@@ -1723,7 +1723,7 @@ class TestHeadlessWizard(unittest.TestCase):
             self.assertTrue(self.mod._complete_first_run_wizard(
                 self.mod.AGH_WEB_HTTP_PUB, "", True))
         ask.assert_called_once()
-        # v49: headless получает и кастомный порт Web UI (дефолт 3000)
+        # headless получает и кастомный порт Web UI (дефолт 3000)
         configure.assert_called_once_with("admin", "pw123456",
                                           web_port=self.mod.AGH_WEB_PORT)
         open_acc.assert_not_called()
@@ -1736,7 +1736,7 @@ class TestHeadlessWizard(unittest.TestCase):
         self.assertEqual(st["web_port"], self.mod.AGH_WEB_PORT)
 
     def test_complete_first_run_wizard_custom_port(self):
-        """v49: кастомный порт Web UI — в payload мастера и в state."""
+        """кастомный порт Web UI — в payload мастера и в state."""
         with patch.object(self.mod, "_ask_headless_wizard", return_value=True), \
              patch.object(self.mod, "_ask_admin_credentials",
                           return_value=("admin", "pw123456")), \
@@ -1828,7 +1828,7 @@ class TestUninstallDnsAlive(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  v45: ложный :53 (systemd-resolved stub) + proc-фильтр
+# ложный :53 (systemd-resolved stub) + proc-фильтр
 # ─────────────────────────────────────────────────────────────────────────────
 class TestPortListeningResolvedStub(unittest.TestCase):
     """vds13195: _port_listening(53) матчила 127.0.0.53:53 (systemd-resolved)
@@ -1896,11 +1896,11 @@ class TestPortListeningResolvedStub(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  v45: TLS-self-heal — tls-секция, диагностика, починка
+# TLS-self-heal — tls-секция, диагностика, починка
 # ─────────────────────────────────────────────────────────────────────────────
 class TestTlsSelfHealV45(unittest.TestCase):
     """AGH при битом сертификате молча ставит tls.enabled=false и живёт
-    на plain DNS (home.go: newTLSManager err → лог, не fatal). v45:
+    на plain DNS (home.go: newTLSManager err → лог, не fatal). 
     финализация диагностирует и чинит TLS-порты."""
 
     def setUp(self):
@@ -2056,7 +2056,7 @@ class TestTlsSelfHealV45(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  v45: перегенерация Xray в режиме B — chain_nodes (не xray_install)
+# перегенерация Xray в режиме B — chain_nodes (не xray_install)
 # ─────────────────────────────────────────────────────────────────────────────
 class TestXrayRegenModeB(unittest.TestCase):
     """vds13195: AttributeError «xray_install has no attribute
@@ -2146,7 +2146,7 @@ class TestXrayRegenModeB(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  v45: финализация вызывает TLS-лечение, если порты не поднялись
+# финализация вызывает TLS-лечение, если порты не поднялись
 # ─────────────────────────────────────────────────────────────────────────────
 class TestFinalizeTlsHealInvocation(unittest.TestCase):
     def setUp(self):
@@ -2229,7 +2229,7 @@ class TestFinalizeTlsHealInvocation(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  v78: _client_dns_links + показ готовых ссылок в статус-боксе
+# _client_dns_links + показ готовых ссылок в статус-боксе
 # ─────────────────────────────────────────────────────────────────────────────
 class TestClientDnsLinks(unittest.TestCase):
     """Готовые ссылки DoH/DoT/DoQ для вставки в клиент из статуса AGH."""

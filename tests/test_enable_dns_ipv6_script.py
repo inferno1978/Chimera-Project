@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v72.1: проверки scripts/enable-dns-ipv6.sh — структурные и функциональные.
+"""проверки scripts/enable-dns-ipv6.sh — структурные и функциональные.
 
 Инцидент vds13195 (30.08): dns_alive был ОДНИМ системным getent без
 settle-повторов — во время bootstrap AGH+dnscrypt после рестарта
@@ -43,7 +43,7 @@ class TestScriptStructure(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_reset_failed_before_every_restart(self):
-        """v57-паттерн: reset-failed перед КАЖДЫМ рестартом (start-limit).
+        """паттерн: reset-failed перед КАЖДЫМ рестартом (start-limit).
 
         Двойной рестарт AGH за минуту без reset-failed ловит
         start-limit-hit — служба остаётся failed навсегда.
@@ -70,7 +70,7 @@ class TestScriptStructure(unittest.TestCase):
         """Проба — прямой запрос к AGH, не системный getent.
 
         Системный путь зависит от resolv.conf и даёт ложный «мёртв»
-        (урок v60 из aghome_setup._system_dns_ok).
+        (урок из aghome_setup._system_dns_ok).
         """
         self.assertNotIn("getent hosts", self.text)
         self.assertIn("probe_dns_at", self.text)

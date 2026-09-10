@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tests/test_v57_agh_aware_and_start_limit.py
+tests/test_agh_aware_and_start_limit.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для v57:
+Unit-тесты для 
 
   A. AGH-aware DNS (умное определение резолва + автооткат на 5300):
      • olcrtc._resolver_for_olcrtc — живой AGH → 127.0.0.1:53;
@@ -12,7 +12,7 @@ Unit-тесты для v57:
        location;
      • сбой импорта agh_probe → тихий откат (не исключение).
 
-  B. Тотальная защита от start-limit-hit (v56 → v57):
+  B. Тотальная защита от start-limit-hit (→):
      • СТАТИЧЕСКИЙ ГВАРД: каждый «systemctl restart xray» в chimera/ либо
        сопровождается reset-failed в соседних строках, либо идёт через
        безопасные обёртки (_xray_safe_restart / _xray_restart_safe /
@@ -23,8 +23,8 @@ Unit-тесты для v57:
      • fp-rotate cron-скрипт (_core) содержит reset-failed.
 
 Контекст: на vds13195 пересборка конфига из меню (3 → 7 → R) ловила
-start-limit-hit (StartLimitBurst=3/60s). v56 закрыла цепочку пересборки,
-v57 закрывает ВСЕ остальные точки рестарта xray + добавляет AGH-aware
+start-limit-hit (StartLimitBurst=3/60s). закрыла цепочку пересборки,
+ закрывает ВСЕ остальные точки рестарта xray + добавляет AGH-aware
 DNS в генератор конфига olcrtc-manager.
 ───────────────────────────────────────────────────────────────────────────────
 """
@@ -174,7 +174,7 @@ class TestStartLimitStaticGuard(unittest.TestCase):
 
     Сканирует ВЕСЬ рантайм-код chimera/ (py). Голый
     ``systemctl restart xray`` без сброса счётчика start-rate-limit —
-    источник start-limit-hit (v56/v57).
+    источник start-limit-hit.
     """
 
     def _iter_py_files(self):

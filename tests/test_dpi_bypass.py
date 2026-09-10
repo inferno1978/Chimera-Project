@@ -1951,7 +1951,7 @@ class TestCleanInstallEmptyConfig(unittest.TestCase):
             self.youtube_b4.B4_GEOSITE_SHARED_PATHS = orig_shared
 
     def test_write_empty_config_always_local_geosite_with_seed(self):
-        """v75.1 (3 машины, 500 EROFS в Web UI b4): общий geosite.dat Xray
+        """ (3 машины, 500 EROFS в Web UI b4): общий geosite.dat Xray
         существует → sitedat_path ВСЁ РАВНО собственный /etc/b4/geosite.dat,
         а база КОПИРУЕТСЯ туда (seed). /usr read-only для процесса b4
         (ProtectSystem=strict) — шаринг ломает Update геосайта.
@@ -2483,11 +2483,11 @@ class TestImportWildcardNormalization(unittest.TestCase):
 
 
 class TestB4GeoDefaultsAndAutoHeal(unittest.TestCase):
-    """v75.1 — geosite-пути b4 «как это необходимо B4": всегда /etc/b4,
+    """ — geosite-пути b4 «как это необходимо B4": всегда /etc/b4,
     seed-копия из Xray, авто-лечение из status().
 
     Контекст: третья машина (picaresque.space) с легаси-хардкодом
-    /usr/share/xray/geosite.dat — v72.4 лечил только при переключении
+    /usr/share/xray/geosite.dat — лечил только при переключении
     пресета/импорте сета, юзер после обновления Химеры их не делал.
     """
 
@@ -2569,7 +2569,7 @@ class TestB4GeoDefaultsAndAutoHeal(unittest.TestCase):
                  mod.B4_GEOSITE_LOCAL_PATH) = orig
 
     def test_heals_shared_xray_path_even_if_file_exists(self):
-        """v72.4-«общий» путь /usr/local/share/xray/geosite.dat (файл жив)
+        """-«общий» путь /usr/local/share/xray/geosite.dat (файл жив)
         — тоже мёртвый для b4: /usr read-only, Update = 500 EROFS."""
         import tempfile
         tmpdir = Path(tempfile.mkdtemp())
@@ -2821,7 +2821,7 @@ class TestB4LegacyConfigCleanup(unittest.TestCase):
                 mod.B4_GEOSITE_SHARED_PATHS = orig
 
     def test_heals_dead_xray_path_even_with_live_shared_file(self):
-        """v75.1: мёртвый xray-хардкод + живой общий файл → ВСЁ РАВНО
+        """мёртвый xray-хардкод + живой общий файл → ВСЁ РАВНО
         /etc/b4/geosite.dat (НЕ репойнт на общий файл).
 
         REGRESSION (3 машины): /usr read-only для b4 — Update геосайта
@@ -2849,7 +2849,7 @@ class TestB4LegacyConfigCleanup(unittest.TestCase):
                  mod.B4_GEOSITE_LOCAL_PATH) = orig
 
     def test_b4_geosite_path_resolver(self):
-        """v75.1: резолвер ВСЕГДА возвращает /etc/b4/geosite.dat —
+        """резолвер ВСЕГДА возвращает /etc/b4/geosite.dat
         существование общих geosite-файлов Xray не меняет выбор (они
         остаются только seed-источником)."""
         import tempfile
@@ -3441,7 +3441,7 @@ class TestNormalizationSyncBetweenModules(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  v76: КЭШ LATEST-ВЕРСИЙ (release / pre-release) В ШАПКЕ ГЛАВНОГО МЕНЮ
+# КЭШ LATEST-ВЕРСИЙ (release / pre-release) В ШАПКЕ ГЛАВНОГО МЕНЮ
 # ══════════════════════════════════════════════════════════════════════════
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
@@ -3452,7 +3452,7 @@ def _plain(s: str) -> str:
 
 
 class _B4BothModulesMixin:
-    """Общая setUp для тестов v76 — оба модуля B4, кэш в state."""
+    """Общая setUp для тестов оба модуля B4, кэш в state."""
 
     def _setup_modules(self):
         _setup_core_in_sysmodules()
@@ -3822,7 +3822,7 @@ class TestB4LatestCache(_B4BothModulesMixin, unittest.TestCase):
 class TestMenuUpdateHeaderRow(_B4BothModulesMixin, unittest.TestCase):
     """Главное меню рендерит строку «Обновление:» с доступными версиями.
 
-    v76: юзер, зайдя в главное меню модуля, сразу видит готовые к
+    юзер, зайдя в главное меню модуля, сразу видит готовые к
     установке release/pre-release — не заходя в раздел [5].
     """
 

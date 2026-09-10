@@ -387,7 +387,7 @@ class TestPortRegistryCoverage(unittest.TestCase):
         """_telemt_setup_direct_access должен вызвать port_register + ufw_open_port."""
         from chimera.modules import telemt_panel
         from chimera.modules import panel_nginx_front
-        # v65: герметичность — nginx-фронт исполняется по-настоящему (именно
+        # герметичность — nginx-фронт исполняется по-настоящему (именно
         # он вызывает port_register/ufw_open_port), но ВСЕ его побочные
         # эффекты замоканы: генерация сертификата, nginx -t, curl, запись
         # vhost-файлов, curl ifconfig.me. Реальный nginx и /etc/nginx
@@ -447,7 +447,7 @@ class TestPortRegistryCoverage(unittest.TestCase):
         from chimera.modules import telemt_panel
         from chimera.modules import panel_nginx_front
         import json
-        # v65: герметичность — nginx-фронт исполняется по-настоящему (именно
+        # герметичность — nginx-фронт исполняется по-настоящему (именно
         # он вызывает ufw_close_port/port_unregister), но nginx -t/reload,
         # unlink vhost-файлов и state.json замоканы.
         _mock_sites_avail = MagicMock()
@@ -484,12 +484,12 @@ class TestPortRegistryCoverage(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  v84: авто-домен для Let's Encrypt (порт v83.3 из triple_panel.py)
+# авто-домен для Let's Encrypt (порт из triple_panel.py)
 # ══════════════════════════════════════════════════════════════════════════════
-class TestV84AutoDomain(unittest.TestCase):
+class TestAutoDomain(unittest.TestCase):
     """Цепочка _detect_panel_domain: PARAM_DOMAIN → state.json →
     naiveproxy.json (домен Naive — его panel_nginx_front не видит).
-    v84 — порт фикса v83.3: Telemt Panel на серверах без VLESS больше
+    порт фикса Telemt Panel на серверах без VLESS больше
     не застревает на пустом «Домен:» при включении прямого доступа."""
 
     def setUp(self):
@@ -567,10 +567,10 @@ class TestV84AutoDomain(unittest.TestCase):
                              "naive.example.com")
 
 
-class TestV84ToggleDirectAccessFlow(unittest.TestCase):
+class TestToggleDirectAccessFlow(unittest.TestCase):
     """Пункт [6] «Прямой доступ»: домен подставляется автоматически,
     ask_domain НЕ вызывается; ручной ввод — только если нигде не нашли;
-    пустой ручной ввод — откат на self-signed (как было до v84)."""
+    пустой ручной ввод — откат на self-signed (как было ранее)."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -606,7 +606,7 @@ class TestV84ToggleDirectAccessFlow(unittest.TestCase):
         self.assertFalse(calls[0].get("use_self_signed"))
 
     def test_manual_input_when_not_found(self):
-        """Нигде не нашли — классический ручной ввод (как до v84)."""
+        """Нигде не нашли — классический ручной ввод (как ранее)."""
         calls, mock_ad = self._run_toggle("", ask_domain_return="manual.example.com")
         mock_ad.assert_called_once()
         self.assertEqual(calls[0].get("domain"), "manual.example.com")
@@ -614,7 +614,7 @@ class TestV84ToggleDirectAccessFlow(unittest.TestCase):
 
     def test_fallback_to_self_signed_when_empty(self):
         """Не нашли + ручной ввод пуст → откат на self-signed (регресс
-        исходного поведения v80)."""
+        исходного поведения)."""
         calls, mock_ad = self._run_toggle("", ask_domain_return=None)
         mock_ad.assert_called_once()
         self.assertTrue(calls[0].get("use_self_signed"))

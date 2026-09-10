@@ -1406,7 +1406,7 @@ def _users_apply_to_config(users: list[dict]) -> bool:
             warn(f"Ошибка записи {cfg_path}: {e}")
             return False
 
-    # v57 (start-limit-fix): безопасный рестарт (reset-failed) — массовые
+    # (start-limit-fix): безопасный рестарт (reset-failed) — массовые
     # операции с юзерами (добавили нескольких подряд) = серия рестартов
     _safe_restart = getattr(core, "_xray_safe_restart", None)
     if callable(_safe_restart):
@@ -1677,7 +1677,7 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
     domain     = st.get("domain", "")
     port       = st.get("server_port", 443)
     proto      = st.get("protocol_mode", "reality")
-    # v58: pbk/sid/spx — с fallback на живой config.json (частично битый
+    # pbk/sid/spx — с fallback на живой config.json (частично битый
     # state.json больше не выдаёт ссылки с pbk=&sid=).
     try:
         pub_key, short_id, _spx_live = core._reality_transport_params_from_state(st)

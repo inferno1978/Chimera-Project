@@ -485,7 +485,7 @@ if __name__ == "__main__":
 
 
 class TestPostInstallBuildLayout(unittest.TestCase):
-    """v74.2 (wdtt-layout-fix): выбор build-таргета по layout архива.
+    """ (wdtt-layout-fix): выбор build-таргета по layout архива.
 
     Upstream SpaceNeuroX/proxy-turn-vk-android (master от 02.09) переехал
     на модульный layout: сервер в ./server (package main), корневого

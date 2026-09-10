@@ -633,7 +633,7 @@ def _load_state() -> Optional[dict]:
     if not state.get("domain") or not state.get("uuid"):
         _warn("В state.json нет domain/uuid — завершите установку сервера")
         return None
-    # v58: Anti-Empty Identity Guard для ссылок — при частично битом
+    # Anti-Empty Identity Guard для ссылок — при частично битом
     # state.json (domain/uuid есть, public_key/short_id потеряны) ссылки
     # получали pbk=&sid= и молча ломались. Добираем параметры доступа
     # из ЖИВОГО /etc/xray/config.json (realitySettings) — он и есть

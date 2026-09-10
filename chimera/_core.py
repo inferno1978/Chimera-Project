@@ -2876,7 +2876,7 @@ def do_change_domain_strategy() -> None:
 
     ans = input(f"{YELLOW}Перезапустить Xray для применения? [y/N]:{NC} ").strip().lower()
     if ans == 'y':
-        # v56: безопасный рестарт — см. _xray_safe_restart()
+        # безопасный рестарт — см. _xray_safe_restart()
         if _xray_safe_restart():
             success("Xray активен — новая domainStrategy применена")
         else:
@@ -2885,7 +2885,7 @@ def do_change_domain_strategy() -> None:
 
 def _xray_safe_restart(wait_active: int = 45, attempts: int = 2) -> bool:
     """
-    v56 (start-limit-fix): безопасный перезапуск xray, устойчивый к
+     (start-limit-fix): безопасный перезапуск xray, устойчивый к
     systemd start-rate-limit.
 
     ПРОБЛЕМА (репродукция 2026-08-27, vds13195): юнит xray.service,
@@ -3046,7 +3046,7 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
         warn(f"SNI-dispatch восстановление: {_sd_e}")
 
     # Финальный рестарт
-    # v56 (start-limit-fix): раньше здесь был голый `systemctl restart xray`.
+    # (start-limit-fix): раньше здесь был голый `systemctl restart xray`.
     # Выше по этому же flow YouTube-restore, IP-pin и Telemt tproxy уже
     # сделали по рестарту каждый — при StartLimitBurst=3/60s юнита xray
     # финальный start отклонялся (start-limit-hit) и xray оставался в
@@ -3258,7 +3258,7 @@ def _fp_from_state() -> str:
 def _logrotate_debug_ok(cfg_path: "Path") -> bool:
     """Валидность logrotate-конфига через `logrotate --debug`.
 
-    v60: критерий — отсутствие строк 'error:' в выводе (реальная
+    критерий — отсутствие строк 'error:' в выводе (реальная
     невалидность конфига ВСЕГДА сопровождается 'error: <файл>:
     <строка> ...'). Голый rc!=0 ненадёжен: часть сборок logrotate
     возвращает ненулевой код на валидных конфигах (warning-строки,
@@ -3373,7 +3373,7 @@ def setup_logrotate() -> None:
     """))
     LOGROTATE_XRAY_HEAVY.chmod(0o644)
 
-    # v60: логи autoban/watchdog создаются позже их cron-скриптами —
+    # логи autoban/watchdog создаются позже их cron-скриптами
     # создаём пустые заранее: часть сборок logrotate в --debug возвращает
     # rc!=0 на отсутствующих логах даже с missingok (инцидент
     # переустановки 176.123.162.42: [WARN] «проверьте конфиг вручную»
@@ -3488,7 +3488,7 @@ def _xray_config_uses_agh_dns(cfg_path: Path) -> bool:
 
 
 def _verify_xray_dns_via_agh() -> bool:
-    """v61 (agh-guarantee): гарантия «запросы Xray идут через AGH».
+    """ (agh-guarantee): гарантия «запросы Xray идут через AGH».
 
     Генераторы конфига выбирают DNS-путь ЖИВОЙ пробой
     agh_dns_available() в момент генерации: если AGH тогда временно
@@ -3559,7 +3559,7 @@ def _verify_xray_dns_via_agh() -> bool:
         log_to_file("WARN", f"agh-guarantee: регенерация упала: {_e}")
 
     if regen_ok:
-        # reset-failed перед рестартом (start-limit защита, v57) — рестарт
+        # reset-failed перед рестартом (start-limit защита) — рестарт
         # идёт в цепочке с рестартами dnscrypt/AGH миграции DNS-стека.
         _run(["systemctl", "reset-failed", "xray"], capture=True,
              check=False, quiet=True)
@@ -3655,7 +3655,7 @@ def do_full_install() -> None:
     install_dnscrypt();             PROGRESS.update(5,  "DNSCrypt")
     if PARAM_USE_DNSCRYPT:
         apply_dnscrypt_tuning()
-    # v66: файрволл — ДО AdGuard Home. Финализация AGH выпускает
+    # файрволл — ДО AdGuard Home. Финализация AGH выпускает
     # LE-сертификат (certbot HTTP-01): :80 обязан уже пропускаться UFW.
     # Раньше configure_firewall шла ПОСЛЕ install_aghome → на образах с
     # активным UFW челлендж LE блокировался → AGH всегда получал
@@ -3690,7 +3690,7 @@ def do_full_install() -> None:
         warn("AdGuard Home требует DNSCrypt-proxy — AGH пропущен")
         PARAM_USE_AGHOME = False
 
-    # v60: убран ложный ранний чек «порт SERVER_PORT может быть недоступен
+    # убран ложный ранний чек «порт SERVER_PORT может быть недоступен
     # снаружи» — он выполнялся ДО запуска xray (порт ещё не слушался) и
     # проверял connect к IP hostname (на Ubuntu это 127.0.1.1), т.е. на
     # чистой установке предупреждал ВСЕГДА. Реальная внешняя проверка
@@ -4040,7 +4040,7 @@ def do_full_install() -> None:
         })
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
-    # ── v61 (agh-guarantee): верификация DNS-пути Xray ────────────────────────
+    # ── (agh-guarantee): верификация DNS-пути Xray ────────────────────────
     # AGH выбран → ФАКТИЧЕСКИЙ config.json обязан идти через 127.0.0.1:53.
     # Генератор делает живую пробу agh_dns_available() в момент генерации;
     # если AGH тогда временно не отвечал — конфиг молча получил fallback.
@@ -4572,7 +4572,7 @@ if changed:
         # Валидация и применение конфига
         if /usr/local/bin/xray -test -config /usr/local/etc/xray/config.json >> "$LOG" 2>&1; then
             # Xray 26.x не поддерживает горячий reload через SIGHUP — используем restart.
-            # v57 (start-limit-fix): reset-failed перед start/restart — сбрасывает
+            # (start-limit-fix): reset-failed перед start/restart — сбрасывает
             # счётчик StartLimitBurst юнита (fp-ротация может совпасть с другими
             # рестартами xray за то же окно).
             systemctl reset-failed xray >> "$LOG" 2>&1 || true
@@ -4673,7 +4673,7 @@ def do_manage_fingerprint() -> None:
                 warn("Конфиг невалиден — fingerprint не применён")
                 warn((val.stdout + val.stderr)[:200])
             else:
-                # v57 (start-limit-fix): безопасный рестарт (reset-failed)
+                # (start-limit-fix): безопасный рестарт (reset-failed)
                 if _xray_safe_restart(wait_active=15, attempts=2):
                     success(f"Fingerprint изменён на: {new_fp}, Xray перезапущен")
                 else:
@@ -4915,7 +4915,7 @@ def do_manage_users() -> None:
                     domain    = st.get("domain", "")
                     port      = st.get("server_port", 443)
                     proto     = st.get("protocol_mode", "reality")
-                    # v58: pbk/sid с fallback на живой config.json —
+                    # pbk/sid с fallback на живой config.json
                     # частично битый state.json не должен выдавать битые ссылки
                     try:
                         pub_key, short_id, _spx_fb = _reality_transport_params_from_state(st)
@@ -5451,7 +5451,7 @@ def do_unified_user_manager() -> None:
                     capture=True, check=False, quiet=True
                 )
                 if val.returncode == 0:
-                    # v57 (start-limit-fix): безопасный рестарт (reset-failed) —
+                    # (start-limit-fix): безопасный рестарт (reset-failed)
                     # применение юзеров может идти в цепочке с другими рестартами
                     if _xray_safe_restart(wait_active=15, attempts=2):
                         success(f"Готово — {len(users)} пользователей применено, Xray перезапущен")
@@ -6113,7 +6113,7 @@ def do_import_config() -> None:
                 str(CONFIG_DIR / "config.json")],
                capture=True, check=False, quiet=True)
     if val.returncode == 0:
-        # v57 (start-limit-fix): безопасный рестарт (reset-failed)
+        # (start-limit-fix): безопасный рестарт (reset-failed)
         if _xray_safe_restart(wait_active=15, attempts=2):
             success("Xray перезапущен с восстановленным конфигом")
         else:
@@ -7243,7 +7243,7 @@ def do_patch_stats_api() -> None:
                 return
             break
 
-    # v57 (start-limit-fix): безопасный рестарт (reset-failed) вместо
+    # (start-limit-fix): безопасный рестарт (reset-failed) вместо
     # голого restart + sleep(3)
     _ok = _xray_safe_restart(wait_active=15, attempts=2)
     _r2 = _run(["pgrep", "-x", "xray"], capture=True, check=False)
@@ -7705,7 +7705,7 @@ def do_manage_xtls_flow() -> None:
             time.sleep(2)
             return
 
-    # v57 (start-limit-fix): безопасный рестарт (reset-failed)
+    # (start-limit-fix): безопасный рестарт (reset-failed)
     if _xray_safe_restart(wait_active=15, attempts=2):
         flow_label = new_flow if new_flow else "(без flow)"
         success(f"XTLS-flow изменён: {old_flow or '(нет)'} → {flow_label}")
@@ -7832,7 +7832,7 @@ def _menu_network() -> None:
         elif ch.lower() == "ra":
             do_dnscrypt_advanced_menu()
         elif ch.lower() == "du":
-            # v74: единое меню обновления/синка dnscrypt (синхронизировано
+            # единое меню обновления/синка dnscrypt (синхронизировано
             # через state-файл со всеми DNS-меню: RA, AGH, селектор)
             try:
                 from chimera.modules.dnscrypt_update import do_dnscrypt_update_menu
@@ -8789,7 +8789,7 @@ def do_scheduler_menu() -> None:
             "cron":     None,
             "unit":     "dnscrypt-autoupdate.timer",
             "log":      "/var/log/dnscrypt-autoupdate.log",
-            "configure": None,  # v74: меню Сеть → DU (do_dnscrypt_update_menu)
+            "configure": None, # меню Сеть → DU (do_dnscrypt_update_menu)
         },
         {
             "id":       "dnscrypt-pool-sync",
@@ -8799,7 +8799,7 @@ def do_scheduler_menu() -> None:
             "cron":     "/etc/cron.d/xray-dnscrypt-pool-sync",
             "unit":     None,
             "log":      "/var/log/dnscrypt-pool-sync.log",
-            "configure": None,  # v74: меню Сеть → DU (do_dnscrypt_update_menu)
+            "configure": None, # меню Сеть → DU (do_dnscrypt_update_menu)
         },
         {
             "id":       "rusubnets",
@@ -8972,7 +8972,7 @@ def _menu_security() -> None:
 
 
 # =============================================================================
-#  v58: ANTI-EMPTY IDENTITY GUARD
+# ANTI-EMPTY IDENTITY GUARD
 #  Гарантия непустых идентификационных параметров (UUID, ShortID, REALITY-
 #  ключи, домен, сокет, spiderX) перед ЛЮБОЙ генерацией/регенерацией конфига.
 #  Пустой privateKey/shortIds/uuid в config.json = REALITY-handshake рвётся
@@ -9038,7 +9038,7 @@ def _identity_pubkey_from_privkey(priv: str) -> str:
 
 def _identity_params_recover() -> list:
     """
-    v58: Anti-Empty Identity Guard — ЕДИНАЯ точка гарантии того, что при
+    Anti-Empty Identity Guard — ЕДИНАЯ точка гарантии того, что при
     генерации/регенерации конфига Xray идентификационные параметры не
     останутся пустыми. Вызывается из всех генераторов конфига
     (xray_install.generate_xray_config / generate_xray_config_xhttp,
@@ -9225,7 +9225,7 @@ def _identity_params_recover() -> list:
 
 def _reality_transport_params_from_state(state: dict) -> tuple:
     """
-    v58: (public_key, short_id, spiderx) для генераторов КЛИЕНТСКИХ ссылок
+    (public_key, short_id, spiderx) для генераторов КЛИЕНТСКИХ ссылок
     с fallback на живой config.json. Генераторы ссылок (subscription,
     fragment_link, client_config_export, users_manager) читают state.json
     напрямую — при частично повреждённом state (domain/uuid на месте,
@@ -9849,7 +9849,7 @@ def _start_services_sequentially(
 
     xray_ok = False
     if xray_restart:
-        # v57 (start-limit-fix): безопасный рестарт (reset-failed) + ожидание
+        # (start-limit-fix): безопасный рестарт (reset-failed) + ожидание
         xray_ok = _xray_safe_restart(wait_active=max(timeout, 15), attempts=2)
         if xray_ok:
             success("  ✓ Xray активен")

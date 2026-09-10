@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tests/test_v66_agh_le_cert_order.py
+tests/test_agh_le_cert_order.py
 ───────────────────────────────────────────────────────────────────────────────
-v66: «Fresh-сервер: AGH поставился, LE-сертификат НЕ выпустился —
+: «Fresh-сервер: AGH поставился, LE-сертификат НЕ выпустился
 self-signed fallback» (инцидент: picaresque.space).
 
 КОРНЕВАЯ ПРИЧИНА (порядок установки + отсутствие ACME-endpoint):
@@ -21,7 +21,7 @@ AGH порт 80 НЕ занимает (web :3000, TLS :30443, DoT :853, DNS :53 
 80 ∈ AGH_WEB_PORT_RESERVED) — гипотеза «AGH съел :80» не подтвердилась,
 но подозрение о неверном ПОРЯДКЕ установки было верным.
 
-Фикс v66:
+Фикс 
   1. aghome_setup._ensure_acme_http80(domain): ДО certbot — certbot ставится
      при отсутствии, PARAM_EMAIL → admin@<domain> (certbot падает на --email ""),
      setup_nginx_temp(domain) (nginx+vhost ACME), UFW allow 80/tcp (правило
@@ -51,7 +51,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Фейковый chimera._core (паттерн test_v65_agh_ratelimit_heal)."""
+    """Фейковый chimera._core (паттерн test_agh_ratelimit_heal)."""
     core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
@@ -206,7 +206,7 @@ class TestPrepareTlsCertOrder(unittest.TestCase):
         fake_ssl = types.ModuleType("chimera.modules.ssl_certbot")
         fake_ssl.obtain_ssl_cert = MagicMock(
             side_effect=lambda domain=None: order.append("certbot"))
-        domain = "v66-missing.example"
+        domain = "missing.example"
         # LE-файлов нет (/etc/letsencrypt/live/<domain>/ не существует)
         self.assertFalse(
             Path(f"/etc/letsencrypt/live/{domain}/fullchain.pem").exists())

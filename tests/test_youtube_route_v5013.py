@@ -37,7 +37,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 def _setup_core_in_sysmodules(awg_enabled: bool = False):
     """Загружает chimera._core через exec и регистрирует в sys.modules.
 
-    v56: exec выполняется ПРЯМО в __dict__ фейкового модуля (раньше — в
+    exec выполняется ПРЯМО в __dict__ фейкового модуля (раньше — в
     отдельный dict g, копируемый в модуль). Теперь мутации вида
     ``core._run = MagicMock(...)`` из тестов видны функциям ядра через
     их __globals__ — без этого _xray_safe_restart и другие функции,

@@ -310,7 +310,7 @@ def _run(cmd: list, capture: bool = False, check: bool = False,
     try:
         return subprocess.run(cmd, **kw)
     except subprocess.TimeoutExpired as e:
-        # v74.1: частичный вывод процесса — в stderr. При таймауте внешнего
+        # частичный вывод процесса — в stderr. При таймауте внешнего
         # бинарника (напр. зависший setup_wizard) вызывающий видит, ГДЕ тот
         # остановился (последние строки stdout/stderr), а не голое
         # «Command ... timed out after N seconds».
@@ -1496,7 +1496,7 @@ def _run_install_inner() -> None:
         _box_bot(); _pause(); return
     print(f"  {GREEN}✓{NC}  Сертификат получен{' (self-signed)' if _le_failed else ''}")
 
-    # v74.1: визард запускается БЕЗ --cert-type — provided-ветка upstream
+    # визард запускается БЕЗ --cert-type — provided-ветка upstream
     # (≤ v1.0.33) дедлочится на PREDEFINED_PARAMS и виснет до таймаута
     # («exited 124», инцидент 2026-09-01) — см. _wizard_cmd. stdin закрываем
     # (input_text=""): случайный интерактивный промпт умрёт по EOF сразу,
@@ -1525,7 +1525,7 @@ def _run_install_inner() -> None:
             _box_bot(); _pause(); return
     print(f"  {GREEN}✓{NC}  vpn.toml + hosts.toml + credentials.toml сгенерированы")
 
-    # v74.1: подменяем self-signed визарда на реальный (LE) сертификат.
+    # подменяем self-signed визарда на реальный (LE) сертификат.
     _box_info("Подменяю hosts.toml на Let's Encrypt сертификат...")
     if _write_hosts_toml(domain, cert_chain, cert_key):
         print(f"  {GREEN}✓{NC}  hosts.toml → {cert_chain}")
@@ -1655,7 +1655,7 @@ def trusttunnel_install(domain: str,
         _log("ERROR", f"install: cert files missing at {cert_chain}"); return False
 
     listen_addr = f"0.0.0.0:{port}"
-    # v58: БЫЛО trusttunnel_derive_password("00000000-...") — публично
+    # БЫЛО trusttunnel_derive_password("00000000-...") — публично
     # вычислимый placeholder-пароль (SHA-256 от известной константы):
     # любой, кто читал исходники, знал админ-пароль. Теперь случайный
     # секрет (token_urlsafe), который сохраняется в state.json (0600)
@@ -1665,7 +1665,7 @@ def trusttunnel_install(domain: str,
     _admin_uuid = str(_uuid_mod.uuid4())
     admin_pass = _secrets_mod.token_urlsafe(18)
     _log("INFO", f"install: admin uuid={_admin_uuid}, password={admin_pass[:4]}***")
-    # v74.1: БЕЗ --cert-type — обход дедлока апстрима ≤ v1.0.33 (см.
+    # БЕЗ --cert-type — обход дедлока апстрима ≤ v1.0.33 (см.
     # _wizard_cmd); hosts.toml подменяется на LE сразу после визарда.
     wizard_cmd = _wizard_cmd(listen_addr, f"admin:{admin_pass}", domain)
     r = _run(wizard_cmd, capture=True, timeout=90, cwd=str(_INSTALL_DIR),
@@ -1710,7 +1710,7 @@ def trusttunnel_install(domain: str,
         "creds_toml":      str(_CREDS_TOML),
         "rules_toml":      str(_RULES_TOML),
         "metrics_port":    _METRICS_PORT,
-        # v58: креды админа (раньше — предсказуемый placeholder)
+        # креды админа (раньше — предсказуемый placeholder)
         "admin_user":      "admin",
         "admin_password":  admin_pass,
         "admin_uuid":      _admin_uuid,

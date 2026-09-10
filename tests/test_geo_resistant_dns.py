@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-tests/test_v73_geo_resistant_dns.py
+tests/test_geo_resistant_dns.py
 ───────────────────────────────────────────────────────────────────────────────
-v73: гео-резистентность DNS-стека Chimera — добивка после v67/v72.
+: гео-резистентность DNS-стека Chimera — добивка.
 
 КОНТЕКСТ (реальные инциденты августа 2026 на Entry-нодах в РФ):
   • ТСПУ начал глушить DoH/DoT Google/Cloudflare и отравлять plain
     UDP:53 (1.1.1.1/8.8.8.8 DNAT-ятся на НСДИ 195.208.5.1, NXDomain-spoof);
-  • v67 (dnscrypt_setup/xray_install) и v72 (IPv6) уже вычистили шаблон
+  • (dnscrypt_setup/xray_install) и (IPv6) уже вычистили шаблон
     [R], генератор Xray (главный) и listen_addresses;
-  • ОСТАВАЛИСЬ мины (весь этот фикс — v73):
+  • ОСТАВАЛИСЬ мины (весь этот фикс —):
       1. dnscrypt_advanced._SECURITY_PARAMS: bootstrap/fallback =
          ['9.9.9.9:53','8.8.8.8:53','1.1.1.1:53'] — переприменение пресета
          [RA] возвращало отраву в вычищенный конфиг;
@@ -20,7 +20,7 @@ v73: гео-резистентность DNS-стека Chimera — добивк
          на отравленных резолверах (и противоречил докстрингу модуля);
       4. dnscrypt_setup.apply_dnscrypt_tuning [T]: fallback_resolvers =
          ['1.1.1.1:53','8.8.8.8:53'] — единственная оставшаяся отрава;
-      5. xray_install.generate_xray_config_xhttp не получил v67-живой
+      5. xray_install.generate_xray_config_xhttp не получил живой
          Quad9-fallback (рассинхрон с главным генератором);
       6. dnscry.pt-moscow в ГЛАВЕ пула [RA] (RU-юрисдикция, риск
          hoster-level отравления рекурсии) + мёртвый из РФ хвост
@@ -28,10 +28,10 @@ v73: гео-резистентность DNS-стека Chimera — добивк
 
 Тестируем:
   1. Пины [RA]: bootstrap/fallback/netprobe без отравы (9.9.9.9+77.88.8.8);
-  2. Пул: 245 серверов (v74: синк с живым списком, 192 было в v73),
+  2. Пул: 245 серверов (синк с живым списком, 192 было в),
      нет moscow/cloudflare/google, голова — kyiv;
-     маршруты: 180 (v74), нет moscow/CF/GG, wildcard на месте;
-  3. [T] fallback_resolvers = v67-канон; шаблон [R] не сломан;
+     маршруты: 180, нет moscow/CF/GG, wildcard на месте;
+  3. [T] fallback_resolvers = канон; шаблон [R] не сломан;
   4. xhttp-генератор синхронен с главным (4 живых Quad9-fallback);
   5. _safe_apply_preset (моки): фаза-1 = quad9-dnscrypt; resolv.conf
      подменяется на живые 9.9.9.9/77.88.8.8 и ВОССТАНАВЛИВАЕТСЯ
@@ -101,8 +101,8 @@ class TestGeoResistantPins(unittest.TestCase):
         self.assertNotIn('"fallback_resolvers": "[\'1.1.1.1:53\', \'8.8.8.8:53\']"',
                          _SETUP_SRC)
 
-    def test_v67_template_not_broken(self):
-        # Регрессия: v67-канон в шаблоне [R] должен остаться нетронутым.
+    def test_template_not_broken(self):
+        # Регрессия: канон в шаблоне [R] должен остаться нетронутым.
         self.assertIn("bootstrap_resolvers = ['9.9.9.9:53', '77.88.8.8:53']", _SETUP_SRC)
         self.assertIn("fallback_resolvers = ['9.9.9.9:53', '77.88.8.8:53']", _SETUP_SRC)
         self.assertIn("netprobe_address = '9.9.9.9:53'", _SETUP_SRC)
@@ -112,7 +112,7 @@ class TestServerPool(unittest.TestCase):
     """2. Пул [RA]: 192 сервера, moscow/CF/GG исключены, голова — kyiv."""
 
     def test_pool_size_and_head(self):
-        # v74: пул синхронизирован с живым списком — 245 серверов
+        # пул синхронизирован с живым списком — 245 серверов
         self.assertEqual(len(_SERVER_NAMES), 245)
         self.assertEqual(_SERVER_NAMES[0], "dnscry.pt-kyiv-ipv4")
         self.assertEqual(_SERVER_NAMES[1], "dnscry.pt-kyiv-ipv6")
@@ -133,7 +133,7 @@ class TestServerPool(unittest.TestCase):
             self.assertIn(name, _SERVER_NAMES)
 
     def test_routes_size_and_no_excluded(self):
-        # v74: 179 персональных + 1 wildcard (DoH-серверы не маршрутятся)
+        # 179 персональных + 1 wildcard (DoH-серверы не маршрутятся)
         self.assertEqual(len(_ANON_ROUTES), 180)
         joined = "\n".join(_ANON_ROUTES)
         self.assertNotIn("moscow", joined)
@@ -145,10 +145,10 @@ class TestServerPool(unittest.TestCase):
 
 
 class TestXrayGeneratorsSync(unittest.TestCase):
-    """4. xhttp-генератор синхронен с главным (v67 + v73)."""
+    """4. xhttp-генератор синхронен с главным (+)."""
 
     def test_quad9_live_fallback_count(self):
-        # 2 в generate_xray_config (v67) + 2 в generate_xray_config_xhttp (v73).
+        # 2 в generate_xray_config + 2 в generate_xray_config_xhttp.
         needle = '"address": "9.9.9.9", "port": 53, "network": "udp", "skipFallback": False'
         self.assertEqual(_XRAY_SRC.count(needle), 4)
 
@@ -213,7 +213,7 @@ class TestSafeApplyPreset(unittest.TestCase):
         self.assertEqual(fake.writes, [_TEMP_RESOLV, _ORIG_RESOLV])
 
     def test_phase1_failure_rollback_and_restore(self):
-        # v74: фаза-1 провал → откат бэкапа (1 проверка) → экстренный конфиг
+        # фаза-1 провал → откат бэкапа (1 проверка) → экстренный конфиг
         # quad9 (5 проверок) — сервер не остаётся без DNS.
         ok, fake, apply_mock, resolves_mock = self._run(resolves_return=False)
         self.assertFalse(ok)

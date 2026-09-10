@@ -60,7 +60,7 @@ def _core_module():
 
 
 # =============================================================================
-#  v63: УСТОЙЧИВАЯ ПРОВЕРКА DNS + ЗАЩИТА ВАЛИДНОГО LE-СЕРТИФИКАТА
+# УСТОЙЧИВАЯ ПРОВЕРКА DNS + ЗАЩИТА ВАЛИДНОГО LE-СЕРТИФИКАТА
 # =============================================================================
 def _dig_a_records(server: str, domain: str) -> list:
     """A-записи domain через указанный DNS-сервер (dig, короткий таймаут).
@@ -82,7 +82,7 @@ def _dig_a_records(server: str, domain: str) -> list:
 def domain_points_to_server(domain: str, ipv4: str) -> "tuple[bool, str]":
     """Резолвит domain и проверяет, что среди A-записей есть ipv4.
 
-    Инцидент v63 (bright-lynx, 91.224.87.154): единственный dig через
+    Инцидент (bright-lynx, 91.224.87.154): единственный dig через
     системный резолвер (127.0.0.1 = DNSCrypt, который установщик только
     что перезапустил: кэш холодный, DoH-upstream ещё бутстрапится) давал
     таймаут → ЛОЖНЫЙ «домен НЕ резолвится», хотя nslookup через 1.1.1.1
@@ -185,9 +185,9 @@ def obtain_ssl_cert(domain: Optional[str] = None) -> None:
     CYAN, NC, GREEN, RED, YELLOW = core.CYAN, core.NC, core.GREEN, core.RED, core.YELLOW
     # fix_letsencrypt_permissions — модуль-локальная (см. ниже)
     info(f"Получение SSL-сертификата для {PARAM_DOMAIN}...")
-    # === Проверка DNS перед получением сертификата (v63: устойчивая) ===
+    # === Проверка DNS перед получением сертификата (устойчивая) ===
     # Один dig через системный резолвер давал ЛОЖНЫЙ WARN, когда локальный
-    # DNSCrypt ещё бутстрапился (инцидент v63). Теперь: локальный (2 попытки)
+    # DNSCrypt ещё бутстрапился (инцидент). Теперь: локальный (2 попытки)
     # → getaddrinfo → внешние 1.1.1.1/8.8.8.8/77.88.8.8. WARN только если
     # НЕ резолвится НИГДЕ — тогда certbot действительно упадёт.
     ipv4 = get_server_ip("4")
@@ -208,10 +208,10 @@ def obtain_ssl_cert(domain: Optional[str] = None) -> None:
     key_path  = Path(f"/etc/letsencrypt/live/{PARAM_DOMAIN}/privkey.pem")
     web_root  = Path(f"/var/www/{PARAM_DOMAIN}")
     request_new = True
-    user_reissue = False   # v63: явный «R» от пользователя → --force-renewal
+    user_reissue = False # явный «R» от пользователя → --force-renewal
 
     if cert_path.exists() and key_path.exists():
-        # v63: единый разбор статуса (issuer + срок) — показывает в боксе,
+        # единый разбор статуса (issuer + срок) — показывает в боксе,
         # КЕМ выдан сертификат, и подсказывает верный выбор по умолчанию:
         # самоподпис → перевыпустить (R), валидный LE → использовать (U).
         _ex, _selfsigned, days_left, expiry, _issuer = \
@@ -257,10 +257,10 @@ def obtain_ssl_cert(domain: Optional[str] = None) -> None:
         (web_root / "index.html").write_text("<h1>ACME Verification</h1>")
 
         le_ok = False
-        # v63: --force-renewal ТОЛЬКО при явном «R» от пользователя.
+        # --force-renewal ТОЛЬКО при явном «R» от пользователя.
         # Раньше флаг был безусловным: каждый повторный запуск установки
         # принуждал certbot к новому выпуску → исчерпывался лимит LE
-        # «5 дублей за 7 дней» (инцидент v63). Без флага certbot на
+        # «5 дублей за 7 дней» (инцидент). Без флага certbot на
         # валидном сертификате отвечает «not yet due for renewal»
         # (exit 0) и НЕ трогает его — установка идемпотентна.
         certbot_cmd = [
@@ -278,7 +278,7 @@ def obtain_ssl_cert(domain: Optional[str] = None) -> None:
             le_ok = True
 
         if not le_ok:
-            # v63: certbot упал (rate-limit, недоступность :80 и т.п.) —
+            # certbot упал (rate-limit, недоступность :80 и т.п.)
             # если на диске есть ВАЛИДНЫЙ НЕсамоподписанный сертификат,
             # используем его. Раньше здесь безусловно генерировался
             # самоподписанный, который ЗАТИРАЛ живой LE-сертификат:

@@ -36,7 +36,7 @@ AdGuard Home — DNS-сервер с фильтрацией рекламных �
     ФАКТИЧЕСКИМ запросом к 127.0.0.1:53 (dig/getent); при отказе —
     авто-восстановление redirect 53→5300 (оба протокола) + красный
     бокс с ручными командами. ok:true фикса ≠ живой DNS.
-  • TLS-SELF-HEAL (v45, vds13195): AGH при ошибке загрузки сертификата
+  • TLS-SELF-HEAL (vds13195): AGH при ошибке загрузки сертификата
     НЕ падает — home.go (newTLSManager err → лог) молча ставит
     tls.enabled=false, пишет это в yaml и служит plain DNS :53.
     Симптом: «DNS слушает :53, а :30443/:853 — нет». Финализация теперь
@@ -44,11 +44,11 @@ AdGuard Home — DNS-сервер с фильтрацией рекламных �
     проверяет пару cert/key (openssl pubkey) и права пользователя
     adguard, чинит (chown / self-signed fallback / рестарт) и
     перезаписывает tls-секцию в live-конфиге.
-  • ЛОЖНЫЙ :53 (v45): _port_listening больше не считает systemd-resolved
+  • ЛОЖНЫЙ :53: _port_listening больше не считает systemd-resolved
     stub (127.0.0.53:53) слушателем :53 — проверка «AGH владеет :53»
     идёт по ИМЕНИ ПРОЦЕССА AdGuardHome в ss (aghome_dns_ready —
     критично для resolv_conf_fix/xray_install).
-  • XRAY MODE-B (v45): перегенерация конфига Xray в режиме B вызывает
+  • XRAY MODE-B: перегенерация конфига Xray в режиме B вызывает
     chain_nodes.generate_xray_config_chain_entry_multi (жил в
     xray_install → AttributeError, конфиг не пересоздавался).
   • Служба работает от отдельного пользователя `adguard` с
@@ -168,7 +168,7 @@ AGH_FILTERS: list[tuple[str, str]] = [
 ]
 
 # Fallback-резолверы — как на роутере (НЕ strict; решение пользователя).
-# v67: фолбэки AGH обязаны быть достижимы и с зарубежных, и с РФ-хостингов
+# фолбэки AGH обязаны быть достижимы и с зарубежных, и с РФ-хостингов
 # (Режим B: Entry в РФ). 1.1.1.1:53 душится TSPU — заменён на второй anycast
 # Quad9 (149.112.112.112). Quad9 не фильтруется РКН и не отравляет ответы
 # для зарубежных доменов (в отличие от РФ-резолверов).
@@ -249,7 +249,7 @@ def aghome_wizard_pending() -> bool:
 def _port_listening(port: int, proto: str = "udp", proc: str = "") -> bool:
     """Проверяет что порт слушается (ss).
 
-    v45 (vds13195): регресс-фикс «ложный :53».
+     (vds13195): регресс-фикс «ложный :53».
       1. port=53 — строки systemd-resolved stub (127.0.0.53/127.0.0.54:53,
          процесс systemd-resolved) ИСКЛЮЧАЮТСЯ: они дают ложное
          «:53 слушается», хотя AGH порт не занял (мастер/упал TLS).
@@ -278,7 +278,7 @@ def _port_listening(port: int, proto: str = "udp", proc: str = "") -> bool:
 def aghome_dns_ready() -> bool:
     """AGH полностью готов: служба активна И :53/udp слушает ИМЕННО AGH.
 
-    v45: proc-фильтр обязателен — без него systemd-resolved stub
+    proc-фильтр обязателен — без него systemd-resolved stub
     (127.0.0.53:53) давал ложный positive, resolv_conf_fix считал
     «AGH владеет :53» и снимал redirect → DNS black-hole.
     Именно это условие используют resolv_conf_fix и xray_install."""
@@ -287,7 +287,7 @@ def aghome_dns_ready() -> bool:
 
 
 def aghome_fix_ratelimit_if_needed(log_info=None, log_warn=None) -> "tuple[bool, str]":
-    """v65: санация ratelimit/upstream_timeout ЖИВОГО AdGuardHome.yaml.
+    """санация ratelimit/upstream_timeout ЖИВОГО AdGuardHome.yaml.
 
     Эмпирика на живом AGH v0.107.79 (инцидент: «клиент сыпал EOFами,
     убрал AGH — всё заработало»): ratelimit: 20 при subnet_len 24 =
@@ -380,7 +380,7 @@ def aghome_fix_ratelimit_if_needed(log_info=None, log_warn=None) -> "tuple[bool,
 
 
 def _agh_core_port_conflicts(extra_ports: "tuple[int, ...]" = ()) -> "dict[int, list[str]]":
-    """v65: конфликтуют ли порты AGH с портами ядра Chimera (Xray/AWG).
+    """конфликтуют ли порты AGH с портами ядра Chimera (Xray/AWG).
 
     AGH биндит фиксированные порты (DNS :53, DoT/DoQ :853, DoH+WebUI
     :30443) и стартует ДО xray (unit: Before=xray.service): коллизия =
@@ -448,7 +448,7 @@ def _agh_core_port_conflicts(extra_ports: "tuple[int, ...]" = ()) -> "dict[int, 
 
 
 def _find_free_web_port(preferred: int) -> int:
-    """v65: первый свободный порт для Web UI, начиная с preferred+1.
+    """первый свободный порт для Web UI, начиная с preferred+1.
 
     Занятый web-порт = FATAL для AGH (bind http → crash-loop → мёртвый
     DNS :53). При коллизии сдвигаем порт и предупреждаем.
@@ -487,7 +487,7 @@ def _get_dnscrypt_port() -> int:
         return 5300
 
 
-# ── v72: IPv6 в DNS-стеке ───────────────────────────────────────────────────
+# ── IPv6 в DNS-стеке ───────────────────────────────────────────────────
 def _get_public_ipv6() -> str:
     """Публичный глобальный IPv6 сервера (для bind_hosts AGH).
 
@@ -533,7 +533,7 @@ def _get_public_ipv6() -> str:
 
 
 def _rewrite_dnscrypt_listen(content: str, port: int, ipv6: bool) -> str:
-    """Перезаписывает строку listen_addresses в TOML dnscrypt (v72).
+    """Перезаписывает строку listen_addresses в TOML dnscrypt.
 
     Брекет-безопасно: IPv6-элементы вида '[::1]:5300' содержат ']' внутри
     списка — поэтому матчу ВСЮ строку до конца (жадный [^\n]*), а не до
@@ -600,7 +600,7 @@ def _get_ssh_client_ip() -> str:
 def _wait_service(svc: str, max_sec: int = 30) -> bool:
     """Ждёт пока служба станет СТАБИЛЬНО active. True при успехе.
 
-    v47: одиночного is-active мало. Crash-looping служба (невалидный
+    одиночного is-active мало. Crash-looping служба (невалидный
     конфиг): systemd помечает active → процесс умирает через ~0.5с →
     failed → автозапуск через 5с. Старая логика ловила миг «active» и
     возвращала True — self-heal откат конфига НЕ срабатывал, crash-loop
@@ -688,7 +688,7 @@ def migrate_dnscrypt_off_53() -> bool:
         warn(f"AGH: не удалось прочитать dnscrypt TOML: {e}")
         return False
 
-    # Текущие listen_addresses (v72: брекет-безопасно — IPv6-элементы
+    # Текущие listen_addresses (брекет-безопасно — IPv6-элементы
     # '[::1]:5300' содержат ']' внутри списка, поэтому матчу всю строку)
     m = re.search(r"^listen_addresses\s*=\s*\[[^\n]*\][^\n]*$",
                   content, re.MULTILINE)
@@ -752,7 +752,7 @@ def migrate_dnscrypt_off_53() -> bool:
     info(f"AGH: redirect-страховка 53→{port} установлена — DNS жив при миграции")
 
     # Бэкап + перезапись listen_addresses → 127.0.0.1:{port}
-    # (+ '[::1]:{port}' вторым слушателем при IPv6 на сервере — v72)
+    # (+ '[::1]:{port}' вторым слушателем при IPv6 на сервере —)
     bak = toml_path.with_name(
         toml_path.name + "." + datetime.now().strftime("%Y%m%d%H%M%S") + ".preAGH.bak")
     try:
@@ -877,7 +877,7 @@ def _create_aghome_user() -> bool:
 #  TLS-СЕРТИФИКАТЫ
 # ============================================================================
 def _ensure_acme_http80(domain: str) -> None:
-    """Гарантирует отвечающий HTTP:80 endpoint ДО запуска certbot (v66).
+    """Гарантирует отвечающий HTTP:80 endpoint ДО запуска certbot.
 
     certbot --webroot НЕ слушает :80 сам — ему нужен веб-сервер, который
     отдаёт /.well-known/acme-challenge/ из webroot-а ЭТОГО домена.
@@ -958,7 +958,7 @@ def _prepare_tls_cert(mode: str, domain: str) -> "tuple[Optional[Path], Optional
         le_key  = Path(f"/etc/letsencrypt/live/{domain}/privkey.pem")
         if not (le_cert.exists() and le_key.exists()):
             info(f"AGH: LE-сертификат для {domain} не найден — получаем через certbot...")
-            # v66: ДО certbot — отвечающий HTTP:80 (ACME-vhost + UFW + email).
+            # ДО certbot — отвечающий HTTP:80 (ACME-vhost + UFW + email).
             # Раньше webroot-челлендж уходил в дефолтный vhost nginx (404)
             # или в ещё не настроенный UFW → LE всегда падал в self-signed.
             _ensure_acme_http80(domain)
@@ -979,7 +979,7 @@ def _prepare_tls_cert(mode: str, domain: str) -> "tuple[Optional[Path], Optional
             _own_certs()
             _own_certs_dir()
             _install_certbot_deploy_hook(domain)
-            # v45: превентивная проверка ДО записи yaml — иначе AGH молча
+            # превентивная проверка ДО записи yaml — иначе AGH молча
             # выключит tls (enabled=false) и DoH/DoT/DoQ не поднимутся.
             pair_ok, pair_why = _cert_pair_matches(AGH_CERT_PATH, AGH_KEY_PATH)
             if not pair_ok:
@@ -1043,7 +1043,7 @@ def _generate_self_signed_tls(cn: str = "") -> "tuple[Optional[Path], Optional[P
             core.warn(f"AGH: openssl упал: {r.stderr.strip()[:200]}")
             return None, None
         _own_certs()
-        # v45: пара должна совпадать (иначе AGH молча выключит TLS)
+        # пара должна совпадать (иначе AGH молча выключит TLS)
         pair_ok, pair_why = _cert_pair_matches(AGH_CERT_PATH, AGH_KEY_PATH)
         if not pair_ok:
             core.warn(f"AGH: self-signed пара битая: {pair_why}")
@@ -1115,12 +1115,12 @@ def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool,
     Публичный :53 НЕ открывается в UFW — open resolver исключён;
     public IP в bind_hosts нужен только для DoT(:853)/DoQ(:853)/DoH(:30443).
 
-    v72: public_ipv6 — публичный IPv6 сервера, добавляется в bind_hosts:
+    public_ipv6 — публичный IPv6 сервера, добавляется в bind_hosts:
     AGH биндит :53/DoT/DoH/Web и на IPv6 (IPv6-клиенты видны в статистике,
     DoT/DoH доступны по v6). Пустая строка (нет IPv6 / self-heal
     loopback-only) — прежнее поведение байт-в-байт.
 
-    v65 (ratelimit: 0 — КРИТИЧНО, эмпирика на живом AGH v0.107.79):
+     (ratelimit: 0 — КРИТИЧНО, эмпирика на живом AGH v0.107.79):
       • ratelimit>0 = ТИХИЙ DROP сверх лимита: ни REFUSED, ни записи в
         лог/querylog — клиент видит чистый таймаут;
       • ratelimit_whitelist — МЁРТВОЕ ПОЛЕ (парсится, но не подключено
@@ -1138,7 +1138,7 @@ def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool,
     if public_ip:
         bind_hosts.append(public_ip)
     if public_ipv6:
-        # v72: конкретный адрес (не '::' — wildcard-бинд конфликтует с
+        # конкретный адрес (не '::' — wildcard-бинд конфликтует с
         # уже забинженным 127.0.0.1/public IPv4 в Go dual-stack)
         bind_hosts.append(public_ipv6)
     bind_lines = "\n".join(f"    - {_yaml_quote(h)}" for h in bind_hosts)
@@ -1148,7 +1148,7 @@ def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool,
 {bind_lines}
   port: {AGH_DNS_PORT}
   anonymize_client_ip: false
-  # v65: 0 = без лимита (тихие дропы лимита убивали DNS Xray; whitelist мёртв).
+  # 0 = без лимита (тихие дропы лимита убивали DNS Xray; whitelist мёртв).
   # Публичный :53 закрыт в UFW — open resolver исключён.
   ratelimit: 0
   ratelimit_subnet_len_ipv4: 24
@@ -1191,7 +1191,7 @@ def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool,
   ipset: []
   ipset_file: ""
   bootstrap_prefer_ipv6: false
-  # v65: 3s < 4с-таймаута DNS-клиента Xray → SERVFAIL успевает до
+  # 3s < 4с-таймаута DNS-клиента Xray → SERVFAIL успевает до
   # таймаута, Xray мгновенно уходит в fallback (не 4с black-hole).
   upstream_timeout: 3s
   private_networks: []
@@ -1246,11 +1246,11 @@ def build_tls_section(tls_enabled: bool, server_name: str,
 def build_http_section(web_mode: str, web_port: int = AGH_WEB_PORT) -> str:
     """Секция http: — адрес Web UI по выбранному режиму.
 
-    v49: web_port — кастомный порт Web UI (по умолчанию AGH_WEB_PORT);
+    web_port — кастомный порт Web UI (по умолчанию AGH_WEB_PORT);
     применяется ко всем режимам (wizard-фаза всегда на :3000 — порт
     меняется при финализации).
 
-    v48: AGH биндит HTTPS-порт (:30443) на ТОТ ЖЕ хост, что и
+    AGH биндит HTTPS-порт (:30443) на ТОТ ЖЕ хост, что и
     http.address (исходники AGH: netip.AddrPortFrom(web.conf.BindAddr,
     portHTTPS)) — отдельных bind-настроек у TLS-порта нет. Поэтому в
     TLS-режимах (https_le/https_self) bind 0.0.0.0:3000: иначе :30443
@@ -1265,7 +1265,7 @@ def build_http_section(web_mode: str, web_port: int = AGH_WEB_PORT) -> str:
     if web_mode == AGH_WEB_LOOPBACK:
         addr = f"127.0.0.1:{web_port}"
     else:
-        # http_public, https_le, https_self — см. docstring v48
+        # http_public, https_le, https_self — см. docstring 
         addr = f"0.0.0.0:{web_port}"
     return f"""http:
   pprof:
@@ -1279,7 +1279,7 @@ def build_http_section(web_mode: str, web_port: int = AGH_WEB_PORT) -> str:
 def build_filters_section() -> str:
     """Секция filters: — все 3 списка (AdGuard DNS + AdAway + OISD Big).
 
-    v47: ТОЛЬКО filters:. Раньше блок тащил внутри себя ещё и
+    ТОЛЬКО filters:. Раньше блок тащил внутри себя ещё и
     whitelist_filters/user_rules — а мастерские копии этих секций
     оставались в конфиге → duplicate mapping keys → строгий YAML-парсер
     AGH отказывался стартовать → crash-loop → DNS down (инцидент
@@ -1295,12 +1295,12 @@ def build_filters_section() -> str:
 
 
 def build_whitelist_filters_section() -> str:
-    """Секция whitelist_filters: — ОТДЕЛЬНО (v47, см. build_filters_section)."""
+    """Секция whitelist_filters: — ОТДЕЛЬНО (см. build_filters_section)."""
     return "whitelist_filters: []\n"
 
 
 def build_user_rules_section() -> str:
-    """Секция user_rules: — ОТДЕЛЬНО (v47, см. build_filters_section)."""
+    """Секция user_rules: — ОТДЕЛЬНО (см. build_filters_section)."""
     return "user_rules: []\n"
 
 
@@ -1332,7 +1332,7 @@ _TOP_KEY_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*):(\s|$)')
 
 
 def _duplicate_top_keys(text: str) -> "list[str]":
-    """Top-level ключи YAML, встречающиеся более одного раза (v47).
+    """Top-level ключи YAML, встречающиеся более одного раза.
 
     AGH v0.107 строго валидирует конфиг: duplicate mapping key =
     «Couldn't get logging settings ... already defined» + отказ
@@ -1347,7 +1347,7 @@ def _duplicate_top_keys(text: str) -> "list[str]":
 
 
 def _dedup_top_level_sections(text: str) -> str:
-    """Убирает дубли top-level секций YAML — остаётся ПЕРВОЕ вхождение (v47).
+    """Убирает дубли top-level секций YAML — остаётся ПЕРВОЕ вхождение.
 
     Safety-net для текстовой хирургии конфига: генераторы секций не
     должны плодить дубли, но цена пропуска — crash-loop AGH и мёртвый
@@ -1448,7 +1448,7 @@ def yaml_replace_sections(text: str, sections: "dict[str, Optional[str]]",
 
     out = "".join(result)
 
-    # v47 SAFETY-NET: дедупликация top-level ключей (первое вхождение
+    # SAFETY-NET: дедупликация top-level ключей (первое вхождение
     # побеждает). Скаляры ниже делаем ПОСЛЕ — их подстановка тоже не
     # должна встретить дублей.
     out = _dedup_top_level_sections(out)
@@ -1628,7 +1628,7 @@ def _register_aghome_ports(dc_port: int, tls_enabled: bool,
     """Регистрирует все порты DNS-стека в port_registry + открывает публичные
     в UFW. Вызывается при установке/финализации (идемпотентно).
 
-    v49: web_port — кастомный порт Web UI. При смене порта закрывает UFW и
+    web_port — кастомный порт Web UI. При смене порта закрывает UFW и
     снимает регистрацию СТАРОГО порта (порт не должен течь).
     """
     try:
@@ -1663,7 +1663,7 @@ def _register_aghome_ports(dc_port: int, tls_enabled: bool,
                   comment="AdGuard Home DNS (loopback+public bind, UFW закрыт снаружи)",
                   force=True)
 
-    # Web UI: кастомный порт (v49). Сначала — уборка СТАРЫХ записей тега
+    # Web UI: кастомный порт. Сначала — уборка СТАРЫХ записей тега
     # с другим портом (смена порта при переустановке/финализации).
     try:
         for e in port_list_for_service(SERVICE_AGHOME_WEB):
@@ -1719,7 +1719,7 @@ def _unregister_aghome_ports() -> None:
     """Снимает регистрацию и закрывает ВСЕ порты DNS-стека AGH
     (кроме dnscrypt :5300 — он остаётся жить).
 
-    v49: Web UI-порт может быть кастомным — закрываем ВСЕ записи тега
+    Web UI-порт может быть кастомным — закрываем ВСЕ записи тега
     SERVICE_AGHOME_WEB из реестра (+ дефолт 3000 страховочно).
     """
     try:
@@ -1766,7 +1766,7 @@ def _unregister_aghome_ports() -> None:
 def _get_latest_agh_tag() -> str:
     """Последний release-tag AGH из GitHub API (3 раунда × 2 зеркала).
 
-    v60: api.github.com с РФ-сетей флапает с первого раза (инцидент
+    api.github.com с РФ-сетей флапает с первого раза (инцидент
     переустановки 176.123.162.42: «GitHub API недоступен» при живой
     сети) — зеркалируем запрос через gh-прокси. Полный провал всех
     попыток → вызывающий код использует pinned AGHOME_FALLBACK_TAG +
@@ -1795,7 +1795,7 @@ def _get_latest_agh_tag() -> str:
 
 
 def _validate_web_port(port: int) -> "tuple[bool, str]":
-    """Кастомный порт Web UI: диапазон + не служебный + свободен (v49)."""
+    """Кастомный порт Web UI: диапазон + не служебный + свободен."""
     if not (1024 <= port <= 65535):
         return False, "порт должен быть в диапазоне 1024–65535"
     if port in AGH_WEB_PORT_RESERVED:
@@ -1817,7 +1817,7 @@ def _validate_web_port(port: int) -> "tuple[bool, str]":
 
 
 def _ask_web_port() -> int:
-    """Спрашивает порт Web UI (plain HTTP/локальный вход; v49).
+    """Спрашивает порт Web UI (plain HTTP/локальный вход;).
 
     Основной вход в Web UI — TLS :30443 (не меняется). Кастомный порт
     управляет plain-доступом: режим «HTTP публично» и локальный вход.
@@ -1870,7 +1870,7 @@ def _ask_web_mode() -> "tuple[str, str]":
       3. http_public  — plain HTTP 0.0.0.0:3000
       4. loopback     — 127.0.0.1:3000 (SSH-туннель)
 
-    v48: https_le/https_self биндят http на 0.0.0.0:3000 (UFW снаружи
+    https_le/https_self биндят http на 0.0.0.0:3000 (UFW снаружи
     закрыт) — HTTPS :30443 в AGH следует хосту http.address, иначе
     Web UI доступен только с туннелем.
     """
@@ -1895,7 +1895,7 @@ def _ask_web_mode() -> "tuple[str, str]":
     _box_item("3", f"HTTP публично :{AGH_WEB_PORT} {DIM}(без TLS — пароль открытым текстом){NC}")
     _box_item("4", f"Только локально 127.0.0.1:{AGH_WEB_PORT} {DIM}(SSH-туннель){NC}")
     _box_row()
-    _box_row(f"  {DIM}Порт plain-доступа можно поменять следующим вопросом (v49).{NC}")
+    _box_row(f" {DIM}Порт plain-доступа можно поменять следующим вопросом.{NC}")
     _box_bottom()
     try:
         ch = input(f"{CYAN}  Выбор [1]: {NC}").strip() or "1"
@@ -1939,7 +1939,7 @@ def _dns_probe_ok(timeout: int = 2) -> bool:
     ok:true от фикса ≠ работающий DNS (инцидент v44).
 
     ВНИМАНИЕ: это проба КОНКРЕТНОГО адреса 127.0.0.1:53. Критерий
-    «система вообще резолвит» — _system_dns_ok() (v60): на чистой
+    «система вообще резолвит» — _system_dns_ok(): на чистой
     установке :53 свободен до старта AGH, и это НОРМА, а не авария.
     """
     if shutil.which("dig"):
@@ -1969,7 +1969,7 @@ def _system_dns_ok(timeout: int = 4) -> bool:
     127.0.0.1:53 или 127.0.0.1 + redirect на dnscrypt — ЛЮБОЙ рабочий
     путь проходит проверку.
 
-    v60 (инцидент переустановки 176.123.162.42): старый критерий
+     (инцидент переустановки 176.123.162.42): старый критерий
     «127.0.0.1:53 обязан отвечать» на чистой системе (AGH ещё не
     ставился, dnscrypt на :5300) давал ложный «DNS мёртв», а
     «восстановление» ЛОМАЛО рабочий DNS провайдера, направляя
@@ -2047,7 +2047,7 @@ def _emergency_public_dns_fallback() -> bool:
 def _dns_blackhole_help_box() -> None:
     """Красный бокс с ручными командами — DNS мёртв даже после авто-фикса.
 
-    v60: два независимых пути оживления — публичный DNS напрямую
+    два независимых пути оживления — публичный DNS напрямую
     (быстрее всего, не зависит от локального стека) и локальный
     redirect на dnscrypt:5300.
     """
@@ -2081,7 +2081,7 @@ def _dns_blackhole_help_box() -> None:
 def _ensure_system_dns_alive(reason: str = "") -> bool:
     """Гарантия живого СИСТЕМНОГО DNS в ЛЮБОЙ фазе AGH.
 
-    v60: критерий живости — СИСТЕМА резолвит имена (getent через
+    критерий живости — СИСТЕМА резолвит имена (getent через
     nsswitch → resolv.conf), а НЕ «127.0.0.1:53 отвечает». Системный
     DNS может идти через DNS провайдера (чистая установка — :53
     свободен до старта AGH), через AGH на :53 или через redirect на
@@ -2169,7 +2169,7 @@ def _ensure_system_dns_alive(reason: str = "") -> bool:
         info("AGH: DNS восстановлен (прямой iptables redirect)")
         return True
 
-    # ── Ступень 4 (v60): публичный DNS напрямую ────────────────────────
+    # ── Ступень 4: публичный DNS напрямую ────────────────────────
     # Локальный стек не поднимается — живой публичный DNS лучше
     # мёртвого 127.0.0.1: установка продолжится (AGH скачается),
     # локальный резолвер вернёт resolv-фикс/финализация.
@@ -2227,7 +2227,7 @@ def _wizard_configure_headless(username: str, password: str,
     Пока redirect 53→5300 активен, системный DNS продолжает работать
     через dnscrypt; финализация затем переключит его на AGH.
 
-    v49: web_port — кастомный порт Web UI в payload мастера (API живёт
+    web_port — кастомный порт Web UI в payload мастера (API живёт
     на дефолтном :3000, а конфиг пишет уже с нужным портом).
     """
     core = _core_module()
@@ -2347,7 +2347,7 @@ def _complete_first_run_wizard(web_mode: str, domain: str,
     ни SSH-туннель, ни UFW. Веб-мастер — fallback: :3000 временно
     открыт для всех, инструкция с URL сервера.
 
-    v49: web_port — финальный порт Web UI (wizard-фаза слушает дефолт
+    web_port — финальный порт Web UI (wizard-фаза слушает дефолт
     :3000; кастомный порт применит финализация).
 
     Возвращает True, если конфиг с users создан (мастер завершён).
@@ -2440,7 +2440,7 @@ def install_aghome(interactive: bool = True) -> bool:
         warn("AGH: сначала установите DNSCrypt (Сеть → установка / wizard)")
         return False
 
-    # ── 1b. v65: конфликт портов AGH с Xray/AWG ──────────────────────
+    # ── 1b. конфликт портов AGH с Xray/AWG ──────────────────────
     # Xray/AWG на :53 — AGH не сможет владеть DNS-портом (ломает xray);
     # :853/:30443 — AGH отберёт порт у Xray на буте (Before=xray.service).
     _pc = _agh_core_port_conflicts()
@@ -2534,7 +2534,7 @@ def install_aghome(interactive: bool = True) -> bool:
     web_mode, domain, web_port = AGH_WEB_LOOPBACK, "", AGH_WEB_PORT
     if wizard_restart:
         web_mode, domain = _ask_web_mode()
-        web_port = _ask_web_port()          # v49: кастомный порт Web UI
+        web_port = _ask_web_port() # кастомный порт Web UI
         if _complete_first_run_wizard(web_mode, domain, interactive,
                                       web_port=web_port):
             return finalize_aghome_config(web_mode=web_mode,
@@ -2577,7 +2577,7 @@ def _wait_wizard_completed(timeout_sec: int, poll_sec: float = 5.0) -> bool:
                 print()
                 return True
         # DNS black-hole недопустим даже во время ожидания мастера.
-        # v60: системная проба (nsswitch-путь), а не только 127.0.0.1:53 —
+        # системная проба (nsswitch-путь), а не только 127.0.0.1:53
         # wizard-фаза может идти и на DNS провайдера (чистая установка).
         if not _system_dns_ok():
             try:
@@ -2604,7 +2604,7 @@ def _wait_wizard_completed(timeout_sec: int, poll_sec: float = 5.0) -> bool:
 # ============================================================================
 #  ФИНАЛИЗАЦИЯ (после мастера; идемпотентна)
 # ============================================================================
-# ── v45: TLS-диагностика/self-heal ──────────────────────────────────────────
+# ── TLS-диагностика/self-heal ──────────────────────────────────────────
 # AGH при ошибке загрузки сертификата НЕ падает (home.go: newTLSManager →
 # err → лог + onConfigModified): молча ставит tls.enabled=false, пишет это
 # в yaml и продолжает на plain DNS. Симптом: служба активна, :53 слушает,
@@ -2717,7 +2717,7 @@ def _own_certs_dir() -> None:
 def _heal_tls_listeners(server_name: str, domain: str,
                         cert_path: "Path | None",
                         key_path: "Path | None") -> "tuple[bool, Path, Path, str]":
-    """Диагностика + починка TLS-портов AGH (v45).
+    """Диагностика + починка TLS-портов AGH.
 
     Порядок:
       1. journalctl — точная причина от самого AGH.
@@ -2828,7 +2828,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
       7. Закрывает временный wizard-доступ, финальные порты в UFW/реестре.
       8. Перегенерирует конфиг Xray (DNS → 127.0.0.1:53 → AGH).
 
-    v49: web_port — кастомный порт Web UI (0/None → из state, иначе
+    web_port — кастомный порт Web UI (0/None → из state, иначе
     AGH_WEB_PORT). При смене порта старый закрывается в UFW/реестре.
     """
     core = _core_module()
@@ -2853,7 +2853,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         web_mode = st.get("web_mode", AGH_WEB_HTTPS_LE)
     if not domain:
         domain = st.get("domain", "") or (getattr(core, "PARAM_DOMAIN", "") or "")
-    # v49: кастомный порт Web UI (state → дефолт)
+    # кастомный порт Web UI (state → дефолт)
     try:
         web_port = int(web_port) if web_port else 0
     except (TypeError, ValueError):
@@ -2867,7 +2867,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         web_port = AGH_WEB_PORT
     tls_enabled = web_mode in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF)
 
-    # ── v65: защита от портов-коллизий AGH ↔ Xray/AWG/чужие сервисы ────
+    # ── защита от портов-коллизий AGH ↔ Xray/AWG/чужие сервисы ────
     # AGH биндит фиксированные 53/853/30443 ДО старта xray — коллизия
     # отдаёт порт AGH и роняет xray (EOF у всех клиентов). Xray на :53 —
     # финализация невозможна в принципе (AGH обязан владеть :53).
@@ -2915,7 +2915,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         # без public IP TLS-порты бессмысленны публично, но оставляем —
         # loopback DoH/DoT тоже валидны (тесты, локальные клиенты).
         pass
-    public_ipv6 = _get_public_ipv6()   # v72: bind_hosts += IPv6
+    public_ipv6 = _get_public_ipv6() # bind_hosts += IPv6
     if public_ipv6:
         info(f"AGH: IPv6 bind: {public_ipv6} — DoT/DoH/Web доступны и по v6")
 
@@ -2934,7 +2934,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
     new_text = yaml_replace_sections(
         original, sections, scalars={"language": "ru"})
 
-    # ── v47 GATE: дубли top-level ключей = crash-loop AGH ────────────
+    # ── GATE: дубли top-level ключей = crash-loop AGH ────────────
     # Строгий YAML-парсер AGH падает на «mapping key already defined».
     # Safety-net в yaml_replace_sections вычищает дубли, сюда попасть
     # нельзя — но если всё же попали, живой конфиг НЕ трогаем (DNS
@@ -2963,7 +2963,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         return False
 
     # ── Restart + верификация ─────────────────────────────────────────
-    # v72.1: reset-failed перед рестартом (паттерн v57 — start-limit)
+    # reset-failed перед рестартом (паттерн start-limit)
     subprocess.run(["systemctl", "reset-failed", AGH_SERVICE_NAME],
                    capture_output=True, check=False)
     subprocess.run(["systemctl", "restart", AGH_SERVICE_NAME],
@@ -2971,7 +2971,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
     ok = _wait_service(AGH_SERVICE_NAME, 30)
 
     if not ok and public_ipv6:
-        # Self-heal #0 (v72.1, инцидент vds13195 30.08): AGH не стартовал
+        # Self-heal #0 (инцидент vds13195 30.08): AGH не стартовал
         # с IPv6 в bind_hosts — сначала снимаем ТОЛЬКО IPv6: публичный IPv4
         # (DoT/DoH/Web) и loopback остаются жить. Прежний путь сразу ронял
         # всё до loopback-only, теряя ещё и TLS-порты.
@@ -3038,7 +3038,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         return False
 
     # ── Верификация портов ────────────────────────────────────────────
-    # v45: только по процессу AdGuardHome (127.0.0.53:53 systemd-resolved
+    # только по процессу AdGuardHome (127.0.0.53:53 systemd-resolved
     # давал ложное «DNS слушает») + retry: AGH биндит порты на 1-3 с
     # позже, чем systemd помечает службу active.
     dns_udp = _port_listening(AGH_DNS_PORT, "udp", proc="AdGuardHome")
@@ -3055,7 +3055,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         warn(f"AGH: активна, но :{AGH_DNS_PORT}/udp не слушается — journalctl")
 
     if tls_enabled:
-        # v45: AGH при ошибке сертификата молча ставит tls.enabled=false
+        # AGH при ошибке сертификата молча ставит tls.enabled=false
         # и продолжает на plain DNS → порты не поднимутся сами. Даём
         # время, затем диагностируем и чиним (_heal_tls_listeners).
         ports = _tls_ports_status()
@@ -3187,7 +3187,7 @@ def _regenerate_xray_config(interactive: bool = True) -> bool:
     подгружает глобали, рестартит xray. При провале — warn (конфиг можно
     пересоздать через меню: Установка → Пересоздать конфиг Xray).
 
-    v61 (install-order): НЕ перегенерирует, когда идёт do_full_install
+     (install-order): НЕ перегенерирует, когда идёт do_full_install
     (INSTALL_STARTED=True, INSTALL_COMPLETED=False — AGH ставится ДО
     Xray) или state.json отсутствует (чистая установка). В обоих случаях
     конфиг Xray ещё не существует или будет (пере)создан ниже по потоку
@@ -3202,7 +3202,7 @@ def _regenerate_xray_config(interactive: bool = True) -> bool:
     core = _core_module()
     info, warn = core.info, core.warn
     try:
-        # v61 (install-order): идёт do_full_install (AGH ставится ДО
+        # (install-order): идёт do_full_install (AGH ставится ДО
         # Xray)? Перегенерировать НЕЛЬЗЯ: конфиг Xray будет создан ниже
         # по потоку AGH-aware генератором из СВЕЖИХ параметров, а вызов
         # _load_state_into_globals() здесь затёр бы только что введённые
@@ -3228,7 +3228,7 @@ def _regenerate_xray_config(interactive: bool = True) -> bool:
         if hasattr(core, "_load_state_into_globals"):
             core._load_state_into_globals()
 
-        # v45 (vds13195): generate_xray_config_chain_entry_multi живёт в
+        # (vds13195): generate_xray_config_chain_entry_multi живёт в
         # chain_nodes (не в xray_install — AttributeError «no attribute»
         # ломал перегенерацию конфига Xray в режиме B).
         from chimera.modules import chain_nodes
@@ -3247,7 +3247,7 @@ def _regenerate_xray_config(interactive: bool = True) -> bool:
         else:
             xray_install.generate_xray_config()
 
-        # v57 (start-limit-fix): reset-failed перед рестартом — перегенерация
+        # (start-limit-fix): reset-failed перед рестартом — перегенерация
         # конфига xray (финализация/удаление AGH) идёт в цепочке с другими
         # рестартами (dnscrypt, AGH, ru_subnets restore)
         subprocess.run(["systemctl", "reset-failed", "xray"],
@@ -3551,7 +3551,7 @@ def print_aghome_status() -> None:
                  f"(https + /dns-query)")
         _box_row(f"  DoT :{s['dot_port']}/tcp:       {_mark(s['dot_listening'])}")
         _box_row(f"  DoQ :{s['doq_port']}/udp:       {_mark(s['doq_listening'])}")
-        # v78: готовые ссылки для вставки в клиент — прямо в статус-боксе.
+        # готовые ссылки для вставки в клиент — прямо в статус-боксе.
         # _box_row сам переносит длинные URL внутри рамки (жёсткая резка
         # по видимой ширине), правая граница ║ не ломается.
         links = _client_dns_links(s)
@@ -3660,7 +3660,7 @@ def do_aghome_menu() -> None:
         elif ch == "4":
             try:
                 web_mode, domain = _ask_web_mode()
-                web_port = _ask_web_port()          # v49: кастомный порт
+                web_port = _ask_web_port() # кастомный порт
                 st2 = aghome_state_load()
                 aghome_state_save({**st2, "web_mode": web_mode, "domain": domain,
                                    "web_port": web_port,
@@ -3676,7 +3676,7 @@ def do_aghome_menu() -> None:
                 core.warn(f"AGH: ошибка смены режима: {e}")
             input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch == "6":
-            # v74: единое меню dnscrypt (state-файл синхронизирует все меню)
+            # единое меню dnscrypt (state-файл синхронизирует все меню)
             try:
                 from chimera.modules.dnscrypt_update import do_dnscrypt_update_menu
                 do_dnscrypt_update_menu()

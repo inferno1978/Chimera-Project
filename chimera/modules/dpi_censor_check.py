@@ -29,7 +29,7 @@ chimera/modules/dpi_censor_check.py
         интерпретатор установщика. Ставятся лениво — только когда
         пользователь реально открывает этот пункт меню.
 
-АВТООБНОВЛЕНИЕ АПСТРИМА (v77):
+АВТООБНОВЛЕНИЕ АПСТРИМА:
     Автор апстрима релизит часто (за лето 2026: v3.3.0 → v4.1.0), вендорная
     копия в git-дереве Химеры устаревает между релизами Химеры. Поэтому:
       • при КАЖДОМ входе в меню Химера смотрит, какая версия установлена,
@@ -98,7 +98,7 @@ _REPORT_DIR = Path("/var/log/xray-installer/dpi-censor-reports")
 # Имена пакетов для импорта (PyYAML импортируется как "yaml")
 _REQUIRED_MODULES = ("httpx", "rich", "yaml")
 
-# ── Автообновление апстрима Runnin4ik/dpi-detector (v77) ──────────────────────
+# ── Автообновление апстрима Runnin4ik/dpi-detector ──────────────────────
 _UPSTREAM_REPO = "Runnin4ik/dpi-detector"
 _UPSTREAM_URL  = f"https://github.com/{_UPSTREAM_REPO}"
 # Runtime-копии свежих версий (в git-дереве установщика НЕ живут):
@@ -445,7 +445,7 @@ def _download_and_install(version: str) -> Tuple[bool, str]:
             return False, f"в архиве версия {got or 'не определена'}, ожидалась {v}"
 
         # ── сборка runtime-копии ──
-        # v77.1: staging создаём ЯВНО до копирования. Раньше каталог
+        # staging создаём ЯВНО до копирования. Раньше каталог
         # возникал неявно — первым скопированным copytree-директорией
         # (makedirs создаёт промежуточные пути). Если же первым в
         # iterdir() оказывался ФАЙЛ (например LICENSE), copy2 падал
@@ -466,7 +466,7 @@ def _download_and_install(version: str) -> Tuple[bool, str]:
         if not (staging / "dpi_detector.py").is_file():
             return False, "после копирования нет точки входа dpi_detector.py"
 
-        # v77.1: final может существовать как ФАЙЛ (мусор/обманка с именем
+        # final может существовать как ФАЙЛ (мусор/обманка с именем
         # версии) — rmtree на нём падает NotADirectoryError; unlink и вперёд.
         if final.exists():
             if final.is_dir():

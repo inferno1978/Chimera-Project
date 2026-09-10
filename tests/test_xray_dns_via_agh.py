@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tests/test_v61_xray_dns_via_agh.py
+tests/test_xray_dns_via_agh.py
 ───────────────────────────────────────────────────────────────────────────────
-v61: порядок установки AGH→Xray + гарантия «запросы Xray идут через AGH».
+: порядок установки AGH→Xray + гарантия «запросы Xray идут через AGH».
 
 Инцидент (переустановка 176.123.162.42, Режим B): AGH ставится ДО Xray,
 финализация AGH пыталась перегенерировать конфиг Xray, которого ещё нет
@@ -11,7 +11,7 @@ v61: порядок установки AGH→Xray + гарантия «запр�
 При этом оставалась неясность: пойдут ли DNS-запросы Xray через AGH,
 DNSCrypt или системный резольвер.
 
-Контракт v61:
+Контракт 
   1. _regenerate_xray_config — mid-install (INSTALL_STARTED=True,
      INSTALL_COMPLETED=False) или state.json нет → INFO-пропуск, не WARN;
      _load_state_into_globals() НЕ вызывается (глобали установки не
@@ -44,7 +44,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Фейковый chimera._core (паттерн test_v60/test_aghome_setup)."""
+    """Фейковый chimera._core (паттерн test_/test_aghome_setup)."""
     core_path = _PROJECT_ROOT / "chimera" / "_core.py"
     src = core_path.read_text()
     g = {}
@@ -329,7 +329,7 @@ class TestVerifyXrayDnsViaAgh(unittest.TestCase):
         self._gen_chain.assert_called_once()
         self.assertTrue(any("исправлен" in m for m in self._success.calls),
                         msg=str(self._success.calls))
-        # рестарт через reset-failed (start-limit защита v57)
+        # рестарт через reset-failed (start-limit защита)
         restarts = [c for c in self._run.call_args_list
                     if c[0][0][:2] == ["systemctl", "restart"]]
         self.assertTrue(restarts, msg=str(self._run.call_args_list))

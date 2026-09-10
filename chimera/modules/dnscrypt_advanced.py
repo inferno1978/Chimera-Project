@@ -4,7 +4,7 @@ chimera/modules/dnscrypt_advanced.py
 Расширенная настройка DNSCrypt-proxy: 245 серверов в 51 стране, ODoH, DNSSEC,
 180 анонимизированных маршрутов, RTT-замер, ручная настройка параметров.
 
-v74 (динамический пул + версионная гигиена):
+ (динамический пул + версионная гигиена):
   • Пул синхронизирован с живым v3/public-resolvers.md: −37 мёртвых имён
     (кладбище _POOL_GRAVEYARD — воскрешаются pool-sync'ом автоматически),
     +90 живых серверов (замены выродившихся стран + UK/IE + глобальный блок).
@@ -30,13 +30,13 @@ v74 (динамический пул + версионная гигиена):
     (do_dnscrypt_update_menu, единое для всех DNS-меню — синхронизировано
     через state-файл).
 
-v73 (гео-резистентность пресета, синхрон с v67 в dnscrypt_setup):
+ Гео-резистентность (синхрон с dnscrypt_setup):
   • dnscry.pt-moscow ИСКЛЮЧЁН: RU-юрисдикция/хостер — риск отравления
     рекурсии (голова списка = де-факто основной резолвер в lb_strategy p2);
     список теперь начинается с kyiv.
   • Хвост cloudflare/google удалён: DoH CF/GG из РФ душится ТСПУ
     (мёртвый груз); за рубежом пул и так богат DoH-серверами.
-  • bootstrap/fallback → 9.9.9.9 + 77.88.8.8 (v67-канон).
+  • bootstrap/fallback → 9.9.9.9 + 77.88.8.8 (канон).
   • Фаза-1 пресета — quad9-dnscrypt (DNSCrypt-протокол, порт 8443,
     без SNI — жив и из РФ, и из-за рубежа).
   • resolv.conf на время применения временно указывает на 9.9.9.9/77.88.8.8
@@ -47,11 +47,11 @@ v73 (гео-резистентность пресета, синхрон с v67 �
   • НЕ вызывает networkctl / ifconfig / ip link / dhclient.
   • НЕ трогает /etc/nsswitch.conf, сетевые интерфейсы. resolv.conf — только
     временная подмена на живые 9.9.9.9/77.88.8.8 с гарантированным
-     восстановлением (v73, try/finally).
+     восстановлением (try/finally).
   • Только перезаписывает /etc/dnscrypt-proxy/dnscrypt-proxy.toml + restart сервиса.
   • Бэкап конфига перед изменением + откат при провале + экстренный конфиг
-    quad9-dnscrypt (v74) — сервер без DNS не остаётся.
-  • Проверка цепочки xray→AGH→dnscrypt после применения (v74).
+    quad9-dnscrypt — сервер без DNS не остаётся.
+  • Проверка цепочки xray→AGH→dnscrypt после применения.
 
 Точка входа:
     from chimera.modules.dnscrypt_advanced import do_dnscrypt_advanced_menu
@@ -101,16 +101,16 @@ def _warn(msg):  print(f"{YELLOW}[WARN]{NC}  {msg}")
 def _err(msg):   print(f"{RED}[ERR]{NC}   {msg}")
 
 # =============================================================================
-#  ПОЛНЫЙ СПИСОК СЕРВЕРОВ — 245 шт., 51 страна (v74)
-#  v74: синхронизирован с живым public-resolvers.md (drift-резистентность):
-#    − 37 мёртвых имён (budapest/brussels/athens/Tier-4-хвост v73) → кладбище
+# ПОЛНЫЙ СПИСОК СЕРВЕРОВ — 245 шт., 51 страна
+# синхронизирован с живым public-resolvers.md (drift-резистентность):
+# − 37 мёртвых имён (budapest/brussels/athens/Tier-4-хвост) → кладбище
 #    + 90 живых: замены выродившихся стран (AL/GR/HU/FR/LU/IT/ES/NO/RO/MD/DK/AT/
 #      SE/DE/UA/PT), UK-восстановление, IE, вторые города (kyiv02/lisbon02/
 #      dusseldorf02-03/stockholm02-уже-были), глобальный блок (HK×3, JP, KR,
 #      SG, TW, IN, AU, NZ, CA, BD, NG, PK, LA, CL) — все DNSCrypt, живые.
-#  Yandex ИСКЛЮЧЁН (утечка DNS). dnscry.pt-moscow ИСКЛЮЧЁН (v73: RU-юрисдикция,
+# Yandex ИСКЛЮЧЁН (утечка DNS). dnscry.pt-moscow ИСКЛЮЧЁН (RU-юрисдикция,
 #  риск hoster-level отравления рекурсии; голова списка — kyiv). Хвост
-#  cloudflare/google удалён (v73: из РФ DoH CF/GG душатся ТСПУ).
+# cloudflare/google удалён (из РФ DoH CF/GG душатся ТСПУ).
 #  Динамический синк: cron каждые 6 ч (chimera/modules/dnscrypt_update.py,
 #  /usr/local/bin/chimera-dnscrypt-pool-sync.py) — пул ∩ живой список,
 #  воскрешения из кладбища, ребилд маршрутов по живым релеям.
@@ -297,13 +297,13 @@ _SERVER_NAMES: List[str] = [
 ]
 
 # =============================================================================
-#  АНОНИМИЗИРОВАННЫЕ МАРШРУТЫ — 193 + wildcard (v73: 194 всего)
+# АНОНИМИЗИРОВАННЫЕ МАРШРУТЫ — 193 + wildcard (194 всего)
 #  Принцип: server в стране X → relay в стране Y (≠ X, не сосед)
 #  Relay видит IP клиента, не видит запрос.
 #  Server видит запрос, не знает IP клиента (видит relay).
 # =============================================================================
 _ANON_ROUTES: List[str] = [
-    # v74: 37 мёртвых имён удалено (кладбище — _POOL_GRAVEYARD),
+    # 37 мёртвых имён удалено (кладбище — _POOL_GRAVEYARD),
     # 61 живой добавлен; мёртвые релеи заменены (anon-cs-ch6→belgium6,
     # anon-cs-swe6→austria6); DoH-серверы из маршрутов исключены
     # (не анонимизируются — ERROR «cannot be anonymized» в логах).
@@ -535,7 +535,7 @@ _ANON_ROUTES: List[str] = [
     "        'dnscry.pt-anon-warsaw-ipv4','dnscry.pt-anon-warsaw-ipv6','dnscry.pt-anon-kyiv-ipv4','dnscry.pt-anon-kyiv-ipv6','dnscry.pt-anon-gdansk-ipv4','dnscry.pt-anon-gdansk-ipv6',\n"
     "] }",
 ]
-# v74: кладбище — выселенные из пула имена (проверка воскрешений
+# кладбище — выселенные из пула имена (проверка воскрешений
 # в pool-sync: если имя снова появится в живом списке, оно
 # возвращается в пул автоматически). Мёртвое имя в server_names
 # игнорируется dnscrypt-proxy молча — безопасно всегда.
@@ -554,7 +554,7 @@ _POOL_GRAVEYARD: List[str] = [
     "dnscrypt-ch-blahdns-ipv6", "dnsforge.uk", "doh.ffmuc.net-2",
     "doh.ffmuc.net-v6-2",
 ]
-# v74: живой wildcard-набор релеев для серверов без персонального
+# живой wildcard-набор релеев для серверов без персонального
 # маршрута (страховка; pool-sync перефильтровывает по живому списку).
 _WILDCARD_RELAYS: List[str] = [
     "anon-cs-finland", "anon-cs-finland6", "anon-cs-poland", "anon-cs-poland6",
@@ -581,7 +581,7 @@ _SECURITY_PARAMS: Dict[str, str] = {
     "require_nofilter":      "true",
     "force_tcp":             "false",
     "http3":                 "true",
-    # v74: http3_probe УДАЛЁН — в 2.1.5 ключа нет ([FATAL] Unsupported key,
+    # http3_probe УДАЛЁН — в 2.1.5 ключа нет ([FATAL] Unsupported key,
     # конфиг не стартует вовсе), в 2.1.18 default false — запись избыточна.
     "timeout":               "3000",
     "keepalive":             "60",
@@ -599,7 +599,7 @@ _SECURITY_PARAMS: Dict[str, str] = {
     "cache_max_ttl":         "3600",
     "cache_neg_min_ttl":     "300",
     "cache_neg_max_ttl":     "900",
-    # v73 = v67-канон (dnscrypt_setup): 8.8.8.8/1.1.1.1 в РФ отравлены
+    # = канон (dnscrypt_setup): 8.8.8.8/1.1.1.1 в РФ отравлены
     # (DNAT→НСДИ, NXDomain-spoof), 9.9.9.9 + 77.88.8.8 работают отовсюду.
     # Используются ТОЛЬКО для резолва имён DoH-upstream'ов.
     "bootstrap_resolvers":   "['9.9.9.9:53', '77.88.8.8:53']",
@@ -612,7 +612,7 @@ _SECURITY_PARAMS: Dict[str, str] = {
     "max_clients":           "250",
 }
 
-# v74: источники dnscry.pt УДАЛЕНЫ — антибот-URL без failover ронял старт
+# источники dnscry.pt УДАЛЕНЫ — антибот-URL без failover ронял старт
 # FATAL'ом при пустом кеше; весь их контент уже в официальных списках
 # (public-resolvers.md / relays.md). Официальные источники продублированы
 # третьим зеркалом cdn.jsdelivr.net — см. шаблон конфига в _apply_preset.
@@ -658,7 +658,7 @@ def _read_config() -> str:
     return _DNSCRYPT_CONF.read_text(errors="replace")
 
 def _get_listen_addresses(content: str) -> str:
-    # v72: жадный [^\n]* до ПОСЛЕДНЕЙ ']' в строке — IPv6-элементы
+    # жадный [^\n]* до ПОСЛЕДНЕЙ ']' в строке — IPv6-элементы
     # '[::1]:5300' содержат ']' внутри списка; ленивый .*? обрезал
     # строку на внутренней скобке и портил перегенерированный TOML.
     m = re.search(r"^listen_addresses\s*=\s*\[[^\n]*\]", content, re.MULTILINE)
@@ -776,7 +776,7 @@ def _verify_resolves_with_retry(attempts: int = 4, pause: float = 3.0) -> bool:
 
 
 def _apply_emergency_config() -> bool:
-    """v74: ЭКСТРЕННЫЙ конфиг — последнее средство «сервер без DNS».
+    """ЭКСТРЕННЫЙ конфиг — последнее средство «сервер без DNS».
 
     Известно-живые имена официального public-resolvers.md (quad9-dnscrypt,
     DNSCrypt-протокол, порт 8443, без SNI — жив и из РФ, и из-за рубежа),
@@ -797,7 +797,7 @@ def _apply_emergency_config() -> bool:
 
 
 def _rollback_or_emergency(bak: Optional[Path], phase: str) -> bool:
-    """v74: откат бэкапа; если откат не резолвит — экстренный конфиг.
+    """откат бэкапа; если откат не резолвит — экстренный конфиг.
 
     Возвращает True если сервер остался с рабочим DNS (откат или экстренный).
     """
@@ -826,7 +826,7 @@ def _rollback_or_emergency(bak: Optional[Path], phase: str) -> bool:
 
 
 def _check_chain_after_apply() -> None:
-    """v74: проверка всей цепочки xray → AGH(:53) → dnscrypt(:5300).
+    """проверка всей цепочки xray → AGH(:53) → dnscrypt(:5300).
 
     Ленивый импорт: модуль dnscrypt_update тянет state-файл, общий для всех
     DNS-меню (синхронизация версий/синка между меню). Провал импорта —
@@ -845,7 +845,7 @@ def _check_chain_after_apply() -> None:
 
 
 def _write_state_after_apply(server_names: List[str]) -> None:
-    """v74: фиксирует применённый пул в общий state-файл (шапки меню)."""
+    """фиксирует применённый пул в общий state-файл (шапки меню)."""
     try:
         from chimera.modules.dnscrypt_update import update_state
         update_state(pool={
@@ -869,24 +869,24 @@ def _safe_apply_preset(server_names: List[str],
     """Безопасное применение пресета с откатом при неудаче.
 
     Двухфазное применение:
-      Фаза 1: Записать конфиг с базовыми серверами (v73/v74: quad9-dnscrypt —
+      Фаза 1: Записать конфиг с базовыми серверами (/: quad9-dnscrypt
                DNSCrypt-протокол жив и из РФ, и из-за рубежа) + официальными
-               источниками (public-resolvers/relays/odoh, 3 зеркала, v74).
+               источниками (public-resolvers/relays/odoh, 3 зеркала).
                Перезапустить dnscrypt — скачает официальные списки.
       Фаза 2: Записать полный конфиг (весь список серверов + маршруты).
-               v74: ждать скачивания dnscry.pt больше не нужно (источник
+               ждать скачивания dnscry.pt больше не нужно (источник
                удалён), стартует из кеша фазы 1 мгновенно.
 
     Если dnscrypt падает на любой фазе — откат с возвратом resolv.conf;
-    если откат не резолвит — ЭКСТРЕННЫЙ конфиг quad9-dnscrypt (v74):
+    если откат не резолвит — ЭКСТРЕННЫЙ конфиг quad9-dnscrypt:
     сервер без DNS не остаётся (плюс AGH fallback_dns поверх).
 
-    v73: resolv.conf восстанавливается через try/finally при ЛЮБОМ исходе
+    resolv.conf восстанавливается через try/finally при ЛЮБОМ исходе
     (включая Ctrl+C и обрыв SSH посреди фазы) — раньше прерывание оставляло
     систему на временном DNS. Временные nameserver-ы — живые из РФ
     9.9.9.9/77.88.8.8 (раньше 8.8.8.8/1.1.1.1 — отравлены ТСПУ).
 
-    v74: после успешного применения — проверка цепочки
+    после успешного применения — проверка цепочки
     xray → AGH → dnscrypt + запись state-файла.
 
     Возвращает True при успехе, False при неудаче (с откатом).
@@ -900,7 +900,7 @@ def _safe_apply_preset(server_names: List[str],
         _ok(f"Бэкап конфига: {bak}")
 
     # 2. Временный bootstrap-DNS в resolv.conf на время применения.
-    #    v73 = v67-канон: 9.9.9.9 + 77.88.8.8 достижимы и из РФ, и из-за
+    # = канон: 9.9.9.9 + 77.88.8.8 достижимы и из РФ, и из-за
     #    рубежа; 8.8.8.8/1.1.1.1 в РФ DNAT-ятся ТСПУ на НСДИ (NXDomain-spoof).
     try:
         if resolv_path.exists():
@@ -917,16 +917,16 @@ def _safe_apply_preset(server_names: List[str],
             except Exception:
                 pass
 
-    # v73: всё тело применения — под try/finally: восстановление resolv.conf
+    # всё тело применения — под try/finally: восстановление resolv.conf
     # гарантировано при любом исходе, включая KeyboardInterrupt (Ctrl+C)
     # и потерю SSH-сессии (обрыв = SIGHUP/смерть процесса без finally —
     # тогда остаётся временный DNS, но живой, а не отравленный).
     try:
         # ── ФАЗА 1: базовые серверы + официальные источники ────────────
         _info("Фаза 1/2: запись базовых серверов + официальных источников (3 зеркала)...")
-        # v73: quad9-dnscrypt вместо cloudflare/google — фаза-1 обязана
-        # резолвить ИЗ РФ (см. v67 в dnscrypt_setup); имена живут в
-        # стандартном public-resolvers (v74: dnscry.pt-источников больше нет).
+        # quad9-dnscrypt вместо cloudflare/google — фаза-1 обязана
+        # резолвить ИЗ РФ (см. в dnscrypt_setup); имена живут в
+        # стандартном public-resolvers (dnscry.pt-источников больше нет).
         phase1_names = ["quad9-dnscrypt-ip4-nofilter-pri",
                         "quad9-dnscrypt-ip6-nofilter-pri"]
         if not _apply_preset(phase1_names, security_params, [], extra_sources=extra_sources):
@@ -938,7 +938,7 @@ def _safe_apply_preset(server_names: List[str],
             _err("Пресет не применён. Проверьте journalctl -u dnscrypt-proxy")
             return False
 
-        # Проверить что фаза 1 резолвит. v73: с ретраями — на старте
+        # Проверить что фаза 1 резолвит. с ретраями — на старте
         # netprobe/latency-ranking держит ~15-20с окно, когда :5300 ещё
         # не отвечает (живой кейс: не путать с блокировкой).
         _info("Проверяю что dnscrypt-proxy резолвит (фаза 1)...")
@@ -952,7 +952,7 @@ def _safe_apply_preset(server_names: List[str],
 
         # ── ФАЗА 2: полный список серверов + маршруты ──────────────────
         _info(f"Фаза 2/2: запись полного списка ({len(server_names)} серверов, {len(anon_routes)} маршрутов)...")
-        # v74: пауза 15с для скачивания dnscry.pt больше не нужна —
+        # пауза 15с для скачивания dnscry.pt больше не нужна
         # официальные списки скачаны/закешированы фазой 1.
 
         if not _apply_preset(server_names, security_params, anon_routes, extra_sources=extra_sources):
@@ -985,12 +985,12 @@ def _safe_apply_preset(server_names: List[str],
 
         # Успех!
         _ok(f"DNSCrypt-proxy резолвит DNS — пресет применён ({len(server_names)} серверов)!")
-        # v74: проверка цепочки xray → AGH → dnscrypt + state для шапок меню.
+        # проверка цепочки xray → AGH → dnscrypt + state для шапок меню.
         _check_chain_after_apply()
         _write_state_after_apply(server_names)
         return True
     finally:
-        # v73: восстановление resolv.conf при ЛЮБОМ исходе — включая
+        # восстановление resolv.conf при ЛЮБОМ исходе — включая
         # Ctrl+C (KeyboardInterrupt) и нештатные исключения посреди фаз.
         _restore_resolv()
 
@@ -1040,7 +1040,7 @@ def _measure_rtt(server_names: List[str]) -> Dict[str, float]:
 #  TUI
 # =============================================================================
 def _pool_header_line() -> str:
-    """v74: строка шапки из state-файла последнего синка (fallback — статика)."""
+    """строка шапки из state-файла последнего синка (fallback — статика)."""
     try:
         from chimera.modules.dnscrypt_update import get_pool_status_line
         return get_pool_status_line(len(_SERVER_NAMES))
@@ -1049,7 +1049,7 @@ def _pool_header_line() -> str:
 
 
 def _version_header_line() -> str:
-    """v74: строка версии из state (синхронизирована между всеми DNS-меню)."""
+    """строка версии из state (синхронизирована между всеми DNS-меню)."""
     try:
         from chimera.modules.dnscrypt_update import get_version_status_line
         return get_version_status_line()
@@ -1072,8 +1072,8 @@ def _screen_preset() -> None:
     _box_row(f"  {BOLD}Версия:{NC} {_version_header_line()}")
     _box_row()
     _box_row(f"  {DIM}Yandex DNS ИСКЛЮЧЁН (утечка).{NC}")
-    _box_row(f"  {DIM}v73: moscow/CF/GG исключены — гео-резистентность.{NC}")
-    _box_row(f"  {DIM}v74: синк с живым списком — 37 мёртвых вон (кладбище), +90 живых; dnscry.pt-источники удалены.{NC}")
+    _box_row(f" {DIM}: moscow/CF/GG исключены — гео-резистентность.{NC}")
+    _box_row(f" {DIM}: синк с живым списком — 37 мёртвых вон (кладбище), +90 живых; dnscry.pt-источники удалены.{NC}")
     _box_row(f"  {DIM}После применения — тест цепочки xray → AGH → dnscrypt + откат/экстренный фолбэк при провале.{NC}")
     _box_row()
     _box_warn("Бэкап конфига будет создан перед изменением.")

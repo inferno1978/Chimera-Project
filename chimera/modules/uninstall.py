@@ -6,8 +6,8 @@ chimera/modules/uninstall.py
 Одна функция:
 
 • **do_uninstall** — интерактивное удаление Xray, Nginx, сайта, правил UFW,
-  DNSCrypt-proxy и AdGuard Home (v59 — полностью, с бэкапом данных).
-  DNS откатывается к состоянию чистой системы: безусловно (v59 — без
+  DNSCrypt-proxy и AdGuard Home (полностью, с бэкапом данных).
+  DNS откатывается к состоянию чистой системы: безусловно (без
   зависимости от state-файла), с живой пробой резолва и fallback на
   публичный DNS, чтобы сервер никогда не оставался с мёртвым DNS.
 
@@ -46,12 +46,12 @@ def _core_module():
 
 
 # =============================================================================
-#  ЗАКРЫТИЕ ПОРТОВ УДАЛЯЕМЫХ СЕРВИСОВ (UFW + port_registry, v49)
+# ЗАКРЫТИЕ ПОРТОВ УДАЛЯЕМЫХ СЕРВИСОВ (UFW + port_registry)
 # =============================================================================
 def _close_chimera_ports() -> list:
     """Закрывает UFW-правила и снимает регистрацию портов удаляемых сервисов.
 
-    v49: do_uninstall обещал «правила UFW» в баннере, но не закрывал ничего —
+    do_uninstall обещал «правила UFW» в баннере, но не закрывал ничего
     orphaned allow-правила и записи port_registry оставались жить после
     полного удаления стека.
 
@@ -107,7 +107,7 @@ def _close_chimera_ports() -> list:
     _close_tag(SERVICE_DNSCRYPT)
 
     # AGH стоит? его upstream (dnscrypt) удаляется — останавливаем и его
-    # v65: детект по бинарнику/unit/yaml — старая проверка
+    # детект по бинарнику/unit/yaml — старая проверка
     # /opt/AdGuardHome/AdGuardHome не срабатывала НИКОГДА (бинарник
     # живёт в /usr/local/bin, в /opt только yaml/data) → stop/disable
     # и закрытие UFW-портов aghome_* были мёртвым кодом.
@@ -142,9 +142,9 @@ def _close_chimera_ports() -> list:
 
 
 def _restore_dns_after_full_uninstall() -> list:
-    """DNS-ALIVE при полном удалении: откат к состоянию ЧИСТОЙ системы (v59).
+    """DNS-ALIVE при полном удалении: откат к состоянию ЧИСТОЙ системы.
 
-    Инцидент v59 (bright-lynx): удаление Chimera с AGH убивало DNS —
+    Инцидент (bright-lynx): удаление Chimera с AGH убивало DNS
     SERVFAIL от 127.0.0.53. Причины: rollback_resolv_conf() требовал
     state.fixed=True (state утерян → откат тихо пропускался, а drop-in
     chimera-dns.conf продолжал гнать ВСЕ запросы systemd-resolved в
@@ -181,10 +181,10 @@ def _restore_dns_after_full_uninstall() -> list:
 
 
 # =============================================================================
-#  v59: ПОЛНОЕ УДАЛЕНИЕ ADGUARD HOME
+# ПОЛНОЕ УДАЛЕНИЕ ADGUARD HOME
 # =============================================================================
 # Пути AGH вынесены в модульные константы — для unit-тестов
-# (tests/test_v59_uninstall_dns_alive.py патчит их на tmpdir).
+# (tests/test_uninstall_dns_alive.py патчит их на tmpdir).
 _AGH_DIR          = Path("/opt/AdGuardHome")
 _AGH_UNIT         = Path("/etc/systemd/system/AdGuardHome.service")
 _AGH_BIN          = Path("/usr/local/bin/AdGuardHome")
@@ -194,7 +194,7 @@ _AGH_CERTBOT_HOOK = Path("/etc/letsencrypt/renewal-hooks/deploy/chimera-aghome.s
 
 
 def _remove_aghome_full() -> list:
-    """v59: полное удаление AdGuard Home при удалении всего стека.
+    """полное удаление AdGuard Home при удалении всего стека.
 
     Раньше do_uninstall только stop/disable AGH («upstream dnscrypt
     удаляется, стек мёртв») — бинарник, /opt/AdGuardHome, юзер adguard,
@@ -263,7 +263,7 @@ def _remove_aghome_full() -> list:
     except Exception:
         pass
 
-    # 6.5. v65: UFW/port_registry — порты aghome_web/doh/dot/doq.
+    # 6.5. UFW/port_registry — порты aghome_web/doh/dot/doq.
     # Раньше их закрывал только _close_chimera_ports с мёртвым детектом
     # (см. выше) → после полного удаления порты 3000/30443/853
     # оставались открытыми в UFW навсегда.
@@ -279,10 +279,10 @@ def _remove_aghome_full() -> list:
 
 
 # =============================================================================
-#  v59: АРТЕФАКТЫ МОДУЛЯ dns_redirect
+# АРТЕФАКТЫ МОДУЛЯ dns_redirect
 # =============================================================================
 def _remove_dns_redirect_artifacts() -> list:
-    """v59: PREROUTING-редиректы 53→5300 для VPN-клиентов + restore-сервис.
+    """PREROUTING-редиректы 53→5300 для VPN-клиентов + restore-сервис.
 
     Модуль dns_redirect (меню «DNS-redirect для VPN-клиентов») оставляет
     после себя iptables PREROUTING-правила (comment xray-dns-redirect) и
@@ -556,28 +556,28 @@ def do_uninstall() -> None:
                 _box_info(f"Оставлено: /var/www/{uninst_domain}")
 
     # ────────────────────────────────────────────────────────────────────────
-    #  UFW + port_registry: закрыть порты удалённых сервисов (v49)
+    # UFW + port_registry: закрыть порты удалённых сервисов
     # ────────────────────────────────────────────────────────────────────────
     _box_info("Закрытие портов UFW и снятие регистрации (port_registry)...")
     for line in _close_chimera_ports():
         _box_info(line)
 
     # ────────────────────────────────────────────────────────────────────────
-    #  v59: ПОЛНОЕ удаление AdGuard Home (файлы, юзер, unit, certbot-hook)
+    # ПОЛНОЕ удаление AdGuard Home (файлы, юзер, unit, certbot-hook)
     # ────────────────────────────────────────────────────────────────────────
     _box_info("Полное удаление AdGuard Home (с бэкапом данных)...")
     for line in _remove_aghome_full():
         _box_info(line)
 
     # ────────────────────────────────────────────────────────────────────────
-    #  v59: артефакты dns_redirect (PREROUTING-редиректы + restore-сервис)
+    # артефакты dns_redirect (PREROUTING-редиректы + restore-сервис)
     # ────────────────────────────────────────────────────────────────────────
     _box_info("Очистка DNS-redirect артефактов (PREROUTING, restore-сервис)...")
     for line in _remove_dns_redirect_artifacts():
         _box_info(line)
 
     # ────────────────────────────────────────────────────────────────────────
-    #  DNS-ALIVE v59: откат к состоянию ЧИСТОЙ системы — безусловно,
+    # DNS-ALIVE откат к состоянию ЧИСТОЙ системы — безусловно,
     #  с живой пробой и fallback на публичный DNS (инцидент bright-lynx:
     #  после удаления стека с AGH systemd-resolved отдавал SERVFAIL)
     # ────────────────────────────────────────────────────────────────────────
@@ -586,7 +586,7 @@ def do_uninstall() -> None:
         _box_info(line)
 
     # ────────────────────────────────────────────────────────────────────────
-    #  v59: финальная зачистка state-каталога установки
+    # финальная зачистка state-каталога установки
     # ────────────────────────────────────────────────────────────────────────
     _box_info("Финальная зачистка state-файлов Chimera...")
     state_dir = Path("/var/lib/xray-installer")

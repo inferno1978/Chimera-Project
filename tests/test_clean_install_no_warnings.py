@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-tests/test_v60_clean_install_no_warnings.py
+tests/test_clean_install_no_warnings.py
 ───────────────────────────────────────────────────────────────────────────────
-v60: чистая переустановка БЕЗ предупреждений (инцидент 176.123.162.42).
+: чистая переустановка БЕЗ предупреждений (инцидент 176.123.162.42).
 
 Лог переустановки на ноде без IPv6 содержал каскад ложных [WARN]:
   [WARN] AGH: системный DNS на 127.0.0.1:53 не отвечает (перед установкой
@@ -17,7 +17,7 @@ v60: чистая переустановка БЕЗ предупреждений
   [WARN] Xray 26.x — date-based версия…  ← норма для актуальных релизов
   [WARN] logrotate: проверьте конфиг вручную: xray-heavy ← валидный конфиг
 
-Тесты фиксируют контракт v60:
+Тесты фиксируют контракт 
   1. _system_dns_ok — системная проба (getent), а не только 127.0.0.1:53
   2. _ensure_system_dns_alive — молча при живом DNS провайдера
   3. _emergency_public_dns_fallback — публичный DNS последней ступенью
@@ -135,7 +135,7 @@ class TestEnsureSystemDnsAliveSilentPass(unittest.TestCase):
         self.mod = ags
 
     def test_fresh_install_provider_dns_silent(self):
-        """Ядро v60: чистая установка — :53 пуст (AGH не ставился),
+        """Ядро чистая установка — :53 пуст (AGH не ставился),
         dnscrypt на :5300, системный DNS = DNS провайдера и ЖИВ.
         Никаких предупреждений и никакого «восстановления»."""
         core = sys.modules["chimera._core"]
@@ -245,7 +245,7 @@ class TestEmergencyPublicDnsFallback(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 class TestAghomeMirrorsV60(unittest.TestCase):
     def test_fallback_tag_actual(self):
-        """v60: pinned-тег синхронизирован с release-каналом adtidy
+        """pinned-тег синхронизирован с release-каналом adtidy
         (v0.107.62 был устаревшим на 17 версий)."""
         from chimera.modules.aghome_mirrors import AGHOME_FALLBACK_TAG
         self.assertEqual(AGHOME_FALLBACK_TAG, "v0.107.79")
@@ -357,7 +357,7 @@ class TestLogrotateDebugOk(unittest.TestCase):
             self.assertTrue(self.core._logrotate_debug_ok(Path("/etc/logrotate.d/xray")))
 
     def test_setup_logrotate_precreates_heavy_logs(self):
-        """v60: логи autoban/watchdog предсоздаются до валидации."""
+        """логи autoban/watchdog предсоздаются до валидации."""
         src = _read("chimera/_core.py")
         self.assertIn("_lp.touch()", src)
         self.assertIn("_logrotate_debug_ok(LOGROTATE_XRAY)", src)
