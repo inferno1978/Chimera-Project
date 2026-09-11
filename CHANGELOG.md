@@ -2,6 +2,83 @@
 
 ---
 
+## FEAT(warp): нода выхода (colo) + MTProto-проба Telegram + экспорт клиентских конфигов — 12 сентября 2026
+
+**Кейс:** Endpoint Manager выбирал WARP-эндпоинт по TCP/ICMP-зонду — слеп
+к ноде выхода: быстрый по RTT кандидат с exit в DME (Москва, DPI-фильтрация
+с апреля 2026) выигрывал сравнение и уезжал в прод, после чего telemt_warp_route
+гнал Telegram-трафик в фильтруемый выход. При этом телемт-маршрут мог стоять
+идеально, а Telegram через текущий WARP-выход умирал (смена ноды выхода
+Cloudflare, DPI) — боты тихо висели в «connecting...» без единого варнинга.
+Заодно WARP был «серверной» фичей: клиентских конфигов для WG/mihomo Химера
+не выдавала, хотя весь стек (wgcf-аккаунт + ключи в wg-warp.conf) для этого
+готов.
+
+**Идеи портированы** (не кодом — Go-бинари не вендорим, паттерн проекта:
+pure Python + системные бинари; на сервере kernel-wg покрывает то, ради
+чего warpscout городит userspace netstack):
+- `vernette/warpscout` (MIT): trace внутри туннеля отдаёт ноду выхода —
+  colo IATA / loc; `-exclude-node DME`; mihomo-прокси в peers-формате.
+- `niklzz/warpscout-tg` (MIT, форк): ДЦ Telegram засчитывается только по
+  ответу на НАСТОЯЩИЙ MTProto-запрос (req_pq_multi, plaintext) — голый
+  TCP-connect ничего не доказывает, DPI завершает хендшейк и дропает
+  payload; обязательны все 5 ДЦ (аккаунт живёт на одном, клиент не
+  выбирает), RTT = худший.
+
+**Сделано:**
+- `warp_telegram_probe.py` (новый, ~300 строк): порт telegram.go —
+  сборка req_pq_multi байт-в-байт (48 байт: intermediate 0xEE×4, LE32(40),
+  auth_key_id=0, msg_id unix<<32 c %4==0, len 20, конструктор 0xBE7E8EF1,
+  nonce 16); probe_dc (connect+send+чтение 4-байтного заголовка, длина
+  кадра 0<n≤64КиБ — res_pq ~84 байта); probe_all_dcs — 5 ДЦ параллельно
+  под одним дедлайном, маска ответивших, worst-RTT; маршрутизация пробы
+  через wg-warp (`ip route get` определяет, идёт ли ДЦ через туннель уже;
+  если нет — временные `ip rule to <dc> lookup 302 priority 155` +
+  `default dev wg-warp`, снятие в finally; приоритет НИЖЕ telemt-fwmark
+  150 — при включённом телемте не перебивает, а лишь страхует).
+- `warp.py`: `_fetch_trace_meta()` — colo/loc/warp из уже существующего
+  curl `1.1.1.1/cdn-cgi/trace` (без DNS, ТСПУ-безопасно); `_change_warp_
+  endpoint` после успешного apply: colo → state, нода в чёрном списке →
+  синхронный автооткат на бэкап (бэкап ещё не удалён), иначе — MTProto-
+  проба «Telegram: 5/5 · худший N мс»; `_menu_colo_blacklist()` —
+  управление списком (дефолт DME, добавление/удаление/выключение,
+  state-ключ warp_colo_blacklist); пункт 7 Endpoint Manager; статус-
+  диагностика (4) теперь показывает ноду выхода + живую MTProto-пробу;
+  пункт 8 главного меню — экспорт клиентских конфигов в
+  /root/warp-client-configs/ (600): `warp-client-wg.conf` (нативный
+  wg-quick: v4+v6 Address, DNS, MTU, AllowedIPs 0.0.0.0/0(+::/0),
+  keepalive; Table=off не переносится — серверная опция),
+  `warp-mihomo-proxy.yaml` (фрагмент proxies: peers-формата warpscout:
+  type wireguard, private-key, ip, peers[server/port/public-key/
+  allowed-ips/persistent-keepalive], mtu/udp/remote-dns-resolve/dns) и
+  `warp-mihomo-proxy.json` (тот же набор для external proxy-providers).
+  Доп. state-ключи (warp_exit_colo/loc, warp_colo_blacklist,
+  warp_last_tg_status/at) — read-modify-write под flock отдельным
+  `_ext_state_save`, маппинг в глобали _core НЕ расширяется, чужие ключи
+  state.json не затираются.
+- `telemt_warp_route.py`: `apply_telemt_warp_routing(enable)` сразу после
+  включения гонит MTProto-пробу и возвращает её в сообщении («Проба:
+  Telegram: 5/5 · худший 84 мс»); watchdog (тик 2 мин) — `_tg_probe_
+  watchdog()`: проба не чаще раза в 10 мин (TG_PROBE_EVERY_MIN, метка
+  last_tg_probe_ts в собственном state), падение <5/5 → WARN в лог c
+  указанием «смените Endpoint (меню WARP → 6)»; исключения глотаются —
+  диагностика не роняет watchdog.
+
+**Совместимость/дефолты:** без state-ключей поведение прежнее; фильтр
+colo по умолчанию = DME; проводные пути SSH/commit-confirm в
+`_change_warp_endpoint` не тронуты — новый post-apply блок стоит ПОСЛЕ
+подтверждения и ДО удаления бэкапа, откат идёт штатным
+`_restore_endpoint_backup + _apply_mode`.
+
+**Тесты:** `tests/test_warp_telegram_probe.py` — 44 (байтовая точность
+req_pq_multi, frame-заголовки, probe_dc/all_dcs/статус-строки, временная
+маршрутизация+cleanup, парсер trace, чёрный список+state-изоляция,
+экспорт wg/mihomo-yaml/json, watchdog-частота); смежные
+`tests.test_warp` (23) + `tests.test_warp_curated_lists` (22) — все
+passed; `compileall chimera/modules` — OK.
+
+---
+
 ## FIX(diagnostics): шаг 6 «TLS-сертификат / REALITY» стучался на хардкод-443 после смены server_port — 11 сентября 2026
 
 **Кейс:** юзер сменил порт хоста на 9443 (Меню 3 → Домен/Порт,

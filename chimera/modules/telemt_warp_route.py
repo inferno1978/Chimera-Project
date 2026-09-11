@@ -70,6 +70,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -100,6 +101,11 @@ RESTORE_SVC  = Path("/etc/systemd/system/telemt-warp-restore.service")
 CRON_FILE    = Path("/etc/cron.d/telemt-warp-watchdog")
 WATCHDOG_LOG = Path("/var/log/telemt-warp-watchdog.log")
 MODULE_PATH  = Path(__file__).resolve()
+
+# MTProto-проба из watchdog: не чаще раза в 10 минут (тик каждые 2 мин —
+# проба на каждый 5-й тик). Проба активная (5 соединений к ДЦ Telegram),
+# чаще не нужно: трафик неотличим от клиента, но незачем и палиться чаще.
+TG_PROBE_EVERY_MIN = 10
 
 _LOG_FILE = Path("/var/log/chimera.log")
 
@@ -289,13 +295,53 @@ def _remove_watchdog_cron() -> None:
 def _watchdog_tick() -> None:
     """Идемпотентная самопроверка — вызывается из cron каждые 2 минуты.
     Восстанавливает ip rule/route table после ребута и подхватывает
-    изменения живого списка подсетей tg_nets.json без участия пользователя."""
+    изменения живого списка подсетей tg_nets.json без участия пользователя.
+
+    Раз в TG_PROBE_EVERY_MIN минут — MTProto-проба 5 ДЦ Telegram через
+    wg-warp (порт warpscout-tg): маршрут может стоять, а Telegram через
+    текущий WARP-выход умереть (смена ноды выхода Cloudflare, DPI) —
+    телемт-боты тогда тихо висят в connecting..., без единого варнинга."""
     if not is_enabled():
         return
     if not warp_iface_up():
         _log("WARN", "watchdog: интерфейс wg-warp не поднят — пропуск тика")
         return
     refresh_telemt_warp_routing(quiet=True)
+    _tg_probe_watchdog()
+
+
+def _tg_probe_watchdog() -> None:
+    """MTProto-проба из watchdog — не чаще, чем раз в TG_PROBE_EVERY_MIN
+    минут (метка времени в собственном state-файле). Проба лёгкая: 5
+    параллельных соединений, общий дедлайн ~6 сек; трафик неотличим от
+    обычного клиента Telegram (req_pq_multi, как warpscout-tg)."""
+    state = _state_load()
+    last = state.get("last_tg_probe_ts") or 0
+    now = time.time()
+    if now - last < TG_PROBE_EVERY_MIN * 60:
+        return
+
+    from chimera.modules.warp_telegram_probe import probe_all_dcs, telegram_status_str
+    try:
+        res = probe_all_dcs()
+    except Exception as e:
+        _log("WARN", f"tg-probe: ошибка пробы: {e}")
+        return
+
+    state["last_tg_probe_ts"] = int(now)
+    state["last_tg_status"] = telegram_status_str(res)
+    _state_save(state)
+
+    if not res.get("warp_up"):
+        # Маршрут стоит, а интерфейс в момент пробы не поднялся — уже
+        # отрепорчено в warp_iface_up(), не дублируем.
+        return
+    if res.get("ok"):
+        _log("INFO", f"tg-probe: {state['last_tg_status']}")
+    else:
+        _log("WARN", f"tg-probe: {state['last_tg_status']} — Telegram через "
+                     f"текущий WARP-выход недоступен; телемт-подключения "
+                     f"будут теряться. Смените Endpoint (меню WARP → 6).")
 
 
 # ── Публичный API ─────────────────────────────────────────────────────────
@@ -327,9 +373,23 @@ def apply_telemt_warp_routing(enable: bool) -> tuple:
                 f"Включено частично: {len(nets) - len(failed)}/{len(nets)} подсетей, "
                 f"не удалось: {', '.join(failed[:3])}{'…' if len(failed) > 3 else ''}"
             )
+        # Сразу проверяем, что Telegram реально отвечает через этот WARP-
+        # выход (MTProto req_pq_multi × 5 ДЦ, как warpscout-tg) — маршрут
+        # маршрутом, а живость ДЦ проверяется только настоящим запросом.
+        tg_note = ""
+        try:
+            from chimera.modules.warp_telegram_probe import probe_all_dcs, telegram_status_str
+            tg = probe_all_dcs()
+            tg_note = telegram_status_str(tg)
+            _state_save({"last_tg_probe_ts": int(time.time()), "last_tg_status": tg_note})
+            if not tg.get("ok"):
+                _log("WARN", f"tg-probe: {tg_note}")
+        except Exception as e:
+            _log("WARN", f"tg-probe: ошибка пробы при включении: {e}")
         return True, (
             f"Telegram → WARP включено: {len(nets)} подсетей, "
             f"fwmark={FWMARK}, table={ROUTE_TABLE}, watchdog каждые 2 мин."
+            + (f" Проба: {tg_note}" if tg_note else "")
         )
 
     # ── disable ──

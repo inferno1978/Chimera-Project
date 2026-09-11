@@ -1559,6 +1559,159 @@ def _verify_warp_handshake() -> tuple[bool, bool]:
     return handshake_ok, warp_on
 
 
+# =============================================================================
+#  POST-APPLY ВЕРИФИКАЦИЯ: НОДА ВЫХОДА (colo) + TELEGRAM (MTProto-проба)
+# =============================================================================
+# Идеи портированы из vernette/warpscout (MIT): trace внутри туннеля отдаёт
+# ноду выхода (colo IATA / loc); нода DME (Москва) с апреля 2026 фильтруется
+# DPI — быстрый по RTT эндпоинт с exit в DME бесполезен. MTProto-проба — из
+# niklzz/warpscout-tg (MIT): см. chimera/modules/warp_telegram_probe.py.
+#
+# Дополнительные ключи state.json (warp_exit_colo / warp_exit_loc /
+# warp_colo_blacklist / warp_last_tg_status) пишутся отдельным
+# read-modify-write под flock — БЕЗ маппинга в глобали _core.py (модуль
+# остаётся полностью автономным, см. докстринг файла).
+WARP_COLO_BLACKLIST_DEFAULT: tuple[str, ...] = ("DME",)  # DPI-фильтрация с 04.2026
+TRACE_CURL_TIMEOUT = 8  # сек
+WARP_EXPORT_DIR = Path("/root/warp-client-configs")
+WARP_EXPORT_MTU_DEFAULT = 1280  # безопасный MTU WARP-туннеля (tunnelMTU warpscout)
+
+
+def _ext_state_load() -> dict:
+    """Читает state.json целиком (свои ключи извлекает вызывающий код).
+    Ошибки молча → {} — пост-верификация не должна ломать основной флоу."""
+    core = _core_module()
+    if not _ensure_state_file():
+        return {}
+    try:
+        return json.loads(core.STATE_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _ext_state_save(updates: dict) -> None:
+    """Read-modify-write ТОЛЬКО переданных ключей в state.json под flock
+    (паттерн _warp_state_save_autonomously: чужие ключи — UUID Xray и т.п. —
+    не затираются). Значения None пропускаются."""
+    core = _core_module()
+    if not _ensure_state_file() or not updates:
+        return
+    import fcntl
+    try:
+        with core.STATE_FILE.open("r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read()
+                state = json.loads(content) if content else {}
+                for k, v in updates.items():
+                    if v is not None:
+                        state[k] = v
+                f.seek(0)
+                f.truncate()
+                f.write(json.dumps(state, indent=2, ensure_ascii=False))
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except Exception as e:
+        warn(f"Не удалось сохранить доп. WARP state: {e}")
+
+
+def _colo_blacklist() -> list[str]:
+    """Текущий чёрный список нод выхода (IATA-коды, верхний регистр).
+    Пустой список [] в state — осознанное отключение фильтра."""
+    v = _ext_state_load().get("warp_colo_blacklist")
+    if isinstance(v, list):
+        return [str(x).strip().upper() for x in v if str(x).strip()]
+    return list(WARP_COLO_BLACKLIST_DEFAULT)
+
+
+def _fetch_trace_meta() -> tuple[Optional[str], Optional[str], bool]:
+    """trace через интерфейс wg-warp (тот же URL, что в
+    _verify_warp_handshake — прямой IP 1.1.1.1, без DNS, ТСПУ-безопасно).
+    Возвращает (colo, loc, warp_on). colo/loc = None, если trace не отдал."""
+    r = _run(
+        ["curl", "-sS", "--interface", WG_INTERFACE,
+         "--max-time", str(TRACE_CURL_TIMEOUT),
+         "https://1.1.1.1/cdn-cgi/trace"],
+        capture=True, check=False,
+    )
+    body = r.stdout or ""
+    warp_on = "warp=on" in body
+    if r.returncode != 0 or "colo=" not in body:
+        return None, None, warp_on
+    m_colo = re.search(r"^colo=(\w+)", body, flags=re.MULTILINE)
+    m_loc = re.search(r"^loc=(\w+)", body, flags=re.MULTILINE)
+    return (
+        m_colo.group(1) if m_colo else None,
+        m_loc.group(1) if m_loc else None,
+        warp_on,
+    )
+
+
+def _menu_colo_blacklist() -> None:
+    """Подменю управления чёрным списком нод выхода WARP."""
+    while True:
+        os.system("clear")
+        bl = _colo_blacklist()
+        bl_str = ", ".join(bl) if bl else f"{YELLOW}пуст (фильтр выключен){NC}"
+        default_str = ", ".join(WARP_COLO_BLACKLIST_DEFAULT)
+
+        _box_top("ЧЁРНЫЙ СПИСОК НОД ВЫХОДА WARP (colo)")
+        _box_row()
+        _box_row("  Нода выхода (colo) определяется по trace из туннеля")
+        _box_row("  ПОСЛЕ применения Endpoint. Эндпоинт, чья нода выхода")
+        _box_row("  в списке, отклоняется с автооткатом на предыдущий.")
+        _box_row()
+        _box_row(f"  Текущий список:  {CYAN}{bl_str}{NC}")
+        _box_row(f"  Дефолт:          {default_str} (Москва, DPI-фильтрация)")
+        _box_row()
+        _box_sep()
+        _box_row(f"  {GREEN}1{NC}  Добавить код ноды (IATA, напр. DME, AMS, FRA)")
+        _box_row(f"  {GREEN}2{NC}  Удалить код ноды из списка")
+        _box_row(f"  {GREEN}3{NC}  Сбросить к дефолту ({default_str})")
+        _box_row(f"  {GREEN}4{NC}  Выключить фильтр (пустой список)")
+        _box_row()
+        _box_row(f"  {RED}0{NC}  ← Назад")
+        _box_bottom()
+
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip()
+        except KeyboardInterrupt:
+            print()
+            return
+
+        if ch in ("0", "q", "Q", ""):
+            return
+
+        if ch == "1":
+            code = input("  Код ноды (IATA, 3 буквы): ").strip().upper()
+            if not re.fullmatch(r"[A-Z]{3}", code):
+                warn("Ожидается 3-буквенный IATA-код (DME, AMS, FRA...).")
+            elif code in (bl := _colo_blacklist()):
+                info(f"{code} уже в списке.")
+            else:
+                _ext_state_save({"warp_colo_blacklist": bl + [code]})
+                success(f"{code} добавлен в чёрный список.")
+        elif ch == "2":
+            code = input("  Код ноды для удаления: ").strip().upper()
+            bl = _colo_blacklist()
+            if code not in bl:
+                info(f"{code} в списке нет.")
+            else:
+                _ext_state_save({"warp_colo_blacklist": [c for c in bl if c != code]})
+                success(f"{code} удалён из списка.")
+        elif ch == "3":
+            _ext_state_save({"warp_colo_blacklist": list(WARP_COLO_BLACKLIST_DEFAULT)})
+            success(f"Список сброшен к дефолту ({default_str}).")
+        elif ch == "4":
+            if input(f"{YELLOW}Отключить фильтр нод выхода совсем? [y/N]:{NC} ").strip().lower() == "y":
+                _ext_state_save({"warp_colo_blacklist": []})
+                success("Фильтр выключен (пустой список).")
+        else:
+            warn("Неверный выбор.")
+            time.sleep(1)
+
+
 def _restore_endpoint_backup() -> bool:
     """Восстанавливает /etc/wireguard/wg-warp.conf из endpoint-backup и
     перезапускает wg-quick@wg-warp. Используется и синхронным rollback'ом
@@ -1682,6 +1835,37 @@ def _change_warp_endpoint(new_endpoint: str) -> bool:
             warn(f"Подтверждение не получено — в течение {COMMIT_CONFIRM_TIMEOUT} сек "
                  f"сработает автоматический откат (Endpoint + маршруты), SSH будет восстановлен.")
             return False
+
+    # ── [POST-APPLY] нода выхода (colo) + MTProto-проверка Telegram ──
+    # Порт идей warpscout/warpscout-tg: handshake жив, но где мы выходим?
+    # Бэкап ещё на месте — нода в чёрном списке откатывается синхронно.
+    colo, loc, _warp_flag = _fetch_trace_meta()
+    if colo:
+        _ext_state_save({"warp_exit_colo": colo, "warp_exit_loc": loc or ""})
+        if colo in _colo_blacklist():
+            warn(f"Нода выхода {colo} ({loc or 'неизвестный регион'}) входит в чёрный "
+                 f"список — трафик через неё фильтруется DPI.")
+            warn("Откат к предыдущему Endpoint (бэкап ещё сохранён)...")
+            _restore_endpoint_backup()
+            _apply_mode(mode, ssh_ip, custom_ips, custom_domains)
+            success("Откат выполнен: предыдущий Endpoint восстановлен, "
+                    "кандидат с плохой нодой выхода отклонён.")
+            return False
+        info(f"Нода выхода WARP: {CYAN}{colo}{NC}" + (f" ({loc})" if loc else ""))
+
+    from chimera.modules.warp_telegram_probe import probe_all_dcs, telegram_status_str
+    tg = probe_all_dcs()
+    tg_str = telegram_status_str(tg)
+    _ext_state_save({"warp_last_tg_status": re.sub(chr(27) + r"\[[0-9;]*m", "", tg_str),
+                     "warp_last_tg_at": int(time.time())})
+    if tg.get("warp_up"):
+        if tg["ok"]:
+            success(f"✓ {tg_str}")
+        else:
+            warn(f"✗ {tg_str}")
+            warn("Endpoint работает, но Telegram через этот выход недоступен — "
+                 "при активном telemt_warp_route телемт будет терять связь. "
+                 "Попробуйте другой кандидат (Endpoint Manager → скан).")
 
     WG_CONFIG_ENDPOINT_BACKUP.unlink(missing_ok=True)  # УТ-11: удаляется после успешного подтверждения
     _state_set("WARP_CONNECTED", True)
@@ -1897,6 +2081,29 @@ def _menu_status_and_diagnostics() -> None:
     else:
         warn("Не удалось получить однозначный ответ от Cloudflare trace.")
 
+    # ── [POST-APPLY-ИНФО] нода выхода + MTProto-проба Telegram (в туннеле) ──
+    if _warp_service_active():
+        colo, loc, _warp_flag = _fetch_trace_meta()
+        if colo:
+            _ext_state_save({"warp_exit_colo": colo, "warp_exit_loc": loc or ""})
+            in_bl = colo in _colo_blacklist()
+            tag = f"{RED}✗ в чёрном списке!{NC}" if in_bl else f"{GREEN}✓{NC}"
+            print(f"  {tag} Нода выхода: {CYAN}{colo}{NC}" + (f" ({loc})" if loc else "")
+                  + ("  — через эту ноду трафик фильтруется DPI" if in_bl else ""))
+
+        from chimera.modules.warp_telegram_probe import probe_all_dcs, telegram_status_str
+        print(f"  {CYAN}[INFO]{NC}  MTProto-проба 5 датацентров Telegram через WARP...")
+        tg = probe_all_dcs()
+        _ext_state_save({"warp_last_tg_status": re.sub(chr(27) + r"\[[0-9;]*m", "", telegram_status_str(tg)),
+                         "warp_last_tg_at": int(time.time())})
+        tg_str = telegram_status_str(tg)
+        if tg.get("ok"):
+            print(f"  {GREEN}[OK]{NC}    {tg_str}")
+        elif tg.get("warp_up"):
+            print(f"  {YELLOW}[WARN]{NC}  {tg_str}")
+        else:
+            print(f"  {YELLOW}[WARN]{NC}  {tg_str}")
+
     _check_ssh_protection()
 
 
@@ -1963,6 +2170,211 @@ def _show_history_pick_list(history: list[dict]) -> None:
     input(f"{BLUE}Нажмите Enter...{NC}")
 
 
+# =============================================================================
+#  ЭКСПОРТ КЛИЕНТСКИХ КОНФИГОВ WARP (WG-клиенты / mihomo / proxy-providers)
+# =============================================================================
+# Формат mihomo-прокси — peers-синтаксис, байт-в-байт по вернии wgconf.go из
+# vernette/warpscout (MIT): type: wireguard + список peers. Тот же набор полей
+# уходит и в YAML (вставить в proxies: своего конфига), и в JSON (файл для
+# external proxy-providers). WG-конфиг — стандартный wg-quick для импорта в
+# любой WireGuard-клиент (официальный, Amnezia, Nekoray и т.п.).
+def _parse_wg_config_fields() -> Optional[dict]:
+    """[Interface]/[Peer] из /etc/wireguard/wg-warp.conf → словарь полей.
+    None, если конфига нет или в нём нет ключей (WARP не установлен)."""
+    if not WG_CONFIG.exists():
+        return None
+    fields: dict = {"address": [], "private_key": None, "public_key": None,
+                    "endpoint": None, "keepalive": "25", "mtu": None, "dns": None}
+    section = ""
+    for raw in WG_CONFIG.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("["):
+            section = line.lower()
+            continue
+        if "=" not in line:
+            continue
+        key, val = (x.strip() for x in line.split("=", 1))
+        kl = key.lower()
+        if section == "[interface]":
+            if kl == "address":
+                fields["address"].append(val)
+            elif kl == "privatekey":
+                fields["private_key"] = val
+            elif kl == "dns":
+                fields["dns"] = val
+            elif kl == "mtu":
+                fields["mtu"] = val
+        elif section == "[peer]":
+            if kl == "publickey":
+                fields["public_key"] = val
+            elif kl == "endpoint":
+                fields["endpoint"] = val
+            elif kl == "persistentkeepalive":
+                fields["keepalive"] = val
+    if not fields["private_key"] or not fields["public_key"]:
+        return None
+    return fields
+
+
+def _warp_addr_v4_v6(fields: dict) -> tuple[Optional[str], Optional[str]]:
+    """Адреса туннеля из списка Address (v4 без ':', v6 с ':')."""
+    v4 = next((a.split("/")[0] for a in fields["address"] if ":" not in a), None)
+    v6 = next((a.split("/")[0] for a in fields["address"] if ":" in a), None)
+    return v4, v6
+
+
+def _export_warp_wg_conf(fields: dict) -> str:
+    """Нативный wg-конфиг для импорта в WireGuard-клиенты.
+    AllowedIPs = 0.0.0.0/0 (+ ::/0 при наличии v6-адреса) — весь трафик
+    клиента через WARP; режимы/сплит пользователь настраивает сам."""
+    v4, v6 = _warp_addr_v4_v6(fields)
+    mtu = fields.get("mtu") or str(WARP_EXPORT_MTU_DEFAULT)
+    lines = [
+        "# Chimera — клиентский конфиг Cloudflare WARP",
+        f"# Сгенерирован {time.strftime('%Y-%m-%d %H:%M')} · нода сервера: {fields.get('endpoint')}",
+        "[Interface]",
+    ]
+    if v4:
+        lines.append(f"Address = {v4}/32")
+    if v6:
+        lines.append(f"Address = {v6}/128")
+    lines += [
+        f"PrivateKey = {fields['private_key']}",
+        "DNS = 1.1.1.1, 1.0.0.1",
+        f"MTU = {mtu}",
+        "",
+        "[Peer]",
+        f"PublicKey = {fields['public_key']}",
+        f"Endpoint = {fields['endpoint']}",
+        "AllowedIPs = 0.0.0.0/0" + (", ::/0" if v6 else ""),
+        f"PersistentKeepalive = {fields.get('keepalive') or 25}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _export_warp_mihomo_proxy(fields: dict, name: str = "CF-WARP") -> dict:
+    """Прокси-структура (поля как у warpscout mihomoPeer, v4-семейство):
+    и YAML, и JSON рендерятся из одного словаря — поля совпадают."""
+    v4, _v6 = _warp_addr_v4_v6(fields)
+    endpoint = fields.get("endpoint") or ""
+    host, _, port_s = endpoint.rpartition(":")
+    try:
+        port = int(port_s)
+    except ValueError:
+        host, port = endpoint, 2408
+    return {
+        "name": name,
+        "type": "wireguard",
+        "private-key": fields["private_key"],
+        "ip": v4 or "172.16.0.2",
+        "peers": [{
+            "server": host,
+            "port": port,
+            "public-key": fields["public_key"],
+            "allowed-ips": ["0.0.0.0/0"],
+            "persistent-keepalive": int(fields.get("keepalive") or 25),
+        }],
+        "mtu": int(fields.get("mtu") or WARP_EXPORT_MTU_DEFAULT),
+        "udp": True,
+        "remote-dns-resolve": True,
+        "dns": ["1.1.1.1", "1.0.0.1"],
+    }
+
+
+def _export_warp_mihomo_yaml(proxy: dict) -> str:
+    """YAML-фрагмент «proxies:» — вставляется в существующий mihomo-конфиг.
+    Пишется вручную (stdlib): поле name в кавычках, список allowed-ips в
+    flow-стиле ['...'] — как у warpscout writeYAML."""
+    p = proxy
+    peer = p["peers"][0]
+    lines = [
+        "proxies:",
+        f"  - name: \"{p['name']}\"",
+        f"    type: {p['type']}",
+        f"    private-key: {p['private-key']}",
+        f"    ip: {p['ip']}",
+        "    peers:",
+        "      - server: " + (f"\"{peer['server']}\"" if ":" in peer["server"] else str(peer["server"])),
+        f"        port: {peer['port']}",
+        f"        public-key: {peer['public-key']}",
+        f"        allowed-ips: ['{peer['allowed-ips'][0]}']",
+        f"        persistent-keepalive: {peer['persistent-keepalive']}",
+        f"    mtu: {p['mtu']}",
+        f"    udp: {'true' if p['udp'] else 'false'}",
+        f"    remote-dns-resolve: {'true' if p['remote-dns-resolve'] else 'false'}",
+        f"    dns: ['{p['dns'][0]}', '{p['dns'][1]}']",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _export_warp_mihomo_json(proxies: list) -> str:
+    """JSON-массив прокси — файл для external proxy-providers mihomo."""
+    return json.dumps(proxies, indent=2, ensure_ascii=False) + "\n"
+
+
+def _menu_export_warp_configs() -> None:
+    """Подменю экспорта: WG-конфиг + mihomo YAML/JSON из СУЩЕСТВУЮЩЕГО
+    серверного wg-warp.conf (ключи wgcf-аккаунта сервера)."""
+    os.system("clear")
+    fields = _parse_wg_config_fields()
+    if not fields:
+        warn(f"Не удалось прочитать {WG_CONFIG} (нет ключей) — сначала установите WARP.")
+        input(f"{BLUE}Нажмите Enter...{NC}")
+        return
+
+    proxy = _export_warp_mihomo_proxy(fields)
+    wg_conf = _export_warp_wg_conf(fields)
+    yaml_frag = _export_warp_mihomo_yaml(proxy)
+    json_arr = _export_warp_mihomo_json([proxy])
+
+    WARP_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    targets = [
+        (WARP_EXPORT_DIR / "warp-client-wg.conf", wg_conf),
+        (WARP_EXPORT_DIR / "warp-mihomo-proxy.yaml", yaml_frag),
+        (WARP_EXPORT_DIR / "warp-mihomo-proxy.json", json_arr),
+    ]
+    for path, content in targets:
+        path.write_text(content)
+        path.chmod(0o600)  # внутри private-key!
+
+    colo = _ext_state_load().get("warp_exit_colo")
+    exit_note = fields["endpoint"]
+    if colo:
+        exit_note += f" (нода выхода: {colo})"
+
+    _box_top("ЭКСПОРТ КЛИЕНТСКИХ КОНФИГОВ WARP")
+    _box_row()
+    _box_row(f"  Источник:           {WG_CONFIG}")
+    _box_row(f"  Endpoint:           {CYAN}{exit_note}{NC}")
+    _box_row()
+    _box_sep()
+    for path, _content in targets:
+        _box_row(f"  {GREEN}✓{NC} {path}  ({path.stat().st_size} байт)")
+    _box_row()
+    _box_row("  warp-client-wg.conf   → импорт в WireGuard/Amnezia/Nekoray")
+    _box_row("  warp-mihomo-proxy.yaml→ блок proxies: в ваш mihomo-конфиг")
+    _box_row("  warp-mihomo-proxy.json→ файл external proxy-providers")
+    _box_row()
+    _box_row(f"  {YELLOW}⚠ Конфиги используют wgcf-аккаунт СЕРВЕРА (те же ключи).{NC}")
+    _box_row(f"  {YELLOW}  Для отдельного клиентского аккаунта — wgcf register.{NC}")
+    _box_row(f"  {YELLOW}⚠ Файлы с private-key — права 600, не выкладывать.{NC}")
+    _box_row()
+    _box_bottom()
+
+    if input(f"{BLUE}Показать mihomo-фрагмент на экране? [y/N]:{NC} ").strip().lower() == "y":
+        print()
+        print(yaml_frag)
+        print(f"  {CYAN}↑ вставьте в proxies: вашего конфига mihomo (рядом с другими"
+              f" нодами) и добавьте имя \"{proxy['name']}\" в группу/правила."
+              f" Для proxy-providers используйте warp-mihomo-proxy.json.{NC}")
+        print()
+    input(f"{BLUE}Нажмите Enter...{NC}")
+
+
 def _menu_endpoint_manager() -> None:
     """Подменю 'Изменить Endpoint WARP' (п.15 ТЗ): текущий Endpoint, кэш,
     история, ручной ввод, fallback, интеллектуальный подбор."""
@@ -1993,6 +2405,8 @@ def _menu_endpoint_manager() -> None:
         _box_row(f"  {GREEN}4{NC}  Выбрать из истории")
         _box_row(f"  {GREEN}5{NC}  Ввести Endpoint вручную (ip:port)")
         _box_row(f"  {GREEN}6{NC}  Использовать fallback-список")
+        _box_row(f"  {GREEN}7{NC}  Чёрный список нод выхода (colo)"
+                 f"  {YELLOW}[{', '.join(_colo_blacklist()) or 'выключен'}]{NC}")
         _box_row()
         _box_row(f"  {RED}0{NC}  ← Назад")
         _box_bottom()
@@ -2071,6 +2485,9 @@ def _menu_endpoint_manager() -> None:
                 "Fallback-список (без предварительной проверки)",
             )
 
+        elif ch == "7":
+            _menu_colo_blacklist()
+
         else:
             warn("Неверный выбор.")
             time.sleep(1)
@@ -2119,6 +2536,7 @@ def do_manage_warp() -> None:
             _box_row(f"  {GREEN}7{NC}  Курируемые списки доменов (RU/GeoBlock/Google AI)")
             if mode != MODE_SELECTIVE:
                 _box_row(f"      {YELLOW}⚠ применяются только в режиме SELECTIVE{NC}")
+            _box_row(f"  {GREEN}8{NC}  Экспорт клиентских конфигов WARP (WG / mihomo)")
         _box_row()
         _box_row(f"  {RED}0{NC}  ← Назад")
         _box_bottom()
@@ -2186,6 +2604,9 @@ def do_manage_warp() -> None:
                     _state_get("WARP_CUSTOM_IPS", []),
                     _state_get("WARP_CUSTOM_DOMAINS", []),
                 )
+
+        elif ch == "8" and installed:
+            _menu_export_warp_configs()
 
         else:
             warn("Неверный выбор.")

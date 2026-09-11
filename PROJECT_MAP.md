@@ -212,8 +212,9 @@
 
 | Файл | За что отвечает |
 |---|---|
-| `warp.py` | Cloudflare WARP — 3 режима маршрутизации (full/selective/SSH-namespace) |
+| `warp.py` | Cloudflare WARP — 3 режима маршрутизации (full/selective/SSH-namespace), Endpoint Manager + post-apply верификация (нода выхода colo с чёрным списком DME, MTProto-проба Telegram), экспорт клиентских конфигов WG/mihomo (peers-формат, YAML+JSON) |
 | `warp_curated_lists.py` | Курируемые списки доменов для WARP (itdoginfo/allow-domains) |
+| `warp_telegram_probe.py` | MTProto-проба 5 ДЦ Telegram через WARP (порт warpscout-tg: req_pq_multi, все 5 обязательны, worst-RTT; временная to-маршрутизация table 302 priority 155 если ДЦ не в туннеле) |
 | `entry_mirrors.py` | Зеркала точки входа (entry mirrors) |
 | `port_hopping.py` | Port hopping (сменa портов для обхода DPI) |
 
@@ -235,7 +236,7 @@
 | `telemt_panel.py` | Веб-панель телеметрии (real-time статистика) |
 | `telemt_fallback.py` | Fallback телеметрии (Middle Proxy → Direct Mode, гибрид ME) — **НЕ путать** с nginx-fallback для маскировки (тот в `mtproto.py:_setup_own_site`) |
 | `telemt_self_route.py` | Self-route телеметрии |
-| `telemt_warp_route.py` | WARP-route телеметрии |
+| `telemt_warp_route.py` | WARP-route телеметрии + MTProto-проба в watchdog (раз в 10 мин, WARN при падении <5/5 ДЦ) |
 | `telemt_syn_limiter.py` | SYN-лимитер телеметрии (защита от SYN-flood) |
 | `telemt_mss_selector.py` | Селектор MSS телеметрии |
 | `telemt_ios_fix.py` | iOS-фикс телеметрии |
