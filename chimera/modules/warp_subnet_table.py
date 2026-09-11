@@ -625,6 +625,10 @@ def run_subnet_table_flow() -> None:
         input(f"{BLUE}Нажмите Enter...{NC}")
         return
 
+    # Пулы скана: восстановить cron автообновления / подтянуть протухший
+    # кэш warpscout (тихо; сбой сети не отменяет скан — статика остаётся).
+    _warp.ensure_pools_ready()
+
     _warp.info("Сканирую диапазоны WARP (массовый TCP-зонд, ~15–30 с)...")
     try:
         results = _warp._scan_warp_endpoints(top=None)

@@ -91,6 +91,20 @@ from chimera.modules.warp_curated_lists import (
     do_manage_curated_lists,
 )
 
+# Пулы сканирования /24 с автообновлением из апстрима vernette/warpscout
+# (pools.go → кэш → cron 04:23): модуль автономен, как и курируемые списки.
+# WARP_SCAN_RANGES ниже — алиас статического офлайн-базиса из него; скан
+# берёт ЭФФЕКТИВНЫЙ набор через get_scan_ranges() (живые пулы warpscout +
+# статические CF), ensure_pools_ready() дергается перед интерактивными
+# сканами. См. chimera/modules/warp_scan_pools.py.
+from chimera.modules.warp_scan_pools import (
+    STATIC_SCAN_RANGES as WARP_SCAN_RANGES,
+    get_scan_ranges,
+    ensure_pools_ready,
+    scan_pools_auto,
+    do_manage_scan_pools,
+)
+
 
 # =============================================================================
 #  ОТЛОЖЕННАЯ ПРИВЯЗКА К ЯДРУ (_core.py) — см. архитектурное замечание выше
@@ -336,23 +350,11 @@ WARP_SCAN_PORTS: tuple[int, ...] = (
     4500,   # IPsec NAT-T (legacy, на некоторых хостингах)
 )
 
-# Диапазоны для автоматического поиска (п.2 ТЗ).
-WARP_SCAN_RANGES: tuple[str, ...] = (
-    # Новые CF-пулы 8.x — дефолтный набор vernette/warpscout (MIT):
-    # те же порты (2408/854/890/928/943/1701/4500…), из RU/EU часто
-    # работают лучше классических 162.159/188.114. Без них «таблица
-    # подсетей» не видит 8 из 14 эталонных пулов warpscout.
-    "8.6.112.0/24", "8.34.70.0/24", "8.34.146.0/24", "8.35.211.0/24",
-    "8.39.125.0/24", "8.39.204.0/24", "8.39.214.0/24", "8.47.69.0/24",
-    # Классические WARP-диапазоны (официальная документация Cloudflare One).
-    "162.159.192.0/24", "162.159.193.0/24", "162.159.195.0/24", "162.159.197.0/24",
-    "162.159.204.0/24", "162.159.239.0/24",
-    "188.114.96.0/24", "188.114.97.0/24", "188.114.98.0/24", "188.114.99.0/24",
-    "188.114.100.0/24", "188.114.101.0/24", "188.114.102.0/24", "188.114.103.0/24",
-    "188.114.104.0/24", "188.114.105.0/24", "188.114.106.0/24", "188.114.107.0/24",
-    "172.65.4.0/24", "172.65.32.0/24",
-    "104.16.10.0/24", "104.17.10.0/24",
-)
+# Диапазоны для автоматического поиска (п.2 ТЗ). Определение ВЫНЕСЕНО в
+# chimera/modules/warp_scan_pools.py (STATIC_SCAN_RANGES — офлайн-базис):
+# эффективный набор скана теперь live-набор — get_scan_ranges() (пулы
+# warpscout, автообновляемые cron'ом, + статические CF, которых у апстрима
+# нет). Алиас выше сохраняет имя для старых ссылок/тестов.
 WARP_HOSTS_PER_SUBNET = (2, 4)  # случайно 2–4 хоста на /24 (Anycast — весь /24 не нужен)
 
 
@@ -1477,7 +1479,7 @@ def _select_scan_targets() -> list[str]:
     import ipaddress
     import random
     targets: list[str] = []
-    for cidr in WARP_SCAN_RANGES:
+    for cidr in get_scan_ranges():
         net = ipaddress.ip_network(cidr, strict=False)
         hosts = list(net.hosts())
         if not hosts:
@@ -2560,6 +2562,7 @@ def _menu_endpoint_manager() -> None:
             candidates = cache.get("endpoints", []) if cache.get("valid") else []
             if not candidates:
                 info("Актуального кэша нет — выполняется сканирование...")
+                ensure_pools_ready()
                 candidates = _scan_warp_endpoints()
                 _endpoint_cache_save(candidates, valid=bool(candidates))
             best, reason = _pick_best_endpoint(candidates)
@@ -2570,6 +2573,7 @@ def _menu_endpoint_manager() -> None:
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "2":
+            ensure_pools_ready()
             try:
                 candidates = _scan_warp_endpoints()
             except KeyboardInterrupt:
@@ -2681,6 +2685,8 @@ def do_manage_warp() -> None:
             if mode != MODE_SELECTIVE:
                 _box_row(f"      {YELLOW}⚠ применяются только в режиме SELECTIVE{NC}")
             _box_row(f"  {GREEN}8{NC}  Экспорт клиентских конфигов WARP (WG / mihomo)")
+            _box_row(f"  {GREEN}9{NC}  Пулы сканирования — автообновление из warpscout"
+                     f"  {YELLOW}[{'вкл' if scan_pools_auto() else 'выкл'}]{NC}")
         _box_row()
         _box_row(f"  {RED}0{NC}  ← Назад")
         _box_bottom()
@@ -2751,6 +2757,9 @@ def do_manage_warp() -> None:
 
         elif ch == "8" and installed:
             _menu_export_warp_configs()
+
+        elif ch == "9" and installed:
+            do_manage_scan_pools()
 
         else:
             warn("Неверный выбор.")
