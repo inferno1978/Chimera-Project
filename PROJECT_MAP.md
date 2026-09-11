@@ -15,6 +15,7 @@
 | `system_deps.py` | Определение пакетного менеджера (apt/dnf) + `ensure_startup_dependencies` (загрузка всех системных пакетов) |
 | `tui.py` | TUI-виджеты без сторонних зависимостей — `tui_input/tui_confirm/tui_select/tui_progress/tui_form` |
 | `scheduler.py` | Cron-планировщик для меню |
+| `updater.py` | Самообновление проекта из TUI: git fetch/pull --ff-only из origin (Раздел 1 → U), ночное автообновление 04:30 (/etc/cron.d/chimera-auto-update), фоновая проверка при старте + строка-подсказка в главном меню, кэш update_check.json |
 | `smoke_test.py` | Smoke-тест Xray после применения конфига |
 | `xray_safe_apply.py` | Безопасное применение конфига с автоматическим rollback при ошибке |
 
