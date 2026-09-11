@@ -103,6 +103,7 @@ from chimera.modules.dnscrypt_advanced import do_dnscrypt_advanced_menu
 from chimera.modules.honeypot      import do_manage_honeypot
 from chimera.modules.fail2ban_manager import do_manage_fail2ban
 from chimera.modules.scheduler     import render_scheduler_menu
+from chimera.modules.updater       import do_manage_update, update_hint_line
 from chimera.modules.warp          import do_manage_warp
 from chimera.modules.smart_balancer import (
     do_manage_smart_balancer, _smart_balancer_run_once,
@@ -7504,6 +7505,7 @@ def _menu_install_system() -> None:
         _box_item("7", "🗑️  Удалить установку")
         _box_item("8", "🧪 Запустить unit-тесты")
         _box_item("9", f"🔀 Mieru Hybrid Addon  {DIM}(Mieru поверх Xray на Entry-ноде, SOCKS-петля){NC}")
+        _box_item("U", f"⬆️  Обновить Chimera  {DIM}(git pull из origin: проверка / ночь-авто / подсказка){NC}")
         _box_sep()
         _box_item("W", f"🌐 Веб-панель управления  {DIM}(Admin Panel + User Portal + REST API){NC}")
         _box_row()
@@ -7555,6 +7557,12 @@ def _menu_install_system() -> None:
                 do_hybrid_addon_menu(default_port=SERVER_PORT)
             except ImportError as _e:
                 warn(f"Модуль Mieru Hybrid Addon не найден: {_e}")
+                time.sleep(2)
+        elif ch.lower() == "u":
+            try:
+                do_manage_update()
+            except Exception as _ue:
+                warn(f"Ошибка меню обновления: {_ue}")
                 time.sleep(2)
         elif ch.lower() == "w":
             do_manage_web_panel()
@@ -9066,6 +9074,16 @@ def do_scheduler_menu() -> None:
             "log":      "/var/log/xray-scheduled-backup.log",
             "configure": do_manage_scheduled_backup,
         },
+        {
+            "id":       "autoupdate",
+            "emoji":    "⬆️",
+            "label":    "Автообновление Chimera (git)",
+            "schedule": "ежедневно 04:30 (ff-only)",
+            "cron":     "/etc/cron.d/chimera-auto-update",
+            "unit":     None,
+            "log":      "/var/log/chimera-update.log",
+            "configure": do_manage_update,
+        },
     ]
 
     render_scheduler_menu(TASKS)
@@ -9717,6 +9735,13 @@ def main_menu() -> None:
             _BOX_W = 64
             _box_top()
             _box_row(f"  {BOLD}{TITLE}Chimera Project v{_get_version()}{NC}  {DIM}│{NC}  {mode_str}")
+            _hint = None
+            try:
+                _hint = update_hint_line()
+            except Exception:
+                _hint = None
+            if _hint:
+                _box_row(f"  {_hint}")
             _box_sep()
             _box_row()
             _box_row(f"  {CYAN}1{NC}  ⚙️  {TITLE}Установка и Система{NC}")

@@ -495,6 +495,14 @@ for _attempt in range(_MAX_RETRIES + 1):
             print()
 
         _checkpoint_save("main_menu")
+        # Фоновая проверка обновлений (daemon-тред, один fetch за сессию):
+        # результат пишется в кэш update_check.json, главное меню читает
+        # только кэш — сети из отрисовки меню нет. Ошибки глотаются целиком.
+        try:
+            from chimera.modules.updater import start_background_check
+            start_background_check()
+        except Exception:
+            pass
         main_menu()
         _checkpoint_clear()
         break
