@@ -15,6 +15,8 @@ Block A — split tunneling diagnostics (28 функций + 3 констант�
     и единый валидатор chk(condition, ok_msg, fail_msg).
   • _diag_run — обёртка над subprocess.run с timeout-обработкой.
   • _diag_fmt_bytes — форматирование байтов в КБ/МБ/ГБ.
+  • _diag_sni_port — порт TLS-проверки SNI-цели: свой домен →
+    server_port (REALITY-эндпоинт Xray), чужой SNI → 443.
   • _diag_resolve_config — поиск config.json по стандартным путям.
   • _diag_stats_api_available / _diag_get_stats_via_api / _diag_hint_stats_api —
     работа с Xray Stats API (gRPC, порт 10085).
@@ -183,6 +185,25 @@ def _diag_fmt_bytes(n: int) -> str:
     if n < 1024 ** 2:   return f"{n/1024:.1f} КБ"
     if n < 1024 ** 3:   return f"{n/1024**2:.1f} МБ"
     return f"{n/1024**3:.2f} ГБ"
+
+
+def _diag_sni_port(sni: str, domain: str, server_port: int) -> int:
+    """Порт TLS-проверки SNI-цели (шаг 6 полной диагностики).
+
+    Раньше порт был хардкодом 443 — после смены server_port (например,
+    на 9443) openssl продолжал стучаться на 443, шаг падал с WARN
+    «Не удалось получить сертификат», хотя REALITY-эндпоинт жив и
+    отвечает на новом порту.
+
+    Правило выбора порта:
+      • SNI == собственный домен (классический REALITY): TLS-эндпоинт —
+        Xray на server_port (слушает публично, неавторизованные
+        хендшейки форвардит nginx'у через unix-сокет — openssl получает
+        реальный сертификат). Паритет с health.py: живой openssl
+        s_client -connect domain:server_port.
+      • Чужой SNI (AWG-камуфляж / внешний dest) — отвечает на своём 443.
+    """
+    return server_port if (domain and sni == domain) else 443
 
 
 def _diag_resolve_config() -> tuple:
@@ -1783,11 +1804,14 @@ def do_full_diagnostic() -> None:
         if _proto_mode == "reality":
             _sni = (_state.get("reality_sni") or _state.get("sni") or
                     _domain or "www.google.com")
-            _box_info(f"  Режим REALITY: проверяем SNI-цель ({_sni})...")
+            # порт SNI-цели: server_port для своего домена
+            # (REALITY-эндпоинт Xray), 443 — только для чужого SNI
+            _sni_port = _diag_sni_port(_sni, _domain, _server_port)
+            _box_info(f"  Режим REALITY: проверяем SNI-цель ({_sni}:{_sni_port})...")
             _rc = _run(
                 ["bash", "-c",
                  f"echo Q | timeout 8 openssl s_client "
-                 f"-connect {_sni}:443 -servername {_sni} 2>/dev/null "
+                 f"-connect {_sni}:{_sni_port} -servername {_sni} 2>/dev/null "
                  f"| openssl x509 -noout -dates -subject 2>/dev/null"],
                 capture=True, check=False
             )
@@ -1816,12 +1840,12 @@ def do_full_diagnostic() -> None:
                             _chunk_w = _cert_col_w - len(_indent)
                             _box_row(f"  {DIM}{_indent}{_rest[:_chunk_w]}{NC}")
                             _rest = _rest[_chunk_w:]
-                _box_ok(f"SNI-цель ({_sni}) доступна и сертификат валиден")
+                _box_ok(f"SNI-цель ({_sni}:{_sni_port}) доступна и сертификат валиден")
                 _res("6. TLS/REALITY", _PASS)
             else:
-                _box_warn(f"Не удалось получить сертификат от {_sni}:443")
+                _box_warn(f"Не удалось получить сертификат от {_sni}:{_sni_port}")
                 _wiz_hint("SNI-домен должен быть доступен с сервера")
-                _res("6. TLS/REALITY", _WARN, f"SNI-цель {_sni} недоступна")
+                _res("6. TLS/REALITY", _WARN, f"SNI-цель {_sni}:{_sni_port} недоступна")
         else:
             _cert_path = Path(f"/etc/letsencrypt/live/{_domain}/fullchain.pem") if _domain else None
             if not _cert_path or not _cert_path.exists():

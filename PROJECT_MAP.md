@@ -88,7 +88,7 @@
 
 | Файл | За что отвечает |
 |---|---|
-| `diagnostics.py` | Мастер полной диагностики (14 шагов) + 30 `_diag_*` хелперов + `do_live_traffic_dashboard` + `run_split_tunnel_diagnostics` |
+| `diagnostics.py` | Мастер полной диагностики (14 шагов) + 31 `_diag_*` хелпер (+ `_diag_sni_port`: порт SNI-цели — свой домен → server_port, чужой → 443) + `do_live_traffic_dashboard` + `run_split_tunnel_diagnostics` |
 | `connection_audit.py` | Аудит access.log: сводка по пользователям, последние подключения, подозрительная активность, активные соединения |
 | `health.py` | Health checks: xray/nginx/ssl/ports (используется другими модулями) |
 | `health_report.py` | Ежедневный health-отчёт (cron 08:00) с отправкой в Telegram |

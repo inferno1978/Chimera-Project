@@ -6,9 +6,10 @@ Unit-тесты для chimera/modules/diagnostics.py.
 
 Покрывает:
   1. _diag_fmt_bytes — форматирование байт
-  2. _diag_make_counters — создание счётчиков
-  3. _diag_chk — валидатор с счётчиками
-  4. _diag_resolve_config — поиск и чтение config.json
+  2. _diag_sni_port — порт TLS-проверки SNI-цели
+  3. _diag_make_counters — создание счётчиков
+  4. _diag_chk — валидатор с счётчиками
+  5. _diag_resolve_config — поиск и чтение config.json
 """
 from __future__ import annotations
 
@@ -65,6 +66,52 @@ class TestDiagFmtBytes(unittest.TestCase):
     def test_gib(self):
         from chimera.modules.diagnostics import _diag_fmt_bytes
         self.assertIn("ГБ", _diag_fmt_bytes(1024 ** 3))
+
+
+class TestDiagSniPort(unittest.TestCase):
+    """_diag_sni_port — порт TLS-проверки SNI-цели.
+
+    Сценарий бага: server_port сменён на 9443, но шаг 6 проверки
+    продолжал стучаться на хардкод-443 → ложный WARN «Не удалось
+    получить сертификат».
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_own_domain_returns_server_port(self):
+        from chimera.modules.diagnostics import _diag_sni_port
+        self.assertEqual(
+            _diag_sni_port("cdn.example", "cdn.example", 9443),
+            9443)
+
+    def test_own_domain_port_443_unchanged(self):
+        from chimera.modules.diagnostics import _diag_sni_port
+        self.assertEqual(
+            _diag_sni_port("example.com", "example.com", 443), 443)
+
+    def test_foreign_sni_returns_443(self):
+        from chimera.modules.diagnostics import _diag_sni_port
+        self.assertEqual(
+            _diag_sni_port("www.cloudflare.com", "example.com", 9443), 443)
+
+    def test_empty_domain_fallback_sni_returns_443(self):
+        from chimera.modules.diagnostics import _diag_sni_port
+        # домен не задан → _sni = www.google.com (fallback) → 443
+        self.assertEqual(
+            _diag_sni_port("www.google.com", "", 9443), 443)
+
+    def test_empty_domain_own_sni_returns_443(self):
+        from chimera.modules.diagnostics import _diag_sni_port
+        # без домена нельзя понять свой/чужой SNI → безопасный 443
+        self.assertEqual(
+            _diag_sni_port("cdn.example", "", 9443), 443)
+
+    def test_reality_sni_differs_from_domain_returns_443(self):
+        from chimera.modules.diagnostics import _diag_sni_port
+        # reality_sni (внешний камуфляж) ≠ домену → чужой → 443
+        self.assertEqual(
+            _diag_sni_port("camo.example.net", "example.com", 9443), 443)
 
 
 class TestDiagMakeCounters(unittest.TestCase):
