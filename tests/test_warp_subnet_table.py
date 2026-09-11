@@ -72,18 +72,21 @@ class FakeIP:
     """Мок wst._ip: пишет команды в self.calls, ответы по префиксу."""
 
     def __init__(self, route_get="", route_show_1111="", default="",
-                 link_add_rc=0):
+                 link_add_rc=0, addr4_show=""):
         self.calls: list[list] = []
         self.route_get = route_get
         self.route_show_1111 = route_show_1111
         self.default = default
         self.link_add_rc = link_add_rc
+        self.addr4_show = addr4_show
 
     def __call__(self, args, timeout=8):
         self.calls.append(list(args))
         joined = " ".join(args)
         if joined.startswith("ip link add"):
             return _cp(args, self.link_add_rc, stderr="err")
+        if joined.startswith("ip -4 addr show"):
+            return _cp(args, 0, stdout=self.addr4_show)
         if joined.startswith("ip route get"):
             return _cp(args, 0, stdout=self.route_get or "1.2.3.4 via 192.0.2.1 dev eth0")
         if joined.startswith("ip route show 1.1.1.1/32"):
@@ -255,7 +258,8 @@ class TestDefaultRoute(unittest.TestCase):
 
 class TestProbeLifecycle(unittest.TestCase):
     def _run_probe(self, fake, trace=("HEL", "RU", True),
-                   tg=None, with_tg=True, route_get="", prev_1111=""):
+                   tg=None, with_tg=True, route_get="", prev_1111="",
+                   fields=None):
         if tg is None:
             tg = {"reached_mask": 0b11111, "ok": True}
         with patch.object(wst, "_ip", fake), \
@@ -268,7 +272,7 @@ class TestProbeLifecycle(unittest.TestCase):
             return wst.probe_endpoint_egress(
                 {"subnet": "162.159.192.0/24", "host": "162.159.192.6",
                  "endpoint": "162.159.192.6:2408", "rtt_ms": 57.0},
-                FIELDS, with_tg=with_tg)
+                fields if fields is not None else FIELDS, with_tg=with_tg)
 
     def test_setup_order_and_full_success(self):
         fake = FakeIP(route_get="162.159.192.6 dev wg-warp")
@@ -375,13 +379,50 @@ class TestProbeLifecycle(unittest.TestCase):
         res = wst.probe_endpoint_egress({"endpoint": "nope"}, FIELDS)
         self.assertFalse(res["probe_ok"])
 
-    def test_no_v4(self):
-        with patch.object(warp_mod, "info"), \
-             patch.object(warp_mod, "warn"):
-            res = wst.probe_endpoint_egress(
-                {"endpoint": "1.2.3.4:2408"},
-                dict(FIELDS, address=["2606:4700::1/128"]))
-        self.assertFalse(res["probe_ok"])
+    # ── IPv6-only-конфиг (нода без родного IPv6, WARP ради v6) ──────────
+    def test_no_v4_fallback_to_standard_warp_ip(self):
+        # раньше проба сдавалась («проба невозможна» на каждой строке);
+        # теперь wg-scout поднимается со стандартным IPv4 WARP 172.16.0.2
+        fake = FakeIP()
+        res = self._run_probe(
+            fake,
+            fields=dict(FIELDS, address=["2606:4700:110:8d87::/128"]))
+        f = fake.flat()
+        self.assertIn("ip -4 addr show dev wg-warp", f)  # спросили живой iface
+        self.assertIn("ip addr add 172.16.0.2/32 dev wg-scout", f)
+        self.assertIn("ip rule add from 172.16.0.2 lookup 303 priority 140", f)
+        self.assertTrue(res["probe_ok"])
+
+    def test_no_v4_uses_live_interface_address(self):
+        # адрес есть на живом wg-warp (добавлен руками, мимо конфига) —
+        # берётся оттуда, а не стандартный
+        fake = FakeIP(
+            addr4_show=("5: wg-warp: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1280\n"
+                        "    inet 172.16.0.9/32 scope global wg-warp\n"))
+        res = self._run_probe(
+            fake,
+            fields=dict(FIELDS, address=["2606:4700:110:8d87::/128"]))
+        f = fake.flat()
+        self.assertIn("ip addr add 172.16.0.9/32 dev wg-scout", f)
+        self.assertIn("ip rule add from 172.16.0.9 lookup 303 priority 140", f)
+        self.assertTrue(res["probe_ok"])
+
+    def test_comma_address_line_still_yields_v4(self):
+        # «Address = v4/32, v6/128» одной строкой (wg-quick допускает) —
+        # раньше такой конфиг считался IPv6-only и отменял пробу
+        fake = FakeIP()
+        res = self._run_probe(
+            fake,
+            fields=dict(FIELDS,
+                        address=["172.16.0.2/32, 2606:4700:110:8d87::/128"]))
+        self.assertIn("ip addr add 172.16.0.2/32 dev wg-scout", fake.flat())
+        self.assertTrue(res["probe_ok"])
+
+    def test_scout_mtu_from_config(self):
+        # wg-scout наследует MTU прода — путь уже проверен с этим MTU
+        fake = FakeIP()
+        self._run_probe(fake, fields=dict(FIELDS, mtu="1280"))
+        self.assertIn("ip link set wg-scout mtu 1280", fake.flat())
 
 
 class TestTgCell(unittest.TestCase):
@@ -589,6 +630,25 @@ class TestFlow(unittest.TestCase):
                                    probe_side_effect=probe,
                                    blacklist=["DME"])
         changes.assert_not_called()
+
+    def test_v6_only_fields_info_shown_once(self):
+        # IPv6-only-конфиг: пояснение про источник IPv4 печатается ОДИН раз
+        # на проход (раньше «проба невозможна» повторялась на каждой строке)
+        rows = [{"endpoint": "162.159.192.6:2408", "rtt_ms": 57.0},
+                {"endpoint": "188.114.96.68:2408", "rtt_ms": 58.0}]
+        fields = dict(FIELDS, address=["2606:4700:110:8d87::/128"])
+        with patch.object(wst, "probe_endpoint_egress",
+                          side_effect=lambda row, f, with_tg=True: dict(row)), \
+             patch.object(warp_mod, "_warp_service_active",
+                          return_value=False), \
+             patch.object(wst, "_probe_v4_source",
+                          return_value=("172.16.0.2", "ПРИМЕЧАНИЕ-ТЕСТ")), \
+             patch.object(warp_mod, "info") as m_info, \
+             patch.object(warp_mod, "warn"):
+            wst._probe_all_rows(rows, fields)
+        notes = [c for c in m_info.call_args_list
+                 if "ПРИМЕЧАНИЕ-ТЕСТ" in str(c)]
+        self.assertEqual(len(notes), 1)
 
 
 if __name__ == "__main__":

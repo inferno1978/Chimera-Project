@@ -279,14 +279,52 @@ def _default_route() -> Optional[list[str]]:
     return None
 
 
+def _live_tunnel_v4() -> Optional[str]:
+    """IPv4 с живого интерфейса wg-warp — на случай, когда адрес есть на
+    интерфейсе, но в конфиге его нет (добавлен руками/скриптом)."""
+    r = _ip(["ip", "-4", "addr", "show", "dev", _warp.WG_INTERFACE])
+    m = re.search(r"inet (\d+(?:\.\d+){3})", r.stdout or "")
+    return m.group(1) if m else None
+
+
+def _probe_v4_source(fields: dict) -> tuple[Optional[str], str]:
+    """IPv4-адрес для wg-scout и готовое пояснение, откуда он взялся:
+    1) Address из конфига wg-warp;
+    2) адрес живого интерфейса (конфиг addressless, адрес добавлен руками);
+    3) стандартный туннельный IPv4 WARP 172.16.0.2 — wgcf-регистрации
+       получают его практически всегда; тот же fallback уже использует
+       экспорт mihomo (warp._export_warp_mihomo_proxy).
+    Живой кейс (3): нода БЕЗ родного IPv6 поднимает WARP ради v6 —
+    конфиг IPv6-only, IPv4-строки в нём нет вовсе, но ключи wgcf те же,
+    и хендшейк с КАНДИДАТОМ честно проверяет именно этот аккаунт.
+    Если CF не примет адрес — trace промолчит и строка уйдёт в серые
+    («проба не прошла»), что и будет правдой."""
+    v4, _v6 = _warp._warp_addr_v4_v6(fields)
+    if v4:
+        return v4, ""
+    v4 = _live_tunnel_v4()
+    if v4:
+        return v4, (f"В конфиге wg-warp нет IPv4-адреса туннеля — проба с "
+                    f"адреса живого интерфейса {_warp.WG_INTERFACE}: {v4}.")
+    return "172.16.0.2", (
+        "В конфиге wg-warp нет IPv4-адреса туннеля (IPv6-only — WARP "
+        "поднят ради v6?) и на интерфейсе его тоже нет. Проба со "
+        "стандартным IPv4 WARP 172.16.0.2 (тот же fallback, что в экспорте "
+        "mihomo); если CF его не примет — строки уйдут в серые «проба не "
+        "прошла».")
+
+
 def probe_endpoint_egress(row: dict, fields: dict, with_tg: bool = True) -> dict:
     """Проба ОДНОГО кандидата через временный интерфейс wg-scout:
     handshake + trace (colo/loc/warp) [+ MTProto 5 ДЦ].
 
     row — строка из aggregate_best_per_subnet; результат — её копия,
     дополненная ключами colo / loc / warp_on / probe_ok / tg (dict пробы)
-    / tg_cell. Все временные маршруты/правила/интерфейс снимаются в
-    finally, поэтому функция безопасна при Ctrl+C и исключениях."""
+    / tg_cell. IPv4 туннеля берётся из конфига, а при его отсутствии —
+    с живого wg-warp или стандартный 172.16.0.2 (см. _probe_v4_source):
+    IPv6-only-конфиг больше не отменяет пробу. Все временные
+    маршруты/правила/интерфейс снимаются в finally, поэтому функция
+    безопасна при Ctrl+C и исключениях."""
     out = dict(row)
     out.update({
         "colo": None, "loc": None, "warp_on": False, "probe_ok": False,
@@ -296,10 +334,7 @@ def probe_endpoint_egress(row: dict, fields: dict, with_tg: bool = True) -> dict
     if not endpoint or ":" not in endpoint:
         return out
     host, _port = endpoint.rsplit(":", 1)
-    v4, _v6 = _warp._warp_addr_v4_v6(fields)
-    if not v4:
-        _warp.warn("В конфиге wg-warp нет IPv4-адреса туннеля — проба невозможна.")
-        return out
+    v4, _src = _probe_v4_source(fields)
 
     keyfile: Optional[str] = None
     del_rules: list[list] = []        # ip rule del (снимаются первыми)
@@ -321,6 +356,12 @@ def probe_endpoint_egress(row: dict, fields: dict, with_tg: bool = True) -> dict
              "private-key", keyfile, "peer", fields["public_key"],
              "endpoint", endpoint, "allowed-ips", "0.0.0.0/0"])
         _ip(["ip", "addr", "add", f"{v4}/32", "dev", SCOUT_IFACE])
+        # MTU как у прода: путь до кандидата уже проверен прод-туннелем с
+        # этим MTU (wgcf обычно 1280) — большие пакеты по «узкому» пути
+        # душат trace TLS-хендшейком.
+        mtu = str(fields.get("mtu") or "").strip()
+        if mtu.isdigit():
+            _ip(["ip", "link", "set", SCOUT_IFACE, "mtu", mtu])
         _ip(["ip", "link", "set", SCOUT_IFACE, "up"])
 
         # 3. host-маршрут до кандидата через исходный шлюз (только если FULL
@@ -502,6 +543,10 @@ def _probe_all_rows(rows: list[dict], fields: dict) -> None:
     (успевшие строки уже дописаны в rows). В finally — ре-хендшейк
     прод-туннеля, если он был активен: CF после проб видит «роуминг»."""
     was_active = _warp._warp_service_active()
+    _v4, v4_note = _probe_v4_source(fields)
+    if v4_note:
+        # один раз на весь проход, а не «нет IPv4» на каждой строке
+        _warp.info(v4_note)
     _warp.info(f"Поднимаю {SCOUT_IFACE} на ключах wgcf по очереди для "
                f"каждой подсети (Ctrl+C — прервать и показать что есть)...")
     try:
