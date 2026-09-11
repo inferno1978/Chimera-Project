@@ -78,7 +78,7 @@ if __name__ == "__main__":
 
 from chimera.modules.box_renderer import (
     _box_top, _box_row, _box_sep, _box_bottom,
-    RED, GREEN, BLUE, CYAN, YELLOW, NC,
+    RED, GREEN, BLUE, CYAN, YELLOW, DIM, NC,
 )
 
 # Курируемые auto-update списки доменов (itdoginfo/allow-domains) — модуль
@@ -248,6 +248,13 @@ def _warp_state_save_autonomously() -> None:
 WG_INTERFACE        = "wg-warp"
 WG_SERVICE          = f"wg-quick@{WG_INTERFACE}"
 WG_CONFIG           = Path("/etc/wireguard/wg-warp.conf")
+# Аккаунт wgcf, переживший удаление: Cloudflare жёстко лимитирует число
+# РЕГИСТРАЦИЙ с одного IP (429 Too Many Requests — анонимный POST /reg,
+# окно от минут до часов, датацентровые IP делят лимит с соседями), а
+# `wgcf generate` работает от существующего account.toml через
+# авторизованный GET — без лимита. Пока файл на месте, переустановка
+# вообще не регистрируется заново (install_warp, uninstall_warp).
+WGCF_ACCOUNT_FILE   = Path("/etc/wireguard/wgcf-account.toml")
 CRON_FILE           = Path("/etc/cron.d/warp-selective-sync")
 ORIG_ROUTE_FILE     = Path("/etc/warp-original-route.conf")
 MODULE_PATH         = Path(__file__).resolve()
@@ -271,6 +278,12 @@ ROLLBACK_UNIT          = "warp-commit-confirm"  # имя transient systemd-юн�
 # ViRb3/wgcf; оба прототипа ошибались в этом по-разному).
 WGCF_FALLBACK_VERSION = "2.2.31"
 WGCF_API_TIMEOUT      = 3  # секунд
+# Ретраи регистрации при 429: Cloudflare редко отпускает лимит быстрее
+# пары минут, но короткий автоповтор ловит «мягкие» окна и соседние
+# всплески — ждать дольше 90 с внутри TUI не осмысленно (см. бокс
+# _show_register_error: ждать 30–60 минут надёжнее руками).
+WGCF_429_RETRIES = 2      # доп. попытки сверх первой
+WGCF_429_WAITS   = (30, 60)  # паузы перед доп. попытками, сек
 
 # Подсети Telegram + Meta для режима RUNET (runetfreedom / публичные RIPE-данные)
 RUNET_CIDRS = [
@@ -741,11 +754,90 @@ def _ensure_wireguard_installed() -> bool:
     return True
 
 
+def _wgcf_register(tmp_bin: Path) -> tuple[bool, str]:
+    """wgcf register --accept-tos с автоповторами при 429: Cloudflare
+    лимитирует число РЕГИСТРАЦИЙ с одного IP (анонимный POST /reg;
+    датацентровые IP делят лимит с соседями — живой кейс: uninstall →
+    install ловит 429, потому что аккаунт с прошлой установки удалился).
+    Паузы WGCF_429_WAITS сек с сообщением (TUI не молчит). Не-429 ошибки
+    не ретраятся. Возвращает (успех, текст последней ошибки)."""
+    total = 1 + WGCF_429_RETRIES
+    err_text = ""
+    for attempt in range(1, total + 1):
+        r = _run([str(tmp_bin), "register", "--accept-tos"],
+                 capture=True, check=False, cwd="/tmp")
+        if r.returncode == 0:
+            return True, ""
+        err_text = (r.stderr or r.stdout or "").strip()
+        if "429" not in err_text or attempt == total:
+            return False, err_text
+        wait_s = WGCF_429_WAITS[min(attempt - 1, len(WGCF_429_WAITS) - 1)]
+        info(f"Регистрация отбита лимитом Cloudflare (429 Too Many "
+             f"Requests) — жду {wait_s} с и пробую ещё раз "
+             f"(попытка {attempt + 1}/{total})...")
+        time.sleep(wait_s)
+    return False, err_text
+
+
+def _show_register_error(err_text: str) -> None:
+    """Детализированное сообщение при неудачной регистрации wgcf:
+    429-лимит / TLS-таймаут / нет соединения."""
+    _err_lower = err_text.lower()
+    if "429" in _err_lower or "too many requests" in _err_lower:
+        print()
+        _box_top("⚠️  Не удалось зарегистрировать WARP")
+        _box_row()
+        _box_row(f"  {RED}Причина: 429 Too Many Requests — Cloudflare{NC}")
+        _box_row(f"  {RED}ограничил число регистраций с IP этого сервера.{NC}")
+        _box_row()
+        _box_row(f"  {DIM}Регистрация — анонимный POST /reg, лимит общий{NC}")
+        _box_row(f"  {DIM}на IP/подсеть; окно — от минут до часов, у DC-IP{NC}")
+        _box_row(f"  {DIM}его делят соседи по стойке. Автоповторы уже{NC}")
+        _box_row(f"  {DIM}сделаны выше (3 попытки с паузами).{NC}")
+        _box_row()
+        _box_row(f"  {DIM}Что можно сделать:{NC}")
+        _box_row(f"  {DIM}1. Подождать 30–60 минут и повторить (меню WARP → 1){NC}")
+        _box_row(f"  {DIM}2. Скопировать wgcf-account.toml с любого другого{NC}")
+        _box_row(f"  {DIM}   WARP-сервера в {WGCF_ACCOUNT_FILE} — установка{NC}")
+        _box_row(f"  {DIM}   подхватит его и пропустит регистрацию совсем{NC}")
+        _box_bottom()
+    elif "tls handshake timeout" in _err_lower or "timeout" in _err_lower:
+        print()
+        _box_top("⚠️  Не удалось зарегистрировать WARP")
+        _box_row()
+        _box_row(f"  {RED}Причина: TLS handshake timeout к api.cloudflareclient.com{NC}")
+        _box_row()
+        _box_row(f"  {DIM}Возможные причины:{NC}")
+        _box_row(f"  {DIM}• IP сервера заблокирован Cloudflare (datacenter IP){NC}")
+        _box_row(f"  {DIM}• ТСПУ режет TLS к api.cloudflareclient.com{NC}")
+        _box_row(f"  {DIM}• Временный сетевой сбой{NC}")
+        _box_row()
+        _box_row(f"  {DIM}Что можно сделать:{NC}")
+        _box_row(f"  {DIM}1. Проверить: curl -v https://api.cloudflareclient.com{NC}")
+        _box_row(f"  {DIM}2. Попробовать позже (если временный сбой){NC}")
+        _box_row(f"  {DIM}3. Зарегистрировать WARP на другой машине и{NC}")
+        _box_row(f"  {DIM}   скопировать wgcf-account.toml на этот сервер:{NC}")
+        _box_row(f"  {DIM}   {WGCF_ACCOUNT_FILE}{NC}")
+        _box_bottom()
+    elif "connection refused" in _err_lower or "no such host" in _err_lower:
+        print()
+        _box_top("⚠️  Не удалось зарегистрировать WARP")
+        _box_row()
+        _box_row(f"  {RED}Причина: нет соединения с api.cloudflareclient.com{NC}")
+        _box_row()
+        _box_row(f"  {DIM}Проверьте DNS и интернет-соединение:{NC}")
+        _box_row(f"  {DIM}• dig api.cloudflareclient.com{NC}")
+        _box_row(f"  {DIM}• curl -v https://api.cloudflareclient.com{NC}")
+        _box_bottom()
+
+
 def install_warp() -> bool:
     """Устанавливает WireGuard + wgcf, генерирует конфиг с Table = off и
     поднимает туннель РОВНО ОДИН РАЗ. Идемпотентна: при уже существующем
     конфиге — no-op. При любой ошибке гарантированно зачищает временные
-    файлы и не оставляет битый конфиг или незавершённую регистрацию wgcf."""
+    файлы и не оставляет битый конфиг или незавершённую регистрацию wgcf.
+    Сохранённый аккаунт (WGCF_ACCOUNT_FILE) переиспользуется — без новой
+    регистрации (профилактика 429 при переустановках)."""
     if WG_CONFIG.exists():
         info("Конфигурация WireGuard (wg-warp) уже существует — установка пропущена.")
         _state_set("WARP_INSTALLED", True)
@@ -770,47 +862,62 @@ def install_warp() -> bool:
             return False
         tmp_bin.chmod(0o755)
 
-        info("Регистрация аккаунта Cloudflare WARP...")
-        r2 = _run([str(tmp_bin), "register", "--accept-tos"], capture=True, check=False, cwd="/tmp")
-        if r2.returncode != 0:
-            err_text = (r2.stderr or r2.stdout or "").strip()
-            warn(f"Ошибка регистрации wgcf: {err_text}")
-            #  детализированное сообщение для пользователя.
-            _err_lower = err_text.lower()
-            if "tls handshake timeout" in _err_lower or "timeout" in _err_lower:
-                print()
-                _box_top("⚠️  Не удалось зарегистрировать WARP")
-                _box_row()
-                _box_row(f"  {RED}Причина: TLS handshake timeout к api.cloudflareclient.com{NC}")
-                _box_row()
-                _box_row(f"  {DIM}Возможные причины:{NC}")
-                _box_row(f"  {DIM}• IP сервера заблокирован Cloudflare (datacenter IP){NC}")
-                _box_row(f"  {DIM}• ТСПУ режет TLS к api.cloudflareclient.com{NC}")
-                _box_row(f"  {DIM}• Временный сетевой сбой{NC}")
-                _box_row()
-                _box_row(f"  {DIM}Что можно сделать:{NC}")
-                _box_row(f"  {DIM}1. Проверить: curl -v https://api.cloudflareclient.com{NC}")
-                _box_row(f"  {DIM}2. Попробовать позже (если временный сбой){NC}")
-                _box_row(f"  {DIM}3. Зарегистрировать WARP на другой машине и{NC}")
-                _box_row(f"  {DIM}   скопировать wgcf-profile.conf на этот сервер{NC}")
-                _box_bottom()
-            elif "connection refused" in _err_lower or "no such host" in _err_lower:
-                print()
-                _box_top("⚠️  Не удалось зарегистрировать WARP")
-                _box_row()
-                _box_row(f"  {RED}Причина: нет соединения с api.cloudflareclient.com{NC}")
-                _box_row()
-                _box_row(f"  {DIM}Проверьте DNS и интернет-соединение:{NC}")
-                _box_row(f"  {DIM}• dig api.cloudflareclient.com{NC}")
-                _box_row(f"  {DIM}• curl -v https://api.cloudflareclient.com{NC}")
-                _box_bottom()
-            return False
+        # Аккаунт с прошлой установки: register при существующем
+        # wgcf-account.toml не нужен вообще (и 429-лимит не задевается),
+        # поэтому сначала — восстановление, и только если его нет —
+        # свежая регистрация.
+        restored_account = False
+        if WGCF_ACCOUNT_FILE.exists():
+            try:
+                tmp_account.write_text(WGCF_ACCOUNT_FILE.read_text())
+                tmp_account.chmod(0o600)
+                restored_account = True
+                info(f"Найден сохранённый аккаунт wgcf — регистрация не нужна.")
+            except OSError as e:
+                warn(f"Не удалось прочитать {WGCF_ACCOUNT_FILE}: {e} — "
+                     f"попробую свежую регистрацию.")
+        if not restored_account:
+            info("Регистрация аккаунта Cloudflare WARP...")
+            ok, err_text = _wgcf_register(tmp_bin)
+            if not ok:
+                warn(f"Ошибка регистрации wgcf: {err_text}")
+                #  детализированное сообщение для пользователя.
+                _show_register_error(err_text)
+                return False
 
         info("Генерация профиля WireGuard...")
         r3 = _run([str(tmp_bin), "generate"], capture=True, check=False, cwd="/tmp")
         if r3.returncode != 0 or not tmp_profile.exists():
-            warn(f"Ошибка генерации конфига wgcf: {(r3.stderr or r3.stdout or '').strip()}")
-            return False
+            gen_err = (r3.stderr or r3.stdout or "").strip()
+            if restored_account:
+                # Аккаунт мог протухнуть (401/403) — wgcf register
+                # отказывается работать при существующем account.toml
+                # (EnsureNoExistingAccount), поэтому файл убираем и
+                # пробуем зарегистрироваться заново.
+                warn(f"Сохранённый аккаунт не сработал ({gen_err}) — "
+                     f"регистрирую новый...")
+                tmp_account.unlink(missing_ok=True)
+                ok, err_text = _wgcf_register(tmp_bin)
+                if not ok:
+                    warn(f"Ошибка регистрации wgcf: {err_text}")
+                    _show_register_error(err_text)
+                    return False
+                info("Генерация профиля WireGuard...")
+                r3 = _run([str(tmp_bin), "generate"], capture=True,
+                          check=False, cwd="/tmp")
+            if r3.returncode != 0 or not tmp_profile.exists():
+                warn(f"Ошибка генерации конфига wgcf: {(r3.stderr or r3.stdout or '').strip()}")
+                return False
+
+        # Успех — аккаунт в надёжное место (после finally /tmp зачищается):
+        # следующая переустановка пройдёт без регистрации и без 429.
+        if tmp_account.exists():
+            try:
+                WGCF_ACCOUNT_FILE.parent.mkdir(parents=True, exist_ok=True)
+                WGCF_ACCOUNT_FILE.write_text(tmp_account.read_text())
+                WGCF_ACCOUNT_FILE.chmod(0o600)
+            except OSError as e:
+                warn(f"Не удалось сохранить аккаунт wgcf в {WGCF_ACCOUNT_FILE}: {e}")
 
         WG_CONFIG.parent.mkdir(parents=True, exist_ok=True)
         WG_CONFIG.write_text(_inject_table_off(tmp_profile.read_text()))
@@ -840,7 +947,11 @@ def install_warp() -> bool:
 
 def uninstall_warp() -> bool:
     """Полностью удаляет WARP: останавливает сервис, очищает cron, конфиг,
-    маршруты и сбрасывает состояние. Идемпотентна при повторном вызове."""
+    маршруты и сбрасывает состояние. Идемпотентна при повторном вызове.
+    Аккаунт wgcf (WGCF_ACCOUNT_FILE) СОЗНАТЕЛЬНО сохраняется: Cloudflare
+    лимитирует регистрации с IP (429), а переустановка с готовым
+    account.toml регистрации не требует. Для полной зачистки — удалить
+    файл руками (путь — в сообщении после удаления)."""
     info("Удаление WireGuard (WARP) из системы...")
     _manage_cron(False)
     _clear_active_routes()
@@ -855,6 +966,10 @@ def uninstall_warp() -> bool:
     _state_set("WARP_ACTIVE_ROUTES", [])
     _warp_state_save_autonomously()
     success("WARP (WireGuard) полностью удалён из системы.")
+    if WGCF_ACCOUNT_FILE.exists():
+        info(f"Аккаунт wgcf сохранён: {WGCF_ACCOUNT_FILE} — переустановка "
+             f"пройдёт без новой регистрации (мгновенно, без 429). "
+             f"Не нужен — удалите файл.")
     return True
 
 
