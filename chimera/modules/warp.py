@@ -1395,10 +1395,13 @@ def _score_probe(result: dict) -> float:
     return tcp_part + icmp_part + rtt_part
 
 
-def _scan_warp_endpoints() -> list[dict]:
+def _scan_warp_endpoints(top: Optional[int] = 5) -> list[dict]:
     """Параллельное сканирование WARP_SCAN_RANGES (п.2 ТЗ). Только Python +
     stdlib (socket, concurrent.futures, ipaddress, random) + системные
     ping/curl, уже используемые в остальном модуле.
+    top=None — вернуть ВСЕ результаты (режим «таблица подсетей» из
+    chimera/modules/warp_subnet_table.py группирует их по /24 сам;
+    дефолт 5 — прежнее поведение топ-5 для выбора эндпоинта).
     УТ-7: ThreadPoolExecutor(max_workers=min(100,len(targets))); на
     KeyboardInterrupt — немедленный cancel_futures=True, без ожидания
     зависших проверок."""
@@ -1432,14 +1435,17 @@ def _scan_warp_endpoints() -> list[dict]:
         r["score"] = round(_score_probe(r), 1)
         r["endpoint"] = f"{r['host']}:{r['port']}"
     results.sort(key=lambda x: x["score"], reverse=True)
-    top5 = results[:5]
+    if top is not None:
+        results = results[:top]
+    top_res = results[:5] if top is None else results
 
-    if top5:
-        success(f"Найдено {len(results)} отвечающих узлов, в топ-5 — score "
-                f"{top5[0]['score']}–{top5[-1]['score']}.")
+    if top_res:
+        success(f"Найдено {len(results)} отвечающих узлов" +
+                (f", в топ-5 — score {top_res[0]['score']}–{top_res[-1]['score']}."
+                 if top is not None else "."))
     else:
         warn("Сканирование не нашло ни одного отвечающего узла.")
-    return top5
+    return results
 
 
 def _probe_single_endpoint(endpoint: str) -> dict:
@@ -2407,6 +2413,8 @@ def _menu_endpoint_manager() -> None:
         _box_row(f"  {GREEN}6{NC}  Использовать fallback-список")
         _box_row(f"  {GREEN}7{NC}  Чёрный список нод выхода (colo)"
                  f"  {YELLOW}[{', '.join(_colo_blacklist()) or 'выключен'}]{NC}")
+        _box_row(f"  {GREEN}8{NC}  Таблица подсетей (нода выхода + Telegram"
+                 f"  на каждый /24)")
         _box_row()
         _box_row(f"  {RED}0{NC}  ← Назад")
         _box_bottom()
@@ -2487,6 +2495,14 @@ def _menu_endpoint_manager() -> None:
 
         elif ch == "7":
             _menu_colo_blacklist()
+
+        elif ch == "8":
+            # warpscout-дашборд: таблица «лучший эндпоинт на подсеть» с
+            # пробой ноды выхода (colo/loc) и Telegram через временный
+            # интерфейс wg-scout. Ленивый импорт — как у телемта (модуль
+            # импортирует warp для _change_warp_endpoint → цикл при top-level).
+            from chimera.modules.warp_subnet_table import run_subnet_table_flow
+            run_subnet_table_flow()
 
         else:
             warn("Неверный выбор.")

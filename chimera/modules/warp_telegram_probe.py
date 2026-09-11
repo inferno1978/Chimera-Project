@@ -209,12 +209,40 @@ def _run_cleanup(cleanup: list) -> None:
 
 
 # ── Проба одного ДЦ ──────────────────────────────────────────────────────
-def probe_dc(dc_ip: str, port: int = TG_DC_PORT, timeout: float = 4.0) -> tuple[bool, float | None]:
+def probe_dc(dc_ip: str, port: int = TG_DC_PORT, timeout: float = 4.0,
+             bind_to: str | None = None) -> tuple[bool, float | None]:
     """TCP-connect + req_pq_multi + чтение заголовка ответа.
     Возвращает (answered, rtt_ms). ДЦ засчитан только по реальному
-    MTProto-ответу — TCP-connect сам по себе ничего не доказывает."""
+    MTProto-ответу — TCP-connect сам по себе ничего не доказывает.
+    bind_to — локальный IP, к которому привязать сокет ПЕРЕД connect
+    (режим «таблица подсетей» warp_subnet_table биндит пробы к адресу
+    временного интерфейса wg-scout: ip rule from <addr> тогда уводит
+    пробу через КАНДИДАТА, а не через прод wg-warp даже при активном
+    telemt_warp_route). None (дефолт) — прежнее поведение системы."""
     start = time.perf_counter()
+    if bind_to:
+        # Вручную: bind(src) + connect — create_connection не умеет bind.
+        sock: socket.socket | None = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind((bind_to, 0))
+            sock.settimeout(timeout)
+            sock.connect((dc_ip, port))
+            sock.sendall(build_req_pq_multi())
+            if not _frame_header_plausible(sock):
+                return False, None
+            return True, (time.perf_counter() - start) * 1000.0
+        except OSError:
+            return False, None
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
     try:
+        # `as sock` обязателен: контекст-менеджер возвращает ГОТОВЫЙ сокет
+        # (в тестах — мок с настроенным recv через __enter__).
         with socket.create_connection((dc_ip, port), timeout=timeout) as sock:
             sock.settimeout(timeout)
             sock.sendall(build_req_pq_multi())
