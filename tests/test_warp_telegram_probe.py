@@ -373,6 +373,22 @@ class TestExportConfigs(unittest.TestCase):
         self.wg_path.write_text("[Interface]\nAddress = 1.2.3.4/32\n")
         self.assertIsNone(self._fields())
 
+    def test_parse_comma_address_line(self):
+        # wg-quick допускает «Address = v4/32, v6/128» одной строкой —
+        # _warp_addr_v4_v6 режет и запятые (иначе v4 терялся, а проба
+        # wg-scout считала конфиг IPv6-only)
+        self.wg_path.write_text(WG_CONF_SAMPLE.replace(
+            "Address = 172.16.0.2/32\nAddress = 2606:4700:110:8d87::/128",
+            "Address = 172.16.0.2/32, 2606:4700:110:8d87::/128"))
+        f = self._fields()
+        v4, v6 = warp_mod._warp_addr_v4_v6(f)
+        self.assertEqual(v4, "172.16.0.2")
+        self.assertEqual(v6, "2606:4700:110:8d87::")
+        # экспорт из comma-конфига тоже не теряет адреса
+        conf = warp_mod._export_warp_wg_conf(f)
+        self.assertIn("Address = 172.16.0.2/32", conf)
+        self.assertIn("Address = 2606:4700:110:8d87::/128", conf)
+
     def test_wg_conf_export(self):
         conf = warp_mod._export_warp_wg_conf(self._fields())
         self.assertIn("[Interface]", conf)
