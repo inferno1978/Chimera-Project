@@ -677,7 +677,7 @@ class TestBothProtocol(unittest.TestCase):
         self.assertEqual(cfg["outbounds"][-1], {"type": "direct", "tag": "direct"})
 
     def test_karing_multi_config_single_no_selector(self):
-        """Регресс: один outbound — без selector, формат как в v85."""
+        """Регресс: один outbound — без selector, формат прежний (один транспорт)."""
         from chimera.modules import mieru
         ob = mieru._gen_singbox_outbound("1.2.3.4", 443, 443, "TCP", "alice", "pw")
         cfg = mieru._build_karing_multi_config([ob])
