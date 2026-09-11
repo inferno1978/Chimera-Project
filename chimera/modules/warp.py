@@ -2347,9 +2347,15 @@ def _parse_wg_config_fields() -> Optional[dict]:
 
 
 def _warp_addr_v4_v6(fields: dict) -> tuple[Optional[str], Optional[str]]:
-    """Адреса туннеля из списка Address (v4 без ':', v6 с ':')."""
-    v4 = next((a.split("/")[0] for a in fields["address"] if ":" not in a), None)
-    v6 = next((a.split("/")[0] for a in fields["address"] if ":" in a), None)
+    """Адреса туннеля из списка Address (v4 без ':', v6 с ':').
+    wg-quick допускает несколько адресов и одной строкой через запятую
+    («Address = 172.16.0.2/32, 2606:.../128») — режем и список, и запятые,
+    иначе v4 в comma-конфиге терялся (в т.ч. в пробе wg-scout)."""
+    addrs: list[str] = []
+    for a in fields.get("address") or []:
+        addrs.extend(p.strip() for p in a.split(",") if p.strip())
+    v4 = next((a.split("/")[0] for a in addrs if ":" not in a), None)
+    v6 = next((a.split("/")[0] for a in addrs if ":" in a), None)
     return v4, v6
 
 
