@@ -23,10 +23,13 @@ Unit-тесты «таблицы подсетей» — warpscout-дашборд
   8. rehandshake_prod — рестарт wg-quick при активном туннеле + перепримен
      маршрутов _apply_mode; неактивный туннель — ничего не делается.
   9. run_subnet_table_flow — интерактив: скан → проба → выбор →
-     _change_warp_endpoint; быстрый режим (n); Ctrl+C — частичная таблица;
-     WARP не установлен.
+     _change_warp_endpoint; быстрый режим (n) и клавиша P — допробить
+     колонки без перескана (в т.ч. «з» на RU-раскладке); P после пробы —
+     игнор; Ctrl+C — частичная таблица; WARP не установлен.
 10. probe_dc(bind_to=...) — сокет биндится к адресу wg-scout до connect.
 11. warp._scan_warp_endpoints(top=None) — возвращает все результаты.
+12. _render_table_screen — шапка зависит от режима: быстрый честно
+     говорит «хендшейков не было», полный — «порт идеи warpscout».
 """
 from __future__ import annotations
 
@@ -167,12 +170,15 @@ class TestRender(unittest.TestCase):
         lines = wst.render_subnet_table([row], [], probed=True)
         self.assertIn(wst.DIM, lines[2])
 
-    def test_fast_mode_dots(self):
+    def test_fast_mode_dots_and_hint(self):
         lines = wst.render_subnet_table(
             [dict(self.ROW1, colo=None)], [], probed=False)
         body = _plain(lines[2])
         self.assertIn("·", body)
         self.assertNotIn("ЧС", _plain(lines[-1]))
+        # подсказка про заполнение колонок — прямо в быстрой таблице
+        self.assertIn("P", _plain(lines[-1]))
+        self.assertIn("не пробовалось", _plain(lines[-1]))
 
     def test_empty_rows(self):
         self.assertEqual(wst.render_subnet_table([], [], True),
@@ -188,6 +194,31 @@ class TestRender(unittest.TestCase):
         for line in wst.render_subnet_table(
                 [dict(self.ROW1)], [], True):
             self.assertFalse(any(ord(ch) > 0x2FFF for ch in line))
+
+
+class TestRenderScreen(unittest.TestCase):
+    """Шапка экрана зависит от режима (честный текст в быстром)."""
+
+    def _rows(self, texts):
+        with patch.object(wst.os, "system"), \
+             patch.object(wst, "_box_top"), \
+             patch.object(wst, "_box_row") as m_row, \
+             patch.object(wst, "_box_bottom"), \
+             patch.object(wst, "render_subnet_table", return_value=[]), \
+             patch.object(warp_mod, "_colo_blacklist", return_value=[]):
+            wst._render_table_screen([dict(TestRender.ROW1)], texts["probed"])
+        return " ".join(str(c) for c in m_row.call_args_list)
+
+    def test_fast_header_honest(self):
+        joined = self._rows({"probed": False})
+        self.assertIn("Быстрый режим", joined)
+        self.assertIn("не было", joined)
+        self.assertNotIn("Порт идеи warpscout", joined)
+
+    def test_probed_header_warpscout(self):
+        joined = self._rows({"probed": True})
+        self.assertIn("Порт идеи warpscout", joined)
+        self.assertNotIn("Быстрый режим", joined)
 
 
 class TestStatusLine(unittest.TestCase):
@@ -497,6 +528,23 @@ class TestFlow(unittest.TestCase):
         changes, reh, _ = self._flow(["n", "2", "y", ""])
         changes.assert_called_once_with("188.114.96.68:2408")
         reh.assert_not_called()
+
+    def test_p_key_fills_columns_without_rescan(self):
+        # n → таблица без данных → P → проба по тем же строкам → выбор
+        changes, reh, cache = self._flow(["n", "p", "1", "y", ""], active=True)
+        changes.assert_called_once_with("162.159.192.6:2408")
+        reh.assert_called_once()          # прод был активен — ре-хендшейк
+        cache.assert_called_once()        # кэш от скана, не от пробы
+
+    def test_p_key_ru_layout(self):
+        # «з» — та же физическая клавиша P на русской раскладке
+        changes, _, _ = self._flow(["n", "з", "1", "y", ""])
+        changes.assert_called_once_with("162.159.192.6:2408")
+
+    def test_p_ignored_after_probe(self):
+        # после пробы P в промпте нет; «p» трактуется как неверный номер
+        changes, _, _ = self._flow(["y", "p", ""])
+        changes.assert_not_called()
 
     def test_decline_confirm(self):
         changes, _, _ = self._flow(["y", "1", "n", ""])

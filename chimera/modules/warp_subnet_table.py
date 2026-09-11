@@ -465,11 +465,16 @@ def render_subnet_table(rows: list[dict], blacklist: list[str],
         elif probed and not rows[i].get("probe_ok", False):
             line = f"{DIM}{line}{NC}"
         lines.append(f"  {line}")
+    lines.append("")
     if probed:
-        lines.append("")
         lines.append(f"  {DIM}ЧС — нода в чёрном списке colo (применение "
                      f"закончится автооткатом); серые строки — проба не "
                      f"прошла; TG — ответившие ДЦ Telegram из 5.{NC}")
+    else:
+        # быстрый режим: без этой подсказки колонки «·» выглядят ошибкой
+        lines.append(f"  {DIM}«·» — не пробовалось. Клавиша P в промпте ниже: "
+                     f"хендшейк wg-scout + trace (нода/локация) + Telegram "
+                     f"для каждой строки, без пересканирования.{NC}")
     return lines
 
 
@@ -490,11 +495,79 @@ def _status_line(rows: list[dict], probed: bool) -> str:
     return "   ·   ".join(parts)
 
 
+# ── Полная проба всех строк (общий код Y-режима и клавиши P) ────────────
+def _probe_all_rows(rows: list[dict], fields: dict) -> None:
+    """Пробит каждую строку через wg-scout in-place (хендшейк + trace +
+    Telegram), с прогрессом по строкам. Ctrl+C — частичные результаты
+    (успевшие строки уже дописаны в rows). В finally — ре-хендшейк
+    прод-туннеля, если он был активен: CF после проб видит «роуминг»."""
+    was_active = _warp._warp_service_active()
+    _warp.info(f"Поднимаю {SCOUT_IFACE} на ключах wgcf по очереди для "
+               f"каждой подсети (Ctrl+C — прервать и показать что есть)...")
+    try:
+        for i, row in enumerate(rows, start=1):
+            end = row["endpoint"]
+            print(f"  [{i}/{len(rows)}] {end} ...", end="", flush=True)
+            res = probe_endpoint_egress(row, fields, with_tg=True)
+            rows[i - 1] = res
+            tail = []
+            if res.get("colo"):
+                tail.append(f"{res['colo']} {res['loc'] or ''}".strip())
+            else:
+                tail.append("нет trace")
+            if res.get("tg") is not None:
+                tail.append(f"TG {res['tg_cell']}")
+            print("  →  " + ", ".join(t for t in tail if t))
+    except KeyboardInterrupt:
+        _warp.warn("\nПроба прервана — показываю то, что успело пробиться.")
+    finally:
+        if was_active:
+            try:
+                rehandshake_prod()
+            except Exception as e:
+                _warp.warn(f"Ре-хендшейк wg-warp не удался: {e} — "
+                           f"проверьте диагностику (меню WARP → 4).")
+
+
+# ── Экран таблицы (clear + шапка + рендер) ────────────────────────────────
+def _render_table_screen(rows: list[dict], probed: bool) -> None:
+    """clear + рамка-шапка + таблица. Текст шапки ЗАВИСИТ от режима:
+    быстрый честно говорит, что хендшейков не было и колонки пусты
+    (иначе «trace отдаёт ноду» в шапке выглядит ошибкой — живой кейс
+    юзера: «данных нет никаких кроме задержки»)."""
+    os.system("clear")
+    _box_top("ТАБЛИЦА ПОДСЕТЕЙ WARP — лучший эндпоинт на /24")
+    _box_row()
+    if probed:
+        _box_row("  Порт идеи warpscout: каждый /24 проверен хендшейком wg-scout")
+        _box_row("  (те же ключи wgcf), trace отдаёт ноду выхода и локацию.")
+    else:
+        _box_row("  Быстрый режим: только RTT массового TCP-скана, "
+                 f"хендшейков wg-scout не было.")
+        _box_row("  Колонки ВЫХОД/НОДА/ЛОКАЦИЯ/TG заполняются полной "
+                 "пробой —")
+        _box_row("  клавиша P в промпте ниже (прод wg-warp мигнёт ~2 с), "
+                 "или Y на")
+        _box_row("  вопросе о пробе при следующем запуске.")
+    _box_row()
+    _box_row(f"  {_status_line(rows, probed)}")
+    _box_bottom()
+    print()
+    title = ("Лучший эндпоинт на подсеть (наименьший RTT" +
+             (", проба нод + Telegram)" if probed else ", без проб нод):"))
+    print(f"  {CYAN}{title}{NC}")
+    for line in render_subnet_table(rows, _warp._colo_blacklist(), probed):
+        print(line)
+    print()
+
+
 # ── Интерактивный флоу (пункт 8 Endpoint Manager) ────────────────────────
 def run_subnet_table_flow() -> None:
     """Скан → (по желанию) полная проба каждой /24 → таблица → выбор и
     применение эндпоинта через штатный _change_warp_endpoint (со всей
-    пост-примен верификацией: colo-чёрный список + MTProto + watchdog)."""
+    пост-примен верификацией: colo-чёрный список + MTProto + watchdog).
+    Быстрый режим (n) допробивается прямо у таблицы клавишей P —
+    без пересканирования, по уже найденным строкам."""
     os.system("clear")
     fields = _warp._parse_wg_config_fields()
     if not fields:
@@ -525,67 +598,40 @@ def run_subnet_table_flow() -> None:
     probed = False
     answer = input(
         f"{YELLOW}Пробить ноду выхода и Telegram для каждой подсети? "
-        f"(~{max(4, len(rows) * 4)} с, туннель wg-warp кратко мигнёт) [Y/n]:{NC} "
+        f"(~{max(4, len(rows) * 4)} с, прод wg-warp мигнёт ~2 с; «n» — только "
+        f"RTT, колонки нод будут пусты) [Y/n]:{NC} "
     ).strip().lower()
     if answer in ("", "y", "д", "yes", "да"):
         probed = True
-        was_active = _warp._warp_service_active()
-        _warp.info(f"Поднимаю {SCOUT_IFACE} на ключах wgcf по очереди для "
-                   f"каждой подсети (Ctrl+C — прервать и показать что есть)...")
-        try:
-            for i, row in enumerate(rows, start=1):
-                end = row["endpoint"]
-                print(f"  [{i}/{len(rows)}] {end} ...", end="", flush=True)
-                res = probe_endpoint_egress(row, fields, with_tg=True)
-                rows[i - 1] = res
-                tail = []
-                if res.get("colo"):
-                    tail.append(f"{res['colo']} {res['loc'] or ''}".strip())
-                else:
-                    tail.append("нет trace")
-                if res.get("tg") is not None:
-                    tail.append(f"TG {res['tg_cell']}")
-                print("  →  " + ", ".join(t for t in tail if t))
-        except KeyboardInterrupt:
-            _warp.warn("\nПроба прервана — показываю то, что успело пробиться.")
-        finally:
-            if was_active:
-                try:
-                    rehandshake_prod()
-                except Exception as e:
-                    _warp.warn(f"Ре-хендшейк wg-warp не удался: {e} — "
-                               f"проверьте диагностику (меню WARP → 4).")
+        _probe_all_rows(rows, fields)
 
-    os.system("clear")
-    _box_top("ТАБЛИЦА ПОДСЕТЕЙ WARP — лучший эндпоинт на /24")
-    _box_row()
-    _box_row("  Порт идеи warpscout: каждый /24 проверен хендшейком wg-scout")
-    _box_row("  (те же ключи wgcf), trace отдаёт ноду выхода и локацию.")
-    _box_row()
-    _box_row(f"  {_status_line(rows, probed)}")
-    _box_bottom()
-    print()
-    title = ("Лучший эндпоинт на подсеть (наименьший RTT" +
-             (", проба нод + Telegram)" if probed else ", без проб нод):"))
-    print(f"  {CYAN}{title}{NC}")
-    for line in render_subnet_table(rows, _warp._colo_blacklist(), probed):
-        print(line)
-    print()
-
-    if not rows:
+    # Экран можно перерисовывать: P допробит строки и вернётся к выбору.
+    while True:
+        _render_table_screen(rows, probed)
+        if not rows:
+            input(f"{BLUE}Нажмите Enter...{NC}")
+            return
+        p_hint = "" if probed else "P — допробить ноды, "
+        choice = input(
+            f"{CYAN}Номер для применения ({p_hint}Enter — выйти):{NC} "
+        ).strip()
+        if not choice:
+            return
+        # «p» латиницей; «з» — та же клавиша на RU-раскладке; «п» — «проба»
+        if not probed and choice.lower() in ("p", "з", "п"):
+            probed = True
+            _probe_all_rows(rows, fields)
+            continue
+        if not choice.isdigit() or not (1 <= int(choice) <= len(rows)):
+            _warp.warn("Неверный номер.")
+            return
+        idx = int(choice) - 1
+        chosen = rows[idx]["endpoint"]
+        if probed and rows[idx].get("colo") in _warp._colo_blacklist():
+            _warp.warn(f"Нода {rows[idx]['colo']} в чёрном списке — "
+                       f"применение завершится автооткатом.")
+        if input(f"{YELLOW}Применить Endpoint {chosen}? [y/N]:{NC} ").strip().lower() == "y":
+            _warp._change_warp_endpoint(chosen)
         input(f"{BLUE}Нажмите Enter...{NC}")
         return
-    choice = input(f"{CYAN}Номер для применения (Enter — выйти):{NC} ").strip()
-    if not choice or not choice.isdigit() or not (1 <= int(choice) <= len(rows)):
-        if choice:
-            _warp.warn("Неверный номер.")
-        return
-    chosen = rows[int(choice) - 1]["endpoint"]
-    bl = _warp._colo_blacklist()
-    if probed and rows[int(choice) - 1].get("colo") in bl:
-        _warp.warn(f"Нода {rows[int(choice) - 1]['colo']} в чёрном списке — "
-                   f"применение завершится автооткатом.")
-    if input(f"{YELLOW}Применить Endpoint {chosen}? [y/N]:{NC} ").strip().lower() == "y":
-        _warp._change_warp_endpoint(chosen)
-    input(f"{BLUE}Нажмите Enter...{NC}")
 
