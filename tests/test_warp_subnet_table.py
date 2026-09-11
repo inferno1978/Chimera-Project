@@ -17,8 +17,10 @@ Unit-тесты «таблицы подсетей» — warpscout-дашборд
   6. probe_endpoint_egress — полный жизненный цикл wg-scout на моках:
      порядок команд (link add → wg set → addr → up), host-маршрут до
      кандидата только при dev wg-warp, replace 1.1.1.1/32 с
-     восстановлением прежнего, from-правило 303/140 для MTProto,
-     cleanup в finally при исключении, ключ-файл удаляется.
+     восстановлением прежнего, from-правило 303/140 ставится ВСЕГДА
+     (общий путь trace и MTProto — даже при with_tg=False), trace —
+     bind по АДРЕСУ wg-scout, cleanup в finally при исключении,
+     ключ-файл удаляется, причина «нет trace» в trace_err.
   7. _tg_cell — 5/5 / 3/5 / не пробовали.
   8. rehandshake_prod — рестарт wg-quick при активном туннеле + перепримен
      маршрутов _apply_mode; неактивный туннель — ничего не делается.
@@ -257,7 +259,7 @@ class TestDefaultRoute(unittest.TestCase):
 
 
 class TestProbeLifecycle(unittest.TestCase):
-    def _run_probe(self, fake, trace=("HEL", "RU", True),
+    def _run_probe(self, fake, trace=("HEL", "RU", True, None),
                    tg=None, with_tg=True, route_get="", prev_1111="",
                    fields=None):
         if tg is None:
@@ -331,17 +333,44 @@ class TestProbeLifecycle(unittest.TestCase):
         self.assertLess(f.index("ip rule del from 172.16.0.2 lookup 303 priority 140"),
                         f.index("ip link del wg-scout"))
 
-    def test_no_tg_no_rule(self):
+    def test_trace_called_with_scout_addr(self):
+        # trace уходит bind'ом по АДРЕСУ wg-scout (путь 140→303), а не по
+        # имени интерфейса — резолв/прокси-окружение не ломают его
         fake = FakeIP()
-        self._run_probe(fake, with_tg=False)
+        with patch.object(wst, "_ip", fake), \
+             patch.object(wst, "_trace_via",
+                          return_value=("HEL", "RU", True, None)) as m_trace, \
+             patch.object(wst, "_tg_probe_via",
+                          return_value={"reached_mask": 31}), \
+             patch.object(wst, "_default_route",
+                          return_value=["via", "192.0.2.1", "dev", "eth0"]), \
+             patch.object(warp_mod, "info"), \
+             patch.object(warp_mod, "warn"):
+            wst.probe_endpoint_egress(
+                {"endpoint": "162.159.192.6:2408", "rtt_ms": 57.0}, FIELDS)
+        m_trace.assert_called_once_with("wg-scout", src="172.16.0.2")
+
+    def test_no_tg_rules_still_present(self):
+        # 303 + from-правило — ОБЩИЙ путь trace и MTProto (trace ходит по
+        # нему bind'ом по адресу): ставится и при with_tg=False
+        fake = FakeIP()
+        res = self._run_probe(fake, with_tg=False)
         f = fake.flat()
-        self.assertNotIn("ip rule add from 172.16.0.2 lookup 303 priority 140", f)
+        self.assertIn("ip route replace default dev wg-scout table 303", f)
+        self.assertIn("ip rule add from 172.16.0.2 lookup 303 priority 140", f)
+        self.assertIn("ip rule del from 172.16.0.2 lookup 303 priority 140", f)
+        self.assertIsNone(res["tg"])  # но ДЦ при with_tg=False не пробуем
 
     def test_dead_trace(self):
         fake = FakeIP()
-        res = self._run_probe(fake, trace=(None, None, False))
+        res = self._run_probe(
+            fake, trace=(None, None, False,
+                         "curl: (7) Failed to connect to 1.1.1.1 port 443: "
+                         "Network is unreachable"))
         self.assertFalse(res["probe_ok"])
         self.assertIsNone(res["colo"])
+        # причина пробивается наружу — для честного «нет trace (…)»
+        self.assertIn("Network is unreachable", res["trace_err"])
 
     def test_cleanup_on_exception(self):
         fake = FakeIP()
@@ -361,7 +390,7 @@ class TestProbeLifecycle(unittest.TestCase):
         unlink = patch("os.unlink", wraps=os.unlink)
         with unlink as m_unlink, \
              patch.object(wst, "_ip", fake), \
-             patch.object(wst, "_trace_via", return_value=("HEL", "RU", True)), \
+             patch.object(wst, "_trace_via", return_value=("HEL", "RU", True, None)), \
              patch.object(wst, "_tg_probe_via", return_value={"reached_mask": 31}), \
              patch.object(warp_mod, "info"), \
              patch.object(warp_mod, "warn"):
@@ -444,7 +473,7 @@ class TestRehandshake(unittest.TestCase):
         with patch.object(warp_mod, "_warp_service_active",
                           return_value=True), \
              patch.object(warp_mod, "_run") as m_run, \
-             patch.object(wst, "_trace_via", return_value=("HEL", "RU", True)), \
+             patch.object(wst, "_trace_via", return_value=("HEL", "RU", True, None)), \
              patch.object(wst, "time") as m_time, \
              patch.object(warp_mod, "_state_get",
                           side_effect=lambda k, d=None: d), \
@@ -650,6 +679,76 @@ class TestFlow(unittest.TestCase):
         notes = [c for c in m_info.call_args_list
                  if "ПРИМЕЧАНИЕ-ТЕСТ" in str(c)]
         self.assertEqual(len(notes), 1)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 13. _trace_via — прокси/резолв-устойчивость + причина ошибки наружу
+#     (живой кейс: TG 5/5 через wg-scout, а ВЫХОД/НОДА — «?» на всех
+#     строках: http(s)_proxy в окружении уводил curl к прокси мимо
+#     --interface; wildcard-DNS резолвил имя интерфейса в адрес)
+# ═════════════════════════════════════════════════════════════════════════
+TRACE_OK_BODY = "fl=581f121\nh=1.1.1.1\nip=172.16.0.2\ncolo=HEL\nloc=RU\nwarp=on\n"
+
+
+class TestTraceViaDirect(unittest.TestCase):
+    """--noproxy '*' всегда; bind по IP-литералу при src= (никакого
+    DNS-резолва значения --interface), по имени — только без src;
+    неудача отдаёт компактную причину 4-м элементом."""
+
+    def test_src_bind_and_noproxy(self):
+        with patch.object(wst.subprocess, "run") as m_run, \
+             patch.object(wst.time, "sleep"):
+            m_run.return_value = _cp([], stdout=TRACE_OK_BODY)
+            colo, loc, warp_on, err = wst._trace_via("wg-scout",
+                                                     src="172.16.0.2")
+        self.assertEqual((colo, loc, warp_on, err), ("HEL", "RU", True, None))
+        cmd = m_run.call_args[0][0]
+        self.assertEqual(cmd[cmd.index("--noproxy") + 1], "*")
+        # IP-литерал, а не имя интерфейса: curl не резолвит значение
+        self.assertEqual(cmd[cmd.index("--interface") + 1], "172.16.0.2")
+        self.assertNotIn("wg-scout", cmd)
+
+    def test_name_bind_when_no_src(self):
+        # прод-путь (rehandshake_prod): bind по имени, --noproxy и здесь
+        with patch.object(wst.subprocess, "run") as m_run, \
+             patch.object(wst.time, "sleep"):
+            m_run.return_value = _cp([], stdout=TRACE_OK_BODY)
+            wst._trace_via("wg-warp")
+        cmd = m_run.call_args[0][0]
+        self.assertEqual(cmd[cmd.index("--interface") + 1], "wg-warp")
+        self.assertEqual(cmd[cmd.index("--noproxy") + 1], "*")
+
+    def test_curl_error_surfaced(self):
+        # rc≠0 → последняя строка stderr в 4-м элементе; все ретраи
+        with patch.object(wst.subprocess, "run") as m_run, \
+             patch.object(wst.time, "sleep"):
+            m_run.return_value = _cp(
+                [], rc=7, stdout="",
+                stderr="* Trying 1.1.1.1:443...\ncurl: (7) Failed to "
+                       "connect to 1.1.1.1 port 443: Network is unreachable")
+            colo, loc, warp_on, err = wst._trace_via("wg-scout",
+                                                     src="172.16.0.2")
+        self.assertEqual((colo, loc, warp_on), (None, None, False))
+        self.assertIn("Network is unreachable", err or "")
+        self.assertNotIn("Trying", err or "")  # именно последняя строка
+        self.assertEqual(m_run.call_count, wst.TRACE_RETRIES)
+
+    def test_curl_timeout_error(self):
+        with patch.object(wst.subprocess, "run",
+                          side_effect=subprocess.TimeoutExpired("curl", 7)), \
+             patch.object(wst.time, "sleep"):
+            _colo, _loc, _w, err = wst._trace_via("wg-scout",
+                                                  src="172.16.0.2")
+        self.assertEqual(err, "curl timeout")
+
+    def test_no_colo_in_body(self):
+        # rc=0, но colo= нет — отдельная причина, не «curl rc=0»
+        with patch.object(wst.subprocess, "run") as m_run, \
+             patch.object(wst.time, "sleep"):
+            m_run.return_value = _cp([], stdout="fl=x\nh=1.1.1.1\n")
+            _colo, _loc, _w, err = wst._trace_via("wg-scout",
+                                                  src="172.16.0.2")
+        self.assertEqual(err, "no colo= in trace")
 
 
 if __name__ == "__main__":
