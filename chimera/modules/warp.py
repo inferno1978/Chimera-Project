@@ -1664,7 +1664,8 @@ def _verify_warp_handshake() -> tuple[bool, bool]:
     warp_on = False
     for attempt in range(HANDSHAKE_VERIFY_RETRIES):
         r_trace = _run(
-            ["curl", "-sS", "--interface", WG_INTERFACE,
+            ["curl", "-sS", "--noproxy", "*",
+             "--interface", WG_INTERFACE,
              "--max-time", str(HANDSHAKE_CURL_TIMEOUT),
              "https://1.1.1.1/cdn-cgi/trace"],
             capture=True, check=False,
@@ -1760,7 +1761,8 @@ def _fetch_trace_meta() -> tuple[Optional[str], Optional[str], bool]:
     _verify_warp_handshake — прямой IP 1.1.1.1, без DNS, ТСПУ-безопасно).
     Возвращает (colo, loc, warp_on). colo/loc = None, если trace не отдал."""
     r = _run(
-        ["curl", "-sS", "--interface", WG_INTERFACE,
+        ["curl", "-sS", "--noproxy", "*",
+         "--interface", WG_INTERFACE,
          "--max-time", str(TRACE_CURL_TIMEOUT),
          "https://1.1.1.1/cdn-cgi/trace"],
         capture=True, check=False,
@@ -2201,7 +2203,8 @@ def _menu_status_and_diagnostics() -> None:
     _box_bottom()
 
     info("Проверка через Cloudflare trace...")
-    r = _run(["curl", "-s", "--max-time", "10", "https://www.cloudflare.com/cdn-cgi/trace"],
+    r = _run(["curl", "-s", "--noproxy", "*", "--max-time", "10",
+              "https://www.cloudflare.com/cdn-cgi/trace"],
              capture=True, check=False)
     trace = r.stdout or ""
     if "warp=on" in trace:

@@ -2,6 +2,55 @@
 
 ---
 
+## FIX(warp): таблица подсетей — trace «?» во всех колонках при живом туннеле (путь trace переведён на bind по адресу) — 12 сентября 2026
+
+**Кейс:** полная проба таблицы подсетей: RTT есть, Telegram 5/5 есть,
+а ВЫХОД/НОДА/ЛОКАЦИЯ — «?» на всех строках (Рабочие 0/4). MTProto-проба
+и trace ходят через ОДИН wg-scout, но РАЗНЫМИ путями: сокеты ДЦ биндятся
+к АДРЕСУ (from-правило 140 → таблица 303 → wg-scout — работает), а trace
+запускает curl с `--interface wg-scout` (bind по ИМЕНИ интерфейса) +
+отдельный /32-маршрут в main. Воспроизведено экспериментами (curl 8.x):
+
+- `http(s)_proxy`/`all_proxy` в окружении shell → curl идёт к ПРОКСИ,
+  ПОЛНОСТЬЮ игнорируя `--interface` для назначения («Uses proxy env
+  variable … Trying <proxy>») — trace не происходит вовсе; python-сокеты
+  (скан RTT, MTProto) прокси-переменных не замечают → ровно наблюдаемая
+  картина «TG 5/5, нод нет». Типичный сценарий: RU-нода с прокси в env;
+- DNS, резолвящий ЛЮБОЕ имя (wildcard у ряда хостингов), заставляет curl
+  трактовать значение `--interface` как ХОСТ (curl семантика: IP-литерал
+  → source-bind; резолвящееся имя → source-bind по резолву; нерезолвящееся
+  → SO_BINDTODEVICE) → bind по чужому адресу, connect падает мгновенно.
+
+**Сделано:**
+- `warp_subnet_table._trace_via(iface, src=None)`: ВСЕГДА `--noproxy '*'`
+  (trace диагностический — прокси исказил бы вердикт); при `src` (адрес
+  wg-scout) — `--interface <IP-литерал>` вместо имени: DNS-резолв значения
+  исключён целиком. Возврат расширен 4-м элементом — компактной причиной
+  последней неудачи (последняя строка stderr curl / «curl timeout» /
+  «no colo= in trace») — больше не «?» без объяснений.
+- `probe_endpoint_egress`: from-правило 140 + default в 303 ставятся
+  ВСЕГДА (общий путь trace и MTProto, не только с with_tg); trace идёт
+  bind'ом по адресу (`src=v4`) — по ЭМПИРИЧЕСКИ рабочему пути этой ноды
+  (TG 5/5 ходит по нему же); 1.1.1.1/32 в main остаётся резервом на случай
+  невставшего правила; в строку добавлен `trace_err`.
+- `_probe_all_rows`: прогресс строки показывает причину — «нет trace
+  (curl: …)»; `rehandshake_prod`: warn при незакрытом warp=on дублирует
+  причину curl; прод-путь trace (bind по имени) получил `--noproxy`
+  автоматически (та же _trace_via).
+- warp.py: `--noproxy '*'` добавлен во ВСЕ CF-trace проверки —
+  `_verify_warp_handshake`, `_fetch_trace_meta`, пост-инфо «Проверка
+  через Cloudflare trace» (прокси-окружение больше не искажает вердикт
+  о туннеле; на установку/диагностику на прокси-нодах ложился warp=off).
+
+**Тесты:** tests/test_warp_subnet_table.py — 3-→4-элементный контракт
+_trace_via, правила 303 присутствуют и при with_tg=False (инверсия
+старого теста), `m_trace.assert_called_once_with(..., src=...)`, новый
+класс TestTraceViaDirect (5: src-bind+--noproxy, имя-без-src, stderr→err,
+timeout, no colo=). Сьюты: subnet 61, warp+install+tg+scan_pools 144,
+warp+curated+ru_subnets 54+3subtests — все passed; compileall OK.
+
+---
+
 ## FEAT(warp): автообновление пулов сканирования из warpscout (pools.go) — 12 сентября 2026
 
 **Кейс:** список /24 для массового TCP-скана Endpoint Manager'а живёт в

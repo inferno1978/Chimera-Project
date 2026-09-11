@@ -23,14 +23,25 @@ DC1/3/5). Таблица показывает это ДО применения, 
 подсвечивается прямо в строках.
 
 Маршрутизация пробы — не трогает ни прод wg-warp, ни telemt_warp_route:
+  • ЕДИНЫЙ путь trace и MTProto — bind по АДРЕСУ: сокеты/кёрл биндятся
+    к IPv4 wg-scout, ip rule from <addr> lookup 303 priority 140 +
+    default dev wg-scout table 303 уводит их через КАНДИДАТА мимо
+    telemt-fwmark (150) и прода; чужой трафик не затрагивается —
+    правило матчит только наш src. Bind по ИМЕНИ интерфейса
+    (curl --interface wg-scout) заменён на bind по IP-литералу из-за
+    живых багов curl-пути: 1) proxy-переменные окружения
+    (http(s)_proxy/all_proxy) заставляют curl идти к ПРОКСИ, полностью
+    игнорируя --interface для назначения (подтверждено экспериментом
+    curl 8.x: «Uses proxy env variable … Trying <proxy>») — лечится
+    --noproxy '*', теперь ставится всегда; 2) DNS, резолвящий ЛЮБОЕ имя
+    (wildcard на части хостингов), превращает --interface wg-scout в
+    bind по чужому АДРЕСУ — curl трактует резолвящееся значение как
+    хост, не как устройство (тоже подтверждено: unresolvable → errno 19
+    «No such device», resolvable → source-bind). IP-литерал исключает
+    резолв целиком;
   • 1.1.1.1/32 dev wg-scout в main (replace; прежний /32, если был,
-    восстанавливается после) — curl --interface wg-scout шлёт trace
-    через КАНДИДАТА, а не через прод;
-  • ip rule from <addr wg-scout> lookup 303 priority 140 + default dev
-    wg-scout table 303 — MTProto-пробы ДЦ (сокеты биндятся к адресу
-    wg-scout: probe_dc(bind_to=...)). Приоритет ВЫШЕ telemt-fwmark (150),
-    поэтому пробы уходят через кандидата даже при активном телемт-маршруте,
-    а чужой трафик не затрагивается — правило матчит только наш src;
+    восстанавливается после) — резервный маршрут trace (если from-правило
+    не встало, source-bound пакет уйдёт в main по /32 — тоже в scout);
   • host-маршрут до САМОГО кандидата через исходный шлюз — UDP-хендшейк
     не заворачивается в прод-туннель при активном FULL (0.0.0.0/1).
 
@@ -70,9 +81,12 @@ from chimera.modules import warp as _warp
 
 # ── Константы ─────────────────────────────────────────────────────────────
 SCOUT_IFACE = "wg-scout"
-# Таблица/приоритет проб ДЦ: 300 = telemt, 301 = youtube, 302 = probe у
-# warp_telegram_probe. 303 — наша. Приоритет 140 — ВЫШЕ telemt-fwmark (150),
-# но ниже всего остального: правило матчит только src-адрес wg-scout.
+# Таблица/приоритет проб ДЦ и trace: 300 = telemt, 301 = youtube,
+# 302 = probe у warp_telegram_probe. 303 — наша. Приоритет 140 — ВЫШЕ
+# telemt-fwmark (150), но ниже всего остального: правило матчит только
+# src-адрес wg-scout (bind по адресу — trace и MTProto, см. докстринг
+# модуля: это эмпирически рабочий путь даже там, где curl --interface
+# <имя> ломается на proxy-env/wildcard-DNS).
 SCOUT_TABLE = 303
 SCOUT_RULE_PRIORITY = 140
 
@@ -177,15 +191,35 @@ def aggregate_best_per_subnet(results: list[dict]) -> list[dict]:
     return rows
 
 
-# ── trace через указанный интерфейс ──────────────────────────────────────
-def _trace_via(iface: str) -> tuple[Optional[str], Optional[str], bool]:
-    """curl cdn-cgi/trace через интерфейс (первый пакет лениво инициирует
-    WireGuard-хендшейк — поэтому ретраи). Возвращает (colo, loc, warp_on),
-    как warp._fetch_trace_meta, но для произвольного интерфейса."""
+# ── trace через wg-scout / прод-интерфейс ────────────────────────────────
+def _trace_via(iface: str,
+               src: Optional[str] = None) -> tuple[Optional[str], Optional[str],
+                                                   bool, Optional[str]]:
+    """curl cdn-cgi/trace через туннель (первый пакет лениво инициирует
+    WireGuard-хендшейк — поэтому ретраи). Возвращает (colo, loc, warp_on,
+    err), где err — компактная причина последней неудачной попытки
+    (последняя строка stderr curl / «curl timeout» / «no colo= in trace»)
+    для честного «нет trace (…)» в прогрессе пробы; None при успехе.
+
+    src — bind по IP-ЛИТЕРАЛУ (адрес wg-scout), а не по имени интерфейса.
+    Почему: curl трактует РЕЗОЛВЯЩЕЕСЯ значение --interface как хост и
+    биндится по чужому адресу (wildcard-DNS хостингов резолвит и
+    «wg-scout»), а при http(s)_proxy/all_proxy в окружении вообще идёт
+    к прокси мимо назначения — оба случая дают «? » во всех колонках
+    ВЫХОД/НОДА при живом туннеле (живой кейс: TG 5/5 через этот же scout,
+    trace — нет). Поэтому: 1) всегда --noproxy '*' — trace диагностический,
+    прокси исказил бы вердикт; 2) IP-литерал в --interface исключает
+    DNS-резолв; пакет уходит by from-правилу 140 → таблица 303 → тот же
+    путь, что у MTProto-проб (эмпирически рабочий). Без src — bind по
+    имени интерфейса (прод wg-warp в rehandshake_prod: имя не резолвится
+    на нормальном DNS, --noproxy страхует от proxy-env)."""
+    bind = src or iface
+    last_err: Optional[str] = None
     for attempt in range(TRACE_RETRIES):
         try:
             r = subprocess.run(
-                ["curl", "-sS", "--interface", iface,
+                ["curl", "-sS", "--noproxy", "*",
+                 "--interface", bind,
                  "--max-time", str(TRACE_TIMEOUT), TRACE_URL],
                 capture_output=True, text=True,
                 timeout=TRACE_TIMEOUT + 4, check=False,
@@ -200,10 +234,18 @@ def _trace_via(iface: str) -> tuple[Optional[str], Optional[str], bool]:
                 m_colo.group(1) if m_colo else None,
                 m_loc.group(1) if m_loc else None,
                 "warp=on" in body,
+                None,
             )
+        if r is None:
+            last_err = "curl timeout"
+        elif r.returncode == 0:
+            last_err = "no colo= in trace"
+        else:
+            lines = (r.stderr or "").strip().splitlines()
+            last_err = lines[-1] if lines else f"curl rc={r.returncode}"
         if attempt < TRACE_RETRIES - 1:
             time.sleep(TRACE_RETRY_PAUSE)
-    return None, None, False
+    return None, None, False, last_err
 
 
 # ── MTProto-проба 5 ДЦ через wg-scout ────────────────────────────────────
@@ -319,16 +361,19 @@ def probe_endpoint_egress(row: dict, fields: dict, with_tg: bool = True) -> dict
     handshake + trace (colo/loc/warp) [+ MTProto 5 ДЦ].
 
     row — строка из aggregate_best_per_subnet; результат — её копия,
-    дополненная ключами colo / loc / warp_on / probe_ok / tg (dict пробы)
+    дополненная ключами colo / loc / warp_on / trace_err (причина
+    «нет trace», см. _trace_via) / probe_ok / tg (dict пробы)
     / tg_cell. IPv4 туннеля берётся из конфига, а при его отсутствии —
     с живого wg-warp или стандартный 172.16.0.2 (см. _probe_v4_source):
-    IPv6-only-конфиг больше не отменяет пробу. Все временные
-    маршруты/правила/интерфейс снимаются в finally, поэтому функция
-    безопасна при Ctrl+C и исключениях."""
+    IPv6-only-конфиг больше не отменяет пробу. Trace идёт bind'ом по
+    этому АДРЕСУ (from-правило 140 → таблица 303 → wg-scout — тот же
+    путь, что у MTProto-проб; путь поднимается всегда, не только при
+    with_tg). Все временные маршруты/правила/интерфейс снимаются в
+    finally, поэтому функция безопасна при Ctrl+C и исключениях."""
     out = dict(row)
     out.update({
         "colo": None, "loc": None, "warp_on": False, "probe_ok": False,
-        "tg": None, "tg_cell": "—",
+        "trace_err": None, "tg": None, "tg_cell": "—",
     })
     endpoint = row.get("endpoint")
     if not endpoint or ":" not in endpoint:
@@ -386,19 +431,23 @@ def probe_endpoint_egress(row: dict, fields: dict, with_tg: bool = True) -> dict
         if prev_line and SCOUT_IFACE not in prev_line:
             restore_routes.append(["ip", "route", "add"] + prev_line.split())
 
-        # 5. MTProto: таблица 303 + from-правило (выше telemt-fwmark)
-        if with_tg:
-            _ip(["ip", "route", "replace", "default", "dev", SCOUT_IFACE,
-                 "table", str(SCOUT_TABLE)])
-            _ip(["ip", "rule", "add", "from", v4, "lookup", str(SCOUT_TABLE),
-                 "priority", str(SCOUT_RULE_PRIORITY)])
-            del_rules.append(["ip", "rule", "del", "from", v4,
-                              "lookup", str(SCOUT_TABLE),
-                              "priority", str(SCOUT_RULE_PRIORITY)])
+        # 5. from-правило 140 + default в 303 — ОБЩИЙ путь ОБЕИХ проб:
+        #    trace (curl --interface <v4>: bind по адресу — см. _trace_via,
+        #    резолв/прокси-окружение больше не ломают его) и MTProto
+        #    (probe_dc(bind_to=v4)). Ставится ВСЕГДА, не только с with_tg.
+        _ip(["ip", "route", "replace", "default", "dev", SCOUT_IFACE,
+             "table", str(SCOUT_TABLE)])
+        _ip(["ip", "rule", "add", "from", v4, "lookup", str(SCOUT_TABLE),
+             "priority", str(SCOUT_RULE_PRIORITY)])
+        del_rules.append(["ip", "rule", "del", "from", v4,
+                          "lookup", str(SCOUT_TABLE),
+                          "priority", str(SCOUT_RULE_PRIORITY)])
 
-        # 6. trace (первая попытка ждёт хендшейк) + MTProto
-        colo, loc, warp_on = _trace_via(SCOUT_IFACE)
-        out.update({"colo": colo, "loc": loc, "warp_on": warp_on})
+        # 6. trace (первая попытка ждёт хендшейк; bind по АДРЕСУ wg-scout)
+        #    + MTProto по тому же from-правилу
+        colo, loc, warp_on, trace_err = _trace_via(SCOUT_IFACE, src=v4)
+        out.update({"colo": colo, "loc": loc, "warp_on": warp_on,
+                    "trace_err": trace_err})
         out["probe_ok"] = colo is not None and warp_on
         if with_tg:
             tg = _tg_probe_via(v4)
@@ -439,7 +488,7 @@ def rehandshake_prod() -> None:
     _warp._run(["systemctl", "restart", _warp.WG_SERVICE],
                capture=True, check=False)
     time.sleep(2)
-    colo, _loc, warp_on = _trace_via(_warp.WG_INTERFACE)
+    colo, _loc, warp_on, err = _trace_via(_warp.WG_INTERFACE)
     mode = _warp._state_get("WARP_MODE", _warp.MODE_FULL) or _warp.MODE_FULL
     _warp._apply_mode(
         mode,
@@ -451,8 +500,9 @@ def rehandshake_prod() -> None:
         _warp.success(f"Туннель wg-warp восстановлен (warp=on" +
                       (f", нода {colo})" if colo else ")") + ".")
     else:
-        _warp.warn("После рестарта trace не подтвердил warp=on — проверьте "
-                   "диагностику (меню WARP → пункт 4).")
+        extra = f" ({err})" if err else ""
+        _warp.warn(f"После рестарта trace не подтвердил warp=on{extra} — "
+                   "проверьте диагностику (меню WARP → пункт 4).")
 
 
 # ── Рендер таблицы ───────────────────────────────────────────────────────
@@ -559,7 +609,9 @@ def _probe_all_rows(rows: list[dict], fields: dict) -> None:
             if res.get("colo"):
                 tail.append(f"{res['colo']} {res['loc'] or ''}".strip())
             else:
-                tail.append("нет trace")
+                err = (res.get("trace_err") or "").strip()
+                # причина видна сразу — больше не «?» без объяснений
+                tail.append(f"нет trace ({err[:80]})" if err else "нет trace")
             if res.get("tg") is not None:
                 tail.append(f"TG {res['tg_cell']}")
             print("  →  " + ", ".join(t for t in tail if t))
