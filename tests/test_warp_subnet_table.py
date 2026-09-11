@@ -544,6 +544,7 @@ class TestFlow(unittest.TestCase):
              patch("builtins.input", side_effect=inputs), \
              patch.object(warp_mod, "_parse_wg_config_fields",
                           return_value=dict(FIELDS)), \
+             patch.object(warp_mod, "ensure_pools_ready"), \
              patch.object(warp_mod, "_scan_warp_endpoints", return_value=scan), \
              patch.object(warp_mod, "_endpoint_cache_save") as m_cache, \
              patch.object(warp_mod, "_warp_service_active",
