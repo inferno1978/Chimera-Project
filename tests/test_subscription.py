@@ -431,7 +431,7 @@ class TestMieruEndpoints(unittest.TestCase):
             self.assertIn("port=20000", link)
 
     def test_standalone_single_protocol_unchanged(self):
-        """Регресс: одиночный протокол — одна ссылка, как до v86."""
+        """Регресс: одиночный протокол — одна ссылка (без BOTH)."""
         from chimera.modules import subscription as sub
         mst = self._write("mieru.json", {
             "installed": True, "port_start": 5353, "port_end": 5353,
@@ -515,7 +515,7 @@ class TestSingboxSubscription(unittest.TestCase):
 
     def test_hybrid_mieru_outbounds_and_dns(self):
         """Hybrid-режим: mieru-outbound'ы на ОБА транспорта, домен,
-        DNS-блок (AGH через туннель) — как в Karing-JSON из v85."""
+        DNS-блок (AGH через туннель) — как в прежнем Karing-JSON."""
         hst, mcfg = self._hybrid_state()
         cfg = json.loads(self._build(hst, mcfg))
         mieru_obs = [ob for ob in cfg["outbounds"] if ob.get("type") == "mieru"]
