@@ -2,7 +2,45 @@
 
 ---
 
+## DOCS(tls): аудит shtorm-7/sing-box-extended — решает ли MLKEM768 + FP=Firefox (нет) — 12 сентября 2026
+
+**Контекст:** пользователь принёс форк `shtorm-7/sing-box-extended`
+(WARP/MASQUE/MTProxy/Mieru/TrustTunnel/Sudoku/SSH/Call + лимитеры,
+HEAD 6a6a1e0 от 2026-09-05) с вопросом «может, в этом ядре есть то, что
+нам надо» — сейчас клиентская сторона работает гибридом Clash Verge +
+xray-ядро из-за проблемы MLKEM768 + FP=Firefox (§18 VLESS_FAQ).
+
+**Аудит (новый `docs/audit-singbox-extended-mlkem.md`):** фингерпринтный
+слой форка НЕ тронут — `common/tls/utls_client.go` побайтово идентичен
+официальному SagerNet/sing-box master (diff 0 строк), та же зависимость
+`metacubex/utls v1.8.7` (go.mod:41 — как у официоза и mihomo), а в этой
+ветке uTLS `HelloFirefox_Auto = HelloFirefox_120` (u_common.go:605) —
+спека Firefox 120 (дек. 2023): curves X25519/P256/P384/P521/FFDHE,
+key_share X25519+P256, БЕЗ X25519MLKEM768 (u_parrots.go:1376-1384,
+1408-1411). Хуже: REALITY-клиент sing-box (upstream, форк не менял;
+единственный дифф — байты SessionId 1,8,1→26,7,11) **безусловно
+вырезает** X25519MLKEM768 из SupportedCurves и KeyShares
+(reality_client.go:147-158) — MLKEM в REALITY недостижим ни одним
+фингерпринтом. `curve_preferences` с X25519MLKEM768 (option/tls.go:162)
+к uTLS-клиенту не применяется (только std/system/masque и серверы).
+Эталон: Xray-core на refraction utls v1.8.3-0.20260301 —
+`HelloFirefox_Auto = HelloFirefox_148` с X25519MLKEM768 первой позицией
+(u_parrots.go:1501-1545) + версионные `hellofirefox_120/148` в конфиге
+(tls.go:221-222). Единственная MLKEM-заготовка metacubex — Chrome 133
+(u_parrots.go:884+), живёт только в не-REALITY направлениях.
+
+**Вердикт:** гибрид Clash Verge + xray-ядро остаётся правильным;
+переход на форк вернул бы проблему (firefox без PQ) и добавил бы
+регресс против mihomo (у того есть «рецепт B»). VLESS_FAQ §18
+дополнен перекрёстной ссылкой на аудит; в аудите — сводная таблица
+четырёх ядер, репродукция командами, бонус-инвентарь форка
+(WARP+MASQUE аутбаунды — кандидат на потребление WARP-кредов Химеры
+без локального wg).
+
+---
+
 ## FIX(warp): таблица подсетей — trace «?» во всех колонках при живом туннеле (путь trace переведён на bind по адресу) — 12 сентября 2026
+
 
 **Кейс:** полная проба таблицы подсетей: RTT есть, Telegram 5/5 есть,
 а ВЫХОД/НОДА/ЛОКАЦИЯ — «?» на всех строках (Рабочие 0/4). MTProto-проба
