@@ -1265,6 +1265,15 @@ REALITY. Вывод: лечится только апдейтом sing-box вы�
 следить за SagerNet/sing-box. Обходные пути: mieru-подписка Chimera
 (nyamebox / `mierus://` / Karing-JSON) или клиент mihomo/Xray-семьи.
 
+> **Почему форк не помогает (аудит 2026-09-12):** фингерпринтный слой
+> `shtorm-7/sing-box-extended` побайтово идентичен официозу — та же
+> `metacubex/utls v1.8.7`, `firefox → HelloFirefox_Auto = Firefox 120`
+> (спека 2023 года, без PQ), а REALITY-клиент sing-box дополнительно
+> **безусловно вырезает** X25519MLKEM768 из ClientHello при любом
+> фингерпринте (upstream-фильтр `common/tls/reality_client.go:147-158`,
+> форк не менял). Полный разбор с file:line-ссылками и сравнением
+> четырёх ядер — [`docs/audit-singbox-extended-mlkem.md`](../audit-singbox-extended-mlkem.md).
+
 **sing-box/mihomo × 26.7.11–26.7.28 (с дефолтом) — гейт версий.** Сервер
 требует ClientVer ≥ 26.3.27; mihomo шлёт `[1,8,2]`, sing-box `[1,8,1]` —
 оба ниже порога, REALITY молча уводит соединение в декой (в клиенте —
