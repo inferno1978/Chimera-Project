@@ -5,7 +5,12 @@ tests/test_openflux.py
 Unit-тесты для chimera/modules/openflux.py.
 
 Покрывает:
-  1.  _validate_doc_url — edit-ссылка vs короткая /i/ vs мусор
+  1.  _validate_doc_url — edit-ссылка vs короткая /i/ vs мусор;
+      sk= обязателен (без него Яндекс отдаёт логин-редирект)
+  1b. _strip_esc / _ask — отмена ввода: Ctrl+C ИЛИ Esc(+Enter)
+      → _Cancelled (урок юзера: ^C на URL-промпте молча превращался
+      в «пустая ссылка» — выйти из мастера было невозможно);
+      escape-мусор (стрелки, bracketed paste) вычищается
   2.  _parse_go_version / _go_meets — версии тулчейна
   3.  _gen_transport_key — генерация секрета e2e
   4.  _render_env_file — EnvironmentFile (URL/транспорт/oneme-хвост)
@@ -106,6 +111,14 @@ class TestValidateDocUrl(OpenfluxTestCase):
             "https://disk.yandex.ru/edit/d/abc", "yandex")
         self.assertFalse(ok)
 
+    def test_no_sk_rejected_with_hint(self):
+        # ?параметры без sk= — Яндекс отдаст логин-редирект, а не
+        # collaborative-комнату: отказ с подсказкой про полный хвост
+        ok, why = self.of._validate_doc_url(
+            "https://disk.yandex.ru/edit/d/abc?v=1697", "yandex")
+        self.assertFalse(ok)
+        self.assertIn("sk", why)
+
     def test_cups_and_oneme_dont_need_url(self):
         # cups: комнаты создаёт exit, oneme: токен вместо URL
         for t in ("cupsonline", "oneme"):
@@ -113,6 +126,125 @@ class TestValidateDocUrl(OpenfluxTestCase):
             self.assertTrue(ok)
             ok, _ = self.of._validate_doc_url("что угодно", t)
             self.assertTrue(ok)
+
+
+class TestAskCancel(OpenfluxTestCase):
+    """1b. _strip_esc / _ask: Ctrl+C и Esc = отмена, мусор вычищается."""
+
+    def test_strip_esc_plain_untouched(self):
+        self.assertEqual(
+            self.of._strip_esc("https://disk.yandex.ru/edit/d/x?sk=y"),
+            ("https://disk.yandex.ru/edit/d/x?sk=y", False))
+
+    def test_strip_esc_bare_esc(self):
+        self.assertEqual(self.of._strip_esc("\x1b"), ("", True))
+
+    def test_strip_esc_arrow_key(self):
+        self.assertEqual(self.of._strip_esc("\x1b[D"), ("", True))
+
+    def test_strip_esc_arrow_then_url(self):
+        # юзер жал стрелку перед вставкой — ссылка не должна ломаться
+        cleaned, had = self.of._strip_esc(
+            "\x1b[Dhttps://disk.yandex.ru/edit/d/x?sk=y")
+        self.assertEqual(cleaned, "https://disk.yandex.ru/edit/d/x?sk=y")
+        self.assertTrue(had)
+
+    def test_strip_esc_bracketed_paste(self):
+        cleaned, had = self.of._strip_esc(
+            "\x1b[200~https://a.b/edit/d/x?sk=y\x1b[201~")
+        self.assertEqual(cleaned, "https://a.b/edit/d/x?sk=y")
+        self.assertTrue(had)
+
+    def test_strip_esc_stray_esc_before_url(self):
+        # случайный Esc, потом вставка — текст сохраняем
+        cleaned, had = self.of._strip_esc("\x1bhttps://a.b")
+        self.assertEqual(cleaned, "https://a.b")
+        self.assertTrue(had)
+
+    def test_strip_esc_osc_title(self):
+        cleaned, had = self.of._strip_esc("\x1b]0;title\x07ls -la")
+        self.assertEqual(cleaned, "ls -la")
+        self.assertTrue(had)
+
+    def test_ask_esc_only_raises(self):
+        with patch.object(self.of, "proto_ask", return_value="\x1b"):
+            with self.assertRaises(self.of._Cancelled):
+                self.of._ask("URL: ")
+
+    def test_ask_ctrl_c_passes_c_true(self):
+        """Регрессия «пустая ссылка»: proto_ask обязан получать c=True,
+        иначе Ctrl+C молча вернёт дефолт вместо ProtoCancelled."""
+        seen = {}
+
+        def fake(prompt, default="", c=False):
+            seen["c"] = c
+            raise self.of.ProtoCancelled()
+
+        with patch.object(self.of, "proto_ask", side_effect=fake):
+            with self.assertRaises(self.of._Cancelled):
+                self.of._ask("URL: ")
+        self.assertTrue(seen["c"])
+
+    def test_ask_returns_cleaned_url(self):
+        with patch.object(self.of, "proto_ask",
+                          return_value="\x1b[Chttps://a.b?sk=1"):
+            self.assertEqual(self.of._ask("URL: "), "https://a.b?sk=1")
+
+    def test_ask_default_on_empty(self):
+        with patch.object(self.of, "proto_ask", return_value=""):
+            self.assertEqual(self.of._ask("Выбор: ", default="1"), "1")
+
+
+class TestAskDocUrlCancel(OpenfluxTestCase):
+    """1b. Отмена на URL-промпте → назад в меню; формат-блок полный."""
+
+    def test_ctrl_c_returns_none(self):
+        with patch.object(self.of, "proto_ask",
+                          side_effect=self.of.ProtoCancelled()), \
+                patch("builtins.print"):
+            self.assertIsNone(self.of._ask_doc_url("yandex"))
+
+    def test_esc_returns_none(self):
+        with patch.object(self.of, "proto_ask", return_value="\x1b"), \
+                patch("builtins.print"):
+            self.assertIsNone(self.of._ask_doc_url("yandex"))
+
+    def test_transport_menu_ctrl_c_returns_none(self):
+        with patch.object(self.of, "proto_ask",
+                          side_effect=self.of.ProtoCancelled()), \
+                patch("builtins.print"):
+            self.assertIsNone(self.of._ask_transport())
+
+    def test_prompt_shows_full_format_and_cancel_hint(self):
+        """Формат-блок обязан содержать /edit/d/, sk=, обе строки
+        примера (не обрезаны) и подсказку об отмене."""
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        calls = {"n": 0}
+
+        def fake(prompt, default="", c=False):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise self.of.ProtoCancelled()
+            return ""
+
+        with patch.object(self.of, "proto_ask", side_effect=fake):
+            with redirect_stdout(buf):
+                self.assertIsNone(self.of._ask_doc_url("yandex"))
+        out = buf.getvalue()
+        for needle in ("/edit/d/", "sk=", "ИМЕННО", "Ctrl+C", "Esc",
+                       "disk.yandex.ru/edit/d/5f8a3b2c",
+                       "?rtp=1&app=word&sk="):
+            self.assertIn(needle, out)
+        # строки примера не шире терминала 80 (с отступом)
+        for ln in out.splitlines():
+            self.assertLessEqual(len(ln), 76, f"строка шире 76: {ln!r}")
+
+    def test_valid_url_passes_through(self):
+        with patch.object(self.of, "proto_ask", return_value=_EDIT_URL), \
+                patch("builtins.print"):
+            self.assertEqual(self.of._ask_doc_url("yandex"), _EDIT_URL)
 
 
 class TestGoVersion(OpenfluxTestCase):

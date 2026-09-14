@@ -61,6 +61,9 @@ OpenFlux — carrier-channel туннель: трафик клиента дох�
   • Ротация ключа и смена doc-URL (ротация канала) без переустановки
   • Экспорт клиентского бандла: команды запуска + mihomo-фрагмент
   • Обновление исходников (re-fetch tarball + rebuild + restart)
+  • Любой интерактивный промпт отменяем: Ctrl+C ИЛИ Esc(+Enter) →
+    _ask() → _Cancelled → назад в меню установки (урок юзера: раньше
+    Ctrl+C на URL-промпте молча превращался в «пустая ссылка»)
 
 Порты (всё через port_registry):
   • exit-нода — ИСХОДЯЩИЙ канал (WSS/HTTPS к носителю), инбаундов
@@ -251,6 +254,56 @@ def _pause() -> None:
         print()
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ВВОД С ОТМЕНОЙ (Ctrl+C / Esc)
+# ══════════════════════════════════════════════════════════════════════════════
+#  Урок юзера: на URL-промпте Ctrl+C молча превращался в «пустая ссылка»
+#  — proto_ask без c=True возвращает default="" вместо отмены, и выйти
+#  из мастера было НЕВОЗМОЖНО. С этих пор любой интерактивный промпт
+#  модуля идёт через _ask: Ctrl+C ИЛИ Esc(+Enter) → _Cancelled →
+#  возврат в меню установки.
+
+# CSI (стрелки/Home/End/bracketed-paste), OSC (заголовок окна), SS3,
+# одиночный Esc (группа опциональна — голый \x1b тоже матчится)
+_ESC_SEQ_RE = re.compile(
+    r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|O[ -~])?")
+
+
+def _strip_esc(s: str) -> tuple[str, bool]:
+    """Убирает escape-мусор из строки ввода; ``(_, True)`` = был Esc.
+
+    Терминал в cooked-режиме кладёт ESC-последовательности прямо в
+    буфер строки: стрелки, Home/End, обёртки bracketed paste
+    (\\x1b[200~...\\x1b[201~), OSC. Если юзер жал стрелки перед вставкой
+    ссылки — она не должна ломаться. Остаточные одиночные Esc (после
+    CSI/OSC-разбора) вычищаются заменой: голый Esc перед печатным
+    текстом = случайное нажатие, текст сохраняем; только Esc без
+    текста = намеренная отмена (см. _ask)."""
+    had = "\x1b" in s
+    if not had:
+        return s, False
+    s = _ESC_SEQ_RE.sub("", s)
+    s = s.replace("\x1b", "")
+    return s, had
+
+
+def _ask(prompt: str, default: str = "") -> str:
+    """Интерактивный ввод с отменой: Ctrl+C ИЛИ Esc(+Enter) → _Cancelled.
+
+    Отличия от proto_ask:
+      • всегда c=True — Ctrl+C = отмена (не «пустая строка»);
+      • Esc: cooked-терминал кладёт \\x1b в буфер, Enter подтверждает —
+        строка из «голого» Esc (+возможно стрелки) = отмена. Подсказка
+        об этом печатается в самих промптах;
+      • escape-мусор (стрелки, bracketed paste) вычищается — вставленная
+        ссылка не ломается.
+    Пустой ввод → default (семантика proto_ask сохранена)."""
+    raw = proto_ask(prompt, default="", c=True)
+    cleaned, had_esc = _strip_esc(raw)
+    if had_esc and not cleaned.strip():
+        raise _Cancelled()
+    return cleaned.strip() or default
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  ВСПОМОГАТЕЛЬНЫЕ
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -302,8 +355,11 @@ def _svc_active() -> bool:
 def _validate_doc_url(url: str, transport: str = "yandex") -> tuple[bool, str]:
     """Валидация носителя для exit-ноды.
 
-    yandex/vyandex: годится ТОЛЬКО edit-ссылка Яндекс.Документов
+    yandex/vyandex: годится ТОЛЬКО полная edit-ссылка Яндекс.Документов
       https://disk.yandex.ru/edit/d/...?...&sk=...
+      ОБЯЗАТЕЛЬНЫ оба признака: «/edit/d/» в пути И «sk=» в параметрах
+      (ключ сессии, обычно последний в хвосте). Без sk= Яндекс отдаёт
+      логин-редирект → upstream падает с «config not found».
       Короткая /i/... НЕ годится (мануал §«Важно»: она не открывает
       collaborative-комнату) — отдельная диагностика, чтобы юзер не
       гадал, почему «curl виснет».
@@ -324,8 +380,10 @@ def _validate_doc_url(url: str, transport: str = "yandex") -> tuple[bool, str]:
     if "disk.yandex.ru/edit/" not in u and "disk.yandex.ru/edit#" not in u:
         return False, ("не похоже на edit-ссылку Яндекс.Документов "
                        "(ожидается disk.yandex.ru/edit/d/...)")
-    if "sk=" not in u and "?" not in u:
-        return False, "в ссылке нет параметров доступа (?...&sk=...)"
+    if "sk=" not in u:
+        return False, ("в ссылке нет «sk=» — ключ сессии обязателен. "
+                       "Нужна ПОЛНАЯ ссылка с хвостом ?...&sk=... "
+                       "(документ → «Поделиться» → копировать целиком)")
     return True, ""
 
 
@@ -890,8 +948,11 @@ def _ask_transport(cli_transport: Optional[str] = None) -> Optional[str]:
                 "experimental": f"{YELLOW}эксперимент{NC}"}[st]
         print(f"   {DIM}[{NC}{WHITE}{BOLD}{i}{NC}{DIM}]{NC} {key:11} — {label}  {mark}")
     while True:
-        raw = proto_ask(f"{CYAN}Выбор [1={_MENU_TRANSPORTS[0]}]: {NC}",
-                        default="1").strip()
+        try:
+            raw = _ask(f"{CYAN}Выбор [1={_MENU_TRANSPORTS[0]}]: {NC}",
+                       default="1")
+        except _Cancelled:
+            return None
         if raw.isdigit() and 1 <= int(raw) <= len(_MENU_TRANSPORTS):
             return _MENU_TRANSPORTS[int(raw) - 1]
         if raw in _TRANSPORTS:
@@ -901,20 +962,40 @@ def _ask_transport(cli_transport: Optional[str] = None) -> Optional[str]:
 
 
 def _ask_doc_url(transport: str) -> Optional[str]:
-    """edit-ссылка доков. Валидация + отдельная диагностика /i/ (короткая).
+    """edit-ссылка доков: строгий формат-блок (edit/d/ + sk=) +
+    валидация + отмена (Ctrl+C / Esc+Enter) назад в меню установки.
     Пустой ввод на yandex/vyandex — отказ (URL обязателен)."""
     need_url = _TRANSPORTS[transport][1]
     if not need_url:
         return ""
     print()
-    print(f"  {CYAN}Edit-ссылка Яндекс.Документа (носитель канала).{NC}")
-    print(f"  {DIM}Формат: https://disk.yandex.ru/edit/d/...?...&sk=...")
-    print(f"  {DIM}НЕ короткая /i/... — она не открывает collaborative-комнату.")
-    print(f"  {DIM}Ссылка = СЕКРЕТ (док публичный). Заведите отдельный документ")
+    print(f"  {CYAN}Edit-ссылка Яндекс.Документа — носитель канала{NC}")
+    print()
+    print(f"  {YELLOW}⚠{NC}  Нужен {BOLD}ИМЕННО такой формат{NC} — это важно:")
+    print(f"     в ссылке ДОЛЖНЫ быть «/edit/d/» и «sk=» (ключ сессии,")
+    print(f"     стоит в конце хвоста ?...&sk=...). Без них Яндекс не")
+    print(f"     открывает collaborative-комнату — канал не поднимется.")
+    print()
+    print(f"  {DIM}Формат целиком (это ОДНА строка; для показа разбита на 2):{NC}")
+    print(f"    {WHITE}https://disk.yandex.ru/edit/d/ID_ДОКУМЕНТА{NC}")
+    print(f"    {WHITE}?ПАРАМЕТРЫ&sk=КЛЮЧ_СЕССИИ{NC}")
+    print()
+    print(f"  {DIM}Пример (реальные длины частей — вставляйте свою ссылку{NC}")
+    print(f"  {DIM}целиком, одной строкой):{NC}")
+    print(f"    {DIM}https://disk.yandex.ru/edit/d/5f8a3b2c1d9e4f7a8b9c0d1e2f3a4b5c{NC}")
+    print(f"    {DIM}?rtp=1&app=word&sk=u76b8a9c0d1e2f3a4b5c6d7e8f9a0b1c2{NC}")
+    print()
+    print(f"  {RED}✗{NC}  НЕ короткая /i/... — она НЕ открывает комнату")
+    print(f"  {RED}✗{NC}  НЕ обрезанная ссылка без хвоста ?...&sk=...")
+    print(f"  {DIM}Где взять: открыть документ → «Поделиться» → скопировать{NC}")
+    print(f"  {DIM}ПОЛНУЮ ссылку (с /edit/d/ и хвостом &sk=...).{NC}")
+    print()
+    print(f"  {DIM}Ссылка = СЕКРЕТ (док публичный). Заведите отдельный документ{NC}")
     print(f"  {DIM}и отдельный Яндекс-аккаунт (рекомендация upstream).{NC}")
+    print(f"  {DIM}Отмена: Ctrl+C или Esc затем Enter — назад в меню{NC}")
     while True:
         try:
-            url = proto_ask(f"{CYAN}URL: {NC}").strip()
+            url = _ask(f"{CYAN}URL: {NC}")
         except _Cancelled:
             return None
         ok, why = _validate_doc_url(url, transport)
@@ -963,9 +1044,13 @@ def _run_install(cli_transport: Optional[str] = None,
 
     # 3. Свежий main vs пин
     if not use_main and not cli_transport:
-        pick = proto_ask(
-            f"{CYAN}Версия [1=verified {_PINNED_COMMIT[:7]} / 2=main]: {NC}",
-            default="1").strip()
+        try:
+            pick = _ask(
+                f"{CYAN}Версия [1=verified {_PINNED_COMMIT[:7]} / 2=main]: {NC}",
+                default="1")
+        except _Cancelled:
+            _box_err("Отмена — назад в меню")
+            _box_bot(); _pause(); return
         use_main = pick == "2"
     if use_main:
         _box_warn("main-ветка: свежие фиксы, но без гарантии мануала")
@@ -1012,9 +1097,13 @@ def _run_install(cli_transport: Optional[str] = None,
     # 8. Сервис
     local_ip = ""
     if raw_mode:
-        local_ip = proto_ask(f"{CYAN}Egress IP для raw-режима "
-                             f"[{_get_server_ip()}]: {NC}",
-                             default=_get_server_ip()).strip()
+        try:
+            local_ip = _ask(f"{CYAN}Egress IP для raw-режима "
+                            f"[{_get_server_ip()}]: {NC}",
+                            default=_get_server_ip())
+        except _Cancelled:
+            _box_err("Отмена — назад в меню")
+            _box_bot(); _pause(); return
     _install_service(transport, raw_mode=raw_mode, local_ip=local_ip)
     _run(["systemctl", "restart", _SERVICE_NAME])
     time.sleep(4)
@@ -1117,7 +1206,10 @@ def _ask_bridge_bind(cli_bind: Optional[str] = None) -> Optional[str]:
           f"(рекомендуется: цепочки Xray/mihomo локально)")
     print(f"   {DIM}[{NC}{WHITE}{BOLD}2{NC}{DIM}]{NC} 0.0.0.0 — все интерфейсы"
           f" (откроет UFW; SOCKS5 БЕЗ аутентификации!)")
-    pick = proto_ask(f"{CYAN}Выбор [1]: {NC}", default="1").strip()
+    try:
+        pick = _ask(f"{CYAN}Выбор [1]: {NC}", default="1")
+    except _Cancelled:
+        return None
     return "0.0.0.0" if pick == "2" else _DEFAULT_BRIDGE_BIND
 
 
@@ -1130,9 +1222,9 @@ def _ask_bridge_port(cli_port: Optional[int] = None) -> Optional[int]:
         return cli_port
     while True:
         try:
-            raw = proto_ask(
+            raw = _ask(
                 f"{CYAN}SOCKS5 порт [{_DEFAULT_BRIDGE_PORT}]: {NC}",
-                default=str(_DEFAULT_BRIDGE_PORT)).strip()
+                default=str(_DEFAULT_BRIDGE_PORT))
         except _Cancelled:
             return None
         if raw.isdigit() and 1 <= int(raw) <= 65535:
@@ -1192,8 +1284,8 @@ def _bridge_setup(cli_bind: Optional[str] = None,
             _box_info("CLI-режим: смените порт флагом --port")
             _box_bot(); _pause(); return
         try:
-            raw = proto_ask(f"{CYAN}Другой порт (Enter — отмена): {NC}",
-                            default="").strip()
+            raw = _ask(f"{CYAN}Другой порт (Enter — отмена): {NC}",
+                       default="")
         except _Cancelled:
             raw = ""
         if not raw or not raw.isdigit():
@@ -1356,6 +1448,8 @@ def _set_url() -> None:
     transport = st.get("transport", "yandex")
     url = _ask_doc_url(transport)
     if not url:
+        print(f"  {DIM}отмена (Ctrl+C/Esc — без изменений){NC}")
+        _pause()
         return
     _write_env(url, transport)
     st["doc_url"] = url
@@ -1472,9 +1566,12 @@ def _restart_service() -> None:
 
 
 def _uninstall() -> None:
-    if not proto_ask(f"{RED}Точно удалить OpenFlux? "
-                     f"Введите YES: {NC}").strip() == "YES":
-        print("  отмена"); return
+    try:
+        if _ask(f"{RED}Точно удалить OpenFlux? "
+                f"Введите YES: {NC}") != "YES":
+            print("  отмена"); return
+    except _Cancelled:
+        print(f"  {DIM}отмена (Ctrl+C/Esc){NC}"); return
     st = proto_load_state(_MODULE_STATE)
     # bridge первым: stop + порт закрыть/разрегистрировать
     if st.get("bridge_port"):
@@ -1615,7 +1712,7 @@ def do_openflux_menu() -> None:
         print()
 
         try:
-            ch = proto_ask(f"{CYAN}Выбор: {NC}", c=True).strip().lower()
+            ch = _ask(f"{CYAN}Выбор: {NC}").strip().lower()
         except _Cancelled:
             break
 
