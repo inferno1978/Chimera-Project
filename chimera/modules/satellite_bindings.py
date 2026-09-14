@@ -47,9 +47,14 @@ from typing import Optional
 # ── Константы ─────────────────────────────────────────────────────────────
 _STATE_FILE = Path("/var/lib/xray-installer/satellite_bindings.json")
 
-# Поддерживаемые сателлиты (5 протоколов).
+# State-файл openflux-модуля (сканер _scan_openflux; константа — чтобы
+# тесты патчили путь, не трогая прод-раскладку).
+_OF_STATE = Path("/var/lib/xray-installer/openflux.json")
+
+# Поддерживаемые сателлиты (6 протоколов).
 # Ключи используются в state-файле и в API — не менять без миграции.
-SATELLITES = ("mieru", "naive", "telemt", "trusttunnel", "singbox")
+SATELLITES = ("mieru", "naive", "telemt", "trusttunnel", "singbox",
+              "openflux")
 
 # Удобные алиасы для отображения в UI.
 SATELLITE_LABELS = {
@@ -58,6 +63,7 @@ SATELLITE_LABELS = {
     "telemt":      "Telemt (MTProto)",
     "trusttunnel": "TrustTunnel",
     "singbox":     "sing-box (ShadowTLS/AnyTLS/TUIC/VLESS-WS-CDN)",
+    "openflux":    "OpenFlux (carrier-канал через Яндекс.Документы)",
 }
 
 
@@ -378,12 +384,33 @@ def _scan_singbox() -> list[dict]:
     return out
 
 
+def _scan_openflux() -> list[dict]:
+    """OpenFlux — ОДНОканальный сателлит: один exit на ноду, один e2e-ключ,
+    логинов per-user нет. Если установлен (state-файл жив) — единственный
+    псевдо-логин "default": к нему можно привязать юзеров «этот юзер
+    пользуется OpenFlux-каналом» (для отображения в Admin Panel /
+    клиентской выдаче бандла)."""
+    path = _OF_STATE
+    if not path.exists():
+        return []
+    try:
+        st = json.loads(path.read_text())
+        if not st.get("doc_url"):
+            return []
+        return [{"satellite": "openflux", "login": "default",
+                 "name": f"exit/{st.get('transport', 'yandex')}"}]
+    except Exception as e:
+        _log("WARN", f"scan openflux: {e}")
+        return []
+
+
 _SCAN_FUNCS = {
     "mieru":       "_scan_mieru",
     "naive":       "_scan_naive",
     "telemt":      "_scan_telemt",
     "trusttunnel": "_scan_trusttunnel",
     "singbox":     "_scan_singbox",
+    "openflux":    "_scan_openflux",
 }
 
 

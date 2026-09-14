@@ -57,6 +57,8 @@ API:
   SERVICE_AGHOME_DOH      — AdGuard Home DoH (:30443/tcp)
   SERVICE_AGHOME_DOT      — AdGuard Home DoT (:853/tcp)
   SERVICE_AGHOME_DOQ      — AdGuard Home DoQ (:853/udp)
+  SERVICE_OPENFLUX        — OpenFlux exit (carrier-канал, исходящий — без портов)
+  SERVICE_OPENFLUX_BRIDGE — OpenFlux bridge SOCKS5 на этой VPS (loopback default)
 
 Паттерн использования (на примере нового сервиса):
   from chimera.modules.port_registry import (
@@ -158,6 +160,13 @@ SERVICE_AGHOME_WEB     = "aghome_web"      # AdGuard Home Web UI (:3000)
 SERVICE_AGHOME_DOH     = "aghome_doh"      # AdGuard Home DoH (:30443/tcp)
 SERVICE_AGHOME_DOT     = "aghome_dot"      # AdGuard Home DoT (:853/tcp)
 SERVICE_AGHOME_DOQ     = "aghome_doq"      # AdGuard Home DoQ (:853/udp)
+# OpenFlux: exit-нода — ИСХОДЯЩИЙ carrier-канал (инбаундов нет, порты
+# не регистрирует); bridge — локальный SOCKS5-сервер клиента OpenFlux
+# на самой VPS (по умолчанию loopback 1080), его порт живёт в реестре:
+# проверка занятости на установке/активации, закрытие при
+# деактивации/удалении.
+SERVICE_OPENFLUX        = "openflux"          # exit-нода (исходящий WSS)
+SERVICE_OPENFLUX_BRIDGE = "openflux_bridge"   # bridge SOCKS5 (loopback default)
 
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────

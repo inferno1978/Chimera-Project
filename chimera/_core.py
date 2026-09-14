@@ -1358,6 +1358,18 @@ def _extract_mieru_ports(st: dict) -> list:
     return list(range(start, end + 1))
 
 
+def _extract_openflux_ports(st: dict) -> list:
+    """OpenFlux: exit-нода — ИСХОДЯЩИЙ carrier-канал (инбаундов нет);
+    bridge — локальный SOCKS5, порт в реестре только пока он активен
+    (деактивация закрывает и разегистрирует порт)."""
+    if not isinstance(st, dict):
+        return []
+    if not st.get("bridge_active"):
+        return []
+    p = st.get("bridge_port")
+    return [p] if isinstance(p, int) and 1 <= p <= 65535 else []
+
+
 def _extract_naiveproxy_ports(st: dict) -> list:
     """NaiveProxy: TCP-порт (HTTPS-обратный-прокси). state['port']."""
     if not isinstance(st, dict) or not st.get("installed"):
@@ -1480,6 +1492,12 @@ PROTOCOL_PORT_REGISTRY = [
         "label": "Mieru (TCP/UDP)",
         "state_file": Path("/var/lib/xray-installer/mieru.json"),
         "extractor": _extract_mieru_ports,
+    },
+    {
+        "key": "openflux",
+        "label": "OpenFlux (carrier: исходящий + bridge SOCKS5)",
+        "state_file": Path("/var/lib/xray-installer/openflux.json"),
+        "extractor": _extract_openflux_ports,
     },
     {
         "key": "naiveproxy",
@@ -9811,11 +9829,15 @@ def main_menu() -> None:
             _box_row(f"     {DIM}AdGuard VPN protocol (HTTP/2+HTTP/3 over TLS) — tt:// deep-link{NC}")
             _box_row()
             _box_sep()
+            _box_row(f"  {CYAN}17{NC} 🛟 {TITLE}OpenFlux{NC}  {DIM}(NEW){NC}")
+            _box_row(f"     {DIM}Канал через Яндекс.Документы — клиентский leg целиком домашний{NC}")
+            _box_row()
+            _box_sep()
             _box_row(f"  {DIM}[{NC}{TITLE}{BOLD}0{NC}{DIM}]{NC}  🚪 Выход")
             _box_bottom()
             _BOX_W = _BOX_W_saved
             print()
-            choice = input(f"{CYAN}Выбор (1–16 / 0):{NC} ").strip()
+            choice = input(f"{CYAN}Выбор (1–17 / 0):{NC} ").strip()
         except KeyboardInterrupt:
             print()
             print(f"{GREEN}До свидания! 👋{NC}")
@@ -9918,6 +9940,14 @@ def main_menu() -> None:
                 do_trusttunnel_menu()
             except ImportError as _e:
                 warn(f"Модуль TrustTunnel не найден: {_e}")
+                time.sleep(2)
+
+        elif choice == "17":
+            try:
+                from chimera.modules.openflux import do_openflux_menu
+                do_openflux_menu()
+            except ImportError as _e:
+                warn(f"Модуль OpenFlux не найден: {_e}")
                 time.sleep(2)
 
         # ── Скрытое меню: olcRTC (туннель под видеозвонок) ────────────────
