@@ -2,6 +2,93 @@
 
 ---
 
+## FEAT(openflux): сателлит OpenFlux — carrier-канал через Яндекс.Документы + download_manager + port_registry (bridge-SOCKS5 на VPS) — 15 сентября 2026
+
+**Кейс:** юзер принёс github.com/p1neappleXpress/OpenFlux (GPL-3.0+,
+Go, gVisor) — TCP-туннель, где клиентский трафик до exit-ноды едет
+внутри легитимных РУ-сервисов: Яндекс.Документы (курсорные сообщения),
+Волга (relay-API, батчи 4 МБ), MAX (WebRTC), Cups.online (Centrifugo).
+Все прочие транспорта флота тянут международку от клиента — OpenFlux
+единственный держит клиентский leg целиком «домашним»: канал «последней
+надежды» на случай тотального зарезания международки/ино-IP. Формы
+интеграции — все: сателлит + узел mihomo + VPS-гибрид. Второе
+требование: ВСЕ загрузки — через download_manager, ВСЕ порты — через
+port_registry (установка/активация: проверка занятости и открытие;
+деактивация/удаление: закрытие).
+
+**Сателлит №6 (`chimera/modules/openflux.py`, по канону mieru.py):**
+- Exit-нода: установка с verified-пином коммита 4619053 (опция —
+  свежий main), e2e-ключ AES-256-GCM генерируется ВСЕГДА (doc-URL =
+  общий секрет, без e2e канал прозрачен носителю), systemd-сервис в
+  proxy-режиме под непривилегированным openflux-юзером — БЕЗ root/
+  iptables/raw (raw — опция со scoped RST-drop и ExecStopPost-cleanup,
+  не host-wide). Транспортное меню: yandex (verified, мануал юзера
+  10/10) / vyandex / cupsonline; oneme (MAX) скрыт — риск лимитации
+  аккаунта, CLI-only с env-заготовками. Edit-ссылка валидируется:
+  короткая /i/ ловится отдельной диагностикой (главная причина
+  «curl виснет» из мануала). Ротация ключа и смена doc-URL (ротация
+  комнаты) без переустановки; клиентский бандл печатается ПОЗАДИ рамок
+  (урок про длинные ссылки). Подписка не тронута осознанно: per-user
+  URI нет, doc-URL — секрет, в подписку не кладём.
+
+**Загрузки — всё через download_manager:**
+- Go-тулчейн: snap → ОБЩИЙ GO_TOOLCHAIN_SPEC из go_toolchain_packages
+  (как wdtt/webdav_tunnel/olcrtc; зеркала go.dev → golang.google.cn →
+  aliyun → tencent, /root-фолбэк WinSCP, post_install с симлинками).
+  Дублирующий спек НЕ заводился — единая конвенция source-build.
+- Исходники: git-clone ВЫКИНУТ — тарболл по sha через новый
+  openflux_packages.OPENFLUX_SRC_SPEC (codeload.github.com → 3 gh-proxy
+  обёртки; sha-запрос иммутабелен — stale-mirror-guard по построению;
+  post_install распаковывает в /opt/openflux/src с проверкой go.mod +
+  main.go против HTML-заглушек). git для установки больше не нужен;
+  ls-remote — только best-effort разрешение sha свежего main (не смог —
+  tarball refs/heads/main с предупреждением о кеш-отставании).
+
+**Порты — всё через port_registry:**
+- Bridge-режим: OpenFlux-КЛИЕНТ на самой VPS (systemd
+  openflux-bridge, --socks5 bind:port) — локальный SOCKS5 для цепочек
+  Xray/mihomo на сервере (VPS-гибрид, узел «🛟 Гарантия»). Bind по
+  умолчанию 127.0.0.1:1080 — дефолт апстрима ':1080' (все интерфейсы,
+  SOCKS5 без аутентификации) запрещён явным указанием bind; 0.0.0.0 —
+  опция с честным предупреждением.
+- Порт-цикл: активация = port_is_free (реестр + ss-слушатели + чужие
+  UFW-правила; конфликт → юзеру список, кто занял, выбор другого
+  порта) → port_register → ufw_open_port (только публичный bind;
+  loopback в UFW не нуждается, но в реестре живёт — как b4_web/
+  dnscrypt). Деактивация/удаление = ufw_close_port + port_unregister.
+  Exit-нода инбаундов не имеет — её цикл пуст (by design, статус это
+  показывает). PROTOCOL_PORT_REGISTRY: экстрактор bridge-порта из
+  state; SERVICE_OPENFLUX / SERVICE_OPENFLUX_BRIDGE в port_registry.
+- Меню: Bridge (настроить/перенастроить), Активировать (проверка +
+  открытие), Деактивировать (остановка + закрытие), удаление чистит
+  bridge-юнит/env/порт. Ротация ключа и смена doc-URL задевают и
+  bridge (одна комната, общий ключ). CLI: bridge-on/bridge-off/
+  activate/deactivate + флаги --bind/--port.
+
+**Тесты:** tests/test_openflux.py — 64 (валидация URL, версии Go,
+ключ 256-bit, env-файлы, юниты proxy-vs-raw и bridge, запрет
+дефолт-байнда ':1080', mihomo-фрагменты, бандл, state-roundtrip,
+реестр транспортов, спеки/зеркала/_ref_slug, ls-remote, _fetch_sources
+пин/main/fallback, _ensure_go → GO_TOOLCHAIN_SPEC, порт-цикл с
+патченным port_registry — занят/свободен/loopback-vs-0.0.0.0/закрытие,
+деактивация/удаление закрывают порт, CLI-валидация, экстрактор _core);
+смоук scripts/smoke_v89_openflux_ports.py — НАСТОЯЩИЙ port_registry в
+tmpdir (регистрация → чужой конфликт → разрегистрация) + рамки целы.
+Прогоны: openflux 64 OK, smoke 4 OK, satellite+mieru+port_registry+
+download_manager 208 OK.
+
+**Риски/решения:** upstream API-хрупкость (Яндекс меняет Документы) —
+закрыто пунктом «Обновить исходники» и пином verified-коммита;
+несколько клиентов в одной doc-комнате (exit + bridge) upstream не
+документированы — по умолчанию мост в той же комнате, при
+нестабильности отдельная правкой env; throughput не мерялся (каждое
+WS-сообщение = пакет; vyandex с батчами — fast-путь), бенчмарк на
+живой ноде.
+
+
+---
+
+
 ## DOCS(tls): аудит shtorm-7/sing-box-extended — решает ли MLKEM768 + FP=Firefox (нет) — 12 сентября 2026
 
 **Контекст:** пользователь принёс форк `shtorm-7/sing-box-extended`
