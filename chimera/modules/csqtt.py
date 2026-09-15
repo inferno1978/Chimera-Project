@@ -1028,6 +1028,16 @@ def _run_install_inner() -> None:
         "dns":           dns,
     })
 
+    # 7.5: фиксируем ревизию/версию апстрима в upstream-updates
+    # state — раньше свежеустановка жила в «legacy»-режиме («ревизия
+    # неизвестна») до первого ручного обновления, и юзеры вообще не
+    # видели номера версии только что поставленного бинарника.
+    try:
+        from chimera.modules.upstream_updates import record_first_install
+        record_first_install("csqtt")
+    except Exception:
+        pass
+
     # 8. Bulk sync VLESS users
     try:
         from chimera.modules.rest_api import _sync_all_from_vless
@@ -1046,6 +1056,15 @@ def _run_install_inner() -> None:
     _box_row()
     _box_ok("csqtt-server установлен и запущен.")
     _box_row()
+    # номер версии установленного бинарника (Cargo-версия
+    # апстрима) — юзеры просили явную версию, а не только хэш.
+    try:
+        from chimera.modules.upstream_updates import get_version_display
+        _ver_disp = get_version_display("csqtt")
+    except Exception:
+        _ver_disp = ""
+    if _ver_disp and _ver_disp != "—":
+        _box_kv("Версия:", f"{YELLOW}{_ver_disp}{NC}")
     _box_kv("Data порт:",    f"{YELLOW}{data_port}/udp{NC}")
     _box_kv("Web Panel:",    f"{YELLOW}https://127.0.0.1:{web_port}{NC}")
     _box_kv("Web логин:",    f"{CYAN}{web_user}{NC}")
@@ -1569,6 +1588,15 @@ def do_csqtt_menu() -> None:
         _box_kv("Статус:", svc_str)
 
         if installed:
+            # явный НОМЕР ВЕРСИИ установленного csqtt-server —
+            # юзеры просили не только sha-хэш ревизии. Источник:
+            # опрос бинарника --version (Cargo-версия апстрима),
+            # кэш в upstream-updates state.
+            try:
+                from chimera.modules.upstream_updates import get_version_display
+                _box_kv("Версия:", f"{WHITE}{get_version_display('csqtt')}{NC}")
+            except Exception:
+                pass
             data = _load_passwords()
             pw_count = len(data.get("passwords", {}))
             _box_kv("Data порт:",   str(state.get("data_port", "—")))
