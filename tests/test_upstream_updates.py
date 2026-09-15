@@ -14,6 +14,11 @@ Unit-тесты для chimera/modules/upstream_updates.py + layout-probe
      latest (регрессия раньше качался pinned 0.4.1).
   5. _record_installed: тот же tarball-sha → ревизия НЕ поднимается
      (CDN отдал старый архив); другой sha → поднимается.
+  5b. _record_installed/record_first_install пишут в state
+     номер версии (installed_version + upstream_version).
+  5c. отображение версии — get_version_display,
+     get_update_status_line (префикс «rev »), _fmt_target_row,
+     ленивый опрос бинарника кэшируется в state.
   6. run_agent: skip неустановленных и auto=off; обновляет доступное.
   7. Layout-probe CSQTT: rust-server, csqtt-uring (легаси),
      переименованная будущая папка (rglob), клиентский крейт игнорируется.
@@ -271,6 +276,220 @@ class TestUpdateTarget(_TmpStateMixin, unittest.TestCase):
         self.assertEqual(st["layout"], "known:rust-server")
         self.assertEqual(st["rust_required"], "1.98.0")
 
+    def test_record_writes_installed_version(self):
+        """После обновления в state лежит и НОМЕР ВЕРСИИ —
+        юзеры просили явную версию, а не только sha-хэш ревизии."""
+        uu.update_state("csqtt", installed_rev="oldrev00001",
+                        tarball_sha256="a" * 64)
+        info = {"latest": "newrev00002", "installed": "oldrev00001"}
+        with patch.object(uu, "_build_info",
+                          return_value={"tarball_sha256": "b" * 64,
+                                        "upstream_version": "2.2.0"}), \
+             patch.object(uu, "get_installed_version",
+                         return_value="2.2.0"):
+            uu._record_installed("csqtt", "newrev00002", info)
+        st = uu.read_state()["csqtt"]
+        self.assertEqual(st["installed_rev"], "newrev00002")
+        self.assertEqual(st["installed_version"], "2.2.0")
+        self.assertEqual(st["upstream_version"], "2.2.0")
+
+    def test_record_version_falls_back_to_cargo(self):
+        """Бинарь --version не отдал (unknown) → Cargo-версия сборки."""
+        uu.update_state("csqtt", installed_rev="oldrev00001",
+                        tarball_sha256="a" * 64)
+        info = {"latest": "newrev00002", "installed": "oldrev00001"}
+        with patch.object(uu, "_build_info",
+                          return_value={"tarball_sha256": "b" * 64,
+                                        "upstream_version": "2.1.9"}), \
+             patch.object(uu, "get_installed_version",
+                         return_value="unknown"):
+            uu._record_installed("csqtt", "newrev00002", info)
+        st = uu.read_state()["csqtt"]
+        self.assertEqual(st["installed_version"], "2.1.9")
+
+
+class TestRecordFirstInstall(_TmpStateMixin, unittest.TestCase):
+    """Свежая установка СРАЗУ пишет ревизию+версию в state —
+    раньше свежеустановка жила в «legacy»-режиме до первого
+    ручного обновления."""
+
+    def setUp(self):
+        super().setUp()
+        self._bin = self._tmpdir / "csqtt-server"
+        self._bin.write_bytes(b"\x7fELF-fake")
+        self._orig_targets = {k: dict(v) for k, v in uu.UPSTREAM_TARGETS.items()}
+        uu.UPSTREAM_TARGETS["csqtt"]["binary"] = self._bin
+
+    def tearDown(self):
+        uu.UPSTREAM_TARGETS.clear()
+        uu.UPSTREAM_TARGETS.update(self._orig_targets)
+        super().tearDown()
+
+    def test_source_install_records_rev_and_version(self):
+        with patch.object(uu, "fetch_latest", return_value="abc123def456"), \
+             patch.object(uu, "get_installed_version", return_value="2.1.9"), \
+             patch.object(uu, "_build_info",
+                          return_value={"tarball_sha256": "f" * 64,
+                                        "layout": "known:rust-server",
+                                        "upstream_version": "2.1.9"}):
+            uu.record_first_install("csqtt")
+        st = uu.read_state()["csqtt"]
+        self.assertEqual(st["installed_rev"], "abc123def456")
+        self.assertEqual(st["installed"], "abc123def456")
+        self.assertEqual(st["installed_version"], "2.1.9")
+        self.assertEqual(st["upstream_version"], "2.1.9")
+        self.assertEqual(st["layout"], "known:rust-server")
+
+    def test_manual_binary_records_version_but_not_rev(self):
+        """Ручной бинарь: из какого коммита собран — неизвестно →
+        ревизию честно НЕ пишем; версию (опрос --version) — пишем."""
+        with patch.object(uu, "fetch_latest", return_value="abc123def456"), \
+             patch.object(uu, "get_installed_version", return_value="2.1.9"), \
+             patch.object(uu, "_build_info", return_value={}):
+            uu.record_first_install("csqtt")
+        st = uu.read_state()["csqtt"]
+        self.assertEqual(st["installed_version"], "2.1.9")
+        self.assertNotIn("installed_rev", st)
+        self.assertEqual(st["latest"], "abc123def456")
+
+    def test_offline_still_records_version(self):
+        """GitHub API недоступен в момент установки — версия всё равно
+        записывается (локальный опрос), ревизия — нет."""
+        with patch.object(uu, "fetch_latest", return_value=None), \
+             patch.object(uu, "get_installed_version", return_value="2.1.9"), \
+             patch.object(uu, "_build_info", return_value={}):
+            uu.record_first_install("csqtt")
+        st = uu.read_state()["csqtt"]
+        self.assertEqual(st["installed_version"], "2.1.9")
+        self.assertNotIn("installed_rev", st)
+
+
+class TestVersionDisplay(_TmpStateMixin, unittest.TestCase):
+    """Номер версии — явно, хэш ревизии — с префиксом «rev »."""
+
+    def setUp(self):
+        super().setUp()
+        self._bin = self._tmpdir / "csqtt-server"
+        self._bin.write_bytes(b"\x7fELF-fake")
+        self._orig_targets = {k: dict(v) for k, v in uu.UPSTREAM_TARGETS.items()}
+        for k in uu.UPSTREAM_TARGETS:
+            uu.UPSTREAM_TARGETS[k]["binary"] = self._bin
+
+    def tearDown(self):
+        uu.UPSTREAM_TARGETS.clear()
+        uu.UPSTREAM_TARGETS.update(self._orig_targets)
+        super().tearDown()
+
+    def test_version_display_version_and_rev(self):
+        uu.update_state("csqtt", installed_rev="aaa111222333",
+                        installed="aaa111222333", installed_version="2.1.9")
+        self.assertEqual(uu.get_version_display("csqtt"),
+                         "v2.1.9 (rev aaa111222333)")
+
+    def test_version_display_rev_only(self):
+        # qWDTT: Go-бинарь не отдаёт --version → только ревизия
+        uu.update_state("wdtt", installed_rev="ccc111222333",
+                        installed="ccc111222333")
+        self.assertEqual(uu.get_version_display("wdtt"),
+                         "rev ccc111222333")
+
+    def test_version_display_version_without_rev(self):
+        # ручной бинарь: версия есть, ревизии нет
+        uu.update_state("csqtt", installed_version="2.1.9")
+        self.assertEqual(uu.get_version_display("csqtt"), "v2.1.9")
+
+    def test_version_display_not_installed(self):
+        uu.UPSTREAM_TARGETS["csqtt"]["binary"] = self._tmpdir / "nope"
+        self.assertEqual(uu.get_version_display("csqtt"), "—")
+
+    def test_status_line_rev_prefix_for_branch(self):
+        uu.update_state("csqtt", installed="aaa111222333",
+                        latest="aaa111222333")
+        line = uu.get_update_status_line("csqtt")
+        self.assertIn("rev aaa111222333", line)
+        self.assertIn("(актуален)", line)
+
+    def test_status_line_update_available_with_rev_prefix(self):
+        uu.update_state("csqtt", installed="aaa111222333",
+                        latest="bbb444555666")
+        line = uu.get_update_status_line("csqtt")
+        self.assertIn("rev aaa111222333 → bbb444555666 доступно", line)
+
+    def test_status_line_release_unchanged(self):
+        # turnable (release): версия и есть «установлено» — без «rev»
+        uu.update_state("turnable", installed="0.4.1", latest="0.4.1")
+        line = uu.get_update_status_line("turnable")
+        self.assertIn("0.4.1", line)
+        self.assertNotIn("rev ", line)
+
+    def test_fmt_target_row_version_first(self):
+        """Единое меню обновлений: «Установлено: v2.1.9 (rev …)»."""
+        uu.update_state("csqtt", installed_rev="aaa111222333",
+                        installed="aaa111222333", installed_version="2.1.9",
+                        latest="aaa111222333")
+        fake_info = {"update_available": False, "reason": "актуален",
+                     "installed": "aaa111222333", "latest": "aaa111222333",
+                     "installed_version": "2.1.9"}
+        with patch.object(uu, "check_target", return_value=fake_info):
+            row = uu._fmt_target_row("csqtt")
+        self.assertIn("v2.1.9 (rev aaa111222333)", row)
+
+    def test_fmt_target_row_rev_only(self):
+        uu.update_state("wdtt", installed_rev="ccc111222333",
+                        installed="ccc111222333", latest="ccc111222333")
+        fake_info = {"update_available": False, "reason": "актуален",
+                     "installed": "ccc111222333", "latest": "ccc111222333",
+                     "installed_version": None}
+        with patch.object(uu, "check_target", return_value=fake_info):
+            row = uu._fmt_target_row("wdtt")
+        self.assertIn("rev ccc111222333", row)
+        self.assertNotIn("v2.1.9", row)
+
+    def test_lazy_probe_cached_once(self):
+        """Ленивый опрос бинарника (legacy-установка без версии в
+        state) кэшируется — второй рендер меню не исполняет бинарь."""
+        calls = {"n": 0}
+
+        def fake_probe(key):
+            calls["n"] += 1
+            return "2.1.9"
+
+        uu.update_state("csqtt", installed="aaa111222333",
+                        latest="aaa111222333")
+        with patch.object(uu, "get_installed_version",
+                          side_effect=fake_probe):
+            first = uu.get_version_display("csqtt")
+            second = uu.get_version_display("csqtt")
+        self.assertEqual(first, "v2.1.9 (rev aaa111222333)")
+        self.assertEqual(second, first)
+        self.assertEqual(calls["n"], 1)
+
+    def test_lazy_probe_unknown_also_cached(self):
+        calls = {"n": 0}
+
+        def fake_probe(key):
+            calls["n"] += 1
+            return "unknown"
+
+        uu.update_state("csqtt", installed="aaa111222333",
+                        latest="aaa111222333")
+        with patch.object(uu, "get_installed_version",
+                          side_effect=fake_probe):
+            uu.get_version_display("csqtt")
+            uu.get_version_display("csqtt")
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(uu.read_state()["csqtt"]["installed_version"],
+                         "unknown")
+
+    def test_check_target_includes_installed_version(self):
+        uu.update_state("csqtt", installed_rev="aaa111222333",
+                        installed="aaa111222333", installed_version="2.1.9")
+        with patch.object(uu, "_github_api_json",
+                          return_value={"sha": "a" * 40}):
+            res = uu.check_target("csqtt", force=True)
+        self.assertEqual(res["installed_version"], "2.1.9")
+        self.assertEqual(res["installed"], "aaa111222333")  # rev — как было
+
 
 class TestRunAgent(_TmpStateMixin, unittest.TestCase):
     """Агент: неустановленные и auto=off пропускаются, доступное — обновляется."""
@@ -392,6 +611,34 @@ class TestCsqttLayoutProbe(unittest.TestCase):
         cargo.write_text('[package]\nname = "csqtt"\nrust-version = "1.99.0"\n')
         probe = csqtt_packages._probe_csqtt_layout(extract)
         self.assertEqual(probe["rust_required"], "1.99.0")
+
+    def test_package_version_parsed(self):
+        """Cargo-версия крейта — из [package], НЕ из зависимостей
+        (aes = "0.9.2" не должен подменить версию)."""
+        extract = self._mk_tree("rust-server")
+        cargo = extract / "csqtt-main" / "rust-server" / "Cargo.toml"
+        cargo.write_text(
+            '[package]\nname = "csqtt"\nversion = "2.1.9"\n'
+            'rust-version = "1.97.1"\n\n[[bin]]\nname = "csqtt"\n\n'
+            '[dependencies]\naes = "0.9.2"\nanyhow = "1.0"\n')
+        probe = csqtt_packages._probe_csqtt_layout(extract)
+        self.assertEqual(probe["upstream_version"], "2.1.9")
+
+    def test_parse_cargo_toml_version_scoped_to_package(self):
+        d = self._tmpdir / "crate-ver"
+        d.mkdir()
+        (d / "Cargo.toml").write_text(
+            '[package]\nname = "csqtt"\nversion = "1.2.3"\n'
+            '[dependencies]\nserde = "1.0"\n')
+        info = csqtt_packages._parse_cargo_toml(d / "Cargo.toml")
+        self.assertEqual(info["package_version"], "1.2.3")
+
+    def test_parse_cargo_toml_no_version(self):
+        d = self._tmpdir / "crate-nover"
+        d.mkdir()
+        (d / "Cargo.toml").write_text('[package]\nname = "csqtt"\n')
+        info = csqtt_packages._parse_cargo_toml(d / "Cargo.toml")
+        self.assertNotIn("package_version", info)
 
     def test_parse_cargo_toml_sections(self):
         d = self._tmpdir / "crate"
