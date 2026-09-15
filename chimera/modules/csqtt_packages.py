@@ -76,7 +76,8 @@ _KNOWN_SERVER_SUBDIRS = ("rust-server", "csqtt-uring", "server")
 
 def _parse_cargo_toml(cargo: Path) -> Dict[str, Any]:
     """Мини-парсер Cargo.toml без внешних зависимостей: [package].name,
-    [[bin]].name, rust-version. Терпим к комментариям и лишним секциям."""
+    [package].version, [[bin]].name, rust-version. Терпим к
+    комментариям и лишним секциям."""
     try:
         text = cargo.read_text(errors="replace")
     except Exception:
@@ -86,6 +87,14 @@ def _parse_cargo_toml(cargo: Path) -> Dict[str, Any]:
                   text, re.M | re.S)
     if m:
         info["package_name"] = m.group(1)
+    # версия крейта — ТОЛЬКО внутри [package]-секции ([^\[]*?
+    # останавливается на следующей секции) — версии зависимостей из
+    # [dependencies] (aes = "0.9.2") не подхватываются. Юзеры просили
+    # явный номер версии, а не только sha-хэш ревизии.
+    m = re.search(r'\[package\][^\[]*?^version\s*=\s*"([^"]+)"',
+                  text, re.M | re.S)
+    if m:
+        info["package_version"] = m.group(1)
     bins = re.findall(r'\[\[bin\]\][^\[]*?^name\s*=\s*"([^"]+)"',
                       text, re.M | re.S)
     if bins:
@@ -127,6 +136,9 @@ def _probe_csqtt_layout(extract_dir: Path) -> Optional[Dict[str, Any]]:
             "source_dir": cargo_dir,
             "bin_names": names,
             "rust_required": pi.get("rust_version"),
+            # Cargo-версия крейта — уходит в LAST_BUILD_INFO и
+            # state upstream-updates (явный номер версии для юзеров).
+            "upstream_version": pi.get("package_version"),
             "how": how,
         }
 
@@ -558,6 +570,12 @@ def install_manual_binary(verbose: bool = True) -> bool:
             print(f"[OK] Найден готовый бинарь csqtt-server: {found} "
                   f"— устанавливаю без сборки")
 
+    # этот бинарь НЕ из текущего tarball — чистим build-инфу,
+    # чтобы upstream_updates.record_first_install() не записал в
+    # state sha-256/версию ПРЕДЫДУЩЕЙ сборки из исходников (процесс
+    # меню живёт долго, LAST_BUILD_INFO переживает установку).
+    LAST_BUILD_INFO.clear()
+
     try:
         ok = _atomic_replace_binary(found, _CSQTT_BIN_PATH,
                                     _CSQTT_SERVICE_NAME,
@@ -772,6 +790,11 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
     LAST_BUILD_INFO["layout"] = probe["how"]
     if probe.get("rust_required"):
         LAST_BUILD_INFO["rust_required"] = probe["rust_required"]
+    # Cargo-версия исходников, из которых собрали (для state и
+    # отображения рядом с ревизией).
+    if probe.get("upstream_version"):
+        LAST_BUILD_INFO["upstream_version"] = probe["upstream_version"]
+        print(f"[INFO] Версия CSQTT: v{probe['upstream_version']}")
     print(f"[INFO] Layout: {probe['how']} → {csqtt_dir}")
 
     # 3. Проверяем/устанавливаем Rust (версия из Cargo.toml)

@@ -36,6 +36,14 @@ chimera/modules/upstream_updates.py
   6. МЕНЕДЖЕР ЗАГРУЗОК — ВСЁ скачивание идёт через download_manager.
      fetch_package(spec): зеркала-фолбэки, ручное размещение в /root/,
      min_size, post_install (сборка+атомарная замена).
+  7. ВЕРСИЯ + РЕВИЗИЯ: юзеры просили явный НОМЕР ВЕРСИИ, а не
+     только sha-хэш ревизии. Для branch-целей с version_arg
+     (csqtt-server — clap, знает свою Cargo-версию) версия бинарника
+     показывается рядом с хэшем: «v2.1.9 (rev a1b2c3d4e5f6)».
+     Решение об обновлении — по-прежнему ПО РЕВИЗИИ (upstream может
+     коммитить без бампа версии). Свежая установка сразу пишет
+     ревизию+версию в state (record_first_install) — «legacy»-режим
+     больше не появляется у свежих установок.
 
 Артефакты на сервере:
   /usr/local/bin/chimera-upstream-update.py       — агент (генерируется)
@@ -133,6 +141,9 @@ UPSTREAM_TARGETS: Dict[str, Dict[str, Any]] = {
         "branch": "main",
         "binary": Path("/usr/local/bin/csqtt-server"),
         "service": "csqtt",
+        # csqtt-server — clap-бинарь и знает Cargo-версию;
+        # показываем её рядом с sha-хэшем ревизии (запрос юзеров).
+        "version_arg": "--version",
     },
     "wdtt": {
         "title": "qWDTT (WireGuard/TURN VK)",
@@ -263,8 +274,10 @@ def fetch_latest(key: str, force: bool = False) -> Optional[str]:
 #  УСТАНОВЛЕННОЕ — версия бинарника / записанная ревизия
 # =============================================================================
 def get_installed_version(key: str) -> Optional[str]:
-    """Версия установленного бинарника (только release-цели).
+    """Версия установленного бинарника по version_arg.
 
+    ЛЮБАЯ цель с version_arg (не только release): csqtt-server —
+    clap и отдаёт Cargo-версию по --version («csqtt 2.1.9»).
     None — бинарника нет; 'unknown' — есть, но версию не отдал.
     """
     t = UPSTREAM_TARGETS[key]
@@ -295,6 +308,29 @@ def installed_revision(key: str) -> Optional[str]:
     st = read_state().get(key, {})
     rev = st.get("installed_rev")
     return rev if isinstance(rev, str) and rev else None
+
+
+def _installed_version_cached(key: str) -> Optional[str]:
+    """Версия установленного бинарника с кэшем в state.
+
+    Первый вызов ИСПОЛНЯЕТ <binary> --version (локально, сеть не
+    трогается) и кэширует результат в state.installed_version —
+    НАВСЕГДА, до следующей установки/обновления (они переписывают
+    поле явно). 'unknown' тоже кэшируется: бинарь без --version не
+    опрашиваем повторно на каждом рендере меню.
+    """
+    t = UPSTREAM_TARGETS[key]
+    if not t.get("version_arg"):
+        return None
+    cached = read_state().get(key, {}).get("installed_version")
+    if isinstance(cached, str) and cached:
+        return cached
+    if not t["binary"].exists():
+        return None
+    ver = get_installed_version(key)
+    if ver:
+        update_state(key, installed_version=ver)
+    return ver
 
 
 def _build_info(key: str) -> Dict[str, Any]:
@@ -333,6 +369,12 @@ def check_target(key: str, force: bool = False) -> Dict[str, Any]:
     if not t["binary"].exists():
         res["reason"] = "не установлен"
         return res
+    # версия бинарника — только для ОТОБРАЖЕНИЯ; на решение об
+    # обновлении не влияет (там по-прежнему ревизии — upstream может
+    # коммитить без бампа версии). Считаем ДО ранних return'ов, чтобы
+    # «Установлено: v2.1.9 (rev …)» показывался и при недоступном API.
+    if t["kind"] != "release" and t.get("version_arg"):
+        res["installed_version"] = _installed_version_cached(key)
     if not latest:
         res["reason"] = "GitHub API недоступен"
         res["installed"] = (get_installed_version(key)
@@ -524,7 +566,12 @@ def update_target(key: str, force: bool = False,
         return False
 
     _record_installed(key, latest, info)
-    _ok(f"{t['title']}: обновлено → {latest}")
+    # явный номер версии в итоге — не только хэш ревизии.
+    ver = read_state().get(key, {}).get("installed_version")
+    if t["kind"] != "release" and ver and ver != "unknown":
+        _ok(f"{t['title']}: обновлено → rev {latest} (v{ver})")
+    else:
+        _ok(f"{t['title']}: обновлено → {latest}")
     return True
 
 
@@ -561,9 +608,58 @@ def _record_installed(key: str, latest: str, info: Dict[str, Any]) -> None:
             kv["installed"] = latest
     if build:
         for bfield in ("tarball_sha256", "layout", "rust_required",
-                       "go_required", "build_target"):
+                       "go_required", "build_target", "upstream_version"):
             if build.get(bfield):
                 kv[bfield] = build[bfield]
+    # номер версии установленного бинарника (опрос --version;
+    # фолбэк — Cargo.toml сборки). Юзеры просили явную версию, а не
+    # только sha-хэш ревизии.
+    ver = get_installed_version(key) if t.get("version_arg") else None
+    if (not ver or ver == "unknown") and build.get("upstream_version"):
+        ver = build["upstream_version"]
+    if ver and ver != "unknown":
+        kv["installed_version"] = ver
+    update_state(key, **kv)
+
+
+def record_first_install(key: str) -> None:
+    """Записать ревизию/версию СРАЗУ после первой установки.
+
+    Раньше свежеустановленный модуль жил в «legacy»-режиме («ревизия
+    неизвестна») до первого ручного обновления — юзеры не видели
+    ни версии, ни ревизии только что поставленного бинарника.
+
+      • версия — опрос бинарника (--version) + Cargo.toml сборки
+        (LAST_BUILD_INFO → _build_info, тот же процесс);
+      • ревизия — HEAD ветки (fetch_latest, один вызов GitHub API,
+        дальше — кэш 6 ч), но ТОЛЬКО если сборка шла из исходников
+        (в LAST_BUILD_INFO есть tarball_sha256). Ручной загруженный
+        бинарь мог быть собран из любого коммита — для него ревизию
+        честно НЕ пишем (остаётся legacy-режим, обновление вручную).
+
+    Ошибки глотаются: установка уже успешна, это косметика state.
+    Вызывается из csqtt.py::_run_install (шаг 7.5).
+    """
+    t = UPSTREAM_TARGETS[key]
+    if not t["binary"].exists():
+        return
+    kv: Dict[str, Any] = {"last_update": _now(), "last_error": None}
+    build = _build_info(key)
+    ver = get_installed_version(key) if t.get("version_arg") else None
+    if (not ver or ver == "unknown") and build.get("upstream_version"):
+        ver = build["upstream_version"]
+    if ver and ver != "unknown":
+        kv["installed_version"] = ver
+    for bfield in ("tarball_sha256", "layout", "rust_required",
+                   "go_required", "build_target", "upstream_version"):
+        if build.get(bfield):
+            kv[bfield] = build[bfield]
+    latest = fetch_latest(key, force=True)
+    if latest:
+        kv["latest"] = latest
+        if build.get("tarball_sha256"):
+            kv["installed_rev"] = latest
+            kv["installed"] = latest
     update_state(key, **kv)
 
 # =============================================================================
@@ -708,8 +804,11 @@ def run_agent() -> int:
         try:
             info = check_target(key, force=True)
             if info["update_available"]:
+                ver = info.get("installed_version")
+                vs = f" (v{ver})" if ver and ver != "unknown" else ""
                 _agent_log(f"{t['title']}: доступно обновление "
-                           f"{info['installed']} → {info['latest']}, применяю...")
+                           f"{info['installed']} → {info['latest']}{vs}, "
+                           f"применяю...")
                 ok = update_target(key, force=False, interactive=False)
                 _agent_log(f"{t['title']}: "
                            + ("обновлено" if ok else "ОШИБКА обновления"))
@@ -732,6 +831,12 @@ def get_update_status_line(key: str) -> str:
 
     Формат: «0.4.1 → 0.4.2 доступно» / «rev a1b2c3d · актуален» /
     «ревизия неизвестна (legacy)» + [авто ✓/✗].
+
+    Для branch-целей хэш выводится с явным префиксом «rev » —
+    чтобы это читалось как ревизия, а не как «версия из цифр».
+    Сам НОМЕР ВЕРСИИ живёт в отдельной строке «Версия:» шапки
+    (get_version_display) и в меню обновлений (_fmt_target_row) —
+    там для него есть место, здесь строка и так длинная.
     """
     t = UPSTREAM_TARGETS[key]
     st = read_state().get(key, {})
@@ -740,15 +845,19 @@ def get_update_status_line(key: str) -> str:
     if t["kind"] == "release":
         if installed and installed.startswith("v"):
             installed = installed[1:]
+    # branch-цели — хэш с префиксом «rev ».
+    shown = installed
+    if t["kind"] != "release" and installed:
+        shown = f"rev {installed}"
     parts = []
     if not t["binary"].exists():
         parts.append(f"{DIM}не установлен{NC}")
     elif not installed:
         parts.append(f"{DIM}ревизия неизвестна (legacy){NC}")
     elif latest and installed != latest:
-        parts.append(f"{installed} {YELLOW}→ {latest} доступно{NC}")
+        parts.append(f"{shown} {YELLOW}→ {latest} доступно{NC}")
     else:
-        parts.append(f"{CYAN}{installed}{NC} {GREEN}(актуален){NC}")
+        parts.append(f"{CYAN}{shown}{NC} {GREEN}(актуален){NC}")
     err = st.get("last_error")
     if err:
         short = str(err).split(" ", 1)[-1][:40]
@@ -758,6 +867,34 @@ def get_update_status_line(key: str) -> str:
         auto = f"{DIM}авто off{NC}"
     parts.append(f"{DIM}[{auto}]{NC}")
     return "  ".join(str(p) for p in parts)
+
+
+def get_version_display(key: str) -> str:
+    """Строка идентичности установленной цели для шапки меню:
+
+      'v2.1.9 (rev a1b2c3d4e5f6)'  — версия + ревизия (csqtt)
+      'v2.1.9'                     — версия есть, ревизии нет
+                                    (ручной бинарь / legacy)
+      'rev a1b2c3d4e5f6'           — только ревизия (qWDTT: Go-бинарь
+                                    не отдаёт --version)
+      '—'                          — ничего не известно / не установлен
+
+    Сеть не дёргается: версия — из state-кэша (ленивый опрос бинарника
+    кэшируется навсегда, см. _installed_version_cached).
+    """
+    t = UPSTREAM_TARGETS[key]
+    if not t["binary"].exists():
+        return "—"
+    st = read_state().get(key, {})
+    if t["kind"] == "release":
+        v = st.get("installed") or (get_installed_version(key)
+                                    if t.get("version_arg") else None)
+        return f"v{v}" if v and v != "unknown" else "—"
+    ver = _installed_version_cached(key)
+    rev = st.get("installed_rev") or st.get("installed")
+    if ver and ver != "unknown":
+        return f"v{ver}" + (f" (rev {rev})" if rev else "")
+    return f"rev {rev}" if rev else "—"
 
 
 def _fmt_target_row(key: str) -> str:
@@ -774,13 +911,28 @@ def _fmt_target_row(key: str) -> str:
         status = f"{YELLOW}legacy-установка{NC}"
     else:
         status = f"{GREEN}актуален{NC}"
+    # «Установлено» — НОМЕР ВЕРСИИ впереди хэша ревизии
+    # («v2.1.9 (rev a1b2c3d4e5f6)») — юзеры просили явную версию,
+    # а не только хэш. Здесь рамок нет — длинная строка не ломает UI.
+    ver = info.get("installed_version")
+    if t["kind"] != "release":
+        rev = info["installed"]
+        if ver and ver != "unknown":
+            installed_str = (f"v{ver} (rev {rev})" if rev
+                             else f"v{ver} (rev неизвестен — legacy)")
+        elif rev:
+            installed_str = f"rev {rev}"
+        else:
+            installed_str = "—"
+    else:
+        installed_str = info["installed"] or "—"
     st = read_state().get(key, {})
     auto = st.get("auto", True)
     auto_str = (f"{GREEN}вкл{NC}" if auto else f"{DIM}выкл{NC}")
     lu = st.get("last_update", "—")
     return (f"  {t['title']}  {DIM}(github: {t['owner']}/{t['repo']}"
             f"{'/' + t['branch'] if t['branch'] else '/releases'}){NC}\n"
-            f"    Установлено: {CYAN}{info['installed'] or '—'}{NC}"
+            f"    Установлено: {CYAN}{installed_str}{NC}"
             f"  →  Последняя: {status}\n"
             f"    Авто: {auto_str}  │  Обновлён: {DIM}{lu}{NC}")
 
