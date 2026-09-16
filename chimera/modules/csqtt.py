@@ -254,17 +254,58 @@ def _pause() -> None:
         print()
 
 def _run(cmd: list, capture: bool = False, check: bool = False,
-         env: Optional[dict] = None, cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+         env: Optional[dict] = None, cwd: Optional[str] = None,
+         timeout: Optional[float] = None,
+         input: Optional[str] = None) -> subprocess.CompletedProcess:
+    """Обёртка subprocess.run с защитой от ВЕЧНОГО зависания.
+
+    timeout=None — прежнее поведение (без таймаута). При таймауте
+    возвращается псевдо-результат с rc=124 (конвенция timeout(1)):
+    вызывающий код с check=False просто продолжит, а зависший
+    дочерний процесс убит самим subprocess.run (kill + wait).
+
+    input — строка для stdin (например 'y\\n' для ufw-промптов:
+    ufw читает ответ БЛОКИРУЮЩЕ через sys.stdin.readline(), без
+    input процесс ждёт вечно, а его промпт уходит в DEVNULL).
+    """
     kw: dict = {"check": check}
     if env:
         kw["env"] = env
     if cwd:
         kw["cwd"] = cwd
+    if input is not None:
+        kw.update(input=input, text=True)
     if capture:
         kw.update(capture_output=True, text=True, encoding="utf-8", errors="replace")
     else:
         kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return subprocess.run(cmd, **kw)
+    if timeout is not None:
+        kw["timeout"] = timeout
+    try:
+        return subprocess.run(cmd, **kw)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", "")
+
+
+def _svc_stop_hard(name: str, grace: int = 30) -> None:
+    """Останавливает сервис с ГАРАНТИЕЙ завершения — никогда не виснет.
+
+    Живой кейс: `systemctl stop` на Rust/io_uring-сервере с активным
+    TUN мог ждать системного TimeoutStopSec (90с по умолчанию), вывод
+    при этом уходил в DEVNULL — юзер видел «непонятное зависание» и
+    рвал всё по Ctrl+C, оставляя полуудалённую установку. Теперь:
+      1. systemctl stop с явным потолком grace секунд;
+      2. если сервис ещё жив — systemctl kill SIGKILL + повторный stop;
+      3. добиваем одиночные процессы напрямую (юнит-файл к этому
+         моменту мог быть уже удалён — systemctl о нём не знает).
+    """
+    _run(["systemctl", "stop", name], timeout=grace)
+    r = _run(["systemctl", "is-active", name], capture=True, timeout=15)
+    if (r.stdout or "").strip() == "active":
+        _run(["systemctl", "kill", "--signal=SIGKILL", name], timeout=15)
+        _run(["systemctl", "stop", name], timeout=15)
+    # остаточные процессы мимо systemd (unit уже удалён / stop не смог)
+    _run(["pkill", "-9", "-x", f"{name}-server"], timeout=10)
 
 def _build_csqtt_v2_link(server_ip: str, data_port: int, password: str,
                          name: str = "", vk_hashes: str = "") -> str:
@@ -330,6 +371,27 @@ def _get_server_ip() -> str:
 def _is_installed() -> bool:
     return _BIN_PATH.exists() and _SERVICE_FILE.exists()
 
+
+def _install_state() -> str:
+    """Точечный диагноз установки: 'ok' | 'no-service' | 'no-binary' | 'none'.
+
+    Живой кейс: прерванное по Ctrl+C удаление оставляло «бинарник есть,
+    юнит-файла нет». Меню при этом показывало «не установлен», а
+    установщик говорил «уже на месте» (install_manual_binary считает
+    бинарник в /usr/local/bin достаточным) — юзер видел два
+    противоречивых сообщения про одно и то же. Теперь оба места
+    спрашивают _install_state() и говорят одно и то же.
+    """
+    bin_ok = _BIN_PATH.exists()
+    svc_ok = _SERVICE_FILE.exists()
+    if bin_ok and svc_ok:
+        return "ok"
+    if bin_ok:
+        return "no-service"
+    if svc_ok:
+        return "no-binary"
+    return "none"
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  КОНФИГ СЕРВЕРА
 # ══════════════════════════════════════════════════════════════════════════════
@@ -361,11 +423,11 @@ def _save_passwords(data: dict) -> None:
 
 def _hot_reload() -> bool:
     """Отправляет SIGHUP серверу — hot reload паролей."""
-    r = _run(["pidof", "csqtt-server"], capture=True)
+    r = _run(["pidof", "csqtt-server"], capture=True, timeout=10)
     pid = (r.stdout or "").strip()
     if not pid:
         return False
-    _run(["kill", "-HUP", pid])
+    _run(["kill", "-HUP", pid], timeout=10)
     return True
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -377,8 +439,8 @@ def is_active() -> bool:
         if not _is_installed():
             return False
         r = _run(["systemctl", "is-active", _SERVICE_NAME],
-                 capture=True, check=False)
-        return r.returncode == 0 and r.stdout.strip() == "active"
+                 capture=True, check=False, timeout=15)
+        return r.returncode == 0 and (r.stdout or "").strip() == "active"
     except Exception:
         return False
 
@@ -540,9 +602,15 @@ def _ipt_rule_exists(table: str, chain: str, args: list) -> bool:
     return proto_ipt_rule_exists(table, chain, args)
 
 def _fw_tool() -> str:
-    """Возвращает 'ufw' если UFW установлен и активен, иначе 'iptables'."""
+    """Возвращает 'ufw' если UFW установлен и активен, иначе 'iptables'.
+
+    timeout: КАЖДЫЙ вызов ufw берёт БЛОКИРУЮЩИЙ fcntl-лок
+    /run/ufw.lock (ufw/util.py create_lock: fcntl.lockf LOCK_EX без
+    таймаута) — зависший держатель лока (например, уfw-процесс от
+    оборванной сессии в D-состоянии) вешал удаление модуля навсегда.
+    """
     if shutil.which("ufw"):
-        r = _run(["ufw", "status"], capture=True, check=False)
+        r = _run(["ufw", "status"], capture=True, check=False, timeout=30)
         if "Status: active" in (r.stdout or ""):
             return "ufw"
     return "iptables"
@@ -607,13 +675,18 @@ def _ipt_close_udp(port: int) -> None:
     except Exception as _e:
         closed_via = f"fallback ({_e})"
     # Двойная проверка — снимаем orphaned правила (если port_registry не нашёл).
+    # input='y\n' + timeout: ufw-промпты читают stdin БЛОКИРУЮЩЕ, а
+    # ufw-лок (/run/ufw.lock) — блокирующий fcntl — без потолка
+    # ожидания этот шаг умел висеть вечно («зависание при
+    # освобождении порта» в живых кейсах).
     if shutil.which("ufw") and _fw_tool() == "ufw":
-        _run(["ufw", "delete", "allow", f"{port}/udp"], check=False)
+        _run(["ufw", "delete", "allow", f"{port}/udp"],
+             check=False, timeout=60, input="y\n")
     args = ["-p", "udp", "--dport", str(port), "-j", "ACCEPT"]
     for _ in range(5):
         if not _ipt_rule_exists("filter", "INPUT", args):
             break
-        _run(["iptables", "-t", "filter", "-D", "INPUT"] + args)
+        _run(["iptables", "-t", "filter", "-D", "INPUT"] + args, timeout=30)
     print(f"  {GREEN}✓{NC}  UDP {port} закрыт ({closed_via})")
 
 def _ipt_open_tcp(port: int) -> None:
@@ -665,19 +738,20 @@ def _ipt_close_tcp(port: int) -> None:
     except Exception as _e:
         closed_via = f"fallback ({_e})"
     if shutil.which("ufw") and _fw_tool() == "ufw":
-        _run(["ufw", "delete", "allow", f"{port}/tcp"], check=False)
+        _run(["ufw", "delete", "allow", f"{port}/tcp"],
+             check=False, timeout=60, input="y\n")
     args = ["-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]
     for _ in range(5):
         if not _ipt_rule_exists("filter", "INPUT", args):
             break
-        _run(["iptables", "-t", "filter", "-D", "INPUT"] + args)
+        _run(["iptables", "-t", "filter", "-D", "INPUT"] + args, timeout=30)
     print(f"  {GREEN}✓{NC}  TCP {port} закрыт ({closed_via})")
 
 def _ipt_masquerade_exists() -> bool:
     r = _run(
         ["iptables", "-t", "nat", "-C", "POSTROUTING",
          "-s", _TUN_SUBNET, "!", "-d", _TUN_SUBNET, "-j", "MASQUERADE"],
-        capture=True,
+        capture=True, timeout=30,
     )
     return r.returncode == 0
 
@@ -689,7 +763,8 @@ def _ipt_add_masquerade() -> None:
     """
     if not _ipt_masquerade_exists():
         _run(["iptables", "-t", "nat", "-A", "POSTROUTING",
-              "-s", _TUN_SUBNET, "!", "-d", _TUN_SUBNET, "-j", "MASQUERADE"])
+              "-s", _TUN_SUBNET, "!", "-d", _TUN_SUBNET, "-j", "MASQUERADE"],
+             timeout=30)
         print(f"  {GREEN}✓{NC}  MASQUERADE для {_TUN_SUBNET} добавлен")
     else:
         print(f"  {DIM}MASQUERADE для {_TUN_SUBNET} уже существует{NC}")
@@ -701,7 +776,8 @@ def _ipt_remove_masquerade() -> None:
         if not _ipt_masquerade_exists():
             break
         _run(["iptables", "-t", "nat", "-D", "POSTROUTING",
-              "-s", _TUN_SUBNET, "!", "-d", _TUN_SUBNET, "-j", "MASQUERADE"])
+              "-s", _TUN_SUBNET, "!", "-d", _TUN_SUBNET, "-j", "MASQUERADE"],
+             timeout=30)
         removed += 1
     if removed:
         print(f"  {GREEN}✓{NC}  MASQUERADE для {_TUN_SUBNET} удалён "
@@ -710,7 +786,7 @@ def _ipt_remove_masquerade() -> None:
         print(f"  {DIM}MASQUERADE для {_TUN_SUBNET} не найден{NC}")
 
 def _enable_ip_forward() -> None:
-    _run(["sysctl", "-w", "net.ipv4.ip_forward=1"])
+    _run(["sysctl", "-w", "net.ipv4.ip_forward=1"], timeout=15)
     sysctl = Path("/etc/sysctl.d/99-csqtt.conf")
     sysctl.write_text("net.ipv4.ip_forward = 1\n")
     print(f"  {GREEN}✓{NC}  IP forwarding включён")
@@ -794,14 +870,18 @@ def _install_service(data_port: int, web_port: int, main_pass: str,
         + "\n"
         "Restart=always\n"
         "RestartSec=5\n"
+        # Rust/io_uring-сервер с TUN не всегда умирает по SIGTERM
+        # мгновенно; без явного потолка systemd ждал системные 90с
+        # («непонятное зависание» при удалении/переустановке).
+        "TimeoutStopSec=20\n"
         "User=root\n"
         "NoNewPrivileges=true\n"
         "\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"
     )
-    _run(["systemctl", "daemon-reload"])
-    _run(["systemctl", "enable", _SERVICE_NAME])
+    _run(["systemctl", "daemon-reload"], timeout=30)
+    _run(["systemctl", "enable", _SERVICE_NAME], timeout=30)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  УСТАНОВКА
@@ -896,7 +976,8 @@ def _run_install_inner() -> None:
     _box_top("🚀  УСТАНОВКА  •  CSQTT")
     _box_row()
 
-    if _is_installed():
+    istate = _install_state()
+    if istate == "ok":
         _box_warn("CSQTT уже установлен.")
         _box_row()
         _box_item("1", "Переустановить (сохранить пароли и конфиг)")
@@ -911,6 +992,17 @@ def _run_install_inner() -> None:
             return
         if ch == "2":
             _full_uninstall(silent=True)
+    elif istate != "none":
+        # Прерванная установка/удаление: раньше меню говорило «не
+        # установлен», а установщик — «уже на месте» (два противоречивых
+        # ответа). Теперь честно: показываем ЧЕГО не хватает и чиним.
+        missing = ("systemd-сервиса" if istate == "no-service"
+                   else "бинарника csqtt-server")
+        _box_warn(f"Обнаружена незавершённая установка (нет {missing}).")
+        _box_info("Установка доведёт её до конца: конфиг и пароли "
+                  "сохранятся, недостающее будет создано.")
+        _box_row()
+        _box_bot(); print()
 
     state = proto_load_state(_MODULE_STATE)
     old_pass  = state.get("main_password", "")
@@ -1009,9 +1101,10 @@ def _run_install_inner() -> None:
     print(f"  {GREEN}✓{NC}  Systemd-сервис создан.")
 
     # 6. Запуск
-    _run(["systemctl", "start", _SERVICE_NAME])
+    _run(["systemctl", "start", _SERVICE_NAME], timeout=60)
     time.sleep(2)
-    r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
+    r = _run(["systemctl", "is-active", _SERVICE_NAME],
+             capture=True, timeout=15)
     if r.stdout.strip() == "active":
         print(f"  {GREEN}✓{NC}  csqtt-server запущен.")
     else:
@@ -1297,8 +1390,9 @@ def _show_status() -> None:
     _box_top("📊  СТАТУС  •  CSQTT")
     _box_row()
 
-    r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
-    svc_ok = r.stdout.strip() == "active"
+    r = _run(["systemctl", "is-active", _SERVICE_NAME],
+             capture=True, timeout=15)
+    svc_ok = (r.stdout or "").strip() == "active"
     _box_kv("Сервис:",
             f"{GREEN}● активен{NC}" if svc_ok else f"{RED}● остановлен{NC}")
     _box_kv("Бинарник:",
@@ -1352,6 +1446,27 @@ def _show_status() -> None:
 #  ПОЛНОЕ УДАЛЕНИЕ
 # ══════════════════════════════════════════════════════════════════════════════
 def _full_uninstall(silent: bool = False) -> bool:
+    """Полное удаление CSQTT.
+
+    Три принципа (следствие живых кейсов «зависание при освобождении
+    порта» + рассинхрон состояния после Ctrl+C):
+
+    1. НИКОГДА не виснем: systemctl/ufw/iptables — только с потолком
+       ожидания (см. _run/_svc_stop_hard), ни один вызов не может
+       заблокировать удаление навсегда.
+    2. ИДЕМПОТЕНТНОСТЬ: повторный запуск после Ctrl+C доводит
+       удаление до конца, а не падает на полдороге. Каждый шаг
+       обёрнут в try/except — сбой одного шага (например, таймаут
+       ufw) не оставляет полуудалённую установку: остальные шаги
+       выполняются, state-файл удаляется ВСЕГДА.
+    3. ПОРТЫ: закрываем ВСЕ кандидатные порты — из state (могут быть
+       легаси-значениями), текущие дефолты 46000/46002 и исторические
+       дефолты 1.x 40000/40500. Прерванное удаление или смена дефолтов
+       между версиями больше не оставляет orphaned-правил фаервола.
+       Закрытие «чужого» порта безопасно: ufw_close_port трогает
+       только правила с нашим comment-тегом, iptables-ветка — точное
+       совпадение ACCEPT-правила.
+    """
     if not silent:
         os.system("clear")
         _box_top("🗑️  УДАЛЕНИЕ  •  CSQTT")
@@ -1377,36 +1492,83 @@ def _full_uninstall(silent: bool = False) -> bool:
             print(f"  {DIM}Отменено.{NC}"); _pause(); return False
 
     state = proto_load_state(_MODULE_STATE)
-    data_port = state.get("data_port", _DEFAULT_DATA_PORT)
+    # Кандидатные порты: state + текущие дефолты + легаси 1.x.
+    _legacy_data_port, _legacy_web_port = 40000, 40500
+    udp_ports = sorted({int(p) for p in (
+        state.get("data_port"), _DEFAULT_DATA_PORT, _legacy_data_port,
+    ) if isinstance(p, int) and 1024 <= p <= 65535})
+    tcp_ports = sorted({int(p) for p in (
+        state.get("web_port"), _DEFAULT_WEB_PORT, _legacy_web_port,
+    ) if isinstance(p, int) and 1024 <= p <= 65535})
 
-    # Удаляем nginx front если включён
+    # ── Шаг 1: nginx front (если включён) ──────────────────────────────
     try:
         _csqtt_nginx_remove()
+    except Exception as _e:
+        if not silent:
+            print(f"  {YELLOW}⚠{NC}  nginx front: {_e} (продолжаю)")
+
+    # ── Шаг 2: сервис — жёсткий stop с потолком + SIGKILL-фолбэк ──────
+    try:
+        _svc_stop_hard(_SERVICE_NAME)
+        _run(["systemctl", "disable", _SERVICE_NAME], timeout=15)
+    except Exception as _e:
+        if not silent:
+            print(f"  {YELLOW}⚠{NC}  stop/disable: {_e} (продолжаю)")
+    try:
+        if _SERVICE_FILE.exists():
+            _SERVICE_FILE.unlink()
+        _run(["systemctl", "daemon-reload"], timeout=30)
+        _run(["systemctl", "reset-failed"], capture=True, timeout=15)
+    except Exception as _e:
+        if not silent:
+            print(f"  {YELLOW}⚠{NC}  юнит-файл/daemon-reload: {_e} (продолжаю)")
+
+    # ── Шаг 3: бинарник и конфиги ──────────────────────────────────────
+    try:
+        if _BIN_PATH.exists():
+            _BIN_PATH.unlink()
+    except Exception as _e:
+        if not silent:
+            print(f"  {YELLOW}⚠{NC}  бинарник: {_e} (продолжаю)")
+    try:
+        if _CFG_DIR.exists():
+            shutil.rmtree(_CFG_DIR, ignore_errors=True)
+    except Exception as _e:
+        if not silent:
+            print(f"  {YELLOW}⚠{NC}  конфиги: {_e} (продолжаю)")
+
+    # ── Шаг 4: фаервол — все кандидатные порты + MASQUERADE ────────────
+    for udp_port in udp_ports:
+        try:
+            _ipt_close_udp(udp_port)
+        except Exception as _e:
+            if not silent:
+                print(f"  {YELLOW}⚠{NC}  UDP {udp_port}: {_e} (продолжаю)")
+    for tcp_port in tcp_ports:
+        try:
+            _ipt_close_tcp(tcp_port)
+        except Exception as _e:
+            if not silent:
+                print(f"  {YELLOW}⚠{NC}  TCP {tcp_port}: {_e} (продолжаю)")
+    try:
+        _ipt_remove_masquerade()
+    except Exception as _e:
+        if not silent:
+            print(f"  {YELLOW}⚠{NC}  MASQUERADE: {_e} (продолжаю)")
+    try:
+        proto_ipt_persist()
+    except Exception as _e:
+        if not silent:
+            print(f"  {YELLOW}⚠{NC}  persist правил: {_e} (продолжаю)")
+
+    # ── Шаг 5: sysctl + state — выполняется ВСЕГДА ─────────────────────
+    try:
+        sysctl = Path("/etc/sysctl.d/99-csqtt.conf")
+        if sysctl.exists():
+            sysctl.unlink()
     except Exception:
         pass
-
-    _run(["systemctl", "stop",    _SERVICE_NAME])
-    _run(["systemctl", "disable", _SERVICE_NAME])
-    if _SERVICE_FILE.exists():
-        _SERVICE_FILE.unlink()
-    _run(["systemctl", "daemon-reload"])
-    _run(["systemctl", "reset-failed"], capture=True)
-
-    if _BIN_PATH.exists():
-        _BIN_PATH.unlink()
-
-    if _CFG_DIR.exists():
-        shutil.rmtree(_CFG_DIR, ignore_errors=True)
-
-    _ipt_close_udp(data_port)
-    _ipt_close_tcp(state.get("web_port", _DEFAULT_WEB_PORT))
-    _ipt_remove_masquerade()
-    proto_ipt_persist()
-
-    sysctl = Path("/etc/sysctl.d/99-csqtt.conf")
-    if sysctl.exists():
-        sysctl.unlink()
-
     try:
         if _MODULE_STATE.exists():
             _MODULE_STATE.unlink()
@@ -1571,23 +1733,35 @@ def do_csqtt_menu() -> None:
     """
     while True:
         os.system("clear")
-        installed = _is_installed()
+        istate   = _install_state()
+        installed = istate == "ok"
         state     = proto_load_state(_MODULE_STATE)
 
-        r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
-        svc_ok = r.stdout.strip() == "active"
+        r = _run(["systemctl", "is-active", _SERVICE_NAME],
+                 capture=True, timeout=15)
+        svc_ok = (r.stdout or "").strip() == "active"
 
-        svc_str = (
-            f"{GREEN}● активен{NC}"  if svc_ok    else
-            f"{RED}● остановлен{NC}" if installed else
-            f"{YELLOW}● не установлен{NC}"
-        )
+        # Статус честно различает 4 состояния. «Частично» — след
+        # прерванного удаления/установки: раньше меню говорило «не
+        # установлен», а установщик в тот же момент — «уже на месте».
+        if svc_ok:
+            svc_str = f"{GREEN}● активен{NC}"
+        elif istate == "ok":
+            svc_str = f"{RED}● остановлен{NC}"
+        elif istate == "no-service":
+            svc_str = f"{YELLOW}⚠ частично: нет systemd-сервиса{NC}"
+        elif istate == "no-binary":
+            svc_str = f"{YELLOW}⚠ частично: нет бинарника{NC}"
+        else:
+            svc_str = f"{YELLOW}● не установлен{NC}"
 
         _box_top("CSQTT  •  RTP/TURN Tunnel")
         _box_row()
         _box_kv("Статус:", svc_str)
 
-        if installed:
+        if istate in ("ok", "no-service"):
+            # Версию показываем если есть бинарник (no-service чинится
+            # доустановкой сервиса, версия при этом осмысленна).
             # явный НОМЕР ВЕРСИИ установленного csqtt-server —
             # юзеры просили не только sha-хэш ревизии. Источник:
             # опрос бинарника --version (Cargo-версия апстрима),
@@ -1615,8 +1789,11 @@ def do_csqtt_menu() -> None:
 
         _box_row(); _box_sep()
 
-        if not installed:
+        if istate == "none":
             _box_item("1", "🚀  Установить CSQTT")
+        elif not installed:
+            # частичная установка — пункт 1 доведёт её до конца
+            _box_item("1", f"🔧  Доустановить  {YELLOW}(завершить прерванную установку){NC}")
         else:
             _box_item("1", "🚀  Переустановить")
             _box_item("2", "🔑  Управление паролями")
@@ -1683,10 +1860,11 @@ def do_csqtt_menu() -> None:
             _pause()
 
         elif ch == "4" and installed:
-            _run(["systemctl", "restart", _SERVICE_NAME])
+            _run(["systemctl", "restart", _SERVICE_NAME], timeout=60)
             time.sleep(1)
-            r = _run(["systemctl", "is-active", _SERVICE_NAME], capture=True)
-            print(f"  {'✓' if r.stdout.strip()=='active' else '⚠'}  "
+            r = _run(["systemctl", "is-active", _SERVICE_NAME],
+                     capture=True, timeout=15)
+            print(f"  {'✓' if (r.stdout or '').strip()=='active' else '⚠'}  "
                   f"{'Перезапущен.' if r.stdout.strip()=='active' else 'Проверьте логи (пункт 5).'}")
             _pause()
 
@@ -1772,8 +1950,19 @@ def do_csqtt_menu() -> None:
                 _pause()
 
         elif ch == "8" and installed:
-            try: _full_uninstall(silent=False)
-            except _Cancelled: print(f"  {DIM}Отменено.{NC}"); _pause()
+            try:
+                _full_uninstall(silent=False)
+            except _Cancelled:
+                print(f"  {DIM}Отменено.{NC}"); _pause()
+            except KeyboardInterrupt:
+                # Удаление теперь не виснет (таймауты на всех вызовах),
+                # но если юзер всё же рвёт процесс — объясняем, что
+                # делать: повтор запуска идемпотентен и всё доделает.
+                print(f"\n  {YELLOW}⚠{NC}  Удаление прервано — состояние "
+                      f"частично сохранено.")
+                print(f"  {DIM}Повторите пункт 8: операция идемпотентна "
+                      f"и доведёт удаление до конца.{NC}")
+                _pause()
 
         elif ch == "u" and installed:
             # единое меню обновления из апстрима (amurcanov/csqtt):
