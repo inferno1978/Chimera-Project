@@ -467,7 +467,9 @@ def update_target(key: str, force: bool = False,
     Шаги:
       1. бинарник существует? (не установлено — не обновляем)
       2. check_target(force=True) — свежая проверка GitHub API
-      3. нечего обновлять и не force → «актуален», True
+      3. нечего обновлять и не force и не legacy → «актуален», True;
+         legacy branch-цель (rev неизвестна, latest известен) —
+         ОБЯЗАТЕЛЬНО обновляем: это единственный выход из legacy-режима
       4. подтверждение (interactive)
       5. бэкап бинарника
       6. turnable: stop сервиса (post_install пишет поверх — ETXTBSY)
@@ -494,11 +496,32 @@ def update_target(key: str, force: bool = False,
         update_state(key, last_error=f"{_now()} api unavailable")
         return False
 
-    if not info["update_available"] and not force:
+    # legacy-установка branch-цели: бинарник стоит, latest известен, но
+    # ревизии в state нет (установка до эпохи record_first_install или
+    # ручной бинарь). Раньше здесь был безусловный «актуален (—)» — и
+    # юзер навсегда застревал: check_target говорил «обновите вручную
+    # один раз», а update_target отказывался. Живой кейс: v2.0.0 при
+    # апстриме 2.1.9. Теперь РУЧНОЕ «Обновить сейчас» фиксирует
+    # ревизию (скачивает свежую сборку и записывает rev в state).
+    # Агент автообновления legacy по-прежнему ПРОПУСКАЕТ: он смотрит
+    # check_target().update_available (False для legacy) и вслепую не
+    # пересобирает — доктрина «не начинаем пересборку вслепую» цела.
+    legacy_unknown_rev = (t["kind"] != "release"
+                          and not info["update_available"]
+                          and not info.get("installed")
+                          and bool(latest))
+
+    if not info["update_available"] and not force and not legacy_unknown_rev:
         _ok(f"{t['title']}: актуален ({info['installed'] or '—'})")
         return True
 
-    arrow = f"{info['installed'] or '—'} → {latest}"
+    if legacy_unknown_rev and not force:
+        ver = info.get("installed_version")
+        cur = f"v{ver}" if ver and ver != "unknown" else "—"
+        arrow = (f"{cur} (rev неизвестна — legacy) → rev {latest}"
+                 f"  [фиксируем ревизию]")
+    else:
+        arrow = f"{info['installed'] or '—'} → {latest}"
     if force and not info["update_available"]:
         arrow += "  [принудительная переустановка]"
     _info(f"{t['title']}: {arrow}")
@@ -853,7 +876,13 @@ def get_update_status_line(key: str) -> str:
     if not t["binary"].exists():
         parts.append(f"{DIM}не установлен{NC}")
     elif not installed:
-        parts.append(f"{DIM}ревизия неизвестна (legacy){NC}")
+        if latest:
+            # legacy-установка, но latest известен — показываем КУДА
+            # обновляться (раньше «ревизия неизвестна (legacy)» читалось
+            # как «обновлений нет», юзер не понимал, что пункт 2 доступен)
+            parts.append(f"{DIM}legacy{NC} {YELLOW}→ rev {latest}{NC}")
+        else:
+            parts.append(f"{DIM}ревизия неизвестна (legacy){NC}")
     elif latest and installed != latest:
         parts.append(f"{shown} {YELLOW}→ {latest} доступно{NC}")
     else:
@@ -908,7 +937,12 @@ def _fmt_target_row(key: str) -> str:
     elif info["reason"] == "GitHub API недоступен":
         status = f"{YELLOW}API недоступен{NC}"
     elif info["reason"].startswith("ревизия неизвестна"):
-        status = f"{YELLOW}legacy-установка{NC}"
+        # legacy: колонка «Последняя» показывает РЕАЛЬНЫЙ latest (раньше
+        # туда писалось «legacy-установка» — ярлык установленного в
+        # колонку апстрима, юзер читал «последняя = legacy-установка»)
+        status = (f"{YELLOW}rev {info['latest']} — обновить вручную{NC}"
+                  if info.get("latest")
+                  else f"{YELLOW}legacy-установка{NC}")
     else:
         status = f"{GREEN}актуален{NC}"
     # «Установлено» — НОМЕР ВЕРСИИ впереди хэша ревизии

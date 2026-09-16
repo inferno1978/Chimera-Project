@@ -762,5 +762,122 @@ class TestTurnableMenuDelegates(unittest.TestCase):
         self.assertEqual(recorded.get("focus"), "turnable")
 
 
+class TestLegacyUpdateProceeds(_TmpStateMixin, unittest.TestCase):
+    """Тупик legacy-обновления: ручное «Обновить сейчас» обязано работать.
+
+    Живой кейс: установленная v2.0.0 (rev неизвестна — legacy), апстрим
+    2.1.9. Проверка говорила «обновите вручную один раз», а пункт
+    «Обновить сейчас» отвечал «актуален (—)» и НЕ обновлял — юзер
+    навсегда застревал в legacy-режиме (выходил только force).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._bin = self._tmpdir / "fake-csqtt"
+        self._bin.write_bytes(b"\x7fELF-fake")
+        self._orig_targets = {k: dict(v) for k, v in uu.UPSTREAM_TARGETS.items()}
+        uu.UPSTREAM_TARGETS["csqtt"]["binary"] = self._bin
+
+    def tearDown(self):
+        uu.UPSTREAM_TARGETS.clear()
+        uu.UPSTREAM_TARGETS.update(self._orig_targets)
+        super().tearDown()
+
+    def _legacy_state(self):
+        """state как у юзера: версия есть, ревизии нет (= legacy)."""
+        uu.update_state("csqtt", installed_version="2.0.0")
+
+    def test_legacy_manual_update_fetches_and_records_rev(self):
+        self._legacy_state()
+        seen = {}
+
+        def fake_fetch(spec, **kwargs):
+            seen.update(kwargs)
+            return True
+
+        with patch.object(uu, "_github_api_json",
+                          return_value={"sha": "a1b2c3d4e5f6"
+                                        "7890aabbccddeeff"}), \
+             patch.object(uu, "get_installed_version", return_value="2.1.9"), \
+             patch.object(uu, "_installed_version_cached",
+                          return_value="2.0.0"), \
+             patch.object(uu, "_svc_active", return_value=False), \
+             patch.object(uu, "_backup_binary", return_value=None), \
+             patch.object(uu, "_build_info", return_value={}), \
+             patch("chimera.modules.download_manager.fetch_package",
+                   side_effect=fake_fetch), \
+             patch.object(uu, "_spec_for", return_value=MagicMock()):
+            ok = uu.update_target("csqtt", interactive=False)
+        self.assertTrue(ok)
+        # ревизия зафиксирована — legacy-режим кончился
+        st = uu.read_state()["csqtt"]
+        self.assertEqual(st["installed_rev"], "a1b2c3d4e5f6")
+        self.assertEqual(st["installed_version"], "2.1.9")
+
+    def test_non_legacy_up_to_date_still_says_actual(self):
+        """Регрессия-гард: не-legacy актуальная цель по-прежнему
+        коротко отвечает «актуален» БЕЗ скачивания."""
+        uu.update_state("csqtt", installed_rev="a1b2c3d4e5f6",
+                        installed="a1b2c3d4e5f6")
+
+        def boom(*a, **kw):
+            raise AssertionError("fetch_package не должен вызываться")
+
+        with patch.object(uu, "_github_api_json",
+                          return_value={"sha": "a1b2c3d4e5f6"
+                                        "7890aabbccddeeff"}), \
+             patch("chimera.modules.download_manager.fetch_package",
+                   side_effect=boom), \
+             patch.object(uu, "_spec_for", return_value=MagicMock()):
+            ok = uu.update_target("csqtt", interactive=False)
+        self.assertTrue(ok)
+
+    def test_agent_skips_legacy(self):
+        """Доктрина: агент автообновления НЕ пересобирает legacy вслепую
+        (только ручное обновление выводит из legacy-режима)."""
+        self._legacy_state()
+        uu.update_state("csqtt", auto=True)
+
+        def boom(*a, **kw):
+            raise AssertionError("агент не должен обновлять legacy")
+
+        with patch.object(uu, "_github_api_json",
+                          return_value={"sha": "a1b2c3d4e5f6"
+                                        "7890aabbccddeeff"}), \
+             patch.object(uu, "_installed_version_cached",
+                          return_value="2.0.0"), \
+             patch.object(uu, "update_target", side_effect=boom):
+            rc = uu.run_agent()
+        self.assertEqual(rc, 0)  # legacy — не ошибка, просто skip
+
+    def test_fmt_target_row_legacy_shows_real_latest(self):
+        """Колонка «Последняя» для legacy показывает РЕАЛЬНЫЙ latest
+        (раньше писалось «legacy-установка» — ярлык установленного
+        в колонку апстрима)."""
+        self._legacy_state()
+        with patch.object(uu, "_github_api_json",
+                          return_value={"sha": "a1b2c3d4e5f6"
+                                        "7890aabbccddeeff"}), \
+             patch.object(uu, "_installed_version_cached",
+                          return_value="2.0.0"):
+            uu.check_target("csqtt", force=True)
+        row = uu._fmt_target_row("csqtt")
+        self.assertIn("обновить вручную", row)
+        self.assertIn("a1b2c3d4e5f6", row)
+        self.assertIn("v2.0.0 (rev неизвестен — legacy)", row)
+
+    def test_status_line_legacy_with_latest(self):
+        self._legacy_state()
+        uu.update_state("csqtt", latest="a1b2c3d4e5f6")
+        line = uu.get_update_status_line("csqtt")
+        self.assertIn("legacy", line)
+        self.assertIn("a1b2c3d4e5f6", line)
+
+    def test_status_line_legacy_without_latest_unchanged(self):
+        self._legacy_state()
+        line = uu.get_update_status_line("csqtt")
+        self.assertIn("ревизия неизвестна (legacy)", line)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -512,6 +512,27 @@ def find_manual_binary() -> tuple:
     return None, rejects
 
 
+def _binary_version(path: Path) -> str:
+    """Опрашивает '<path> --version', возвращает '2.1.9' или ''.
+
+    Живой кейс: у юзера в /root лежал ручной бинарь v2.0.0, пока
+    апстрим был уже 2.1.9 — каждая переустановка молча ставила СТАРЫЙ
+    бинарь. Теперь версия печатается прямо в сообщении об установке:
+    «Найден готовый бинарь csqtt-server: /root/csqtt-server
+    (12.3 MB, v2.0.0)» — юзер сразу видит, ЧТО будет поставлено.
+    Безопасность: бинарь в любом случае будет тут же установлен и
+    запущен как сервис — отдельный запуск с --version ничего не
+    меняет; таймаут 20с защищает от зависшего бинаря.
+    """
+    try:
+        r = subprocess.run([str(path), "--version"],
+                           capture_output=True, text=True, timeout=20)
+        m = re.search(r"v?(\d+\.\d+[\.\d]*)", (r.stdout or "") + (r.stderr or ""))
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
 def install_manual_binary(verbose: bool = True) -> bool:
     """устанавливает ГОТОВЫЙ бинарь, загруженный юзером вручную.
 
@@ -552,8 +573,10 @@ def install_manual_binary(verbose: bool = True) -> bool:
             ok, why = _validate_manual_binary(_CSQTT_BIN_PATH)
             if ok:
                 if verbose:
+                    ver = _binary_version(_CSQTT_BIN_PATH)
+                    vs = f", v{ver}" if ver else ""
                     print(f"[OK] csqtt-server уже на месте: "
-                          f"{_CSQTT_BIN_PATH} ({why}) — сборка не требуется")
+                          f"{_CSQTT_BIN_PATH}{vs} ({why}) — сборка не требуется")
                 try:
                     _CSQTT_BIN_PATH.chmod(0o755)
                 except Exception:
@@ -562,12 +585,14 @@ def install_manual_binary(verbose: bool = True) -> bool:
         return False
 
     if verbose:
+        ver = _binary_version(found)
+        vs = f", v{ver}" if ver else ""
         try:
             size_mb = found.stat().st_size / (1024 * 1024)
             print(f"[OK] Найден готовый бинарь csqtt-server: {found} "
-                  f"({size_mb:.1f} MB) — устанавливаю без сборки")
+                  f"({size_mb:.1f} MB{vs}) — устанавливаю без сборки")
         except Exception:
-            print(f"[OK] Найден готовый бинарь csqtt-server: {found} "
+            print(f"[OK] Найден готовый бинарь csqtt-server: {found}{vs} "
                   f"— устанавливаю без сборки")
 
     # этот бинарь НЕ из текущего tarball — чистим build-инфу,
@@ -619,12 +644,16 @@ def _atomic_replace_binary(built: Path, bin_path: Path,
                            service_name: str, service_file: Path) -> bool:
     """Атомарно заменяет binary (останавливает сервис если активен)."""
     was_active = False
-    r = subprocess.run(["systemctl", "is-active", service_name],
-                       capture_output=True, text=True, check=False)
-    if r.returncode == 0 and r.stdout.strip() == "active":
-        was_active = True
-        subprocess.run(["systemctl", "stop", service_name],
-                       capture_output=True, check=False)
+    try:
+        r = subprocess.run(["systemctl", "is-active", service_name],
+                           capture_output=True, text=True, check=False,
+                           timeout=15)
+        if r.returncode == 0 and r.stdout.strip() == "active":
+            was_active = True
+            subprocess.run(["systemctl", "stop", service_name],
+                           capture_output=True, check=False, timeout=60)
+    except subprocess.TimeoutExpired:
+        pass
 
     try:
         if bin_path.exists():
@@ -640,8 +669,11 @@ def _atomic_replace_binary(built: Path, bin_path: Path,
         return False
 
     if was_active:
-        subprocess.run(["systemctl", "start", service_name],
-                       capture_output=True, check=False)
+        try:
+            subprocess.run(["systemctl", "start", service_name],
+                           capture_output=True, check=False, timeout=60)
+        except subprocess.TimeoutExpired:
+            pass
 
     return True
 

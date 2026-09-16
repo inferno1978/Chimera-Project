@@ -120,6 +120,16 @@ LOCK_FILE = PORT_REGISTRY_FILE.with_suffix(".lock")
 # возвращаем ошибку вместо зависания.
 _LOCK_TIMEOUT_SEC = 10
 
+# ⏱ Таймауты на внешние вызовы (ufw/ss): КАЖДЫЙ запуск ufw берёт
+# БЛОКИРУЮЩИЙ fcntl-лок /run/ufw.lock (ufw/util.py create_lock) —
+# зависший держатель лока (ufw-процесс от оборванной сессии в
+# D-состоянии) раньше вешал удаление/установку модулей НАВСЕГДА
+# («зависание при освобождении порта»). Теперь ждём не дольше
+# _UFW_TIMEOUT_SEC и возвращаем честную ошибку/пустой результат.
+_UFW_TIMEOUT_SEC = 60   # allow/delete (внутри iptables-restore)
+_UFW_STATUS_TIMEOUT_SEC = 30  # status numbered
+_SS_TIMEOUT_SEC = 15    # ss -ltnp
+
 # Канонические service_tag — короткие строки, без пробелов.
 SERVICE_VLESS           = "vless"
 SERVICE_WEB_PANEL       = "web_panel"
@@ -268,10 +278,14 @@ def port_check_system(port: int, proto: str = "tcp") -> list[str]:
         return []
     proto_flag = "-t" if proto == "tcp" else "-u"
     # -ltnp = listening, tcp, numeric, processes
-    r = subprocess.run(
-        ["ss", proto_flag + "lnp"],
-        capture_output=True, text=True, check=False,
-    )
+    try:
+        r = subprocess.run(
+            ["ss", proto_flag + "lnp"],
+            capture_output=True, text=True, check=False,
+            timeout=_SS_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return []
     if r.returncode != 0:
         return []
     results: list[str] = []
@@ -324,10 +338,14 @@ def _check_ufw_rules(port: int, proto: str = "tcp") -> list[dict]:
     """Возвращает UFW-правила для port/proto. Каждое — {num, comment, raw}."""
     if not shutil.which("ufw"):
         return []
-    r = subprocess.run(
-        ["ufw", "status", "numbered"],
-        capture_output=True, text=True, check=False,
-    )
+    try:
+        r = subprocess.run(
+            ["ufw", "status", "numbered"],
+            capture_output=True, text=True, check=False,
+            timeout=_UFW_STATUS_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return []
     if r.returncode != 0:
         return []
     rules: list[dict] = []
@@ -653,11 +671,15 @@ def ufw_open_port(port: int, proto: str, service_tag: str,
         return False, (f"Порт {port}/{proto} уже открыт чужим UFW-правилом "
                        f"(#{foreign[0]['num']}) — не трогаем")
 
-    r = subprocess.run(
-        ["ufw", "allow", f"{port}/{proto}", "comment", comment],
-        capture_output=True, text=True, check=False,
-        input="y\n",
-    )
+    try:
+        r = subprocess.run(
+            ["ufw", "allow", f"{port}/{proto}", "comment", comment],
+            capture_output=True, text=True, check=False,
+            input="y\n", timeout=_UFW_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return False, (f"ufw allow {port}/{proto}: таймаут "
+                       f"{_UFW_TIMEOUT_SEC}с (лок /run/ufw.lock занят?)")
     if r.returncode != 0:
         return False, f"ufw allow failed: {r.stderr.strip()}"
     return True, f"Порт {port}/{proto} открыт в UFW"
@@ -697,11 +719,14 @@ def ufw_close_port(port: int, proto: str, service_tag: str,
     # Удаляем с конца (старшие номера первыми).
     deleted = 0
     for r in sorted(ours, key=lambda x: x["num"], reverse=True):
-        result = subprocess.run(
-            ["ufw", "delete", str(r["num"])],
-            capture_output=True, text=True, check=False,
-            input="y\n",
-        )
+        try:
+            result = subprocess.run(
+                ["ufw", "delete", str(r["num"])],
+                capture_output=True, text=True, check=False,
+                input="y\n", timeout=_UFW_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            break  # лок занят — остальные правила снимет повторный запуск
         if result.returncode == 0:
             deleted += 1
     return True, f"Удалено {deleted} правил для порта {port}/{proto}"
@@ -723,11 +748,15 @@ def ufw_open_port_range(port_start: int, port_end: int, proto: str,
     else:
         comment_str = f"chimera-{service_tag} {comment}"
 
-    r = subprocess.run(
-        ["ufw", "allow", f"{port_start}:{port_end}/{proto}", "comment", comment_str],
-        capture_output=True, text=True, check=False,
-        input="y\n",
-    )
+    try:
+        r = subprocess.run(
+            ["ufw", "allow", f"{port_start}:{port_end}/{proto}", "comment", comment_str],
+            capture_output=True, text=True, check=False,
+            input="y\n", timeout=_UFW_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return False, (f"ufw allow range {port_start}-{port_end}/{proto}: "
+                       f"таймаут {_UFW_TIMEOUT_SEC}с")
     if r.returncode != 0:
         return False, f"ufw allow range failed: {r.stderr.strip()}"
     return True, f"Диапазон {port_start}-{port_end}/{proto} открыт в UFW"
@@ -754,12 +783,15 @@ def ufw_close_port_range(port_start: int, port_end: int, proto: str,
     for c in comments_to_try:
         if not c:
             continue
-        r = subprocess.run(
-            ["ufw", "delete", "allow", f"{port_start}:{port_end}/{proto}",
-             "comment", c],
-            capture_output=True, text=True, check=False,
-            input="y\n",
-        )
+        try:
+            r = subprocess.run(
+                ["ufw", "delete", "allow", f"{port_start}:{port_end}/{proto}",
+                 "comment", c],
+                capture_output=True, text=True, check=False,
+                input="y\n", timeout=_UFW_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            continue
         if r.returncode == 0:
             deleted += 1
 
@@ -769,11 +801,14 @@ def ufw_close_port_range(port_start: int, port_end: int, proto: str,
         # Только наши (chimera- или legacy).
         comment = r.get("comment", "")
         if any(c in comment for c in comments_to_try if c):
-            result = subprocess.run(
-                ["ufw", "delete", str(r["num"])],
-                capture_output=True, text=True, check=False,
-                input="y\n",
-            )
+            try:
+                result = subprocess.run(
+                    ["ufw", "delete", str(r["num"])],
+                    capture_output=True, text=True, check=False,
+                    input="y\n", timeout=_UFW_TIMEOUT_SEC,
+                )
+            except subprocess.TimeoutExpired:
+                continue
             if result.returncode == 0:
                 deleted += 1
 
@@ -785,10 +820,14 @@ def _check_ufw_rules_range(port_start: int, port_end: int,
     """Возвращает UFW-правила для диапазона портов."""
     if not shutil.which("ufw"):
         return []
-    r = subprocess.run(
-        ["ufw", "status", "numbered"],
-        capture_output=True, text=True, check=False,
-    )
+    try:
+        r = subprocess.run(
+            ["ufw", "status", "numbered"],
+            capture_output=True, text=True, check=False,
+            timeout=_UFW_STATUS_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return []
     if r.returncode != 0:
         return []
     rules: list[dict] = []
@@ -891,10 +930,15 @@ def do_manage_port_registry() -> None:
             else:
                 _box_top("Активные слушатели (ss -ltnp)")
                 _box_row()
-                r = subprocess.run(["ss", "-ltnp"], capture_output=True,
-                                  text=True, check=False)
-                for line in r.stdout.splitlines()[:30]:
-                    _box_row(f"  {DIM}{line}{NC}")
+                try:
+                    r = subprocess.run(["ss", "-ltnp"], capture_output=True,
+                                      text=True, check=False,
+                                      timeout=_SS_TIMEOUT_SEC)
+                except subprocess.TimeoutExpired:
+                    r = None
+                if r:
+                    for line in r.stdout.splitlines()[:30]:
+                        _box_row(f"  {DIM}{line}{NC}")
                 _box_bottom()
             input(f"\n{BLUE}  Нажмите Enter...{NC}")
 
