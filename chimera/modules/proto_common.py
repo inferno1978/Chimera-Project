@@ -165,16 +165,26 @@ def proto_ipt_persist() -> None:
     Uses ``subprocess.run`` directly (not the module-local ``_run``) so it
     works identically across all protocol modules regardless of their
     ``_run`` signature variations.
+
+    Таймауты: netfilter-persistent/iptables-save ходят в ядро через
+    xtables-лок — под нагрузкой (параллельный b4/ufw/Docker) вызов
+    мог блокировать удаление модуля неограниченно долго. Теперь
+    ждём не дольше 120с; таймаут НЕ роняет вызывающий код (persist —
+    косметика, правила в живом iptables уже применены).
     """
-    if shutil.which("netfilter-persistent"):
-        subprocess.run(["netfilter-persistent", "save"],
-                       capture_output=True, text=True)
-        return
-    rules_dir = Path("/etc/iptables")
-    rules_dir.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(["iptables-save"], capture_output=True, text=True)
-    if r.returncode == 0 and r.stdout:
-        (rules_dir / "rules.v4").write_text(r.stdout)
+    try:
+        if shutil.which("netfilter-persistent"):
+            subprocess.run(["netfilter-persistent", "save"],
+                           capture_output=True, text=True, timeout=120)
+            return
+        rules_dir = Path("/etc/iptables")
+        rules_dir.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(["iptables-save"], capture_output=True, text=True,
+                           timeout=60)
+        if r.returncode == 0 and r.stdout:
+            (rules_dir / "rules.v4").write_text(r.stdout)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════

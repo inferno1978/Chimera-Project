@@ -509,13 +509,22 @@ def panel_nginx_front_install(
     nginx_bin = shutil.which("nginx")
     if not nginx_bin:
         return False, "nginx не установлен"
-    r = subprocess.run([nginx_bin, "-t"], capture_output=True, text=True, check=False)
-    if r.returncode != 0:
+    try:
+        r = subprocess.run([nginx_bin, "-t"], capture_output=True, text=True,
+                           check=False, timeout=30)
+    except subprocess.TimeoutExpired:
+        r = None
+    if r is None or r.returncode != 0:
         # Откат.
         enabled.unlink(missing_ok=True)
         available.unlink(missing_ok=True)
-        return False, f"nginx -t failed: {r.stderr.strip()[:300]}"
-    subprocess.run(["systemctl", "reload", "nginx"], check=False)
+        return False, ("nginx -t failed: таймаут" if r is None
+                       else f"nginx -t failed: {r.stderr.strip()[:300]}")
+    try:
+        subprocess.run(["systemctl", "reload", "nginx"], check=False,
+                       timeout=30)
+    except subprocess.TimeoutExpired:
+        pass
 
     # 6. Регистрация в port_registry + открытие порта в фаерволе.
     # ВАЖНО: ufw_open_port() работает только если UFW активен.
@@ -540,27 +549,41 @@ def panel_nginx_front_install(
             ipt = _sh.which("iptables")
             if ipt:
                 # Проверяем существующее правило (идемпотентность).
-                r_check = subprocess.run(
-                    [ipt, "-C", "INPUT", "-p", "tcp", "--dport", str(port),
-                     "-j", "ACCEPT"],
-                    capture_output=True, check=False,
-                )
-                if r_check.returncode != 0:
-                    # Правила нет — добавляем.
-                    r_add = subprocess.run(
-                        [ipt, "-I", "INPUT", "1", "-p", "tcp",
-                         "--dport", str(port), "-j", "ACCEPT"],
-                        capture_output=True, text=True, check=False,
+                try:
+                    r_check = subprocess.run(
+                        [ipt, "-C", "INPUT", "-p", "tcp", "--dport", str(port),
+                         "-j", "ACCEPT"],
+                        capture_output=True, check=False, timeout=30,
                     )
-                    if r_add.returncode == 0:
+                except subprocess.TimeoutExpired:
+                    r_check = None
+                if r_check is not None and r_check.returncode != 0:
+                    # Правила нет — добавляем.
+                    try:
+                        r_add = subprocess.run(
+                            [ipt, "-I", "INPUT", "1", "-p", "tcp",
+                             "--dport", str(port), "-j", "ACCEPT"],
+                            capture_output=True, text=True, check=False,
+                            timeout=30,
+                        )
+                    except subprocess.TimeoutExpired:
+                        r_add = None
+                    if r_add is not None and r_add.returncode == 0:
                         info(f"  {CYAN}Порт {port}/tcp открыт в iptables{NC}")
                         # Persist rules (iptables-persistent / netfilter-persistent).
                         np = _sh.which("netfilter-persistent")
                         if np:
-                            subprocess.run([np, "save"], capture_output=True, check=False)
+                            try:
+                                subprocess.run([np, "save"], capture_output=True,
+                                               check=False, timeout=120)
+                            except subprocess.TimeoutExpired:
+                                pass
                     else:
+                        why = ("таймаут iptables (xtables-лок занят?)"
+                               if r_add is None
+                               else r_add.stderr.strip()[:200])
                         warn(f"  {RED}Не удалось открыть порт {port} в iptables: "
-                             f"{r_add.stderr.strip()[:200]}{NC}")
+                             f"{why}{NC}")
                         warn(f"  {YELLOW}Откройте вручную: iptables -I INPUT 1 "
                              f"-p tcp --dport {port} -j ACCEPT{NC}")
                 else:
@@ -634,9 +657,14 @@ def panel_nginx_front_remove(
     # 3. nginx reload.
     nginx_bin = shutil.which("nginx")
     if nginx_bin:
-        r = subprocess.run([nginx_bin, "-t"], capture_output=True, text=True, check=False)
-        if r.returncode == 0:
-            subprocess.run(["systemctl", "reload", "nginx"], check=False)
+        try:
+            r = subprocess.run([nginx_bin, "-t"], capture_output=True, text=True,
+                               check=False, timeout=30)
+            if r.returncode == 0:
+                subprocess.run(["systemctl", "reload", "nginx"], check=False,
+                               timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
 
     # 4. Закрываем порт в фаерволе + снимаем регистрацию.
     # Симметрично panel_nginx_front_install: UFW → iptables fallback.
@@ -657,28 +685,38 @@ def panel_nginx_front_remove(
         if ipt:
             args = ["-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]
             for _ in range(5):
-                r_check = subprocess.run(
-                    [ipt, "-C", "INPUT"] + args,
-                    capture_output=True, check=False,
-                )
-                if r_check.returncode != 0:
-                    break  # правила нет — выходим
-                subprocess.run(
-                    [ipt, "-D", "INPUT"] + args,
-                    capture_output=True, check=False,
-                )
+                try:
+                    r_check = subprocess.run(
+                        [ipt, "-C", "INPUT"] + args,
+                        capture_output=True, check=False, timeout=30,
+                    )
+                    if r_check.returncode != 0:
+                        break  # правила нет — выходим
+                    subprocess.run(
+                        [ipt, "-D", "INPUT"] + args,
+                        capture_output=True, check=False, timeout=30,
+                    )
+                except subprocess.TimeoutExpired:
+                    break  # xtables-лок занят — повторный запуск дочистит
             # Persist после удаления.
             np = _sh.which("netfilter-persistent")
             if np:
-                subprocess.run([np, "save"], capture_output=True, check=False)
+                try:
+                    subprocess.run([np, "save"], capture_output=True,
+                                   check=False, timeout=120)
+                except subprocess.TimeoutExpired:
+                    pass
         # Также снимаем orphaned UFW правило (если осталось).
         if _sh.which("ufw"):
             # text=True ОБЯЗАТЕЛЬНО при input=str (иначе memoryview()
             # падает: «a bytes-like object is required, not 'str'» —
             # инцидент 29.08.2026, прод). Паттерн как в port_registry.
-            subprocess.run(["ufw", "delete", "allow", f"{port}/tcp"],
-                           capture_output=True, text=True,
-                           input="y\n", check=False)
+            try:
+                subprocess.run(["ufw", "delete", "allow", f"{port}/tcp"],
+                               capture_output=True, text=True,
+                               input="y\n", check=False, timeout=60)
+            except subprocess.TimeoutExpired:
+                pass  # /run/ufw.lock занят — повторное удаление дочистит
 
     # 5. Очищаем state.
     state_file.unlink(missing_ok=True)
