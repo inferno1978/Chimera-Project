@@ -610,6 +610,13 @@ _SECURITY_PARAMS: Dict[str, str] = {
     "cert_refresh_delay":    "240",
     "cert_ignore_timestamp": "false",
     "max_clients":           "250",
+    # (кейс vds14808, 2026-09-20): use_syslog отсутствовал в наборе →
+    # pool-sync/advanced конфиги не имели его в top-level, а
+    # apply_dnscrypt_tuning [T] дописывал недостающий ключ В КОНЕЦ файла
+    # — после хвостовой секции [local_doh] → local_doh.use_syslog →
+    # [FATAL] dnscrypt-proxy (дубль при повторе: Key has already been
+    # defined). Ключ в каноническом top-level наборе генераторов.
+    "use_syslog":            "true",
 }
 
 # источники dnscry.pt УДАЛЕНЫ — антибот-URL без failover ронял старт
