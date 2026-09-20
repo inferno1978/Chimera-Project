@@ -443,7 +443,12 @@ def _fw_ban(ip: str) -> bool:
 
 
 def _fw_unban(ip: str) -> bool:
-    """Разбанивает IP через ufw или iptables."""
+    """Разбанивает IP через ufw или iptables.
+
+    ufw ищет правило на delete по ПОЛНОМУ синтаксису: новые баны
+    создаются с comment (см. _fw_ban), старые — без. Пробуем оба
+    варианта, чтобы разбан работал для правил любого поколения.
+    """
     core = _core_module()
     _run = core._run
 
@@ -451,11 +456,173 @@ def _fw_unban(ip: str) -> bool:
     if _shutil.which("ufw"):
         r = _run(["ufw", "delete", "deny", "from", ip, "to", "any"],
                  check=False, quiet=True)
+        if r.returncode == 0:
+            return True
+        # правило могло быть создано с comment (ufw матчит по полному
+        # синтаксису) — пробуем и такой вариант
+        r = _run(["ufw", "delete", "deny", "from", ip, "to", "any",
+                  "comment", "xray-autoban"], check=False, quiet=True)
         return r.returncode == 0
     r = _run(["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP",
               "-m", "comment", "--comment", "xray-autoban"],
              check=False, quiet=True)
     return r.returncode == 0
+
+
+# ufw хранит пользовательские правила в iptables-save-формате;
+# deny-from-бан выглядит так (comment может отсутствовать или стоять
+# до/после -j — порядок у разных версий ufw разный):
+#   -A ufw-user-input -s 1.2.3.4/32 -j DROP [-m comment --comment xray-autoban]
+_UFW_USER_RULES = Path("/etc/ufw/user.rules")
+_RE_UFW_INPUT_RULE = re.compile(r'^-A\s+ufw-user-input\b')
+_RE_SRC_IPV4       = re.compile(r'(?:^|\s)-s\s+\d{1,3}(?:\.\d{1,3}){3}(?:/\d+)?(?:\s|$)')
+_RE_J_DROP         = re.compile(r'(?:^|\s)-j\s+DROP(?:\s|$)')
+
+
+def _ufw_reorder_rules_file(banned: dict, runner):
+    """Быстрый (батч) путь миграции порядка ufw-правил: одна правка
+    /etc/ufw/user.rules + один `ufw reload`.
+
+    Почему не ufw CLI на каждый IP (кейс vds14808, 2026-09-21): каждый
+    вызов `ufw delete/insert` ре-апплит ВЕСЬ ruleset через
+    iptables-restore — 1-3 с на вызов; 199 IP x 2 вызова = ~10-20 минут
+    «зависания» без единой строки прогресса. Файловый путь: парсинг и
+    запись — миллисекунды, один reload ~1-3 с, итого секунды.
+
+    deny-from-правила (автобан + любые ручные source-DROP) переносятся
+    в начало цепочки ufw-user-input — ДО allow-правил портов
+    (first-match-wins). Относительный порядок deny-правил сохраняется.
+
+    Возвращает:
+      int  — сколько deny-правил переставлено (0 — если их нет; столько
+             же — если уже стоят сверху: идемпотентно, файл и reload
+             не трогаются)
+      None — быстрый путь не удался (файла нет / структура непонятна /
+             reload упал) → вызывающий код откатывается на CLI-режим
+    """
+    path = _UFW_USER_RULES
+    try:
+        if not path.exists():
+            return None
+        lines = path.read_text().splitlines()
+    except Exception:
+        return None
+
+    def _is_ban_rule(ln: str) -> bool:
+        return (bool(_RE_UFW_INPUT_RULE.match(ln))
+                and bool(_RE_SRC_IPV4.search(ln))
+                and bool(_RE_J_DROP.search(ln)))
+
+    ban_idx = [i for i, ln in enumerate(lines) if _is_ban_rule(ln)]
+    if not ban_idx:
+        return 0
+
+    first_input = next(
+        (i for i, ln in enumerate(lines) if _RE_UFW_INPUT_RULE.match(ln)),
+        None)
+    if first_input is None:      # ban-строки сами совпадают с шаблоном
+        return None              # → ветка недостижима, но не падаем
+
+    # Идемпотентность: deny-блок уже стоит сплошняком с первой строки
+    # ufw-user-input → ничего не делаем (повторный [F] мгновенен)
+    if ban_idx[0] == first_input and all(
+            b == first_input + k for k, b in enumerate(ban_idx)):
+        return len(ban_idx)
+
+    new_lines = [ln for i, ln in enumerate(lines) if i not in set(ban_idx)]
+    for k, i in enumerate(ban_idx):
+        new_lines.insert(first_input + k, lines[i])
+
+    import shutil as _shutil
+    bak = Path(str(path) + ".chimera-bak")
+    tmp = Path(str(path) + ".chimera-tmp")
+    try:
+        _shutil.copy2(path, bak)
+        tmp.write_text("\n".join(new_lines) + "\n")
+        os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+            if bak.exists():
+                _shutil.copy2(bak, path)
+        except Exception:
+            pass
+        return None
+
+    # ufw активен? (inactive → файл поправлен, применится при enable;
+    # ошибка → ufw не смог прочитать файл → откат и CLI-фолбэк)
+    try:
+        rs = runner(["ufw", "status"], check=False, quiet=True)
+    except Exception:
+        rs = None
+    if rs is not None and rs.returncode != 0:
+        try:
+            _shutil.copy2(bak, path)
+        except Exception:
+            pass
+        return None
+    active = (rs is not None and "inactive" not in (rs.stdout or ""))
+    if not active:
+        return len(ban_idx)
+
+    # ОДИН reload вместо 2xN CLI-вызовов; при неудаче — откат из бэкапа
+    r = runner(["ufw", "reload"], check=False, quiet=True)
+    if r.returncode != 0:
+        try:
+            _shutil.copy2(bak, path)
+            runner(["ufw", "reload"], check=False, quiet=True)
+        except Exception:
+            pass
+        return None
+
+    # Лёгкая верификация: первая строка цепочки должна быть deny-правилом.
+    # Отрицательный результат (строка есть и она НЕ deny) → откат+фолбэк;
+    # пустой вывод (нечем проверить) → доверяем reload'у
+    try:
+        rv = runner(["iptables", "-S", "ufw-user-input"],
+                    check=False, quiet=True)
+        if rv.returncode == 0:
+            first = next((ln for ln in (rv.stdout or "").splitlines()
+                          if ln.startswith("-A ufw-user-input")), "")
+            if first and not (_RE_SRC_IPV4.search(first)
+                              and _RE_J_DROP.search(first)):
+                _shutil.copy2(bak, path)
+                runner(["ufw", "reload"], check=False, quiet=True)
+                return None
+    except Exception:
+        pass
+    return len(ban_idx)
+
+
+def _fw_repair_order_cli(banned: dict, _run) -> int:
+    """Фолбэк-миграция порядка правил через ufw CLI (по одному IP).
+
+    Медленно — каждый вызов ufw ре-апплит весь ruleset — поэтому печатает
+    прогресс каждые 20 IP. Используется только если файловый батч-путь
+    не удался (нет/не распарсился user.rules, упал reload).
+    """
+    core = _core_module()
+    info = core.info
+    fixed = 0
+    total = len(banned)
+    for done, ip in enumerate(list(banned.keys()), 1):
+        # удалить старое правило (любое положение) — «not found» молча
+        # игнорируем; правило могло быть с comment или без — оба варианта
+        r = _run(["ufw", "delete", "deny", "from", ip, "to", "any"],
+                 check=False, quiet=True)
+        if r.returncode != 0:
+            _run(["ufw", "delete", "deny", "from", ip, "to", "any",
+                  "comment", "xray-autoban"], check=False, quiet=True)
+        r = _run(["ufw", "insert", "1", "deny", "from", ip, "to", "any",
+                  "comment", "xray-autoban"], check=False, quiet=True)
+        if r.returncode == 0:
+            fixed += 1
+        if done % 20 == 0 and done < total:
+            info(f"  … {done}/{total} (CLI-фолбэк: каждый вызов ufw "
+                 f"ре-апплит весь ruleset — это медленно)")
+    return fixed
 
 
 def _fw_repair_order(banned: dict):
@@ -464,8 +631,13 @@ def _fw_repair_order(banned: dict):
     (кейс AS25369): старый _fw_ban добавлял `ufw deny from X` в КОНЕЦ
     ufw-user-input — ПОСЛЕ allow-правил портов (ufw allow 22/80/SERVER_PORT
     из configure_firewall) → first-match-wins пропускал нарушителей на
-    открытые порты: баны росли в state, трафик продолжал течь. Функция
-    переставляет каждый deny ПЕРВОЙ строкой (ufw insert 1).
+    открытые порты: баны росли в state, трафик продолжал течь.
+
+    (кейс vds14808, 2026-09-21): прежняя миграция делала 2 ufw-вызова на
+    IP, каждый ре-апплит весь ruleset → 199 IP висели 10-20 минут. Теперь:
+    батч-правка /etc/ufw/user.rules + ОДИН `ufw reload` (секунды);
+    CLI по-IP — только фолбэк с прогрессом.
+
     Возвращает число переставленных правил или None, если ufw нет
     (iptables-режим всегда ставил правила первой строкой).
     """
@@ -475,18 +647,11 @@ def _fw_repair_order(banned: dict):
     import shutil as _shutil
     if not _shutil.which("ufw"):
         return None
-    fixed = 0
-    for ip in list(banned.keys()):
-        # удалить старое правило (в конце, любое положение) — ошибки
-        # «rule not found» молча игнорируем
-        _run(["ufw", "delete", "deny", "from", ip, "to", "any"],
-             check=False, quiet=True)
-        r = _run(["ufw", "insert", "1", "deny", "from", ip, "to", "any",
-                  "comment", "xray-autoban"],
-                 check=False, quiet=True)
-        if r.returncode == 0:
-            fixed += 1
-    return fixed
+
+    n = _ufw_reorder_rules_file(banned, _run)
+    if n is not None:
+        return n
+    return _fw_repair_order_cli(banned, _run)
 
 
 def _autoban_run_once() -> int:
@@ -1103,17 +1268,30 @@ def do_manage_autoban() -> None:
             # Миграция порядка FW-правил: deny-правила существующих банов
             # переставляются ПЕРВОЙ строкой ufw-user-input (старые баны
             # добавлялись в конец — после allow портов — и не работали).
+            # Батч-режим: правка user.rules + ОДИН reload (кейс vds14808:
+            # 199 IP через CLI-вызовы висели 10-20 минут).
             print()
             if not banned:
                 info("Активных банов нет — переставлять нечего")
             else:
-                info(f"Переставляю deny-правила первой строкой UFW ({len(banned)} IP)...")
+                info(f"Переставляю deny-правила первой строкой UFW "
+                     f"({len(banned)} IP, батч: правка user.rules + "
+                     f"один reload)...")
+                _t0 = time.monotonic()
                 _n = _fw_repair_order(banned)
+                _dt = time.monotonic() - _t0
                 if _n is None:
                     warn("ufw не найден — порядок правил не требует миграции "
                          "(iptables-режим ставит правила первой строкой)")
                 else:
-                    success(f"Готово: переставлено {_n} из {len(banned)} правил")
+                    if _n >= len(banned):
+                        success(f"Готово: переставлено {_n} из {len(banned)} "
+                                f"правил за {_dt:.1f}с")
+                    else:
+                        success(f"Готово: переставлено {_n} deny-правил "
+                                f"за {_dt:.1f}с")
+                        warn(f"Внимание: {len(banned) - _n} банов без ufw "
+                             f"deny-правил (iptables-режим или уже удалены)")
                     warn("Проверка: iptables -L ufw-user-input -n --line-numbers | head")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
