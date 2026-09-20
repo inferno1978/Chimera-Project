@@ -417,5 +417,181 @@ class TestTuiHistoryAsnFields(unittest.TestCase):
         self.assertIn("_lookup_asn(_ip)", src)
 
 
+class TestFwRepairOrderBatch(unittest.TestCase):
+    """
+    Кейс vds14808 (2026-09-21): пункт [F] на 199 IP «висел» 10-20 минут —
+    _fw_repair_order делал 2 ufw-CLI-вызова на IP, а каждый вызов ufw
+    ре-апплит весь ruleset (iptables-restore). Теперь быстрый путь —
+    одна правка /etc/ufw/user.rules + ОДИН `ufw reload` (батч);
+    ufw CLI — только фолбэк с прогрессом.
+    """
+
+    def setUp(self):
+        _setup_core()
+        self._tmp = Path(tempfile.mkdtemp())
+        self._rules = self._tmp / "user.rules"
+        # типичная структура user.rules (iptables-save формат ufw):
+        # allow-правила портов сверху, deny-баны в хвосте (старый баг)
+        self._rules.write_text(
+            "*filter\n"
+            ":ufw-user-input - [0:0]\n"
+            ":ufw-user-output - [0:0]\n"
+            ":ufw-user-forward - [0:0]\n"
+            "### RULES ###\n"
+            "-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n"
+            "-A ufw-user-input -p tcp --dport 443 -j ACCEPT\n"
+            "-A ufw-user-input -s 1.2.3.4/32 -j DROP\n"
+            "-A ufw-user-input -s 5.6.7.8/32 -m comment --comment xray-autoban -j DROP\n"
+            "-A ufw-user-output -j ACCEPT\n"
+            "COMMIT\n"
+        )
+        self._banned = {"1.2.3.4": {"count": 20}, "5.6.7.8": {"count": 15}}
+        self._calls: list = []
+
+    def tearDown(self):
+        import shutil; shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _runner(self, rc=0, stdout=""):
+        def _run(cmd, check=False, quiet=True, **kw):
+            self._calls.append(cmd)
+            r = MagicMock(); r.returncode = rc; r.stdout = stdout
+            return r
+        return _run
+
+    def test_deny_moves_above_allow_with_single_reload(self):
+        """Батч: deny-правила до allow, ровно 3 вызова, бэкап, без tmp."""
+        from chimera.modules import autoban
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules):
+            n = autoban._ufw_reorder_rules_file(self._banned, self._runner())
+        self.assertEqual(n, 2)
+        # только status + reload + iptables -S — НЕ 2xN CLI-вызовов
+        self.assertEqual(len(self._calls), 3)
+        self.assertEqual(self._calls[0], ["ufw", "status"])
+        self.assertEqual(self._calls[1], ["ufw", "reload"])
+        self.assertEqual(self._calls[2], ["iptables", "-S", "ufw-user-input"])
+        text = self._rules.read_text()
+        # deny теперь ДО allow-правил портов
+        self.assertLess(text.index("-s 1.2.3.4/32"), text.index("--dport 22"))
+        self.assertLess(text.index("-s 5.6.7.8/32"), text.index("--dport 22"))
+        # относительный порядок deny между собой сохранён
+        self.assertLess(text.index("-s 1.2.3.4/32"), text.index("-s 5.6.7.8/32"))
+        # бэкап создан, tmp не мусорит
+        self.assertTrue(Path(str(self._rules) + ".chimera-bak").exists())
+        self.assertFalse(Path(str(self._rules) + ".chimera-tmp").exists())
+
+    def test_idempotent_run_does_nothing(self):
+        """Если deny уже сверху — ни файла, ни ufw не трогаем."""
+        from chimera.modules import autoban
+        self._rules.write_text(
+            "*filter\n"
+            ":ufw-user-input - [0:0]\n"
+            "### RULES ###\n"
+            "-A ufw-user-input -s 1.2.3.4/32 -j DROP\n"
+            "-A ufw-user-input -s 5.6.7.8/32 -j DROP\n"
+            "-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n"
+            "COMMIT\n"
+        )
+        before = self._rules.read_text()
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules):
+            n = autoban._ufw_reorder_rules_file(self._banned, self._runner())
+        self.assertEqual(n, 2)
+        self.assertEqual(self._calls, [],
+                         "идемпотентный вызов не должен трогать ufw")
+        self.assertEqual(self._rules.read_text(), before)
+
+    def test_no_deny_rules_returns_zero(self):
+        from chimera.modules import autoban
+        self._rules.write_text(
+            "*filter\n:ufw-user-input - [0:0]\n"
+            "-A ufw-user-input -p tcp --dport 22 -j ACCEPT\nCOMMIT\n")
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules):
+            n = autoban._ufw_reorder_rules_file(self._banned, self._runner())
+        self.assertEqual(n, 0)
+        self.assertEqual(self._calls, [])
+
+    def test_file_missing_returns_none_for_cli_fallback(self):
+        from chimera.modules import autoban
+        with patch.object(autoban, "_UFW_USER_RULES", self._tmp / "missing.rules"):
+            n = autoban._ufw_reorder_rules_file(self._banned, self._runner())
+        self.assertIsNone(n)
+
+    def test_reload_failure_rolls_back_file(self):
+        """Упавший reload → файл откачен из бэкапа → None (CLI-фолбэк)."""
+        from chimera.modules import autoban
+        original = self._rules.read_text()
+        def _run(cmd, check=False, quiet=True, **kw):
+            self._calls.append(cmd)
+            r = MagicMock(); r.stdout = ""
+            # status ок, reload падает
+            r.returncode = 0 if cmd[:2] == ["ufw", "status"] else 1
+            return r
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules):
+            n = autoban._ufw_reorder_rules_file(self._banned, _run)
+        self.assertIsNone(n)
+        self.assertEqual(self._rules.read_text(), original)
+
+    def test_status_failure_rolls_back_file(self):
+        """ufw не смог прочитать файл (status rc≠0) → откат, None."""
+        from chimera.modules import autoban
+        original = self._rules.read_text()
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules):
+            n = autoban._ufw_reorder_rules_file(self._banned, self._runner(rc=1))
+        self.assertIsNone(n)
+        self.assertEqual(self._rules.read_text(), original)
+
+    def test_verification_failure_rolls_back_file(self):
+        """Первая строка цепочки после reload НЕ deny → откат, None."""
+        from chimera.modules import autoban
+        original = self._rules.read_text()
+        def _run(cmd, check=False, quiet=True, **kw):
+            self._calls.append(cmd)
+            r = MagicMock(); r.returncode = 0; r.stdout = ""
+            if cmd[:2] == ["iptables", "-S"]:
+                r.stdout = "-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n"
+            return r
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules):
+            n = autoban._ufw_reorder_rules_file(self._banned, _run)
+        self.assertIsNone(n)
+        self.assertEqual(self._rules.read_text(), original)
+
+    def test_fw_repair_order_uses_batch_path(self):
+        """Оркестратор: ufw есть, файл есть → батч (3 вызова, не 2×N)."""
+        import sys as _sys
+        from chimera.modules import autoban
+        core = _sys.modules["chimera._core"]
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules), \
+             patch("shutil.which", return_value="/usr/sbin/ufw"), \
+             patch.object(core, "_run", self._runner()):
+            n = autoban._fw_repair_order(self._banned)
+        self.assertEqual(n, 2)
+        self.assertEqual(len(self._calls), 3)
+
+    def test_fw_repair_order_falls_back_to_cli_when_file_missing(self):
+        """Файл недоступен → CLI-фолбэк: insert 1 на каждый бан."""
+        import sys as _sys
+        from chimera.modules import autoban
+        core = _sys.modules["chimera._core"]
+        with patch.object(autoban, "_UFW_USER_RULES", self._tmp / "missing.rules"), \
+             patch("shutil.which", return_value="/usr/sbin/ufw"), \
+             patch.object(core, "_run", self._runner()):
+            n = autoban._fw_repair_order(self._banned)
+        self.assertEqual(n, 2)
+        inserts = [c for c in self._calls if c[:3] == ["ufw", "insert", "1"]]
+        self.assertEqual(len(inserts), 2)
+
+    def test_repair_order_has_batch_and_fallback(self):
+        """Регрессия: оркестратор обязан звать батч-путь и CLI-фолбэк."""
+        from chimera.modules import autoban
+        src = inspect.getsource(autoban._fw_repair_order)
+        self.assertIn("_ufw_reorder_rules_file", src, "нет батч-пути")
+        self.assertIn("_fw_repair_order_cli", src, "нет CLI-фолбэка")
+
+    def test_fw_unban_tries_both_comment_variants(self):
+        """_fw_unban пробует delete без comment и с comment."""
+        from chimera.modules import autoban
+        src = inspect.getsource(autoban._fw_unban)
+        self.assertIn('"comment", "xray-autoban"', src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
