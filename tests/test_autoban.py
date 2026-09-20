@@ -593,5 +593,260 @@ class TestFwRepairOrderBatch(unittest.TestCase):
         self.assertIn('"comment", "xray-autoban"', src)
 
 
+class TestHistoryClearResurrection(unittest.TestCase):
+    """
+    Кейс vds14808 (2026-09-21): «История банов → C → y» не очищала
+    историю. Причины: (1) _autoban_load() миграцией воскрешал
+    ban_history из banned при следующей итерации меню (cron за 5 минут
+    перебанивал пару IP → banned непуст → история «оставалась»);
+    (2) файл-отчёт под таблицей [6] никто не чистил. Флаг
+    history_migrated + unlink отчёта закрывают обе.
+    """
+
+    def setUp(self):
+        _setup_core()
+        self._tmp = Path(tempfile.mkdtemp())
+        self._state = self._tmp / "autoban.json"
+        self._report = self._tmp / "xray-ban-report.txt"
+    def tearDown(self):
+        import shutil; shutil.rmtree(self._tmp, ignore_errors=True)
+    def _patch(self):
+        from unittest.mock import patch as _patch
+        return _patch("chimera.modules.autoban._XRAY_BAN_STATE", self._state)
+    def _report_patch(self):
+        from unittest.mock import patch as _patch
+        return _patch("chimera.modules.autoban._XRAY_BAN_REPORT", self._report)
+
+    def _write_state(self, banned: dict, hist: list, flag: bool):
+        data = {"enabled": True, "banned": banned, "ban_history": hist}
+        if flag:
+            data["history_migrated"] = True
+        self._state.write_text(json.dumps(data))
+
+    def test_migration_still_works_for_legacy_state(self):
+        """Legacy (флага нет, история пуста, banned непуст) → миграция
+        выполняется и ставит флаг — одноразовость гарантирована."""
+        from chimera.modules import autoban
+        self._write_state(
+            banned={"1.2.3.4": {"count": 10, "banned_at": "2026-08-01T00:00:00"}},
+            hist=[], flag=False)
+        with self._patch(), self._report_patch(), _nop_asn():
+            loaded = autoban._autoban_load()
+        self.assertEqual(len(loaded["ban_history"]), 1)
+        self.assertTrue(loaded.get("history_migrated"),
+                        "после миграции флаг должен стоять")
+
+    def test_cleared_history_not_resurrected(self):
+        """После очистки (флаг стоит) история НЕ воскресает, даже если
+        banned непуст (cron перебанил). Регрессия «C не работает»."""
+        from chimera.modules import autoban
+        # пользователь очистил историю, но cron уже перебанил 2 IP
+        self._write_state(
+            banned={"1.2.3.4": {"count": 9}, "5.6.7.8": {"count": 15}},
+            hist=[], flag=True)
+        with self._patch():
+            loaded = autoban._autoban_load()
+        self.assertEqual(loaded["ban_history"], [],
+                         "миграция воскресила очищенную историю")
+
+    def test_resurrection_without_flag(self):
+        """Документируем старое поведение: без флага очистка воскресала."""
+        from chimera.modules import autoban
+        self._write_state(
+            banned={"1.2.3.4": {"count": 9}}, hist=[], flag=False)
+        with self._patch(), self._report_patch(), _nop_asn():
+            loaded = autoban._autoban_load()
+        self.assertEqual(len(loaded["ban_history"]), 1,
+                         "legacy-миграция должна работать")
+
+    def test_menu_clear_sets_flag_and_removes_report(self):
+        """[C] ставит history_migrated и удаляет файл-отчёт."""
+        from chimera.modules import autoban
+        src = inspect.getsource(autoban.do_manage_autoban)
+        self.assertIn('cfg["history_migrated"] = True', src,
+                      "[C] не ставит флаг — история воскреснет")
+        self.assertIn("_XRAY_BAN_REPORT.unlink", src,
+                      "[C] не чистит файл-отчёт")
+
+
+def _nop_asn():
+    """Глушим _lookup_asn в миграции (не дёргать сеть в тестах)."""
+    from unittest.mock import patch as _patch
+    return _patch("chimera._core._lookup_asn", lambda ip: {})
+
+
+class TestFwUnbanBatch(unittest.TestCase):
+    """
+    Кейс vds14808 (2026-09-21): «Разбанить IP → all» на 199 IP висел
+    ~5 минут — по-IP ufw delete, каждый вызов ре-апплит весь ruleset.
+    Теперь _fw_unban_batch: батч-удаление строк из user.rules + ОДИН
+    reload (один IP — CLI; ufw нет — iptables по-IP, kernel-only).
+    """
+
+    def setUp(self):
+        _setup_core()
+        self._tmp = Path(tempfile.mkdtemp())
+        self._rules = self._tmp / "user.rules"
+        self._rules.write_text(
+            "*filter\n"
+            ":ufw-user-input - [0:0]\n"
+            "### RULES ###\n"
+            "-A ufw-user-input -s 1.2.3.4/32 -j DROP\n"
+            "-A ufw-user-input -s 5.6.7.8/32 -m comment --comment xray-autoban -j DROP\n"
+            "-A ufw-user-input -s 5.6.7.8/32 -j DROP\n"      # дубль
+            "-A ufw-user-input -s 9.9.9.9/32 -j DROP\n"      # чужой — не трогать
+            "-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n"
+            "COMMIT\n"
+        )
+        self._calls: list = []
+
+    def tearDown(self):
+        import shutil; shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _runner(self, rc=0, stdout=""):
+        def _run(cmd, check=False, quiet=True, **kw):
+            self._calls.append(cmd)
+            r = MagicMock(); r.returncode = rc; r.stdout = stdout
+            return r
+        return _run
+
+    def test_removes_only_target_lines_with_single_reload(self):
+        """Удаляются все строки целевых IP (в т.ч. дубли), чужие и allow
+        остаются; ровно 3 вызова (status + reload + iptables -S)."""
+        from chimera.modules import autoban
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules):
+            n = autoban._ufw_remove_rules_file(
+                ["1.2.3.4", "5.6.7.8"], self._runner())
+        self.assertEqual(n, 3)   # 1 + 2 (дубль 5.6.7.8)
+        self.assertEqual(len(self._calls), 3)
+        self.assertEqual(self._calls[0], ["ufw", "status"])
+        self.assertEqual(self._calls[1], ["ufw", "reload"])
+        self.assertEqual(self._calls[2], ["iptables", "-S", "ufw-user-input"])
+        text = self._rules.read_text()
+        self.assertNotIn("1.2.3.4", text)
+        self.assertNotIn("5.6.7.8", text)
+        self.assertIn("9.9.9.9", text, "чужой deny удалён по ошибке")
+        self.assertIn("--dport 22", text, "allow-правило удалено по ошибке")
+        self.assertTrue(Path(str(self._rules) + ".chimera-bak").exists())
+        self.assertFalse(Path(str(self._rules) + ".chimera-tmp").exists())
+
+    def test_no_target_rules_returns_zero(self):
+        from chimera.modules import autoban
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules):
+            n = autoban._ufw_remove_rules_file(["8.8.8.8"], self._runner())
+        self.assertEqual(n, 0)
+        self.assertEqual(self._calls, [])
+
+    def test_reload_failure_rolls_back(self):
+        from chimera.modules import autoban
+        original = self._rules.read_text()
+        def _run(cmd, check=False, quiet=True, **kw):
+            self._calls.append(cmd)
+            r = MagicMock(); r.stdout = ""
+            r.returncode = 0 if cmd[:2] == ["ufw", "status"] else 1
+            return r
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules):
+            n = autoban._ufw_remove_rules_file(["1.2.3.4"], _run)
+        self.assertIsNone(n)
+        self.assertEqual(self._rules.read_text(), original)
+
+    def test_verification_failure_rolls_back(self):
+        """Целевой IP остался в живой цепочке → откат, None → CLI-фолбэк."""
+        from chimera.modules import autoban
+        original = self._rules.read_text()
+        def _run(cmd, check=False, quiet=True, **kw):
+            self._calls.append(cmd)
+            r = MagicMock(); r.returncode = 0; r.stdout = ""
+            if cmd[:2] == ["iptables", "-S"]:
+                r.stdout = ("-A ufw-user-input -s 1.2.3.4/32 -j DROP\n"
+                            "-A ufw-user-input -p tcp --dport 22 -j ACCEPT\n")
+            return r
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules):
+            n = autoban._ufw_remove_rules_file(["1.2.3.4"], _run)
+        self.assertIsNone(n)
+        self.assertEqual(self._rules.read_text(), original)
+
+    def test_verification_no_prefix_false_positive(self):
+        """После удаления 1.2.3.4 в цепочке остался 1.2.3.40 — это НЕ
+        повод для откката (точное сравнение -s <ip>, не подстрокой)."""
+        from chimera.modules import autoban
+        self._rules.write_text(
+            "*filter\n:ufw-user-input - [0:0]\n"
+            "-A ufw-user-input -s 1.2.3.4/32 -j DROP\n"
+            "-A ufw-user-input -s 1.2.3.40/32 -j DROP\n"
+            "-A ufw-user-input -p tcp --dport 22 -j ACCEPT\nCOMMIT\n")
+        def _run(cmd, check=False, quiet=True, **kw):
+            self._calls.append(cmd)
+            r = MagicMock(); r.returncode = 0
+            r.stdout = "Status: active"
+            if cmd[:2] == ["iptables", "-S"]:
+                # в живой цепочке остался НЕ целевой 1.2.3.40 — это нормально
+                r.stdout = "-A ufw-user-input -s 1.2.3.40/32 -j DROP\n"
+            return r
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules):
+            n = autoban._ufw_remove_rules_file(["1.2.3.4"], _run)
+        self.assertEqual(n, 1)   # удалён только 1.2.3.4, без откката
+        text = self._rules.read_text()
+        self.assertNotIn("1.2.3.4/32", text)
+        self.assertIn("1.2.3.40/32", text)
+
+    def test_batch_uses_file_path_for_multiple(self):
+        import sys as _sys
+        from chimera.modules import autoban
+        core = _sys.modules["chimera._core"]
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules), \
+             patch("shutil.which", return_value="/usr/sbin/ufw"), \
+             patch.object(core, "_run", self._runner()):
+            n = autoban._fw_unban_batch(["1.2.3.4", "5.6.7.8"])
+        self.assertEqual(n, 3)
+        self.assertEqual(len(self._calls), 3)
+
+    def test_single_ip_uses_cli(self):
+        import sys as _sys
+        from chimera.modules import autoban
+        core = _sys.modules["chimera._core"]
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules), \
+             patch("shutil.which", return_value="/usr/sbin/ufw"), \
+             patch.object(core, "_run", self._runner()):
+            n = autoban._fw_unban_batch(["9.9.9.9"])
+        self.assertEqual(n, 1)
+        # одиночный IP — CLI delete, файл не трогаем
+        self.assertEqual(self._calls,
+                         [["ufw", "delete", "deny", "from", "9.9.9.9", "to", "any"]])
+
+    def test_no_ufw_uses_iptables_per_ip(self):
+        import sys as _sys
+        from chimera.modules import autoban
+        core = _sys.modules["chimera._core"]
+        with patch.object(autoban, "_UFW_USER_RULES", self._rules), \
+             patch("shutil.which", return_value=None), \
+             patch.object(core, "_run", self._runner()):
+            n = autoban._fw_unban_batch(["1.2.3.4", "9.9.9.9"])
+        self.assertEqual(n, 2)
+        for c in self._calls:
+            self.assertEqual(c[0], "iptables")
+
+    def test_cli_fallback_when_file_missing(self):
+        import sys as _sys
+        from chimera.modules import autoban
+        core = _sys.modules["chimera._core"]
+        with patch.object(autoban, "_UFW_USER_RULES", self._tmp / "missing.rules"), \
+             patch("shutil.which", return_value="/usr/sbin/ufw"), \
+             patch.object(core, "_run", self._runner()):
+            n = autoban._fw_unban_batch(["1.2.3.4", "9.9.9.9"])
+        self.assertEqual(n, 2)
+        deletes = [c for c in self._calls if c[:2] == ["ufw", "delete"]]
+        self.assertEqual(len(deletes), 2)
+
+    def test_menu_unban_uses_batch(self):
+        """Регрессия: меню [3] обязан звать _fw_unban_batch, не цикл
+        _fw_unban по-одному (кейс «all висел 5 минут»)."""
+        from chimera.modules import autoban
+        src = inspect.getsource(autoban.do_manage_autoban)
+        self.assertIn("_fw_unban_batch(targets)", src)
+        # старый по-IP вызов из цикла разбана исчез
+        self.assertNotIn("_fw_unban(target)", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

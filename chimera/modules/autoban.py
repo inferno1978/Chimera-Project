@@ -205,9 +205,16 @@ def _autoban_load() -> dict:
             # «История банов» показывал «История пуста».
             # Если ban_history пуст, но в banned есть записи — переносим
             # их в историю (один раз, при первом открытии после фикса).
+            # FIX (кейс vds14808, 2026-09-21): миграция была НЕ одноразовой —
+            # пересоздавала историю при каждом load, у которого banned
+            # непуст, а история пуста. После «Очистить историю» [C]
+            # cron успевал перебанить пару IP → banned непуст → на
+            # следующей итерации меню история «воскресала» с теми же
+            # записями. Флаг history_migrated (ставится при первой
+            # миграции ИЛИ при явной очистке [C]) закрывает навсегда.
             banned = cfg.get("banned", {})
             hist   = cfg.get("ban_history", [])
-            if banned and not hist:
+            if not cfg.get("history_migrated") and banned and not hist:
                 cfg["ban_history"] = [
                     {
                         "ip":          ip,
@@ -218,7 +225,8 @@ def _autoban_load() -> dict:
                     }
                     for ip, meta in banned.items()
                 ]
-                _autoban_save(cfg)
+                cfg["history_migrated"] = True   # миграция выполнена —
+                _autoban_save(cfg)               # больше не воскресаем
                 #  FIX: также пишем мигрированные баны в файл отчёта
                 # (/var/log/xray-ban-report.txt) — иначе пункт [6] показывает
                 # историю, а файл отчёта остаётся пустым со статусом
@@ -475,8 +483,64 @@ def _fw_unban(ip: str) -> bool:
 #   -A ufw-user-input -s 1.2.3.4/32 -j DROP [-m comment --comment xray-autoban]
 _UFW_USER_RULES = Path("/etc/ufw/user.rules")
 _RE_UFW_INPUT_RULE = re.compile(r'^-A\s+ufw-user-input\b')
-_RE_SRC_IPV4       = re.compile(r'(?:^|\s)-s\s+\d{1,3}(?:\.\d{1,3}){3}(?:/\d+)?(?:\s|$)')
+_RE_SRC_IPV4       = re.compile(r'(?:^|\s)-s\s+(\d{1,3}(?:\.\d{1,3}){3})(?:/\d+)?(?:\s|$)')
 _RE_J_DROP         = re.compile(r'(?:^|\s)-j\s+DROP(?:\s|$)')
+
+
+def _ufw_write_rules_atomic(new_lines) -> bool:
+    """Бэкап + атомарная запись user.rules (tmp + os.replace, режим
+    файла сохраняется). Перед правкой — copy2 в .chimera-bak. При
+    неудаче записи — попытка откатить файл из бэкапа и вернуть False."""
+    path = _UFW_USER_RULES
+    import shutil as _shutil
+    bak = Path(str(path) + ".chimera-bak")
+    tmp = Path(str(path) + ".chimera-tmp")
+    try:
+        _shutil.copy2(path, bak)
+        tmp.write_text("\n".join(new_lines) + "\n")
+        os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+            if bak.exists():
+                _shutil.copy2(bak, path)
+        except Exception:
+            pass
+        return False
+
+
+def _ufw_restore_backup() -> bool:
+    """Откат user.rules из .chimera-bak (после неудачного reload и т.п.)."""
+    import shutil as _shutil
+    path = _UFW_USER_RULES
+    bak = Path(str(path) + ".chimera-bak")
+    try:
+        if bak.exists():
+            _shutil.copy2(bak, path)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _ufw_status_active(runner) -> str:
+    """Статус ufw: 'active' / 'inactive' / 'error' (не смог прочитать)."""
+    try:
+        rs = runner(["ufw", "status"], check=False, quiet=True)
+    except Exception:
+        return "error"
+    if rs.returncode != 0:
+        return "error"
+    return "inactive" if "inactive" in (rs.stdout or "") else "active"
+
+
+def _ufw_reload(runner) -> bool:
+    """Один `ufw reload`; True при успехе."""
+    r = runner(["ufw", "reload"], check=False, quiet=True)
+    return r.returncode == 0
 
 
 def _ufw_reorder_rules_file(banned: dict, runner):
@@ -533,48 +597,20 @@ def _ufw_reorder_rules_file(banned: dict, runner):
     for k, i in enumerate(ban_idx):
         new_lines.insert(first_input + k, lines[i])
 
-    import shutil as _shutil
-    bak = Path(str(path) + ".chimera-bak")
-    tmp = Path(str(path) + ".chimera-tmp")
-    try:
-        _shutil.copy2(path, bak)
-        tmp.write_text("\n".join(new_lines) + "\n")
-        os.chmod(tmp, path.stat().st_mode & 0o7777)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            if tmp.exists():
-                tmp.unlink()
-            if bak.exists():
-                _shutil.copy2(bak, path)
-        except Exception:
-            pass
+    if not _ufw_write_rules_atomic(new_lines):
         return None
 
-    # ufw активен? (inactive → файл поправлен, применится при enable;
-    # ошибка → ufw не смог прочитать файл → откат и CLI-фолбэк)
-    try:
-        rs = runner(["ufw", "status"], check=False, quiet=True)
-    except Exception:
-        rs = None
-    if rs is not None and rs.returncode != 0:
-        try:
-            _shutil.copy2(bak, path)
-        except Exception:
-            pass
+    st = _ufw_status_active(runner)
+    if st == "error":             # ufw не смог прочитать файл
+        _ufw_restore_backup()     # → откат и CLI-фолбэк
         return None
-    active = (rs is not None and "inactive" not in (rs.stdout or ""))
-    if not active:
+    if st == "inactive":          # файл поправлен, применится при enable
         return len(ban_idx)
 
     # ОДИН reload вместо 2xN CLI-вызовов; при неудаче — откат из бэкапа
-    r = runner(["ufw", "reload"], check=False, quiet=True)
-    if r.returncode != 0:
-        try:
-            _shutil.copy2(bak, path)
-            runner(["ufw", "reload"], check=False, quiet=True)
-        except Exception:
-            pass
+    if not _ufw_reload(runner):
+        _ufw_restore_backup()
+        _ufw_reload(runner)
         return None
 
     # Лёгкая верификация: первая строка цепочки должна быть deny-правилом.
@@ -588,12 +624,123 @@ def _ufw_reorder_rules_file(banned: dict, runner):
                           if ln.startswith("-A ufw-user-input")), "")
             if first and not (_RE_SRC_IPV4.search(first)
                               and _RE_J_DROP.search(first)):
-                _shutil.copy2(bak, path)
-                runner(["ufw", "reload"], check=False, quiet=True)
+                _ufw_restore_backup()
+                _ufw_reload(runner)
                 return None
     except Exception:
         pass
     return len(ban_idx)
+
+
+def _ufw_remove_rules_file(ips, runner):
+    """Батч-удаление deny-правил заданных IP из user.rules + один reload.
+
+    Кейс vds14808 (2026-09-21): «Разбанить IP → all» на 199 IP висел
+    ~5 минут — по-IP ufw delete, каждый вызов ре-апплит весь ruleset.
+    Здесь: парсинг/удаление строк — миллисекунды, ОДИН `ufw reload`.
+    Удаляются ВСЕ deny-строки с -s <ip> для каждого IP (в т.ч. дубли
+    от старых багов). Allow-правила и чужие deny не трогаются.
+
+    Возвращает:
+      int  — сколько строк удалено (0 — целевых правил не было)
+      None — быстрый путь не удался → CLI-фолбэк (откат уже сделан)
+    """
+    path = _UFW_USER_RULES
+    try:
+        if not path.exists():
+            return None
+        lines = path.read_text().splitlines()
+    except Exception:
+        return None
+
+    targets = set(ips)
+
+    def _src_ip(ln: str):
+        m = _RE_SRC_IPV4.search(ln)
+        return m.group(1) if m else None
+
+    remove_idx = [
+        i for i, ln in enumerate(lines)
+        if _RE_UFW_INPUT_RULE.match(ln) and _RE_J_DROP.search(ln)
+        and _src_ip(ln) in targets
+    ]
+    if not remove_idx:
+        return 0
+
+    new_lines = [ln for i, ln in enumerate(lines) if i not in set(remove_idx)]
+    if not _ufw_write_rules_atomic(new_lines):
+        return None
+
+    st = _ufw_status_active(runner)
+    if st == "error":
+        _ufw_restore_backup()
+        return None
+    if st == "inactive":
+        return len(remove_idx)
+
+    if not _ufw_reload(runner):
+        _ufw_restore_backup()
+        _ufw_reload(runner)
+        return None
+
+    # Верификация: в живой цепочке не должно остаться целевых IP
+    # (точное сравнение -s <ip>, не подстрокой — иначе 1.2.3.4 совпадёт
+    # с 1.2.3.40); пустой вывод → доверяем reload'у
+    try:
+        rv = runner(["iptables", "-S", "ufw-user-input"],
+                    check=False, quiet=True)
+        if rv.returncode == 0:
+            for ln in (rv.stdout or "").splitlines():
+                m = _RE_SRC_IPV4.search(ln)
+                if m and m.group(1) in targets and _RE_J_DROP.search(ln):
+                    _ufw_restore_backup()
+                    _ufw_reload(runner)
+                    return None
+    except Exception:
+        pass
+    return len(remove_idx)
+
+
+def _fw_unban_cli_batch(ips) -> int:
+    """CLI-фолбэк разбана: по-IP через _fw_unban, прогресс каждые 20 IP."""
+    core = _core_module()
+    info = core.info
+    ok = 0
+    total = len(ips)
+    for done, ip in enumerate(ips, 1):
+        if _fw_unban(ip):
+            ok += 1
+        if done % 20 == 0 and done < total:
+            info(f"  … {done}/{total} (CLI-фолбэк: каждый вызов ufw "
+                 f"ре-апплит весь ruleset — это медленно)")
+    return ok
+
+
+def _fw_unban_batch(ips) -> int:
+    """Батч-разбан: снимает deny-правила для списка IP.
+
+    Один IP → ufw CLI delete (1-2 вызова — достаточно быстро).
+    Несколько → батч: правка /etc/ufw/user.rules + ОДИН reload (кейс
+    vds14808: 199 IP по-одному = ~5 минут, каждый ufw-вызов ре-апплит
+    ruleset). ufw нет → iptables-режим по-IP (kernel-only, быстро).
+    Возвращает число снятых FW-правил (0 — правил не было).
+    """
+    ips = list(dict.fromkeys(ips))
+    if not ips:
+        return 0
+    if len(ips) == 1:
+        return 1 if _fw_unban(ips[0]) else 0
+
+    core = _core_module()
+    _run = core._run
+    import shutil as _shutil
+    if not _shutil.which("ufw"):
+        return sum(1 for ip in ips if _fw_unban(ip))
+
+    n = _ufw_remove_rules_file(ips, _run)
+    if n is not None:
+        return n
+    return _fw_unban_cli_batch(ips)
 
 
 def _fw_repair_order_cli(banned: dict, _run) -> int:
@@ -1236,9 +1383,17 @@ def do_manage_autoban() -> None:
             # ── Выполняем разбан ──────────────────────────────────────────────
             if targets:
                 _unban_ts = datetime.now().isoformat()
+                # Батч: FW-правила снимаются ОДНОЙ правкой user.rules +
+                # одним reload — не по-IP через ufw CLI (кейс vds14808:
+                # 199 IP висели ~5 минут)
+                if len(targets) > 1:
+                    info(f"Снижаю deny-правила UFW батчем "
+                         f"({len(targets)} IP, один reload)...")
+                _t0 = time.monotonic()
+                _fw_n = _fw_unban_batch(targets)
+                _dt = time.monotonic() - _t0
                 ok_count  = 0
                 for target in targets:
-                    _fw_unban(target)
                     banned.pop(target, None)
                     for _hrec in reversed(cfg.get("ban_history", [])):
                         if _hrec.get("ip") == target and _hrec.get("unbanned_at") is None:
@@ -1250,7 +1405,10 @@ def do_manage_autoban() -> None:
                 if ok_count == 1:
                     success(f"IP {targets[0]} разбанен")
                 else:
-                    success(f"Разбанено IP: {ok_count}")
+                    success(f"Разбанено IP: {ok_count} за {_dt:.1f}с")
+                    if _fw_n < len(targets):
+                        warn(f"FW-правил снято: {_fw_n} из {len(targets)} "
+                             f"(остальные не имели ufw deny-правил)")
 
             input(f"{BLUE}Нажмите Enter...{NC}")
 
@@ -1366,11 +1524,26 @@ def do_manage_autoban() -> None:
             _ban_report_show_in_box()
             _hch = input(f"{CYAN}Выбор [Enter — назад]:{NC} ").strip().lower()
             if _hch == "c":
-                ans = input(f"  {RED}Удалить всю историю банов? [y/N]:{NC} ").strip().lower()
+                ans = input(f"  {RED}Удалить всю историю банов (таблицу + "
+                            f"файл отчёта)? [y/N]:{NC} ").strip().lower()
                 if ans == "y":
+                    # FIX (кейс vds14808, 2026-09-21): очистка «не работала»:
+                    # 1) _autoban_load() воскрешал ban_history миграцией из
+                    #    banned при следующей итерации меню (cron перебанивал
+                    #    пару IP за 5 минут → banned непуст → история
+                    #    «оставалась на месте»). Флаг history_migrated
+                    #    выключает авто-миграцию навсегда.
                     cfg["ban_history"] = []
+                    cfg["history_migrated"] = True
                     _autoban_save(cfg)
-                    success("История очищена")
+                    # 2) файл отчёта — тоже часть «Истории банов» на экране [6]:
+                    #    показывался под таблицей и выглядел как «не очистилось»
+                    try:
+                        _XRAY_BAN_REPORT.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    success("История очищена. Новые баны по-прежнему будут "
+                            "записываться, пока работает авто-бан")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "5":
