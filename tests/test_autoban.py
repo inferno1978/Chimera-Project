@@ -9,7 +9,7 @@ Unit-тесты для chimera/modules/autoban.py.
   2. _ban_report_append — добавление записи в отчёт
 """
 from __future__ import annotations
-import json, os, stat, sys, tempfile, unittest
+import inspect, json, os, stat, sys, tempfile, unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -284,6 +284,137 @@ class TestBanReportFileSync(unittest.TestCase):
                       "cron-скрипт не пишет в файл отчёта")
         self.assertIn("ЗАБЛОКИРОВАН:", body,
                       "cron-скрипт не форматирует запись отчёта")
+
+
+class TestFwRuleOrdering(unittest.TestCase):
+    """
+    Регрессия кейса AS25369 (2026-09-21): `ufw deny from X` добавляется
+    в КОНЕЦ ufw-user-input — ПОСЛЕ allow-правил портов (configure_firewall
+    → ufw allow 22/80/SERVER_PORT) → first-match-wins пропускал
+    нарушителей на открытые порты: баны росли в state, трафик тек.
+    Теперь deny ставится ПЕРВОЙ строкой (ufw insert 1) — в TUI-пути
+    и в cron-скрипте; для существующих банов — миграция через
+    _fw_repair_order (меню [F]).
+    """
+
+    def test_fw_ban_uses_ufw_insert_1(self):
+        from chimera.modules import autoban
+        src = inspect.getsource(autoban._fw_ban)
+        self.assertIn('"ufw", "insert", "1", "deny"', src,
+                      "_fw_ban не ставит deny первой строкой ufw-user-input")
+
+    def test_fw_repair_order_exists(self):
+        from chimera.modules import autoban
+        self.assertTrue(callable(getattr(autoban, "_fw_repair_order", None)),
+                        "_fw_repair_order не определена (миграция старых правил)")
+
+    def test_cron_script_uses_ufw_insert_1(self):
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "autoban.py").read_text()
+        import re
+        m = re.search(r'py_body = f"""(.*?)"""', src, re.DOTALL)
+        self.assertIsNotNone(m, "py_body не найден")
+        body = m.group(1)
+        self.assertIn("'ufw','insert','1','deny'", body,
+                      "cron-скрипт не ставит deny первой строкой")
+        self.assertNotIn("['ufw','deny','from',ip", body,
+                         "cron-скрипт вернулся к deny в конец ufw-user-input")
+
+
+class TestCronScriptAsnLookup(unittest.TestCase):
+    """
+    Регрессия кейса vds14808 (2026-09-20): история банов из cron шла с
+    прочерками «ASN: — (cron-скрипт, без ASN-lookup)». Теперь cron сам
+    делает lookup (ip-api.com, тот же endpoint что asn_cache) с
+    файл-кешем, пишет asn/isp/org в ban_history и в отчёт.
+    """
+
+    def _py_body(self) -> str:
+        import re
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "autoban.py").read_text()
+        m = re.search(r'py_body = f"""(.*?)"""', src, re.DOTALL)
+        self.assertIsNotNone(m, "py_body не найден")
+        return m.group(1)
+
+    def test_lookup_asn_function_in_cron(self):
+        body = self._py_body()
+        self.assertIn("def lookup_asn(ip):", body)
+        # py_body — ШАБЛОН f-string: литеральные скобки удвоены
+        self.assertIn("ip-api.com/json/{{ip}}?fields=as,org,isp,status", body)
+        self.assertIn("autoban_asn_cache.json", body,
+                      "нет файл-кеша ASN (повторные баны дёргают API)")
+        self.assertIn("ASN_CACHE_TTL", body)
+
+    def test_ban_history_entry_contains_asn_fields(self):
+        body = self._py_body()
+        self.assertIn("'asn':         _asn.get('asn', '')", body)
+        self.assertIn("'isp':         _asn.get('isp', '')", body)
+        self.assertIn("'org':         _asn.get('org', '')", body)
+
+    def test_report_block_has_real_values(self):
+        body = self._py_body()
+        self.assertIn("ASN:         {{_asn_v}}", body)
+        self.assertIn("Провайдер:   {{_isp_v}}", body)
+        self.assertIn("Организация: {{_org_v}}", body)
+        self.assertNotIn("ASN:         — (cron-скрипт", body,
+                         "возврат к прочерку без ASN-lookup")
+
+    def test_lookup_asn_cache_roundtrip(self):
+        """Сгенерированный lookup_asn реально работает: API-мок + кеш."""
+        import re as _re
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "autoban.py").read_text()
+        m = _re.search(r'py_body = f"""(.*?)"""', src, _re.DOTALL)
+        generated = eval(f'f"""{m.group(1)}"""', {"threshold": 20, "window": 10})
+        m2 = _re.search(
+            r"ASN_CACHE_F\s*=.*?(?=\n#  DoH-resolver|\ndef _resolve_fresh)",
+            generated, _re.DOTALL)
+        self.assertIsNotNone(m2, "фрагмент lookup_asn не найден")
+        snippet = m2.group(0)
+
+        tmp = Path(tempfile.mkdtemp())
+        cache_f = tmp / "asn_cache.json"
+        snippet = snippet.replace(
+            "Path('/var/lib/xray-installer/autoban_asn_cache.json')",
+            f"Path('{cache_f}')")
+
+        # мок urlopen: ip-api возвращает success-JSON (контекст-менеджер)
+        _resp = MagicMock()
+        _resp.read.return_value = json.dumps(
+            {"status": "success", "as": "AS63737 VIETSERVER",
+             "org": "YUH", "isp": "VIETSERVER"}).encode()
+        _resp.__enter__.return_value = _resp
+        import urllib.request as _ur
+        g: dict = {}
+        exec("import json, re, time\nfrom pathlib import Path\n" + snippet, g)
+        with patch.object(_ur, "urlopen", return_value=_resp):
+            info = g["lookup_asn"]("203.0.113.118")
+        self.assertEqual(info["asn"], "AS63737 VIETSERVER")
+        self.assertEqual(info["isp"], "VIETSERVER")
+        self.assertEqual(info["org"], "YUH")
+        self.assertTrue(cache_f.exists(), "кеш-файл не создан")
+
+        # второй вызов — из памяти, urlopen не нужен
+        with patch.object(_ur, "urlopen",
+                          side_effect=AssertionError("не из кеша")):
+            info2 = g["lookup_asn"]("203.0.113.118")
+        self.assertEqual(info2["asn"], "AS63737 VIETSERVER")
+
+
+class TestTuiHistoryAsnFields(unittest.TestCase):
+    """TUI-скан (_autoban_run_once) и меню [6]: ASN-поля в записях."""
+
+    def test_run_once_history_contains_asn_fields(self):
+        from chimera.modules import autoban
+        src = inspect.getsource(autoban._autoban_run_once)
+        self.assertIn('"asn":         _asn.get("asn", "")', src)
+        self.assertIn('"isp":         _asn.get("isp", "")', src)
+        self.assertIn('"org":         _asn.get("org", "")', src)
+
+    def test_history_menu_prefers_stored_fields(self):
+        """Меню [6] берёт ASN из записи (если есть), иначе lookup на лету."""
+        from chimera.modules import autoban
+        src = inspect.getsource(autoban.do_manage_autoban)
+        self.assertIn('rec.get("asn") or rec.get("isp") or rec.get("org")', src)
+        self.assertIn("_lookup_asn(_ip)", src)
 
 
 if __name__ == "__main__":

@@ -252,5 +252,135 @@ class TestStateAddRemoveEntry(unittest.TestCase):
             self.assertFalse(_state_remove_entry("nonexistent"))
 
 
+# ============================================================================
+#  Порядок правил + персистентность (кейс vds14808 / AS25369, 2026-09-21)
+# ============================================================================
+from unittest.mock import MagicMock
+
+
+class _FakeRunner:
+    """Рекордер subprocess.run с управляемыми кодами возврата."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(list(cmd))
+        rc = 1
+        if cmd[:2] == ["ipset", "create"]:
+            rc = 0
+        elif cmd[0] == "systemctl":
+            rc = 0
+        elif "-C" in cmd:
+            rc = 1   # правило не найдено → вставка выполнится
+        elif "-D" in cmd:
+            rc = 1   # нечего удалять → цикл миграции прерывается сразу
+        elif "-I" in cmd:
+            rc = 0
+        elif "which" == cmd[0]:
+            rc = 0
+        r = MagicMock()
+        r.returncode = rc
+        r.stdout = ""
+        r.stderr = ""
+        return r
+
+
+class TestRulesOrderingAndPersistence(unittest.TestCase):
+    """Правила банa обязаны стоять ПЕРВОЙ строкой INPUT — до ufw-цепочек.
+
+    Регрессия кейса AS25369 (2026-09-21): при включённом UFW (дефолт
+    Chimera) пакеты на открытые порты принимаются внутри
+    ufw-before-input/ufw-user-input (first-match-wins) и НИКОГДА не
+    доходят до правила, добавленного -A INPUT (в конец) → бан ASN был
+    декоративным. Дополнительно: ipset_persist восстанавливает только
+    сеты, правила iptables после reboot терялись.
+    """
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._runner = _FakeRunner()
+        _p1 = patch("chimera.modules.ipban.subprocess.run", self._runner)
+        _p1.start()
+        self.addCleanup(_p1.stop)
+        _p2 = patch("chimera.modules.ipban._BOOT_UNIT",
+                    self._tmp / "xray-ipban-restore.service")
+        _p2.start()
+        self.addCleanup(_p2.stop)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_rule_spec_includes_comment(self):
+        """-C/-D/-I используют единый spec с comment-матчером.
+
+        Старый код проверял -C БЕЗ comment, а правило создавал С
+        comment → проверка никогда не находила правило → дубликаты.
+        """
+        from chimera.modules.ipban import _iptables_rule_spec, _COMMENT
+        spec = _iptables_rule_spec("xray_manual_ban")
+        self.assertIn("-m", spec)
+        self.assertIn("comment", spec)
+        self.assertIn(_COMMENT, spec)
+
+    def test_ensure_uses_insert_at_top_not_append(self):
+        """Правило вставляется -I INPUT 1, НЕ -A INPUT (в конец)."""
+        from chimera.modules.ipban import _ensure_iptables_rules
+        _ensure_iptables_rules()
+        inserted = [c for c in self._runner.calls if c[:4] == ["iptables", "-I", "INPUT", "1"]]
+        self.assertTrue(inserted, "iptables -I INPUT 1 не вызван")
+        for c in inserted:
+            self.assertIn("--match-set", c)
+            self.assertIn("xray_manual_ban", c)
+        inserted6 = [c for c in self._runner.calls if c[:4] == ["ip6tables", "-I", "INPUT", "1"]]
+        self.assertTrue(inserted6, "ip6tables -I INPUT 1 не вызван")
+        appended = [c for c in self._runner.calls if c[:3] in (
+            ["iptables", "-A", "INPUT"], ["ip6tables", "-A", "INPUT"])]
+        self.assertFalse(appended, f"-A INPUT запрещён (недостижимо за ufw): {appended}")
+
+    def test_ensure_migrates_old_appended_rules(self):
+        """Старые правила (любой spec-вариант) удаляются перед вставкой."""
+        from chimera.modules.ipban import _ensure_iptables_rules
+        _ensure_iptables_rules()
+        deletes = [c for c in self._runner.calls if c[:3] == ["iptables", "-D", "INPUT"]]
+        self.assertTrue(deletes, "миграция: старые правила не удаляются")
+        # удаляются ОБА варианта spec — с comment и без
+        with_comment = [c for c in deletes if "comment" in c]
+        without_comment = [c for c in deletes if "comment" not in c]
+        self.assertTrue(with_comment, "миграция не удаляет вариант с comment")
+        self.assertTrue(without_comment, "миграция не удаляет вариант без comment")
+
+    def test_boot_unit_created_and_persists_rules(self):
+        """После reboot правила восстанавливаются юнитом (сеты + INPUT 1)."""
+        from chimera.modules.ipban import _ensure_boot_unit, _BOOT_UNIT
+        _ensure_boot_unit()
+        self.assertTrue(_BOOT_UNIT.exists(), "юнит не записан")
+        text = _BOOT_UNIT.read_text(encoding="utf-8")
+        self.assertIn("ipset create xray_manual_ban", text)
+        self.assertIn("-exist", text)
+        self.assertIn("-I INPUT 1", text, "юнит восстанавливает правило НЕ первой строкой")
+        self.assertIn("xray_manual_ban6", text)
+        self.assertIn("After=xray-ipset-restore.service", text)
+        # enable вызван
+        enabled = [c for c in self._runner.calls
+                   if c[:2] == ["systemctl", "enable"]]
+        self.assertTrue(enabled, "systemctl enable юнита не вызван")
+
+    def test_ipban_add_bootstraps_rules_and_unit(self):
+        """ipban_add ставит правила + юнит (мокается только резолв CIDR)."""
+        import chimera.modules.ipban as ipban
+        with patch.object(ipban, "_resolve_to_cidrs",
+                          return_value=("1.2.3.4", "ip", ["1.2.3.4/32"])), \
+             patch.object(ipban, "_ensure_sets", return_value=True), \
+             patch.object(ipban, "_state_add_entry"), \
+             patch.object(ipban, "_ipban_persist_save"):
+            ipban.ipban_add("1.2.3.4")
+        top_insert = [c for c in self._runner.calls if c[:4] == ["iptables", "-I", "INPUT", "1"]]
+        self.assertTrue(top_insert, "ipban_add не вставил правило в вершину INPUT")
+        unit_calls = [c for c in self._runner.calls if c[:2] == ["systemctl", "enable"]]
+        self.assertTrue(unit_calls, "ipban_add не установил boot-юнит")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
