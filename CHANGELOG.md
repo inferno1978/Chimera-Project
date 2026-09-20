@@ -2,6 +2,63 @@
 
 ---
 
+## FIX(dnscrypt): [FATAL] local_doh.use_syslog has already been defined — тюнинг [T] дописывал top-level ключи в хвостовую секцию — 20 сентября 2026
+
+**Кейс (vds14808, 2026-09-20):** после синка пула (cron 06:00) и
+меню Сеть → [3] «DNSCrypt-proxy (управление и оптимизация)» сервис
+умер, а ручная проверка `dnscrypt-proxy -config ... -list` падала:
+
+```
+[FATAL] toml: line 291 (last key "local_doh.use_syslog"):
+Key 'local_doh.use_syslog' has already been defined.
+```
+
+**Аудит:**
+- `dnscrypt_update.build_config()` (pool-sync, cron каждые 6 ч) и
+  `dnscrypt_advanced._apply_preset()` ([RA]) генерируют конфиг из
+  `_SECURITY_PARAMS`, где НЕТ `use_syslog`, и заканчивают файл
+  ПУСТОЙ секцией `[local_doh]`.
+- `dnscrypt_setup.apply_dnscrypt_tuning()` ([T], вызывается из
+  install-флоу и меню [3]) заменяет TOP_PARAMS только в top-level
+  зоне (до первого `[section]`), а НЕДОСТАЮЩИЕ ключи дописывал
+  В КОНЕЦ файла → после `[local_doh]` → TOML трактует их как
+  `local_doh.<key>` (неизвестный ключ для dnscrypt ≥ 2.1.5 —
+  [FATAL] Unsupported key). Повторный прогон тюнинга дописывал
+  ключ ещё раз → дубль → parse-time FATAL «has already been
+  defined». Живой кейс: цепочка xray → AGH → dnscrypt разорвана
+  («dnscrypt ✗ · :53 ✓ · xray ✓»).
+- Воспроизведено детерминированно: первый прогон —
+  `local_doh = {'odoh_servers': False, 'use_syslog': True}`;
+  второй — TOML «Cannot overwrite a value».
+
+**Фикс (двухслойный):**
+1. `apply_dnscrypt_tuning()` — зонная переработка: вычисляются
+   границы top-zone (до первого `[section]`) и tail-zone (после
+   последнего `[section]`). Недостающие ключи вставляются
+   ПОСЛЕДНЕЙ строкой top-zone (перед первой секцией), а не в
+   конец файла. Хвостовые вырожденные случаи закрыты: файл без
+   секций (дозапись в конец = легитимный top-level) и файл,
+   начинающийся сразу секцией (ключи в начало). Бонус:
+   tail-zone ЧИСТИТСЯ от застрявших TOP_PARAMS-ключей и старых
+   маркеров «## Добавлено apply_dnscrypt_tuning» → повторный
+   запуск [T] РЕМОНТИРУЕТ уже битый конфиг пользователя
+   (проверено на реплике: 2 застрявших use_syslog → валидный
+   TOML, ровно один ключ, local_doh пустая).
+2. Источник: `_SECURITY_PARAMS` (dnscrypt_advanced) пополнился
+   `use_syslog = true` — генераторы pool-sync/advanced больше не
+   порождают конфиги без этого ключа, тюнингу нечего дописывать.
+
+Проверки: 8 новых тестов (TestApplyTuningTomlZones) — вставка в
+top-zone, идемпотентность двойного прогона, ремонт битого
+конфига, замена in-place классического шаблона install, log_file
+(top-level удаляется / секционный живёт), вырожденные конфиги
+(без секций / секция в начале), наличие use_syslog в
+_SECURITY_PARAMS. TOML-валидность через tomllib (Python 3.11+,
+структурный fallback на 3.10). Регрессия: DNS-сьют 250 passed,
+AGH-сьюты 212 passed.
+
+---
+
 ## FIX(csqtt/upstream): три живых кейса — тупик legacy-обновления, зависание удаления, рассинхрон состояния — 16 сентября 2026
 
 **Кейс:** юзер на актуальной ветке с установленным CSQTT v2.0.0

@@ -416,15 +416,36 @@ def apply_dnscrypt_tuning() -> None:
     }
 
     lines = DNSCRYPT_CONF.read_text().splitlines(keepends=True)
+
+    # ── Границы зон ────────────────────────────────────────────────────────
+    # top-zone  = строки ДО первого [section] (там живут глобальные ключи).
+    # tail-zone = строки ПОСЛЕ последнего [section] (pool-sync/advanced
+    #             генераторы заканчивают файл пустой секцией [local_doh]).
+    # БАГ (кейс vds14808, 2026-09-20): недостающие TOP_PARAMS дописывались
+    # В КОНЕЦ файла, т.е. ПОСЛЕ [local_doh] → ключи становились
+    # local_doh.use_syslog → [FATAL] dnscrypt-proxy, повторный тюнинг
+    # дописывал ещё раз → toml: Key 'local_doh.use_syslog' has already
+    # been defined. Теперь: недостающие ключи вставляются в top-zone
+    # (перед первой секцией), а застрявший в tail-zone мусор от старых
+    # прогонов вычищается — повторный [T] чинит битый конфиг сам.
+    section_idx: list[int] = [
+        i for i, line in enumerate(lines)
+        if re.match(r'^\[', line.strip())
+    ]
+    first_section_idx = section_idx[0] if section_idx else None
+    last_section_idx = section_idx[-1] if section_idx else None
+
+    _TUNING_MARKER = "## Добавлено apply_dnscrypt_tuning"
+
     result: list[str] = []
-    in_section = False
     applied_top: set[str] = set()
 
-    for line in lines:
+    for i, line in enumerate(lines):
         stripped = line.strip()
-        if re.match(r'^\[', stripped):
-            in_section = True
-        if not in_section:
+        in_top = first_section_idx is None or i < first_section_idx
+        in_tail = last_section_idx is not None and i > last_section_idx
+
+        if in_top:
             if re.match(r'^log_file\s*=', stripped):
                 result.append("## log_file удалён apply_dnscrypt_tuning — используем journald\n")
                 continue
@@ -434,13 +455,42 @@ def apply_dnscrypt_tuning() -> None:
                 indent = line[: len(line) - len(line.lstrip())]
                 line = f"{indent}{key} = {TOP_PARAMS[key]}\n"
                 applied_top.add(key)
+        elif in_tail:
+            # чистка мусора старого бага: TOP_PARAMS-ключи и маркер, попавшие
+            # в хвостовую секцию (например local_doh.use_syslog)
+            m = re.match(r'^(\w+)\s*=\s*.*$', stripped)
+            if m and m.group(1) in TOP_PARAMS:
+                continue
+            if stripped.startswith(_TUNING_MARKER):
+                continue
         result.append(line)
 
-    missing_top = [k for k in TOP_PARAMS if k not in applied_top]
-    if missing_top:
-        result.append("\n## Добавлено apply_dnscrypt_tuning\n")
-        for k in missing_top:
-            result.append(f"{k} = {TOP_PARAMS[k]}\n")
+        # вставка недостающих ключей — строго в top-zone,
+        # последней строкой ПЕРЕД первым заголовком секции
+        if first_section_idx is not None and i + 1 == first_section_idx:
+            missing_top = [k for k in TOP_PARAMS if k not in applied_top]
+            if missing_top:
+                result.append("\n" + _TUNING_MARKER + "\n")
+                for k in missing_top:
+                    result.append(f"{k} = {TOP_PARAMS[k]}\n")
+
+    # вырожденные случаи без вставки в цикле:
+    #   а) нет ни одной секции — весь файл top-level, дозапись в конец;
+    #   б) файл начинается сразу секцией — top-zone пуста, ключи в начало.
+    if first_section_idx is None:
+        missing_top = [k for k in TOP_PARAMS if k not in applied_top]
+        if missing_top:
+            result.append("\n" + _TUNING_MARKER + "\n")
+            for k in missing_top:
+                result.append(f"{k} = {TOP_PARAMS[k]}\n")
+    elif first_section_idx == 0:
+        missing_top = [k for k in TOP_PARAMS if k not in applied_top]
+        if missing_top:
+            head = [_TUNING_MARKER + "\n"]
+            for k in missing_top:
+                head.append(f"{k} = {TOP_PARAMS[k]}\n")
+            head.append("\n")
+            result = head + list(result)
 
     DNSCRYPT_CONF.write_text("".join(result))
     success(f"Конфиг обновлён: {DNSCRYPT_CONF}")
