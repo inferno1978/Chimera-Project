@@ -418,13 +418,21 @@ def _autoban_get_chain_ips() -> list[str]:
 
 
 def _fw_ban(ip: str) -> bool:
-    """Банит IP через ufw если доступен, иначе через iptables. Возвращает True при успехе."""
+    """Банит IP через ufw если доступен, иначе через iptables. Возвращает True при успехе.
+
+    (кейс AS25369): ufw ОБЯЗАН ставить deny ПЕРВОЙ пользовательской
+    строкой (ufw insert 1) — обычный `ufw deny` добавляется в КОНЕЦ
+    ufw-user-input, ПОСЛЕ allow-правил портов (configure_firewall →
+    ufw allow 22/80/SERVER_PORT) → first-match-wins пропускал
+    нарушителя на открытые порты, бан был декоративным.
+    """
     core = _core_module()
     _run = core._run
 
     import shutil as _shutil
     if _shutil.which("ufw"):
-        r = _run(["ufw", "deny", "from", ip, "to", "any", "comment", "xray-autoban"],
+        r = _run(["ufw", "insert", "1", "deny", "from", ip, "to", "any",
+                  "comment", "xray-autoban"],
                  check=False, quiet=True)
         return r.returncode == 0
     # Fallback: iptables (Debian 13 / nftables системы без ufw)
@@ -448,6 +456,37 @@ def _fw_unban(ip: str) -> bool:
               "-m", "comment", "--comment", "xray-autoban"],
              check=False, quiet=True)
     return r.returncode == 0
+
+
+def _fw_repair_order(banned: dict):
+    """Миграция порядка ufw-правил для уже существующих банов.
+
+    (кейс AS25369): старый _fw_ban добавлял `ufw deny from X` в КОНЕЦ
+    ufw-user-input — ПОСЛЕ allow-правил портов (ufw allow 22/80/SERVER_PORT
+    из configure_firewall) → first-match-wins пропускал нарушителей на
+    открытые порты: баны росли в state, трафик продолжал течь. Функция
+    переставляет каждый deny ПЕРВОЙ строкой (ufw insert 1).
+    Возвращает число переставленных правил или None, если ufw нет
+    (iptables-режим всегда ставил правила первой строкой).
+    """
+    core = _core_module()
+    _run = core._run
+
+    import shutil as _shutil
+    if not _shutil.which("ufw"):
+        return None
+    fixed = 0
+    for ip in list(banned.keys()):
+        # удалить старое правило (в конце, любое положение) — ошибки
+        # «rule not found» молча игнорируем
+        _run(["ufw", "delete", "deny", "from", ip, "to", "any"],
+             check=False, quiet=True)
+        r = _run(["ufw", "insert", "1", "deny", "from", ip, "to", "any",
+                  "comment", "xray-autoban"],
+                 check=False, quiet=True)
+        if r.returncode == 0:
+            fixed += 1
+    return fixed
 
 
 def _autoban_run_once() -> int:
@@ -520,10 +559,17 @@ def _autoban_run_once() -> int:
             # Баним через UFW
             if _fw_ban(ip):
                 _ban_ts = datetime.now().isoformat()
+                _reason = f"{count} TLS errors in {window}min"
+                # ASN-инфо: в запись истории и в отчёт (кейс vds14808 —
+                # Провайдер/Организация в «Истории банов»)
+                try:
+                    _asn = _lookup_asn(ip)
+                except Exception:
+                    _asn = {}
                 banned[ip] = {
                     "count":     count,
                     "banned_at": _ban_ts,
-                    "reason":    f"{count} TLS errors in {window}min",
+                    "reason":    _reason,
                 }
                 # Записываем в историю (запись не удаляется при разбане)
                 cfg.setdefault("ban_history", []).append({
@@ -531,7 +577,10 @@ def _autoban_run_once() -> int:
                     "banned_at":   _ban_ts,
                     "unbanned_at": None,
                     "count":       count,
-                    "reason":      f"{count} TLS errors in {window}min",
+                    "reason":      _reason,
+                    "asn":         _asn.get("asn", ""),
+                    "isp":         _asn.get("isp", ""),
+                    "org":         _asn.get("org", ""),
                 })
                 if len(cfg["ban_history"]) > 500:
                     cfg["ban_history"] = cfg["ban_history"][-500:]
@@ -547,8 +596,7 @@ def _autoban_run_once() -> int:
                     pass
                 # Записываем в читаемый отчёт с ASN-данными
                 try:
-                    _asn = _lookup_asn(ip)
-                    _ban_report_append(ip, count, f"{count} TLS errors in {window}min", _asn)
+                    _ban_report_append(ip, count, _reason, _asn)
                 except Exception:
                     pass
 
@@ -584,12 +632,62 @@ def tg(msg):
     except: pass
 
 def fw_ban(ip):
+    #  FIX (кейс AS25369): deny ПЕРВОЙ строкой ufw-user-input — обычный
+    # `ufw deny` добавляется в конец, ПОСЛЕ allow-правил портов,
+    # и не срабатывает для открытых портов (first-match-wins).
     if shutil.which('ufw'):
-        return subprocess.run(['ufw','deny','from',ip,'to','any','comment','xray-autoban'],
+        return subprocess.run(['ufw','insert','1','deny','from',ip,'to','any','comment','xray-autoban'],
             capture_output=True).returncode == 0
     return subprocess.run(['iptables','-I','INPUT','-s',ip,'-j','DROP',
         '-m','comment','--comment','xray-autoban'],
         capture_output=True).returncode == 0
+
+#  FIX (кейс vds14808, 2026-09-20): ASN/Провайдер/Организация в истории
+#  банов и отчёте. Cron-скрипт не может импортировать
+#  chimera.modules.asn_cache — поэтому lookup дублирует его логику
+#  (ip-api.com, тот же endpoint/UA) + файл-кеш
+#  /var/lib/xray-installer/autoban_asn_cache.json (TTL 7 дней,
+#  лимит 2000 записей) — повторы не дёргают API зря.
+ASN_CACHE_F   = Path('/var/lib/xray-installer/autoban_asn_cache.json')
+ASN_CACHE_TTL = 7 * 86400
+_asn_mem = {{}}
+
+def lookup_asn(ip):
+    if ip in _asn_mem:
+        return _asn_mem[ip]
+    data = {{}}
+    try:
+        if ASN_CACHE_F.exists():
+            data = json.loads(ASN_CACHE_F.read_text())
+    except Exception:
+        data = {{}}
+    hit = data.get(ip)
+    if hit and (time.time() - hit.get('ts', 0)) < ASN_CACHE_TTL:
+        _asn_mem[ip] = hit
+        return hit
+    info = {{'asn': '', 'isp': '', 'org': ''}}
+    try:
+        import urllib.request as _ur
+        _url = f'http://ip-api.com/json/{{ip}}?fields=as,org,isp,status'
+        _req = _ur.Request(_url, headers={{'User-Agent': 'xray-installer/3.99'}})
+        with _ur.urlopen(_req, timeout=4) as _resp:
+            _d = json.loads(_resp.read().decode())
+        if _d.get('status') == 'success':
+            info = {{'asn': _d.get('as',''), 'isp': _d.get('isp',''), 'org': _d.get('org','')}}
+    except Exception:
+        pass
+    info['ts'] = time.time()
+    _asn_mem[ip] = info
+    try:
+        data[ip] = info
+        if len(data) > 2000:
+            _keep = sorted(data.items(), key=lambda kv: kv[1].get('ts', 0))[-2000:]
+            data = dict(_keep)
+        ASN_CACHE_F.parent.mkdir(parents=True, exist_ok=True)
+        ASN_CACHE_F.write_text(json.dumps(data))
+    except Exception:
+        pass
+    return info
 
 #  DoH-resolver: резолв домена exit-ноды → IPv4 через публичные
 # DoH-резолверы (Cloudflare 1.1.1.1 + Google 8.8.8.8 JSON API), минуя
@@ -726,6 +824,9 @@ for ip, cnt in ip_errors.items():
         if fw_ban(ip):
             _ban_ts = datetime.now().isoformat()
             _ban_reason = f'{{cnt}} TLS errors in {{window}}min'
+            #  FIX (кейс vds14808): ASN/Провайдер/Организация прямо в запись
+            #  истории (lookup_asn — ip-api.com + файл-кеш, см. выше).
+            _asn = lookup_asn(ip)
             banned[ip] = {{'count':cnt,'banned_at':_ban_ts,'reason':_ban_reason}}
             BAN_LOG.parent.mkdir(parents=True,exist_ok=True)
             with open(BAN_LOG,'a') as f:
@@ -743,25 +844,31 @@ for ip, cnt in ip_errors.items():
                 'unbanned_at': None,
                 'count':       cnt,
                 'reason':      _ban_reason,
+                'asn':         _asn.get('asn', ''),
+                'isp':         _asn.get('isp', ''),
+                'org':         _asn.get('org', ''),
             }})
             if len(cfg['ban_history']) > 500:
                 cfg['ban_history'] = cfg['ban_history'][-500:]
             #  FIX: пишем в читаемый отчёт /var/log/xray-ban-report.txt —
             # иначе пункт [6] показывает историю, а файл отчёта пустой.
-            # Cron-скрипт не имеет доступа к chimera.modules.asn_cache,
-            # поэтому ASN-инфо не включаем — только IP, время, причина.
+            #  FIX (кейс vds14808): ASN/Провайдер/Организация из lookup_asn
+            # (ip-api.com + файл-кеш) — вместо прочерков «без ASN-lookup».
             try:
                 _report_f = Path('/var/log/xray-ban-report.txt')
                 _report_f.parent.mkdir(parents=True, exist_ok=True)
                 _sep = '─' * 64
                 _ts_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                _asn_v = _asn.get('asn') or '—'
+                _isp_v = _asn.get('isp') or '—'
+                _org_v = _asn.get('org') or '—'
                 _block = (
                     f'\\n{{_sep}}\\n'
                     f'[{{_ts_str}}]  ЗАБЛОКИРОВАН: {{ip}}\\n'
                     f'  Ошибок:      {{cnt}}  ({{_ban_reason}})\\n'
-                    f'  ASN:         — (cron-скрипт, без ASN-lookup)\\n'
-                    f'  Провайдер:   —\\n'
-                    f'  Организация: —\\n'
+                    f'  ASN:         {{_asn_v}}\\n'
+                    f'  Провайдер:   {{_isp_v}}\\n'
+                    f'  Организация: {{_org_v}}\\n'
                 )
                 with open(_report_f, 'a', encoding='utf-8') as _rf:
                     _rf.write(_block)
@@ -860,6 +967,7 @@ def do_manage_autoban() -> None:
         _box_item("4", f"Запустить проверку прямо сейчас")
         _box_item("5", f"Управление whitelist")
         _box_item("6", f"📜 История банов")
+        _box_item("F", f"🔧 FW-порядок банов  {DIM}(переставить deny выше allow — миграция){NC}")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -991,6 +1099,24 @@ def do_manage_autoban() -> None:
                 success("Новых нарушителей не обнаружено")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
+        elif ch == "f":
+            # Миграция порядка FW-правил: deny-правила существующих банов
+            # переставляются ПЕРВОЙ строкой ufw-user-input (старые баны
+            # добавлялись в конец — после allow портов — и не работали).
+            print()
+            if not banned:
+                info("Активных банов нет — переставлять нечего")
+            else:
+                info(f"Переставляю deny-правила первой строкой UFW ({len(banned)} IP)...")
+                _n = _fw_repair_order(banned)
+                if _n is None:
+                    warn("ufw не найден — порядок правил не требует миграции "
+                         "(iptables-режим ставит правила первой строкой)")
+                else:
+                    success(f"Готово: переставлено {_n} из {len(banned)} правил")
+                    warn("Проверка: iptables -L ufw-user-input -n --line-numbers | head")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
         elif ch == "6":
             # История банов
             history = cfg.get("ban_history", [])
@@ -1023,9 +1149,18 @@ def do_manage_autoban() -> None:
                         f"  {_col}{_ip:<18}{NC} {_bat:<16} {_uat_s:<16} "
                         f"{_cnt:>3}  {DIM}{_rsn}{NC}"
                     )
-                    # Строка 2: ASN + провайдер
-                    asn_info = _lookup_asn(_ip)
-                    asn_str  = _fmt_asn_short(asn_info)
+                    # Строка 2: ASN + провайдер. Приоритет — значения,
+                    # сохранённые в записи (cron/TUI пишут с фикса vds14808);
+                    # для старых записей — lookup на лету.
+                    if rec.get("asn") or rec.get("isp") or rec.get("org"):
+                        asn_info = {
+                            "asn": rec.get("asn", ""),
+                            "isp": rec.get("isp", ""),
+                            "org": rec.get("org", ""),
+                        }
+                    else:
+                        asn_info = _lookup_asn(_ip)
+                    asn_str = _fmt_asn_short(asn_info)
                     if asn_str:
                         _asn_max = _BOX_W - 6
                         if len(asn_str) > _asn_max:

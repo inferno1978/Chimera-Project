@@ -13,8 +13,12 @@ chimera/modules/ipban.py
 Реализация:
   • ipset hash:net  xray_manual_ban   (IPv4)
   • ipset hash:net  xray_manual_ban6  (IPv6)
-  • iptables  INPUT -m set --match-set xray_manual_ban  src -j DROP
-  • ip6tables INPUT -m set --match-set xray_manual_ban6 src -j DROP
+  • iptables  INPUT -I 1 -m set --match-set xray_manual_ban  src -j DROP
+    (ПЕРВОЙ строкой INPUT — до ufw-цепочек; старый вариант -A в конце
+    INPUT был недостижим при включённом UFW: пакеты на открытые порты
+    принимались внутри ufw-user-input раньше — кейс AS25369)
+  • ip6tables INPUT -I 1 -m set --match-set xray_manual_ban6 src -j DROP
+  • Восстановление после reboot: xray-ipban-restore.service (сеты + правила)
   • Состояние бана → /var/lib/xray-installer/ipban.json
   • Персистентность — через ipset_persist (сохранение в /etc/ipset.conf)
 
@@ -70,6 +74,7 @@ _IPSET_V4      = "xray_manual_ban"
 _IPSET_V6      = "xray_manual_ban6"
 _COMMENT       = "xray-manual-ban"
 _IPSET_CONF    = Path("/etc/ipset.conf")
+_BOOT_UNIT     = Path("/etc/systemd/system/xray-ipban-restore.service")
 
 _RIPE_PREFIXES = (
     "https://stat.ripe.net/data/announced-prefixes/data.json?resource={asn}"
@@ -162,58 +167,115 @@ def _ensure_sets() -> bool:
     return True
 
 
+def _iptables_rule_spec(set_name: str) -> list:
+    """Канонический spec правила DROP (с comment-матчером).
+
+    ВАЖНО: iptables -C/-D сопоставляют правила ТОЛЬКО при точном
+    совпадении набора матчеров. Старый код проверял -C БЕЗ comment,
+    а правило создавал С comment → проверка никогда не находила
+    правило → оно добавлялось повторно при каждом вызове.
+    Теперь check/insert/delete используют единый spec.
+    """
+    return ["-m", "set", "--match-set", set_name, "src",
+            "-j", "DROP",
+            "-m", "comment", "--comment", _COMMENT]
+
+
+def _rule_exists(ipt: str, set_name: str) -> bool:
+    return subprocess.run(
+        [ipt, "-C", "INPUT"] + _iptables_rule_spec(set_name),
+        capture_output=True
+    ).returncode == 0
+
+
+def _rule_delete_all(ipt: str, set_name: str) -> None:
+    """Удаляет ВСЕ вхождения правила (и новый spec с comment, и
+    старый вариант без comment — миграция)."""
+    variants = [
+        _iptables_rule_spec(set_name),
+        ["-m", "set", "--match-set", set_name, "src", "-j", "DROP"],
+    ]
+    for spec in variants:
+        for _ in range(20):
+            r = _run([ipt, "-D", "INPUT"] + spec, quiet=True)
+            if r.returncode != 0:
+                break
+
+
 def _ensure_iptables_rules() -> None:
     """
-    Добавляет правила iptables DROP через _IPSET_V4 / _IPSET_V6 в цепочку INPUT,
-    только если они ещё не существуют.
-    Правила ставятся через -A (в конец), не -I 1 — чтобы не перекрыть
-    ESTABLISHED,RELATED и lo-ACCEPT, которые уже находятся выше.
-    """
-    # IPv4
-    _chk4 = subprocess.run(
-        ["iptables", "-C", "INPUT",
-         "-m", "set", "--match-set", _IPSET_V4, "src", "-j", "DROP"],
-        capture_output=True
-    )
-    if _chk4.returncode != 0:
-        _run([
-            "iptables", "-A", "INPUT",
-            "-m", "set", "--match-set", _IPSET_V4, "src",
-            "-j", "DROP",
-            "-m", "comment", "--comment", _COMMENT,
-        ], quiet=True)
+    Добавляет правила iptables DROP через _IPSET_V4 / _IPSET_V6 в цепочку INPUT.
 
-    # IPv6
-    _chk6 = subprocess.run(
-        ["ip6tables", "-C", "INPUT",
-         "-m", "set", "--match-set", _IPSET_V6, "src", "-j", "DROP"],
-        capture_output=True
-    )
-    if _chk6.returncode != 0:
-        _run([
-            "ip6tables", "-A", "INPUT",
-            "-m", "set", "--match-set", _IPSET_V6, "src",
-            "-j", "DROP",
-            "-m", "comment", "--comment", _COMMENT,
-        ], quiet=True)
+    (кейс vds14808 / AS25369, 2026-09-21): правило ОБЯЗАНО стоять ПЕРВОЙ
+    строкой INPUT (iptables -I INPUT 1), а не в конце (-A):
+    при включённом UFW (дефолт Chimera: configure_firewall → ufw allow
+    22/80/SERVER_PORT) пакеты на открытые порты принимаются ВНУТРИ
+    ufw-цепочек (INPUT → ufw-before-input → ufw-user-input → «allow
+    <port>») по принципу first-match-wins и НИКОГДА не доходят до
+    правила в конце INPUT. Бан ASN/подсетей был декоративным: сканеры
+    продолжали долбить xray → TLS-ошибки → новые записи в истории
+    автобана с той же ASN.
+
+    Вставка в начало INPUT режет и УСТАНОВЛЕННЫЕ соединения из
+    забаненных префиксов (для бана это семантически верно), а также
+    все порты, не только открытые. loopback не затрагивается
+    (127.0.0.0/8 не анонсируется ни одной ASN).
+
+    Миграция: старые -A-правила (в конце INPUT, недостижимые за
+    ufw-цепочками) удаляются, вместо них вставляется -I INPUT 1.
+    """
+    for ipt, set_name in (
+        ("iptables", _IPSET_V4),
+        ("ip6tables", _IPSET_V6),
+    ):
+        # 1) удалить все старые вхождения (миграция с -A и без comment)
+        _rule_delete_all(ipt, set_name)
+        # 2) вставить ПЕРВОЙ строкой INPUT — до ufw-цепочек
+        if not _rule_exists(ipt, set_name):
+            _run([ipt, "-I", "INPUT", "1"] + _iptables_rule_spec(set_name),
+                 quiet=True)
+
+
+def _ensure_boot_unit() -> None:
+    """
+    systemd-юнит восстановления правил после reboot.
+
+    Проблема: ipset_persist восстанавливает только САМИ сеты
+    (ipset restore -! -f /etc/ipset.conf), но НЕ iptables-правила,
+    которые на них ссылаются → после ребута бан ASN превращался в
+    пустой сет без правила. Юнит пересоздаёт сеты (-exist), затем
+    правила (-C || -I INPUT 1).
+    """
+    try:
+        unit = f"""# AUTOGENERATED by chimera ipban — не редактировать вручную
+[Unit]
+Description=xray-ipban: правила iptables для manual-ban (xray_manual_ban*)
+After=xray-ipset-restore.service
+Before=xray.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'ipset create {_IPSET_V4} hash:net family inet maxelem 65536 -exist; ipset create {_IPSET_V6} hash:net family inet6 maxelem 65536 -exist'
+ExecStart=/bin/bash -c 'iptables -C INPUT -m set --match-set {_IPSET_V4} src -j DROP -m comment --comment {_COMMENT} 2>/dev/null || iptables -I INPUT 1 -m set --match-set {_IPSET_V4} src -j DROP -m comment --comment {_COMMENT}'
+ExecStart=/bin/bash -c 'ip6tables -C INPUT -m set --match-set {_IPSET_V6} src -j DROP -m comment --comment {_COMMENT} 2>/dev/null || ip6tables -I INPUT 1 -m set --match-set {_IPSET_V6} src -j DROP -m comment --comment {_COMMENT}'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+"""
+        _BOOT_UNIT.parent.mkdir(parents=True, exist_ok=True)
+        _BOOT_UNIT.write_text(unit, encoding="utf-8")
+        _BOOT_UNIT.chmod(0o644)
+        _run(["systemctl", "daemon-reload"], quiet=True)
+        _run(["systemctl", "enable", "xray-ipban-restore.service"], quiet=True)
+    except Exception as exc:
+        _warn(f"Не удалось создать boot-юнит: {exc}")
 
 
 def _remove_iptables_rules() -> None:
-    """Удаляет правила iptables (все вхождения xray-manual-ban)."""
-    for _ in range(10):
-        r = _run([
-            "iptables", "-D", "INPUT",
-            "-m", "set", "--match-set", _IPSET_V4, "src", "-j", "DROP"
-        ], quiet=True)
-        if r.returncode != 0:
-            break
-    for _ in range(10):
-        r = _run([
-            "ip6tables", "-D", "INPUT",
-            "-m", "set", "--match-set", _IPSET_V6, "src", "-j", "DROP"
-        ], quiet=True)
-        if r.returncode != 0:
-            break
+    """Удаляет правила iptables (все вхождения, оба варианта spec)."""
+    _rule_delete_all("iptables", _IPSET_V4)
+    _rule_delete_all("ip6tables", _IPSET_V6)
 
 
 def _ipset_add_cidrs(cidrs: list) -> Tuple[int, int]:
@@ -465,6 +527,7 @@ def ipban_add(raw: str, comment: str = "") -> bool:
         return False
 
     _ensure_iptables_rules()
+    _ensure_boot_unit()
     added_v4, added_v6 = _ipset_add_cidrs(cidrs)
     total = added_v4 + added_v6
     if total == 0:
@@ -522,6 +585,7 @@ def ipban_restore() -> None:
     if not _ensure_sets():
         return
     _ensure_iptables_rules()
+    _ensure_boot_unit()
     total = 0
     for e in entries:
         v4, v6 = _ipset_add_cidrs(e.get("cidrs", []))
@@ -548,17 +612,9 @@ def do_manage_ipban() -> None:
         cnt_v4, cnt_v6 = _ipset_count()
         sets_ok  = _set_exists(_IPSET_V4) or _set_exists(_IPSET_V6)
 
-        # статус iptables-правил
-        chk4 = subprocess.run(
-            ["iptables", "-C", "INPUT",
-             "-m", "set", "--match-set", _IPSET_V4, "src", "-j", "DROP"],
-            capture_output=True
-        ).returncode == 0
-        chk6 = subprocess.run(
-            ["ip6tables", "-C", "INPUT",
-             "-m", "set", "--match-set", _IPSET_V6, "src", "-j", "DROP"],
-            capture_output=True
-        ).returncode == 0
+        # статус iptables-правил (единый spec с comment — см. _rule_exists)
+        chk4 = _rule_exists("iptables", _IPSET_V4)
+        chk6 = _rule_exists("ip6tables", _IPSET_V6)
 
         rules_str = (
             f"{GREEN}активны{NC}"

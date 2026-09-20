@@ -232,12 +232,21 @@ broken pipe
 - `unbanned_at` — дата/время разбана (или `None` если активен)
 - `count` — сколько ошибок накопилось
 - `reason` — текстовая причина (например, `12 TLS errors in 10min`)
+- `asn` / `isp` / `org` — ASN, провайдер и организация (с фикса
+  2026-09-20, кейс vds14808: раньше cron-бан писал прочерки «без
+  ASN-lookup»; теперь lookup выполняется в момент бана — ip-api.com
+  + файл-кеш `/var/lib/xray-installer/autoban_asn_cache.json`, TTL
+  7 дней — и значения сохраняются в запись). В таблице истории
+  строка `↳ AS… · Провайдер` берётся из записи, для старых записей —
+  lookup на лету.
 
 ### Полный лог
 
 `/var/log/xray-ban-report.txt` — читаемый отчёт, ротация раз в 7 дней
 (`_BAN_REPORT_TTL_DAYS = 7`). Содержит по одной строке на каждый бан
-с ASN-информацией. Открывается через `[6]` после таблицы истории.
+с ASN-информацией (ASN / Провайдер / Организация). Открывается через
+`[6]` после таблицы истории. Записи, сделанные ДО фикса 2026-09-20,
+останутся с прочерками — это статический текстовый лог.
 
 ### Плюсы
 
@@ -1138,6 +1147,12 @@ ufw delete deny from <ВАШ_IP> to any
 нужно:
 1. Иметь выгруженный файл `/etc/ipset.conf` (через `[5] Сохранить`).
 2. Иметь включенный `ipset-persist` (меню безопасности → `[IP]`).
+3. Раньше iptables-правила (`-m set --match-set xray_manual_ban`)
+   НЕ восстанавливались вовсе — `xray-ipset-restore.service`
+   восстанавливает только сеты. С фикса 2026-09-21 при добавлении
+   бана ставится собственный `xray-ipban-restore.service`, который
+   при загрузке пересоздаёт сеты (`ipset create -exist`) и правила
+   (`iptables -I INPUT 1 …`).
 
 ### Решение
 
@@ -1145,11 +1160,14 @@ ufw delete deny from <ВАШ_IP> to any
 2. Включите **`ipset Persist`** (`[IP]` в меню безопасности) — это
    создаст systemd-юнит, который при загрузке системы восстанавливает
    ipset из `/etc/ipset.conf`.
-3. Если после reboot правила всё равно не появились — вручную:
+3. `[4] Восстановить из state` в меню IP-Ban — пересоздаёт сеты,
+   правила (первой строкой INPUT) и boot-юнит.
+4. Если после reboot правила всё равно не появились — вручную
+   (правило — ПЕРВОЙ строкой, не `-A`!):
    ```bash
    ipset restore -! -f /etc/ipset.conf
-   iptables -A INPUT -m set --match-set xray_manual_ban src -j DROP
-   ip6tables -A INPUT -m set --match-set xray_manual_ban6 src -j DROP
+   iptables -I INPUT 1 -m set --match-set xray_manual_ban src -j DROP -m comment --comment xray-manual-ban
+   ip6tables -I INPUT 1 -m set --match-set xray_manual_ban6 src -j DROP -m comment --comment xray-manual-ban
    ```
 
 ### Проверка
@@ -1158,9 +1176,17 @@ ufw delete deny from <ВАШ_IP> to any
 # ipset должен содержать ваши CIDR
 ipset list xray_manual_ban | head -20
 
-# iptables должен иметь правило с --match-set
-iptables -L INPUT -n | grep xray_manual_ban
+# iptables должен иметь правило с --match-set ПЕРВОЙ строкой INPUT
+iptables -L INPUT -n --line-numbers | head -5
 ```
+
+> **Почему именно `-I INPUT 1`:** при включённом UFW (дефолт Chimera)
+> пакеты на открытые порты принимаются внутри ufw-цепочек
+> (`ufw-before-input → ufw-user-input → allow`) по принципу
+> first-match-wins и никогда не доходят до правил в конце INPUT.
+> Правило, добавленное `-A` (в конец), — декоративное. Это была
+> причина кейса AS25369 (2026-09-21): бан ASN стоял, а сканеры
+> продолжали долбить xray и попадать в историю автобана.
 
 ---
 
