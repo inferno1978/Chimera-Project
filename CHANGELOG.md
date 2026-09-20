@@ -2,6 +2,80 @@
 
 ---
 
+## FIX(security): бан ASN/подсетей был декоративным при включённом UFW + история банов без ASN/Провайдера/Организации — 21 сентября 2026
+
+**Кейс 1 (AS25369, vds14808):** пользователь забанил AS25369 через
+IP-Бан [IB], но записи с этой ASN продолжали появляться в истории
+автобана. Живая проверка RIPE Stat: показанный в истории 103.171.1.29
+вообще из AS63737 (VIETSERVER, Вьетнам) — т.е. часть новых записей
+просто из ДРУГИХ ASN. Но и записи AS25369 продолжали появляться —
+потому что бан не резал трафик.
+
+**Аудит (обе функции сломаны одним и тем же — порядком правил):**
+- ipban.py `_ensure_iptables_rules()`: правило
+  `iptables -A INPUT -m set --match-set xray_manual_ban` добавлялось
+  В КОНЕЦ INPUT. При включённом UFW (дефолт Chimera:
+  configure_firewall → ufw allow 22/80/SERVER_PORT) пакеты на открытые
+  порты принимаются ВНУТРИ ufw-цепочек (INPUT → ufw-before-input →
+  ufw-user-input → «allow <port>») по first-match-wins и НИКОГДА не
+  доходят до правила в конце INPUT → сканеры AS25369 продолжали
+  долбить xray → TLS-ошибки → автобан банил их IP по одному → история
+  росла. Бан был декоративным.
+- ipban.py: iptables-правила НЕ восстанавливались после reboot —
+  xray-ipset-restore.service восстанавливает только ipset-СЕТЫ,
+  не правила. И бонус-баг: `-C`-проверка статуса шла БЕЗ
+  comment-матчера, а правило создавалось С comment → iptables -C/-D
+  требуют точного совпадения набора матчеров → проверка всегда
+  «не найдено» → правило дублировалось при каждом вызове.
+- autoban.py `_fw_ban()` и cron-скрипт `fw_ban()`: `ufw deny from X
+  to any` добавляется в КОНЕЦ ufw-user-input — ПОСЛЕ allow-правил
+  портов → та же механика first-match-wins, автобан тоже был
+  декоративным на UFW-системах (баны в state, трафик течёт).
+
+**Фиксы:**
+1. ipban.py: правила вставляются `iptables -I INPUT 1` (ПЕРВОЙ
+   строкой INPUT, до ufw-цепочек; режет и установленные соединения
+   из забаненных префиксов — семантически верно для бана; loopback
+   не затрагивается). Миграция: старые -A-правила и оба варианта
+   spec (с/без comment) удаляются перед вставкой. Единый spec
+   `_iptables_rule_spec()` для -C/-D/-I (чинит и ложный статус в
+   меню, и накопление дублей). Новый `xray-ipban-restore.service`
+   (After=xray-ipset-restore, Before=xray): при boot пересоздаёт
+   сеты (ipset create -exist) и правила (-C || -I INPUT 1);
+   ставится/enable при ipban_add и ipban_restore.
+2. autoban.py: `_fw_ban` и cron `fw_ban` → `ufw insert 1 deny from X`
+   (первой строкой ufw-user-input). Для СУЩЕСТВУЮЩИХ банов —
+   `_fw_repair_order()` + пункт меню **[F] FW-порядок банов**
+   (переставляет все deny выше allow). Cron-скрипт регенерируется
+   при следующем «Включить авто-бан» / изменении порога.
+3. История банов (кейс 2, vds14808): ASN/Провайдер/Организация.
+   Cron-скрипт получил `lookup_asn()` (ip-api.com, тот же endpoint/UA
+   что asn_cache._lookup_asn; файл-кеш
+   /var/lib/xray-installer/autoban_asn_cache.json, TTL 7 дней,
+   лимит 2000 записей — повторы не дёргают API; rate-limit
+   ip-api 45/мин не тревожим: баны идут поштучно). Значения
+   пишутся в запись ban_history (поля asn/isp/org) и в отчёт
+   /var/log/xray-ban-report.txt вместо прочерков «— (cron-скрипт,
+   без ASN-lookup)». TUI-скан `_autoban_run_once` — те же поля.
+   Меню [6]: строка `↳ ASN · Провайдер` берётся из записи, для
+   старых записей — lookup на лету. Старые записи отчёта остаются
+   с прочерками (статический лог).
+
+**Живая верификация:** lookup_asn(103.171.1.29) → AS63737 VIETSERVER
+SERVICES TECHNOLOGY COMPANY LIMITED (сверено с RIPE Stat), кеш
+работает (второй вызов без сети, 1 мс).
+
+Тесты: +12 (ipban: единый spec с comment; -I INPUT 1 без -A;
+миграция старых правил; boot-юнит; ipban_add ставит правила+юнит;
+autoban: _fw_ban/cron ufw insert 1; _fw_repair_order; lookup_asn в
+cron + кеш-roundtrip с API-моком; поля asn/isp/org в ban_history и
+отчёте; TUI-поля; меню [6] из записи). Регрессия: test_autoban 25,
+test_ipban 30, смежные сьюты (ipset_persist, fail2ban,
+user_ip_whitelist, ingress_geoip, connection_audit,
+admin_whitelist_geo_dns, ingress_port_follow) — 138 passed.
+
+---
+
 ## FIX(dnscrypt): [FATAL] local_doh.use_syslog has already been defined — тюнинг [T] дописывал top-level ключи в хвостовую секцию — 20 сентября 2026
 
 **Кейс (vds14808, 2026-09-20):** после синка пула (cron 06:00) и
