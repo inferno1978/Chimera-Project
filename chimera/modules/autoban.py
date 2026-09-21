@@ -1058,6 +1058,16 @@ window    = cfg.get('window_min', {window})
 if 'whitelist' not in cfg or not isinstance(cfg.get('whitelist'), list):
     cfg['whitelist'] = ['127.0.0.1', '::1']
 whitelist = set(cfg['whitelist'])
+#  FIX (кейс vds13195, 2026-09-21): авто-IP НЕ сливаем с пользовательским
+# whitelist. Резолвы доменов каскада (DoH, ниже) и собственные IP сервера
+# держим в отдельном рантайм-сете auto_wl: он защищает ровно один прогон и
+# пересчитывается заново каждые 5 минут. Раньше каждый резолв персистился
+# в cfg['whitelist'] навсегда: домен без A-записи на DNS регистратора
+# (ns*.reg.ru) отвечал парковочным кластером round-robin (ParkingCrew,
+# 194.67.71.0/24) — за месяцы cron накидал в «Пользовательский whitelist»
+# ~80 чужих IP; DDNS-ротация нод оседала там же всей историей адресов.
+# cfg['whitelist'] навсегда = только ручные записи из меню [5].
+auto_wl = set()
 try:
     import socket as _sock
     _state_f = Path('/var/lib/xray-installer/state.json')
@@ -1068,17 +1078,17 @@ try:
             if not _h: continue
             import re as _re
             if _re.match(r'^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$', _h):
-                whitelist.add(_h)
+                auto_wl.add(_h)
             else:
                 _r = _resolve_fresh(_h)
-                if _r: whitelist.add(_r)
+                if _r: auto_wl.add(_r)
         _lh = _st.get('chain_exit_host','')
         if _lh:
             if _re.match(r'^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$', _lh):
-                whitelist.add(_lh)
+                auto_wl.add(_lh)
             else:
                 _r = _resolve_fresh(_lh)
-                if _r: whitelist.add(_r)
+                if _r: auto_wl.add(_r)
 except: pass
 
 #  FIX: добавляем собственные IP сервера в whitelist — чтобы автобан
@@ -1097,7 +1107,7 @@ try:
             if _idx + 1 < len(_parts):
                 _candidate = _parts[_idx + 1]
                 if _re.match(r'^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$', _candidate):
-                    whitelist.add(_candidate)
+                    auto_wl.add(_candidate)
     # 2. Все IPv4 на всех интерфейсах
     _r_addr = _sp2.run(['ip', '-4', 'addr', 'show'],
                        capture_output=True, text=True, timeout=5)
@@ -1107,7 +1117,7 @@ try:
             if _m:
                 _ip = _m.group(1)
                 if not _ip.startswith('127.'):
-                    whitelist.add(_ip)
+                    auto_wl.add(_ip)
 except: pass
 
 banned = cfg.get('banned', {{}})
@@ -1128,7 +1138,7 @@ for line in error_log.read_text(errors='replace').splitlines()[-5000:]:
         except: pass
     if not tls_re.search(line): continue
     im = ip_re.search(line)
-    if not im or im.group(1) in whitelist: continue
+    if not im or im.group(1) in whitelist or im.group(1) in auto_wl: continue
     ip_errors[im.group(1)] = ip_errors.get(im.group(1), 0) + 1
 
 for ip, cnt in ip_errors.items():
@@ -1188,9 +1198,11 @@ for ip, cnt in ip_errors.items():
                 pass
 
 cfg['banned'] = banned
-#  FIX: persist whitelist (включая добавленные chain IPs) и
-# гарантировать наличие 'ban_history' — иначе cron-скрипт затирал
-# эти поля, и пункт меню [6] История банов оставался пустым.
+#  FIX: persist whitelist и гарантировать наличие 'ban_history' — иначе
+# cron-скрипт затирал эти поля, и пункт меню [6] История банов оставался
+# пустым. whitelist здесь = только пользовательские записи (см. FIX
+# кейса vds13195 выше): авто-резолвы живут в auto_wl один прогон и
+# в файл не попадают.
 cfg['whitelist'] = sorted(whitelist)
 if 'ban_history' not in cfg:
     cfg['ban_history'] = []
