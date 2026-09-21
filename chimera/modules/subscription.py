@@ -892,6 +892,24 @@ def build_subscription_singbox_config(user: dict) -> str:
     except Exception as _e:
         _log("WARN", f"singbox_client_rulesets.inject failed: {_e}")
 
+    # mieru_dpi (режим «Mieru + B4»): route-правила доменов b4-сетов →
+    # mieru-outbound. Вставляются ПОВЕРХ правил inject_route_rulesets
+    # (prepend): domain_suffix-правила кастомных ресурсов закреплены
+    # админом и приоритетнее geosite-категорий rulesets.
+    if mieru_outbounds:
+        try:
+            from chimera.modules import mieru_dpi
+            if mieru_dpi.is_mieru_dpi_active():
+                _md_rules = mieru_dpi.build_mieru_route_rules(
+                    [ob["tag"] for ob in mieru_outbounds],
+                    mieru_dpi.get_route_domains())
+                if _md_rules:
+                    _route = config.setdefault("route", {})
+                    _existing = _route.get("rules") or []
+                    _route["rules"] = _md_rules + _existing
+        except Exception as _e:
+            _log("WARN", f"mieru_dpi route rules: {_e}")
+
     return _json.dumps(config, indent=2, ensure_ascii=False)
 
 
