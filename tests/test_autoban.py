@@ -7,6 +7,8 @@ Unit-тесты для chimera/modules/autoban.py.
 Покрывает:
   1. _autoban_load / _autoban_save — JSON I/O с дефолтами
   2. _ban_report_append — добавление записи в отчёт
+  3. Cron-шаблон: авто-резолвы не персистятся в пользовательский
+     whitelist (кейс <node-2>: парковка REG.RU накидала ~80 IP)
 """
 from __future__ import annotations
 import inspect, json, os, stat, sys, tempfile, unittest
@@ -207,7 +209,7 @@ class TestServerOwnIPsWhitelist(unittest.TestCase):
                          f"Собственный IP {ip} не попал в chain_ips — сервер может забанить сам себя")
 
     def test_cron_script_detects_server_own_ips(self):
-        """Cron-скрипт определяет собственные IP сервера и добавляет в whitelist."""
+        """Cron-скрипт определяет собственные IP сервера и добавляет в рантайм-сет auto_wl."""
         src = (_PROJECT_ROOT / "chimera" / "modules" / "autoban.py").read_text()
         import re
         m = re.search(r'py_body = f"""(.*?)"""', src, re.DOTALL)
@@ -218,10 +220,10 @@ class TestServerOwnIPsWhitelist(unittest.TestCase):
                       "cron-скрипт не определяет primary IP через ip route get")
         self.assertIn("'ip', '-4', 'addr'", body,
                       "cron-скрипт не получает все интерфейсные IP через ip -4 addr show")
-        self.assertIn("whitelist.add(_candidate)", body,
-                      "cron-скрипт не добавляет primary IP в whitelist")
-        self.assertIn("whitelist.add(_ip)", body,
-                      "cron-скрипт не добавляет интерфейсные IP в whitelist")
+        self.assertIn("auto_wl.add(_candidate)", body,
+                      "cron-скрипт не добавляет primary IP в auto_wl (защита само-бана)")
+        self.assertIn("auto_wl.add(_ip)", body,
+                      "cron-скрипт не добавляет интерфейсные IP в auto_wl (защита само-бана)")
 
 
 class TestBanReportFileSync(unittest.TestCase):
@@ -846,6 +848,124 @@ class TestFwUnbanBatch(unittest.TestCase):
         self.assertIn("_fw_unban_batch(targets)", src)
         # старый по-IP вызов из цикла разбана исчез
         self.assertNotIn("_fw_unban(target)", src)
+
+
+class TestCronWhitelistNoPersist(unittest.TestCase):
+    """
+    Регрессия (кейс <node-2>, 2026-09-21): cron-скрипт сливал авто-резолвы
+    (домены каскада через DoH + собственные IP сервера) в пользовательский
+    cfg['whitelist'] и персистил их навсегда. Домен без A-записи на DNS
+    регистратора (ns*.reg.ru) резолвится в парковочный кластер round-robin
+    (ParkingCrew, 194.67.71.0/24) — за месяцы в «Пользовательском whitelist»
+    накопилось ~80 чужих IP; DDNS-ротация нод оседала всей историей.
+
+    Теперь авто-IP живут в рантайм-сете auto_wl (ровно один прогон, каждые
+    5 минут пересчитывается), cfg['whitelist'] навсегда = только ручные
+    записи из меню [5] «Управление whitelist».
+    """
+
+    def _body(self):
+        """Исходник cron-шаблона (f-string до подстановки порога/окна)."""
+        import re
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "autoban.py").read_text()
+        m = re.search(r'py_body = f"""(.*?)"""', src, re.DOTALL)
+        self.assertIsNotNone(m, "py_body f-string не найден в исходнике")
+        return m.group(1)
+
+    def test_auto_wl_runtime_set_declared(self):
+        """В шаблоне объявлен отдельный рантайм-сет auto_wl."""
+        self.assertIn("auto_wl = set()", self._body())
+
+    def test_no_whitelist_add_left_in_cron(self):
+        """Главный маркер регрессии: в cron-шаблоне не осталось ни одного
+        whitelist.add(...) — авто-IP добавляются только в auto_wl."""
+        self.assertNotIn("whitelist.add(", self._body(),
+                         "cron-скрипт снова добавляет авто-IP в пользовательский whitelist")
+
+    def test_scan_skips_whitelist_and_auto_wl(self):
+        """Сканер TLS-ошибок пропускает IP из обоих сетов."""
+        self.assertIn("im.group(1) in whitelist or im.group(1) in auto_wl",
+                      self._body())
+
+    def test_user_whitelist_still_persisted(self):
+        """Прошлый FIX сохранён: cfg['whitelist'] записывается обратно в
+        autoban.json — ручные записи пользователя не теряются."""
+        self.assertIn("cfg['whitelist'] = sorted(whitelist)", self._body())
+
+    def test_cron_run_does_not_persist_auto_ips(self):
+        """E2E: генерируем cron-скрипт НАСТОЯЩЕЙ функцией _autoban_install_cron()
+        (f-string интерполируется как в проде), подменяем захардкоженные пути
+        на tmp, исполняем. Ожидание: нода каскада из state.json НЕ забанена
+        (auto_wl), посторонний забанен, а пользовательский whitelist в
+        autoban.json НЕ вырос."""
+        import re, shutil
+        from datetime import datetime
+        _setup_core()
+        from chimera.modules import autoban
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            script_f = tmp / "xray-autoban.sh"
+            cron_f   = tmp / "xray-autoban.cron"
+            with patch.object(autoban, "_XRAY_BAN_SCRIPT", script_f), \
+                 patch.object(autoban, "_XRAY_BAN_CRON", cron_f):
+                autoban._autoban_install_cron(10, 10)
+            sh = script_f.read_text()
+            # Вырезаем python-тело из bash-обёртки (heredoc)
+            m = re.search(r"python3 - <<'PYEOF'\n(.*)\nPYEOF", sh, re.DOTALL)
+            self.assertIsNotNone(m, "python-тело не найдено в сгенерированном .sh")
+            body = m.group(1)
+            # Подмена путей на песочницу (порядок важен: сначала частные)
+            body = body.replace("'/var/log/xray-autoban.log'",
+                                f"'{tmp}/xray-autoban.log'")
+            body = body.replace("'/var/log/xray-ban-report.txt'",
+                                f"'{tmp}/xray-ban-report.txt'")
+            body = body.replace("'/var/log/xray/error.log'",
+                                f"'{tmp}/error.log'")
+            body = body.replace("'/var/lib/xray-installer/", f"'{tmp}/")
+            self.assertIn(f"'{tmp}/autoban.json'", body,
+                          "подмена пути BAN_STATE не сработала — тест сломан")
+
+            # state.json: нода каскада с literal-IP (резолв не нужен, сеть не трогаем)
+            (tmp / "state.json").write_text(json.dumps({
+                "chain_nodes": [{"host": "203.0.113.10"}],
+            }))
+            # error.log: по 10 TLS-ошибок от ноды (203.0.113.10) и от постороннего (198.51.100.7)
+            now = datetime.now()
+            lines = []
+            for ip in ("203.0.113.10", "198.51.100.7"):
+                for _ in range(10):
+                    lines.append(
+                        f"{now:%Y/%m/%d %H:%M:%S} [Warning] v2ray/core: "
+                        f"failed to read request from {ip}: tls: handshake failure")
+            (tmp / "error.log").write_text("\n".join(lines) + "\n")
+            # Начальный state: только пользовательский whitelist
+            (tmp / "autoban.json").write_text(json.dumps({
+                "enabled": True,
+                "whitelist": ["127.0.0.1", "::1"],
+                "banned": {},
+            }, ensure_ascii=False))
+
+            g = {"__name__": "cron_script_test"}
+            run_mock = MagicMock(return_value=MagicMock(returncode=0))
+            with patch("subprocess.run", run_mock), \
+                 patch("urllib.request.urlopen", side_effect=OSError("no network")):
+                exec(compile(body, "<cron-script>", "exec"), g)
+
+            cfg = json.loads((tmp / "autoban.json").read_text())
+            # 1) Пользовательский whitelist не вырос — авто-IP не персистятся
+            self.assertEqual(cfg["whitelist"], ["127.0.0.1", "::1"],
+                             "cron-скрипт записал авто-IP в пользовательский whitelist — регрессия кейса <node-2>!")
+            # 2) Нода каскада НЕ забанена (защита auto_wl работает)
+            self.assertNotIn("203.0.113.10", cfg["banned"],
+                             "нода каскада забанена — auto_wl не защищает")
+            # 3) Посторонний IP забанен (авто-бан работает)
+            self.assertIn("198.51.100.7", cfg["banned"],
+                          "посторонний IP не забанен — авто-бан сломан")
+            self.assertEqual(cfg["banned"]["198.51.100.7"]["count"], 10)
+            # 4) История пополнилась записью (FIX кейса vds14808 не сломан)
+            self.assertEqual(len(cfg.get("ban_history", [])), 1)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
