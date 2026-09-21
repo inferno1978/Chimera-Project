@@ -1630,6 +1630,27 @@ _SINGBOX_RULESET_DEFS = [
 ]
 
 
+def _collect_mieru_outbounds_for_multinode(user: dict) -> list:
+    """mieru-outbound'ы для мульти-нодового конфига (режим «Mieru + B4»).
+
+    Ленивый импорт subscription (цикл модулей: subscription импортирует
+    subscription_multinode на верхнем уровне) — к моменту вызова оба
+    модуля уже загружены, Python разбирает это по sys.modules.
+
+    Отдельно от сателлитных outbounds: mieru попадает в selector и
+    Streaming-группу (это полноценный выбор ноды с per-user кредом
+    через satellite_bindings, а не запасной протокол).
+    """
+    try:
+        from chimera.modules import subscription as _sub
+        server_ip = _sub._get_server_ip("4") or ""
+        obs, _meta = _sub._collect_mieru_json_outbounds(user, server_ip)
+        return obs
+    except Exception as e:
+        _log("WARN", f"_collect_mieru_outbounds_for_multinode: {e}")
+        return []
+
+
 def _singbox_ruleset_definitions() -> list[dict]:
     """Генерирует route.rule_set[] — remote .srs.
     download_detour убран: «detour к пустому direct-outbound» = FATAL
@@ -1753,12 +1774,39 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
         entry_tag = reg["entry"]["name"] if reg.get("entry") else None
         default_tag = entry_tag or first_tag
 
+        # ── Mieru-DPI (режим «Mieru + B4»): mita как нода конфига ──────
+        # Домены b4-сетов маршрутизируются на mieru-outbound (выход через
+        # RU-ноду с DPI-обходом b4), остальной трафик — прежние ноды.
+        # Выключен/не установлен → список пуст → конфиг байт-в-байт прежний.
+        mieru_tags: list[str] = []
+        mieru_domains: list[str] = []
+        mieru_server_domains: list[str] = []
+        try:
+            from chimera.modules import mieru_dpi as _md
+            if _md.is_mieru_dpi_active():
+                _mobs = _collect_mieru_outbounds_for_multinode(user)
+                if _mobs:
+                    node_outbounds.extend(_mobs)
+                    mieru_tags = [ob["tag"] for ob in _mobs]
+                    mieru_domains = _md.get_route_domains()
+                    # домен mita (если задан) — в protect (как домены нод):
+                    # нельзя, чтобы dial к mita уходил через прокси-петлю.
+                    for ob in _mobs:
+                        srv = ob.get("server") or ""
+                        if _is_domain(srv):
+                            mieru_server_domains.append(srv)
+        except Exception as e:
+            _log("WARN", f"mieru_dpi outbounds: {e}")
+
+
         # ── Группы (selector + urltest) ─────────────────────────────────
         # Главный selector — выбор ноды + auto + сателлиты.
         selector_proxy = {
             "type": "selector",
             "tag": SELECTOR_TAG,
-            "outbounds": node_tags + extra_tags + [URLTEST_TAG],
+            # mieru-ноды — в общем selector (выбираются руками/правилами;
+            # в urltest не включаем — протокол другой, пинг-семантика иная)
+            "outbounds": node_tags + extra_tags + mieru_tags + [URLTEST_TAG],
             "default": default_tag,
             "interrupt_exist_connections": True,
         }
@@ -1787,11 +1835,18 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
                 members = (([entry_tag] if entry_tag else [])
                            + [exit_tags[0], auto_tag] + exit_tags[1:]
                            + [SELECTOR_TAG])
+                # Streaming: mieru-ноды первыми в списке (RU-IP + b4 —
+                # семантика «YouTube via RU»); дефолт группы при активном
+                # Mieru-DPI — mieru (юзер может переключить руками).
+                streaming_default = entry_tag or exit_tags[0]
+                if gtag == STREAMING_TAG and mieru_tags:
+                    members = list(mieru_tags) + members
+                    streaming_default = mieru_tags[0]
                 group_outbounds.append({
                     "type": "selector",
                     "tag": gtag,
                     "outbounds": members,
-                    "default": entry_tag or exit_tags[0],
+                    "default": streaming_default,
                 })
                 # urltest для этой группы (exit-ноды + entry-каскад).
                 group_outbounds.append({
@@ -1808,6 +1863,9 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
         # Нельзя пускать домены нод через прокси — иначе селектор для них
         # сам себя вызывает (бесконечный цикл до таймаута).
         node_domains = _node_domains(nodes)
+        # домен mita (Mieru-DPI) защищаем тем же правилом
+        if mieru_server_domains:
+            node_domains = sorted(set(node_domains + mieru_server_domains))
         protect_rules: list[dict] = []
         if node_domains:
             protect_rules.append({
@@ -1825,6 +1883,15 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
                           "action": "reject"})
         # 3. Защита прокси-доменов
         all_rules.extend(protect_rules)
+        # 3.5 Mieru-DPI: домены b4-сетов → mieru-outbound. Правило стоит
+        # ВЫШЕ streaming-групп (п.4): domain_suffix-правила кастомных
+        # ресурсов закреплены админом и приоритетнее geosite-категорий.
+        if mieru_tags and mieru_domains:
+            all_rules.append({
+                "domain_suffix": list(mieru_domains),
+                "action": "route",
+                "outbound": mieru_tags[0],
+            })
         # 4. Streaming/Telegram/AI — только если есть exit-ноды
         if exit_tags:
             all_rules.extend([
