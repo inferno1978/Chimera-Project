@@ -968,5 +968,108 @@ class TestCronWhitelistNoPersist(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestWhitelistBatchOperations(unittest.TestCase):
+    """
+    FEAT (кейс <node-2>, 2026-09-21): пакетные операции в меню [5]
+    «Управление whitelist» — добавление списком, удаление по номерам
+    ('3', '1,3,5', '2-25'), 'all' и по IP — тем же синтаксисом, что и
+    разбан в меню [3]. Раньше удаление было только по одному номеру:
+    вычищать 90 записей «лапками» — чокнуться можно.
+    """
+
+    def _parse(self, raw, items, known=None):
+        from chimera.modules.autoban import _parse_selection_targets
+        return _parse_selection_targets(raw, items, known=known)
+
+    def test_parse_single_number(self):
+        targets, warns = self._parse("3", ["a", "b", "c"])
+        self.assertEqual(targets, ["c"])
+        self.assertEqual(warns, [])
+
+    def test_parse_comma_list(self):
+        targets, warns = self._parse("1,3,5", ["a", "b", "c", "d", "e"])
+        self.assertEqual(targets, ["a", "c", "e"])
+
+    def test_parse_number_range(self):
+        targets, warns = self._parse("2-4", ["a", "b", "c", "d", "e"])
+        self.assertEqual(targets, ["b", "c", "d"])
+
+    def test_parse_range_reversed(self):
+        targets, _ = self._parse("4-2", ["a", "b", "c", "d", "e"])
+        self.assertEqual(targets, ["b", "c", "d"])
+
+    def test_parse_range_clamped(self):
+        targets, _ = self._parse("3-99", ["a", "b", "c"])
+        self.assertEqual(targets, ["c"])
+
+    def test_parse_all_variants(self):
+        for raw in ("all", "все", "*"):
+            targets, _ = self._parse(raw, ["a", "b"])
+            self.assertEqual(targets, ["a", "b"])
+
+    def test_parse_exact_ip(self):
+        items = ["127.0.0.1", "8.8.8.8"]
+        targets, _ = self._parse("8.8.8.8", items)
+        self.assertEqual(targets, ["8.8.8.8"])
+
+    def test_parse_mixed_comma_numbers_and_ips(self):
+        items = ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+        targets, warns = self._parse("2,3.3.3.3", items)
+        self.assertEqual(targets, ["2.2.2.2", "3.3.3.3"])
+
+    def test_parse_out_of_range_warns(self):
+        targets, warns = self._parse("9", ["a"])
+        self.assertEqual(targets, [])
+        self.assertTrue(any("вне диапазона" in w for w in warns))
+
+    def test_parse_not_found_warns(self):
+        targets, warns = self._parse("9.9.9.9", ["1.1.1.1"])
+        self.assertEqual(targets, [])
+        self.assertTrue(any("не найден" in w for w in warns))
+
+    def test_parse_dedup(self):
+        targets, _ = self._parse("1,1,2-2", ["a", "b"])
+        self.assertEqual(targets, ["a", "b"])
+
+    def _add_many(self, wl, raw):
+        from chimera.modules.autoban import _whitelist_add_many
+        return _whitelist_add_many(wl, raw)
+
+    def test_add_many_valid_list(self):
+        wl = ["127.0.0.1"]
+        added, warns = self._add_many(wl, "203.0.113.142, 203.0.113.143, 203.0.113.144")
+        self.assertEqual(added, ["203.0.113.142", "203.0.113.143", "203.0.113.144"])
+        self.assertEqual(warns, [])
+        self.assertEqual(len(wl), 4)
+
+    def test_add_many_duplicate_skipped(self):
+        wl = ["1.2.3.4"]
+        added, warns = self._add_many(wl, "1.2.3.4, 5.6.7.8")
+        self.assertEqual(added, ["5.6.7.8"])
+        self.assertTrue(any("уже в whitelist" in w for w in warns))
+
+    def test_add_many_cidr_rejected(self):
+        # КРИТИЧНО (кейс <node-2>): whitelist сравнивает точные строки —
+        # «203.0.113.141/24» молча не срабатывает никогда → отклоняем явно.
+        wl = []
+        added, warns = self._add_many(wl, "203.0.113.141/24")
+        self.assertEqual(added, [])
+        self.assertTrue(any("подсети не поддерживаются" in w for w in warns))
+
+    def test_add_many_invalid_rejected(self):
+        wl = []
+        added, warns = self._add_many(wl, "not-an-ip, ::1")
+        self.assertEqual(added, ["::1"])  # IPv6 валиден
+        self.assertTrue(any("не похоже на IP" in w for w in warns))
+
+    def test_menu_uses_batch_helpers(self):
+        """Source-маркеры: [5] использует общий парсер и много-IP добавление,
+        [3] — общий парсер (симметрия UX разбана и whitelist)."""
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "autoban.py").read_text()
+        self.assertIn("_whitelist_add_many(wl, raw_ips)", src)
+        self.assertIn("_parse_selection_targets(raw_n, wl)", src)
+        self.assertIn("_parse_selection_targets(raw, ban_list", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

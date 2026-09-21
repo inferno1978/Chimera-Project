@@ -80,6 +80,7 @@
 | `fail2ban_manager.py` | Управление fail2ban jail'ами через меню |
 | `ipban.py` | Ручной ban/unban IP-адресов через меню |
 | `ipset_persist.py` | Сохранение ipset правил после ребута (systemd unit) |
+| `fw_guard.py` | FW Guard — авто-восстановление правил ufw/ipset/iptables (systemd timer, снапшот «как до сбоя») |
 | `ssh_hardening.py` | SSH hardening: смена порта, отключение паролей, AllowUsers, 2FA (TOTP через google-authenticator) |
 | `honeypot.py` | Honeypot для сканеров (имитация сервисов) |
 

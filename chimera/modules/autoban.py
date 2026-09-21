@@ -1224,6 +1224,107 @@ BAN_STATE.chmod(0o600)
 
 
 
+def _parse_selection_targets(raw: str, items: list,
+                              known: "set | None" = None) -> "tuple[list, list]":
+    """Разбор выбора из нумерованного списка: '3' | '1,3,5' | '2-6' |
+    'all'/'все'/'*' | точное значение (IP).
+
+    Единый парсер для меню [3] «Разбанить IP» и [5] «Управление whitelist»
+    (кейс <node-2>: вычищать 90 записей whitelist по одной — чокнуться
+    можно). items — список в порядке нумерации меню (1-based).
+    known — допустимые точные значения (по умолчанию set(items)).
+    Возвращает (targets, warnings) — без дублей, порядок как в items.
+    """
+    targets: list = []
+    warnings: list = []
+    r = (raw or "").strip().lower()
+    if not r:
+        return targets, warnings
+    if known is None:
+        known = set(items)
+
+    def _add(value) -> None:
+        if value not in targets:
+            targets.append(value)
+
+    if r in ("all", "все", "*"):
+        return list(items), warnings
+
+    # Перечисление через запятую: '1,3,5' или '1.2.3.4,5.6.7.8'
+    if "," in r:
+        for token in r.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            sub, sub_warns = _parse_selection_targets(token, items, known)
+            warnings.extend(sub_warns)
+            for v in sub:
+                _add(v)
+        return targets, warnings
+
+    # Одиночный номер: '3'
+    if r.isdigit():
+        idx = int(r)
+        if 1 <= idx <= len(items):
+            _add(items[idx - 1])
+        else:
+            warnings.append(f"Номер {idx} вне диапазона (1..{len(items)})")
+        return targets, warnings
+
+    # Диапазон номеров: '2-6' (IP содержит точки; здесь — чистые цифры)
+    if "-" in r and not r.startswith("-"):
+        parts = r.split("-", 1)
+        if parts[0].strip().isdigit() and parts[1].strip().isdigit():
+            lo, hi = int(parts[0]), int(parts[1])
+            lo, hi = min(lo, hi), max(lo, hi)
+            for i in range(lo, hi + 1):
+                if 1 <= i <= len(items):
+                    _add(items[i - 1])
+            return targets, warnings
+        warnings.append("Неверный диапазон. Формат: 2-6")
+        return targets, warnings
+
+    # Точное значение (IP)
+    if r in known:
+        _add(r)
+    else:
+        warnings.append(f"'{raw}' не найден")
+    return targets, warnings
+
+
+def _whitelist_add_many(wl: list, raw: str) -> "tuple[list, list]":
+    """Добавляет в whitelist несколько IP (запятая/пробелы).
+
+    Валидация точных IP (IPv4/IPv6) — подсети/CIDR НЕ поддерживаются:
+    whitelist автобана сравнивает точные строки (кейс <node-2> —
+    «203.0.113.141/24» молча не срабатывает никогда).
+    Мутирует wl по месту. Возвращает (added, warnings).
+    """
+    import ipaddress
+    added: list = []
+    warnings: list = []
+    tokens = [t.strip() for t in re.split(r"[,\s]+", raw or "") if t.strip()]
+    if not tokens:
+        warnings.append("Пустой ввод")
+        return added, warnings
+    for token in tokens:
+        if "/" in token:
+            warnings.append(f"{token}: подсети не поддерживаются — только точные "
+                            f"IP (сравнение по строке)")
+            continue
+        try:
+            ipaddress.ip_address(token)
+        except ValueError:
+            warnings.append(f"{token}: не похоже на IP — пропущен")
+            continue
+        if token in wl:
+            warnings.append(f"{token}: уже в whitelist")
+            continue
+        wl.append(token)
+        added.append(token)
+    return added, warnings
+
+
 def do_manage_autoban() -> None:
     """Меню автоматического бана IP по TLS-ошибкам."""
     core = _core_module()
@@ -1348,49 +1449,12 @@ def do_manage_autoban() -> None:
             raw = input(f"  {CYAN}Ввод:{NC} ").strip().lower()
 
             # ── Разбираем ввод → список целевых IP ────────────────────────────
-            targets: list[str] = []
-
-            if raw in ("all", "все", "*"):
-                targets = list(ban_list)
-
-            elif "-" in raw and not raw.startswith("-") and not raw.replace(".", "").replace("-", "").isdigit() is False:
-                # Диапазон номеров: "2-6"
-                parts = raw.split("-", 1)
-                if parts[0].isdigit() and parts[1].isdigit():
-                    lo, hi = int(parts[0]), int(parts[1])
-                    lo, hi = min(lo, hi), max(lo, hi)
-                    targets = [ban_list[i-1] for i in range(lo, hi+1)
-                               if 1 <= i <= len(ban_list)]
-                else:
-                    warn("Неверный диапазон. Формат: 2-6")
-
-            elif "," in raw:
-                # Перечисление: "1,3,5" или "1.2.3.4,5.6.7.8"
-                for token in raw.split(","):
-                    token = token.strip()
-                    if token.isdigit():
-                        idx = int(token)
-                        if 1 <= idx <= len(ban_list):
-                            targets.append(ban_list[idx-1])
-                        else:
-                            warn(f"Номер {idx} вне диапазона — пропущен")
-                    elif token in banned:
-                        targets.append(token)
-                    else:
-                        warn(f"'{token}' не найден — пропущен")
-
-            elif raw.isdigit():
-                idx = int(raw)
-                if 1 <= idx <= len(ban_list):
-                    targets = [ban_list[idx-1]]
-                else:
-                    warn(f"Номер {idx} вне диапазона")
-
-            elif raw in banned:
-                targets = [raw]
-
-            else:
-                warn("Не удалось распознать ввод")
+            # Единый парсер (общий с меню [5] whitelist): '3' | '1,3,5' | '2-6'
+            # | 'all'/'все'/'*' | точный IP.
+            targets, _sel_warns = _parse_selection_targets(raw, ban_list,
+                                                            known=set(banned))
+            for _w in _sel_warns:
+                warn(_w)
 
             # ── Выполняем разбан ──────────────────────────────────────────────
             if targets:
@@ -1582,24 +1646,44 @@ def do_manage_autoban() -> None:
                     in_wl = "  (уже в whitelist)" if ip in wl else ""
                     _box_row(f"    {DIM}• {ip}{in_wl}{NC}")
             _box_sep()
-            _box_item("+", f"Добавить IP  {DIM}(например: свой рабочий IP, IP мониторинга){NC}")
-            _box_item("-", f"Удалить IP")
+            _box_item("+", f"Добавить IP  {DIM}(один или список через запятую){NC}")
+            _box_item("-", f"Удалить  {DIM}N | N,M | N-M | all | IP{NC}")
             _box_bottom()
             act = input("  Действие [+/-/Enter]: ").strip()
             if act == "+":
-                new_ip = input("  IP для whitelist: ").strip()
-                if new_ip and new_ip not in wl:
-                    wl.append(new_ip)
+                #  FEAT (кейс <node-2>): пакетное добавление — список IP через
+                # запятую (например, пул IP мониторинга: 3 адреса одним вводом).
+                raw_ips = input("  IP (или список через запятую): ").strip()
+                added, add_warns = _whitelist_add_many(wl, raw_ips)
+                if added or add_warns:
                     cfg["whitelist"] = wl
                     _autoban_save(cfg)
-                    success(f"Добавлен в whitelist: {new_ip}")
+                if added:
+                    success(f"Добавлено ({len(added)}): {', '.join(added)}")
+                for msg in add_warns:
+                    warn(msg)
             elif act == "-":
-                raw_n = input("  Номер для удаления: ").strip()
-                if raw_n.isdigit() and 1 <= int(raw_n) <= len(wl):
-                    removed = wl.pop(int(raw_n)-1)
+                #  FEAT (кейс <node-2>): пакетное удаление — по номерам
+                # ('3', '1,3,5', '2-25'), 'all' или по IP напрямую — тем же
+                # синтаксисом, что и разбан в меню [3].
+                raw_n = input("  Удалить (N / N,M / N-M / all / IP): ").strip().lower()
+                targets, _sel_warns = _parse_selection_targets(raw_n, wl)
+                for _w in _sel_warns:
+                    warn(_w)
+                if targets and raw_n in ("all", "все", "*"):
+                    if input(f"  {YELLOW}Удалить ВСЕ {len(targets)} записей? [y/N]: {NC}") \
+                            .strip().lower() in ("y", "yes", "д", "да"):
+                        for t in targets:
+                            wl.remove(t)
+                        cfg["whitelist"] = wl
+                        _autoban_save(cfg)
+                        success(f"Whitelist очищен (удалено {len(targets)})")
+                elif targets:
+                    for t in targets:
+                        wl.remove(t)  # по значению — безопасно при нескольких
                     cfg["whitelist"] = wl
                     _autoban_save(cfg)
-                    success(f"Удалён из whitelist: {removed}")
+                    success(f"Удалено ({len(targets)}): {', '.join(targets)}")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch in ("q", "Q", ""):
