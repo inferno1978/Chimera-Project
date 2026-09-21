@@ -161,6 +161,7 @@ from chimera.modules.hysteria2_menu      import do_hysteria2_menu
 # ── Новые модули (бэкап, cold boot, health monitor) ──────────────────────────
 from chimera.modules.config_backup       import backup_xray_config, do_backup_menu
 from chimera.modules.cold_boot_restore   import do_cold_boot_menu
+from chimera.modules.fw_guard           import do_manage_fw_guard
 from chimera.modules.node_health_monitor import do_health_monitor_menu
 # ── Новые модули (DPI-цензура снаружи + бенчмарк сервера) ────────────────────
 from chimera.modules.dpi_censor_check    import do_dpi_censor_check_menu
@@ -9131,6 +9132,7 @@ def _menu_security() -> None:
         _box_item("W",  f"🔌 AWG Tunnel Watchdog  {DIM}(fallback при падении awg0){NC}")
         _box_item("N",  f"🌐 AWG Multi-Node  {DIM}(ноды, failover, SSH-защита){NC}")
         _box_item("IP", f"📦 ipset Persist  {DIM}(восстановление ipset при reboot){NC}")
+        _box_item("FG", f"🧯 FW Guard  {DIM}(авто-восстановление правил ufw/ipset/iptables){NC}")
         _box_item("IB", f"🚫 IP-Бан  {DIM}(iptables/ipset: IP / подсеть / диапазон / ASN){NC}")
         _box_item("FB", f"🛡️  Fail2ban  {DIM}(банит за подбор пароля / лишние запросы){NC}")
         _box_item("CL", f"🔗 Кластер Exit Nodes  {DIM}(все Exit Nodes по SSH){NC}")
@@ -9189,6 +9191,8 @@ def _menu_security() -> None:
             do_manage_awg_watchdog()
         elif ch.lower() == "ip":
             do_manage_ipset_persist()
+        elif ch.lower() == "fg":
+            do_manage_fw_guard()
         elif ch.lower() == "ib":
             do_manage_ipban()
         elif ch.lower() == "fb":
