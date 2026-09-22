@@ -90,9 +90,34 @@ class TestSynLimiterConfig(unittest.TestCase):
         self.assertFalse(cfg.enabled)
         self.assertEqual(cfg.port, 0)
         self.assertEqual(cfg.rate_per_sec, 1)
+        self.assertEqual(cfg.rate_unit, "sec")
         self.assertEqual(cfg.burst, 1)
         self.assertEqual(cfg.htable_expire_ms, 60000)
         self.assertEqual(cfg.preset_name, "hard")
+        self.assertEqual(cfg.mode, "simple")
+
+    def test_v3_mode_construction(self):
+        """Можно создать cfg с режимом v3_u32."""
+        from chimera.modules.telemt_syn_limiter import SynLimiterConfig, _MODE_V3
+        cfg = SynLimiterConfig(
+            enabled=True, port=8443,
+            rate_per_sec=54, rate_unit="minute", burst=1,
+            preset_name="v3", mode=_MODE_V3,
+        )
+        self.assertTrue(cfg.enabled)
+        self.assertEqual(cfg.rate_per_sec, 54)
+        self.assertEqual(cfg.rate_unit, "minute")
+        self.assertEqual(cfg.mode, _MODE_V3)
+
+    def test_v2_mode_construction(self):
+        """Можно создать cfg с режимом v2_ttl."""
+        from chimera.modules.telemt_syn_limiter import SynLimiterConfig, _MODE_V2
+        cfg = SynLimiterConfig(
+            enabled=True, port=8443,
+            rate_per_sec=54, rate_unit="minute", burst=1,
+            preset_name="v2_ttl", mode=_MODE_V2,
+        )
+        self.assertEqual(cfg.mode, _MODE_V2)
 
 
 class TestLoadSaveState(unittest.TestCase):
@@ -138,14 +163,36 @@ class TestLoadSaveState(unittest.TestCase):
         self.assertTrue(cfg.enabled)
         self.assertEqual(cfg.port, 443)
         self.assertEqual(cfg.rate_per_sec, 5)
+        # rate_unit и mode не были в JSON — берём дефолты dataclass (обратная совместимость)
+        self.assertEqual(cfg.rate_unit, "sec")
+        self.assertEqual(cfg.mode, "simple")
+
+    def test_load_preserves_v3_mode(self):
+        """V3 mode сохраняется через save/load цикл."""
+        from chimera.modules.telemt_syn_limiter import (
+            _load_state, _save_state, SynLimiterConfig, _MODE_V3,
+        )
+        cfg = SynLimiterConfig(
+            enabled=True, port=8443,
+            rate_per_sec=54, rate_unit="minute", burst=1,
+            preset_name="v3", mode=_MODE_V3,
+        )
+        with self._patch():
+            _save_state(cfg)
+            loaded = _load_state()
+        self.assertTrue(loaded.enabled)
+        self.assertEqual(loaded.port, 8443)
+        self.assertEqual(loaded.rate_per_sec, 54)
+        self.assertEqual(loaded.rate_unit, "minute")
+        self.assertEqual(loaded.mode, _MODE_V3)
 
     def test_save_then_load(self):
         from chimera.modules.telemt_syn_limiter import (
             _load_state, _save_state, SynLimiterConfig,
         )
         cfg = SynLimiterConfig(enabled=True, port=8443, rate_per_sec=10,
-                                burst=20, htable_expire_ms=120000,
-                                preset_name="medium")
+                                rate_unit="sec", burst=20, htable_expire_ms=120000,
+                                preset_name="medium", mode="simple")
         with self._patch():
             _save_state(cfg)
             loaded = _load_state()
@@ -199,16 +246,81 @@ class TestPresets(unittest.TestCase):
         self.assertGreater(len(_PRESETS), 0)
 
     def test_each_preset_has_required_fields(self):
-        """Структура: (preset_name, rate_per_sec, burst, label, detail, recommended)."""
+        """Структура: tuple of 8 элементов
+        (preset_name, rate_per_sec, rate_unit, burst, label, detail, recommended, mode).
+        """
         from chimera.modules.telemt_syn_limiter import _PRESETS
         for name, preset in _PRESETS.items():
             with self.subTest(preset=name):
-                # preset — tuple из 6 элементов
+                # preset — tuple из 8 элементов
                 self.assertIsInstance(preset, tuple)
-                self.assertEqual(len(preset), 6)
+                self.assertEqual(len(preset), 8)
                 # rate_per_sec и burst — положительные int
-                self.assertGreater(preset[1], 0)  # rate_per_sec
-                self.assertGreater(preset[2], 0)  # burst
+                self.assertGreater(preset[1], 0)  # rate_per_sec (int)
+                # preset[2] — rate_unit (str "sec"|"minute"), проверяем ниже
+                self.assertIsInstance(preset[2], str)
+                self.assertIn(preset[2], ("sec", "minute"))
+                self.assertGreater(preset[3], 0)  # burst (int)
+                # preset[5] — detail (str)
+                self.assertIsInstance(preset[5], str)
+                # preset[6] — recommended (bool)
+                self.assertIsInstance(preset[6], bool)
+                # mode — валидная строка
+                self.assertIn(preset[7], ("v3_u32", "v2_ttl", "simple"))
+
+    def test_v3_preset_exists_and_recommended(self):
+        """V3 preset должен быть в _PRESETS и быть recommended."""
+        from chimera.modules.telemt_syn_limiter import _PRESETS, _MODE_V3
+        # V3 — preset под ключом "1"
+        self.assertIn("1", _PRESETS)
+        pname, rate, rate_unit, burst, label, detail, recommended, mode = _PRESETS["1"]
+        self.assertEqual(pname, "v3")
+        self.assertEqual(rate, 54)
+        self.assertEqual(rate_unit, "minute")
+        self.assertEqual(burst, 1)
+        self.assertTrue(recommended)
+        self.assertEqual(mode, _MODE_V3)
+
+    def test_v2_preset_exists(self):
+        """V2 preset должен быть в _PRESETS (fallback)."""
+        from chimera.modules.telemt_syn_limiter import _PRESETS, _MODE_V2
+        self.assertIn("2", _PRESETS)
+        pname, rate, rate_unit, burst, label, detail, recommended, mode = _PRESETS["2"]
+        self.assertEqual(pname, "v2_ttl")
+        self.assertEqual(rate, 54)
+        self.assertEqual(rate_unit, "minute")
+        self.assertEqual(mode, _MODE_V2)
+
+
+class TestIosConstants(unittest.TestCase):
+    """Константы для iOS fingerprint (u32 match, MARK, length+ttl)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_ios_u32_match_is_nonempty_string(self):
+        from chimera.modules.telemt_syn_limiter import _IOS_U32_MATCH
+        self.assertIsInstance(_IOS_U32_MATCH, str)
+        self.assertGreater(len(_IOS_U32_MATCH), 50)
+        # Должен содержать все 5 offsets (32, 40, 44, 48, 60)
+        for offset in ("32", "40", "44", "48", "60"):
+            self.assertIn(offset, _IOS_U32_MATCH)
+
+    def test_ios_mark_is_0x400(self):
+        """Марка 0x400 — стандартное значение из MTPROTO_FIX v3."""
+        from chimera.modules.telemt_syn_limiter import _IOS_MARK
+        self.assertEqual(_IOS_MARK, 0x400)
+
+    def test_ios_pkt_length_and_ttl(self):
+        from chimera.modules.telemt_syn_limiter import _IOS_PKT_LENGTH, _IOS_TTL_LT
+        self.assertEqual(_IOS_PKT_LENGTH, 64)
+        self.assertEqual(_IOS_TTL_LT, 65)
+
+    def test_mode_constants_distinct(self):
+        from chimera.modules.telemt_syn_limiter import _MODE_V3, _MODE_V2, _MODE_SIMPLE
+        self.assertNotEqual(_MODE_V3, _MODE_V2)
+        self.assertNotEqual(_MODE_V3, _MODE_SIMPLE)
+        self.assertNotEqual(_MODE_V2, _MODE_SIMPLE)
 
 
 if __name__ == "__main__":

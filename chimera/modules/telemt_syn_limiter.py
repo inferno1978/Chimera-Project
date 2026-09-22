@@ -3,6 +3,29 @@ chimera/modules/telemt_syn_limiter.py
 ───────────────────────────────────────────────────────────────────────────────
 Per-IP лимитер входящих SYN-пакетов для Telemt — стабилизация TCP-рукопожатия.
 
+Поддержаны три режима работы (портированы + адаптированы из
+MTPROTO_FIX_By_MEKO, https://github.com/Mekotofeuka/MTPROTO_FIX_By_MEKO):
+
+  1. V3 (u32 iOS-фингерпринт) — РЕКОМЕНДУЕТСЯ
+     • mangle PREROUTING: u32 match iOS ClientHello → MARK 0x400
+     • INPUT: ACCEPT для mark=0x400 БЕЗ лимита (iOS пропускается мгновенно)
+     • INPUT: hashlimit 54/min (~0.9/sec) per-IP для остальных + REJECT tcp-reset
+     • Плюс: iOS имеет отличные от Android/Desktop паттерны подключений
+       (мобильный клиент делает несколько SYN для multipath). Без разделения
+       iOS и non-iOS мешают друг другу в одном лимите — iOS пользователей
+       приходится выносить на отдельный порт (костыль telemt_ios_fix.py).
+       V3 решает эту проблему на одном порту.
+
+  2. V2 (TTL+Length) — FALLBACK для старых kernel без u32 match
+     • INPUT: ACCEPT для length=64 + ttl<65 (iOS fingerprint по размеру пакета)
+     • INPUT: hashlimit 54/min per-IP для остальных + REJECT tcp-reset
+     • Минус: TTL нестабилен через балансировщики — может дать ложное срабатывание
+
+  3. SIMPLE (без iOS detection) — исходный Chimera режим
+     • INPUT: hashlimit 1/sec per-IP burst 1 + REJECT tcp-reset
+     • Минус: iOS режется наравне со всеми → зависания в "Подключение..."
+       при нестабильной мобильной сети
+
 Контекст
 ────────
 Симптом: клиент Telegram у части пользователей зависает в статусе
@@ -21,36 +44,53 @@ telemt_mss_selector.py) здесь не помогает, потому что э
 Решение — секционировать SYN-трафик по клиентскому IP так, чтобы один
 "шумный" клиент не создавал нагрузку, которая мешает остальным, и чтобы
 дублирующиеся SYN от одного и того же клиента отбрасывались, давая TCP-стеку
-шанс довести до конца уже начатое соединение.
+шанс довести до конца уже начатое соединение. Дополнительно в режимах V3/V2
+iOS-клиенты пропускаются без лимита — у них паттерн SYN действительно требует
+нескольких попыток (это не ретраи, а multipath).
 
 Механизм: iptables `hashlimit` (НЕ nftables — проект целиком на iptables,
 смешивать backend'ы на одном сервере рискованно из-за разделяемых
 conntrack-таблиц и нет смысла тащить новую зависимость).
 
+Пример для V3 (рекомендуется):
+
+    # mangle PREROUTING — маркировка iOS SYN по u32 фингерпринту
+    iptables -t mangle -A PREROUTING -m u32 \
+        --u32 "32 & 0x000FFFFF = 0x0002FFFF && 40 & 0xFF000000 = 0x02000000 && \
+                44 & 0xFFFF0000 = 0x01030000 && 48 & 0xFFFFFF00 = 0x01010800 && \
+                60 & 0xFFFFFFFF = 0x04020000" \
+        -j MARK --set-mark 0x400
+
+    # INPUT — iOS без лимита (по марке)
+    iptables -A INPUT -p tcp --dport <PORT> --syn -m mark --mark 0x400 -j ACCEPT
+
+    # INPUT — все остальные в рамках лимита
     iptables -A INPUT -p tcp --dport <PORT> --syn \
         -m hashlimit --hashlimit-name telemt_syn \
         --hashlimit-mode srcip --hashlimit-srcmask 32 \
-        --hashlimit-upto <RATE>/sec --hashlimit-burst <BURST> \
-        --hashlimit-htable-expire <EXPIRE_MS> \
+        --hashlimit-upto 54/minute --hashlimit-burst 1 \
+        --hashlimit-htable-expire 60000 \
         -j ACCEPT
-    iptables -A INPUT -p tcp --dport <PORT> --syn -j REJECT --reject-with tcp-reset
 
-Первое правило пропускает SYN в пределах лимита на src-IP (через скрытую
-hash-таблицу ядра), второе — отбрасывает всё, что превысило лимит для
-данного IP, сразу с TCP RST (а не тихим DROP), чтобы клиент не ждал таймаут
-и реконнектился мгновенно. Не-SYN пакеты (уже установленные соединения)
-правило не трогает.
+    # INPUT — over-limit → REJECT tcp-reset
+    iptables -A INPUT -p tcp --dport <PORT> --syn \
+        -j REJECT --reject-with tcp-reset
 
-Пресеты (по аналогии с mtpr.sh, адаптированы под iptables hashlimit):
-  • жёсткий   — 1/sec  burst 1   (рекомендуется по умолчанию)
-  • средний   — 1/sec  burst 3
-  • мягкий    — 2/sec  burst 5
-  • свой      — произвольные rate/burst
+iOS u32 фингерпринт (стандартный SYN от iOS-устройства):
+  • offset 32: TCP window=0xFFFF + flags=SYN (0x02)
+  • offset 40: TCP option MSS (kind=0x02, len=0x04)
+  • offset 44: TCP option Window Scale (kind=0x03, len=0x01, value=0x01)
+  • offset 48: NOP (kind=0x01) + NOP (kind=0x01) + Timestamp (kind=0x08, len=0x08)
+  • offset 60: SACK Permitted (kind=0x04, len=0x02)
+
+Этот фингерпринт стабилен для iOS-клиентов Telegram и не встречается у
+Android/Desktop. Подробности: data/dictionary.md в MTPROTO_FIX_By_MEKO.
 
 Гарантии совместимости
 ──────────────────────
-  • Модуль работает только с правилами INPUT для порта Telemt — не трогает
-    REDIRECT-правила xray/tproxy (другая chain-логика, другой match).
+  • Модуль работает с правилами INPUT (filter table) и PREROUTING (mangle
+    table) для порта Telemt — не трогает REDIRECT-правила xray/tproxy
+    (другая chain-логика, другой match).
   • Все правила маркируются комментарием `--comment "telemt-syn-limit"` —
     отключение модуля удаляет ТОЛЬКО эти правила, ничего больше.
   • persist делается тем же механизмом, что и для остальных iptables-правил
@@ -59,10 +99,13 @@ hash-таблицу ядра), второе — отбрасывает всё, �
     с тем же безопасным паттерном (best-effort, без падения при отсутствии).
   • Установка/удаление идемпотентны: повторный enable() не плодит дубликаты
     правил — сначала disable(), потом добавление актуальных.
+  • При переключении между режимами (v3 → v2 → simple) модуль сначала
+    удаляет ВСЕ правила предыдущего режима (включая mangle PREROUTING),
+    затем добавляет правила нового режима.
 
 Интеграция с mtproto.py
 ───────────────────────
-  Vызывается из mtproto_menu() через lazy-import (как telemt_fallback):
+  Вызывается из mtproto_menu() через lazy-import (как telemt_fallback):
       from chimera.modules.telemt_syn_limiter import syn_limiter_menu
       syn_limiter_menu()
 
@@ -93,6 +136,38 @@ _SERVICE_NAME  = "telemt"
 _STATE_FILE    = Path("/var/lib/xray-installer/telemt_syn_limiter.json")
 _COMMENT_TAG   = "telemt-syn-limit"
 _HASHLIMIT_NAME = "telemt_syn"
+
+# ── iOS-фингерпринт для V3 режима (u32 match в mangle PREROUTING) ──────────
+# Портировано из MTPROTO_FIX_By_MEKO/data/rules.sh (preset "new"/v3).
+# Соответствует стандартному SYN-пакету iOS-устройства (Telegram client):
+#   • TCP window=0xFFFF + flags=SYN (offset 32)
+#   • TCP option MSS=0x02 len=0x04 (offset 40)
+#   • TCP option Window Scale=0x03 len=0x01 value=0x01 (offset 44)
+#   • NOP + NOP + Timestamp=0x08 len=0x08 (offset 48)
+#   • SACK Permitted=0x04 len=0x02 (offset 60)
+# Подробное объяснение каждого байта: data/dictionary.md в MTPROTO_FIX_By_MEKO
+_IOS_U32_MATCH = (
+    "32 & 0x000FFFFF = 0x0002FFFF && "
+    "40 & 0xFF000000 = 0x02000000 && "
+    "44 & 0xFFFF0000 = 0x01030000 && "
+    "48 & 0xFFFFFF00 = 0x01010800 && "
+    "60 & 0xFFFFFFFF = 0x04020000"
+)
+# Марка, которой mangle помечает iOS-пакеты; потом INPUT цепочка делает
+# ACCEPT для пакетов с этой маркой без лимита.
+_IOS_MARK = 0x400
+
+# ── iOS-фингерпринт для V2 режима (length + ttl в INPUT, fallback если нет u32) ──
+# Портировано из MTPROTO_FIX_By_MEKO/data/rules.sh (preset "old"/v2).
+# iOS Telegram SYN пакет имеет длину 64 байта и TTL<65 (мобильная сеть).
+# Менее надёжно чем V3: TTL может быть изменён балансировщиками в пути.
+_IOS_PKT_LENGTH = 64
+_IOS_TTL_LT     = 65
+
+# Режимы работы лимитера
+_MODE_V3     = "v3_u32"      # u32 iOS fingerprint + MARK
+_MODE_V2     = "v2_ttl"      # length=64 + ttl<65 (fallback)
+_MODE_SIMPLE = "simple"      # без iOS detection (исходный Chimera режим)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ЦВЕТА (self-contained, как в telemt_mss_selector.py)
@@ -232,17 +307,46 @@ def _get_telemt_port() -> int:
 # ══════════════════════════════════════════════════════════════════════════════
 @dataclass
 class SynLimiterConfig:
+    """Конфигурация лимитера, сохраняемая в /var/lib/xray-installer/telemt_syn_limiter.json.
+
+    Поля `rate_unit` и `mode` добавлены в той же минорной версии, что и поддержка
+    V3/V2 пресетов. Для обратной совместимости со старыми state-файлами:
+      • если `rate_unit` отсутствует → дефолт "sec"
+      • если `mode` отсутствует → дефолт "simple" (старый hard/medium/soft)
+    """
     enabled: bool = False
     port: int = 0
-    rate_per_sec: int = 1
+    rate_per_sec: int = 1            # raw число (1, 54, и т.д.)
+    rate_unit: str = "sec"           # "sec" или "minute" (для hashlimit-upto)
     burst: int = 1
     htable_expire_ms: int = 60000   # 60 сек — время жизни записи в hash-таблице
     preset_name: str = "hard"
+    mode: str = _MODE_SIMPLE         # "v3_u32" | "v2_ttl" | "simple"
 
+# Структура tuple в _PRESETS (8 элементов):
+#   (preset_name, rate_per_sec, rate_unit, burst, label, detail, recommended, mode)
 _PRESETS = {
-    "1": ("hard",   1, 1, "Жёсткий",  "1/sec burst 1 — рекомендуется при нестабильных подключениях", True),
-    "2": ("medium", 1, 3, "Средний",  "1/sec burst 3 — если жёсткий режим режет легитимные ретраи", False),
-    "3": ("soft",   2, 5, "Мягкий",   "2/sec burst 5 — мягкая защита для серверов с большим числом клиентов", False),
+    # ── V3 (РЕКОМЕНДУЕТСЯ) — u32 iOS fingerprint + MARK ───────────────────────
+    "1": ("v3",     54, "minute", 1, "V3 iptables (MEKO)",
+          "u32 iOS-фингерпринт в mangle + 54/мин per-IP. iOS без лимита, остальные 54/мин. "
+          "Стандартный фикс MTPROTO_FIX v3 — один порт для всех устройств без конфликтов.",
+          True, _MODE_V3),
+    # ── V2 — TTL+Length (fallback для kernel без u32) ─────────────────────────
+    "2": ("v2_ttl", 54, "minute", 1, "V2 iptables (TTL+Length)",
+          "length=64 + ttl<65 для iOS. Универсальный fallback для старых kernel "
+          "без xt_u32 модуля. Менее надёжен: TTL может меняться балансировщиками.",
+          False, _MODE_V2),
+    # ── SIMPLE (исходный Chimera режим, без iOS detection) ───────────────────
+    "3": ("hard",    1, "sec",     1, "Жёсткий (без iOS detection)",
+          "1/sec per-IP burst 1, REJECT tcp-reset. Простой per-IP лимитер без "
+          "iOS fingerprint — режет iOS наравне со всеми. Только если u32 не работает.",
+          False, _MODE_SIMPLE),
+    "4": ("medium",  1, "sec",     3, "Средний (без iOS detection)",
+          "1/sec burst 3 — менее строгий, для серверов с большим числом клиентов.",
+          False, _MODE_SIMPLE),
+    "5": ("soft",    2, "sec",     5, "Мягкий (без iOS detection)",
+          "2/sec burst 5 — мягкая защита для загруженных серверов.",
+          False, _MODE_SIMPLE),
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -274,11 +378,13 @@ def _rule_exists() -> bool:
 
 def _remove_rules() -> int:
     """
-    Удаляет ВСЕ правила INPUT с нашим тегом, независимо от порта/rate.
+    Удаляет ВСЕ правила INPUT с нашим тегом, независимо от порта/rate,
+    А ТАКЖЕ правило mangle PREROUTING (u32 MARK для iOS, если есть).
     Безопасно вызывать многократно — если правил нет, просто ничего не делает.
     Возвращает количество удалённых правил.
     """
     removed = 0
+    # ── Чистим filter INPUT ────────────────────────────────────────────────────
     for _ in range(20):  # защита от бесконечного цикла, если что-то пошло не так
         r = _run(["iptables", "-S", "INPUT"], capture=True)
         lines = [l for l in (r.stdout or "").splitlines() if _COMMENT_TAG in l]
@@ -293,28 +399,133 @@ def _remove_rules() -> int:
         if r2.returncode != 0:
             break
         removed += 1
+    # ── Чистим mangle PREROUTING (u32 MARK для V3 режима) ─────────────────────
+    # Аналогичный цикл: ищем правила с нашим тегом в mangle PREROUTING,
+    # удаляем по одному. Безопасно если правил нет.
+    for _ in range(20):
+        r = _run(["iptables", "-t", "mangle", "-S", "PREROUTING"], capture=True)
+        lines = [l for l in (r.stdout or "").splitlines() if _COMMENT_TAG in l]
+        if not lines:
+            break
+        line = lines[0]
+        if not line.startswith("-A PREROUTING"):
+            break
+        # Конвертация: "-A PREROUTING ..." → "-D PREROUTING ..."
+        del_args = ["iptables", "-t", "mangle", "-D", "PREROUTING"] + line.split()[2:]
+        r2 = _run(del_args, capture=True)
+        if r2.returncode != 0:
+            break
+        removed += 1
     return removed
 
 def _apply_rules(cfg: SynLimiterConfig) -> tuple[bool, str]:
     """
     Применяет правила hashlimit для текущего cfg.
-    Идемпотентно: сначала удаляет старые правила с нашим тегом, потом
-    добавляет новые. Порядок ACCEPT-затем-DROP важен — iptables проходит
-    правила по порядку, поэтому ACCEPT (в пределах лимита) должен идти первым.
+
+    Поддерживаются 3 режима (см. docstring сверху):
+      • v3_u32 — mangle PREROUTING u32 MARK + INPUT ACCEPT-marked (iOS без лимита)
+                + INPUT hashlimit (остальные) + INPUT REJECT
+      • v2_ttl — INPUT ACCEPT length=64+ttl<65 (iOS) + INPUT hashlimit + INPUT REJECT
+      • simple — INPUT hashlimit + INPUT REJECT (без iOS detection, исходный Chimera режим)
+
+    Идемпотентно: сначала удаляет старые правила с нашим тегом (включая mangle),
+    потом добавляет новые. Порядок ACCEPT-затем-DROP важен — iptables проходит
+    правила по порядку, поэтому iOS-ACCEPT (V3/V2) должен идти первым,
+    ACCEPT-hashlimit вторым, REJECT последним.
     """
     if cfg.port <= 0:
         return False, "Не удалось определить порт Telemt — конфиг telemt.toml не найден."
 
     _remove_rules()  # чистим перед применением — гарантия идемпотентности
 
+    rate_arg = f"{cfg.rate_per_sec}/{cfg.rate_unit}"
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # V3: mangle PREROUTING — маркировка iOS SYN по u32 фингерпринту
+    # ══════════════════════════════════════════════════════════════════════════
+    if cfg.mode == _MODE_V3:
+        # mangle MARK — iOS пакеты получат марку 0x400, которая затем
+        # обрабатывается в INPUT цепочке ACCEPT-правилом без лимита.
+        mangle_cmd = [
+            "iptables", "-t", "mangle", "-A", "PREROUTING",
+            "-m", "u32", "--u32", _IOS_U32_MATCH,
+            "-j", "MARK", "--set-mark", str(_IOS_MARK),
+            "-m", "comment", "--comment", _COMMENT_TAG,
+        ]
+        r_mangle = _run(mangle_cmd, capture=True)
+        if r_mangle.returncode != 0:
+            # Не致命но — V3 может не работать на kernel без xt_u32, откатываемся
+            # к поведению SIMPLE (без iOS detection), но пишем warning в лог.
+            # Правила mangle нет → INPUT-ACCEPT для mark не сработает → останется
+            # только hashlimit + REJECT (как в SIMPLE). Это безопасно.
+            err_msg = r_mangle.stderr.strip()[:200] if r_mangle.stderr else ""
+            print(f"{YELLOW}⚠ V3 u32 MARK failed (kernel without xt_u32?): {err_msg}{NC}")
+            # Фолбэк к SIMPLE-логике (без mangle ACCEPT-marked правила)
+            cfg_v3_fallback = SynLimiterConfig(
+                enabled=cfg.enabled, port=cfg.port,
+                rate_per_sec=cfg.rate_per_sec, rate_unit=cfg.rate_unit,
+                burst=cfg.burst, htable_expire_ms=cfg.htable_expire_ms,
+                preset_name=cfg.preset_name, mode=_MODE_SIMPLE,
+            )
+            return _apply_rules(cfg_v3_fallback)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # V3: INPUT ACCEPT для iOS-маркированных пакетов (без лимита)
+    # ══════════════════════════════════════════════════════════════════════════
+    insert_pos = 1
+    if cfg.mode == _MODE_V3:
+        ios_accept_cmd = [
+            "iptables", "-I", "INPUT", str(insert_pos),
+            "-p", "tcp", "--dport", str(cfg.port), "--syn",
+            "-m", "mark", "--mark", str(_IOS_MARK),
+            "-m", "comment", "--comment", _COMMENT_TAG,
+            "-j", "ACCEPT",
+        ]
+        r_ios = _run(ios_accept_cmd, capture=True)
+        if r_ios.returncode != 0:
+            _remove_rules()  # откатываем mangle MARK если не получилось добавить INPUT ACCEPT
+            return False, f"Ошибка V3 iOS ACCEPT: {r_ios.stderr.strip()[:120]}"
+        insert_pos += 1
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # V2: INPUT ACCEPT для length=64 + ttl<65 (iOS fingerprint по размеру+TTL)
+    # ══════════════════════════════════════════════════════════════════════════
+    if cfg.mode == _MODE_V2:
+        ios_accept_cmd = [
+            "iptables", "-I", "INPUT", str(insert_pos),
+            "-p", "tcp", "--dport", str(cfg.port), "--syn",
+            "-m", "tcp", "--tcp-flags", "SYN", "SYN",
+            "-m", "length", "--length", str(_IOS_PKT_LENGTH),
+            "-m", "ttl", "--ttl-lt", str(_IOS_TTL_LT),
+            "-m", "comment", "--comment", _COMMENT_TAG,
+            "-j", "ACCEPT",
+        ]
+        r_ios = _run(ios_accept_cmd, capture=True)
+        if r_ios.returncode != 0:
+            err_msg = r_ios.stderr.strip()[:200] if r_ios.stderr else ""
+            print(f"{YELLOW}⚠ V2 length+ttl match failed (xt_length/xt_ttl missing?): {err_msg}{NC}")
+            # Фолбэк к SIMPLE
+            cfg_v2_fallback = SynLimiterConfig(
+                enabled=cfg.enabled, port=cfg.port,
+                rate_per_sec=cfg.rate_per_sec, rate_unit=cfg.rate_unit,
+                burst=cfg.burst, htable_expire_ms=cfg.htable_expire_ms,
+                preset_name=cfg.preset_name, mode=_MODE_SIMPLE,
+            )
+            _remove_rules()
+            return _apply_rules(cfg_v2_fallback)
+        insert_pos += 1
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ALL MODES: INPUT hashlimit для остальных (не iOS) пакетов
+    # ══════════════════════════════════════════════════════════════════════════
     accept_cmd = [
-        "iptables", "-I", "INPUT", "1",
+        "iptables", "-I", "INPUT", str(insert_pos),
         "-p", "tcp", "--dport", str(cfg.port), "--syn",
         "-m", "hashlimit",
         "--hashlimit-name", _HASHLIMIT_NAME,
         "--hashlimit-mode", "srcip",
         "--hashlimit-srcmask", "32",
-        "--hashlimit-upto", f"{cfg.rate_per_sec}/sec",
+        "--hashlimit-upto", rate_arg,
         "--hashlimit-burst", str(cfg.burst),
         "--hashlimit-htable-expire", str(cfg.htable_expire_ms),
         "-m", "comment", "--comment", _COMMENT_TAG,
@@ -324,7 +535,7 @@ def _apply_rules(cfg: SynLimiterConfig) -> tuple[bool, str]:
     # таймаут (3-5 сек) и только потом ретраит с бэкоффом. RST даёт клиенту
     # мгновенный сигнал "соединение разорвано" → реконнект без ожидания.
     reject_cmd = [
-        "iptables", "-I", "INPUT", "2",
+        "iptables", "-I", "INPUT", str(insert_pos + 1),
         "-p", "tcp", "--dport", str(cfg.port), "--syn",
         "-m", "comment", "--comment", _COMMENT_TAG,
         "-j", "REJECT", "--reject-with", "tcp-reset",
@@ -340,7 +551,7 @@ def _apply_rules(cfg: SynLimiterConfig) -> tuple[bool, str]:
         _remove_rules()
         return False, f"Ошибка применения REJECT-правила: {r2.stderr.strip()[:120]}"
 
-    return True, "Правила hashlimit применены."
+    return True, "Правила применены."
 
 def _persist_rules() -> None:
     """
@@ -394,8 +605,10 @@ def status() -> dict:
         "enabled": cfg.enabled and active,
         "configured_but_inactive": cfg.enabled and not active,
         "rate": cfg.rate_per_sec,
+        "rate_unit": cfg.rate_unit,
         "burst": cfg.burst,
         "preset": cfg.preset_name,
+        "mode": cfg.mode,
         "port": cfg.port,
     }
 
@@ -403,7 +616,14 @@ def syn_limiter_status_line() -> str:
     """Однострочный статус для главного меню mtproto_menu()."""
     st = status()
     if st["enabled"]:
-        return f"{GREEN}● активен{NC}  {DIM}{st['rate']}/sec burst {st['burst']} (port {st['port']}){NC}"
+        mode_tag = {
+            _MODE_V3: "V3-u32",
+            _MODE_V2: "V2-ttl",
+            _MODE_SIMPLE: "simple",
+        }.get(st["mode"], st["mode"])
+        return (f"{GREEN}● активен{NC}  "
+                f"{DIM}{st['rate']}/{st['rate_unit']} burst {st['burst']} "
+                f"[{mode_tag}] (port {st['port']}){NC}")
     if st["configured_but_inactive"]:
         return f"{YELLOW}⚠ включён в конфиге, но правил нет в iptables{NC}"
     return f"{DIM}не активен{NC}"
@@ -412,32 +632,38 @@ def syn_limiter_status_line() -> str:
 #  ИНТЕРАКТИВНОЕ МЕНЮ
 # ══════════════════════════════════════════════════════════════════════════════
 def _show_preset_picker() -> Optional[tuple]:
-    """Возвращает (preset_key, rate, burst, name) либо None при ручном вводе/отмене."""
+    """Возвращает (preset_name, rate, rate_unit, burst, label, mode) либо None при ручном вводе/отмене."""
     os.system("clear")
     _box_top("ЗАЩИТА ОТ SYN-ШТОРМОВ  •  PER-IP RATE LIMIT")
     _box_row()
     _box_info("Симптом: клиент зависает в 'Подключение...' или подключается и рвётся.")
     _box_info("Причина часто не в DPI, а в ретраях SYN от нестабильного клиента —")
     _box_info("повторные SYN от одного IP накладываются на уже начатый handshake.")
-    _box_info("Лимитер режет дубли SYN per-IP, не трогая уже установленные соединения.")
+    _box_info("V3/V2 режимы дополнительно пропускают iOS без лимита (у iOS свой")
+    _box_info("паттерн SYN — multipath). Один порт для всех устройств без конфликтов.")
     _box_row()
     _box_sep()
 
-    for key, (pname, rate, burst, label, detail, recommended) in _PRESETS.items():
+    for key, (pname, rate, rate_unit, burst, label, detail, recommended, mode) in _PRESETS.items():
         star = f" {GREEN}★ рекомендуется{NC}" if recommended else ""
+        mode_tag = {
+            _MODE_V3: f"{CYAN}V3{NC}",
+            _MODE_V2: f"{YELLOW}V2{NC}",
+            _MODE_SIMPLE: f"{DIM}SIMPLE{NC}",
+        }.get(mode, mode)
         key_col = WHITE + BOLD
-        _box_row(f"  {DIM}[{NC}{key_col}{key}{NC}{DIM}]{NC}  {BOLD}{label}{NC}{star}")
-        _box_row(f"       {DIM}{rate}/sec, burst {burst}{NC}")
+        _box_row(f"  {DIM}[{NC}{key_col}{key}{NC}{DIM}]{NC}  {BOLD}{label}{NC} {DIM}[{NC}{mode_tag}{DIM}]{NC}{star}")
+        _box_row(f"       {DIM}{rate}/{rate_unit}, burst {burst}{NC}")
         _box_wrap(detail, indent="       ")
         _box_row()
 
     _box_sep()
-    _box_row(f"  {DIM}[{NC}{WHITE}{BOLD}C{NC}{DIM}]{NC}  ✏️   Свой rate/burst")
+    _box_row(f"  {DIM}[{NC}{WHITE}{BOLD}C{NC}{DIM}]{NC}  ✏️   Свой rate/burst (mode=simple)")
     _box_row(f"  {DIM}[{NC}{RED}{BOLD}Q{NC}{DIM}]{NC}  ← Отмена")
     _box_bot(); print()
 
     while True:
-        raw = _ask(f"{CYAN}Выбор [1-3/C/Q] (Enter=1): {NC}", default="1", c=True).strip().lower()
+        raw = _ask(f"{CYAN}Выбор [1-5/C/Q] (Enter=1): {NC}", default="1", c=True).strip().lower()
         if raw == "":
             raw = "1"
         if raw == "q":
@@ -449,12 +675,12 @@ def _show_preset_picker() -> Optional[tuple]:
                 rate, burst = int(rate_s), int(burst_s)
                 if not (1 <= rate <= 50 and 1 <= burst <= 20):
                     _box_warn("Значения вне диапазона. Повторите."); continue
-                return ("custom", rate, burst, "Свой")
+                return ("custom", rate, "sec", burst, "Свой", _MODE_SIMPLE)
             except (ValueError, _Cancelled):
                 _box_warn("Нужны целые числа. Повторите."); continue
         if raw in _PRESETS:
-            pname, rate, burst, label, detail, _ = _PRESETS[raw]
-            return (pname, rate, burst, label)
+            pname, rate, rate_unit, burst, label, _, _, mode = _PRESETS[raw]
+            return (pname, rate, rate_unit, burst, label, mode)
         _box_warn(f"Неверный выбор: '{raw}'.")
 
 def _show_live_counter(cfg: SynLimiterConfig) -> None:
@@ -506,8 +732,14 @@ def syn_limiter_menu() -> None:
             _box_warn("Telemt не установлен — лимитер недоступен.")
             _box_row(); _box_bot(); _pause(); return
 
+        mode_tag = {
+            _MODE_V3: f"{CYAN}V3-u32{NC}",
+            _MODE_V2: f"{YELLOW}V2-ttl{NC}",
+            _MODE_SIMPLE: f"{DIM}simple{NC}",
+        }.get(cfg.mode, cfg.mode)
         status_str = (
-            f"{GREEN}● активен{NC}  {cfg.rate_per_sec}/sec burst {cfg.burst} (port {cfg.port})"
+            f"{GREEN}● активен{NC}  {cfg.rate_per_sec}/{cfg.rate_unit} burst {cfg.burst} "
+            f"[{mode_tag}] (port {cfg.port})"
             if active and cfg.enabled else
             f"{YELLOW}⚠ включён в конфиге, но правил в iptables нет{NC}"
             if cfg.enabled and not active else
@@ -538,22 +770,28 @@ def syn_limiter_menu() -> None:
             picked = _show_preset_picker()
             if picked is None:
                 continue
-            pname, rate, burst, label = picked
+            pname, rate, rate_unit, burst, label, mode = picked
             port = _get_telemt_port()
             if port <= 0:
                 _box_err("Не удалось определить порт Telemt из telemt.toml.")
                 _pause(); continue
 
             new_cfg = SynLimiterConfig(
-                enabled=True, port=port, rate_per_sec=rate, burst=burst,
-                htable_expire_ms=60000, preset_name=pname,
+                enabled=True, port=port,
+                rate_per_sec=rate, rate_unit=rate_unit, burst=burst,
+                htable_expire_ms=60000, preset_name=pname, mode=mode,
             )
             ok, msg = _apply_rules(new_cfg)
             if ok:
                 _persist_rules()
                 _save_state(new_cfg)
                 print()
-                _box_ok(f"Лимитер включён: {label} ({rate}/sec burst {burst}) на порту {port}.")
+                _box_ok(f"Лимитер включён: {label} ({rate}/{rate_unit} burst {burst}, mode={mode}) на порту {port}.")
+                if mode == _MODE_V3:
+                    _box_info("V3 режим: mangle u32 MARK iOS → INPUT ACCEPT без лимита для iOS.")
+                    _box_info("INPUT hashlimit 54/мин для остальных, REJECT tcp-reset по превышению.")
+                elif mode == _MODE_V2:
+                    _box_info("V2 режим: INPUT length=64+ttl<65 для iOS (fallback для kernel без u32).")
                 _box_info("Дайте серверу поработать 10-30 минут, затем проверьте")
                 _box_info("живой счётчик [2] — если дропы растут, лимитер работает.")
             else:
