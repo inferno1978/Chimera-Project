@@ -785,17 +785,6 @@ def do_emergency_repair() -> None:
     else:
         _box_warn("Xray не запустился — проверьте: journalctl -u xray -n 20")
 
-    # Ждём сокет (только REALITY без AWG — при AWG Xray слушает на PORT, сокета нет)
-    if PROTOCOL_MODE == "reality" and xray_ok_started and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
-        _box_row(f"  {DIM}Ожидание Unix-сокета...{NC}")
-        for _ in range(20):
-            if Path(PARAM_SOCKET_PATH).is_socket():
-                _box_ok(f"Сокет готов")
-                break
-            time.sleep(1)
-        else:
-            _box_warn("Сокет не появился — проверьте: journalctl -u xray -n 20")
-
     # Nginx
     _run(["systemctl", "stop",  "nginx"], check=False, quiet=True)
     time.sleep(1)
@@ -805,6 +794,38 @@ def do_emergency_repair() -> None:
         _box_ok("Nginx запущен")
     else:
         _box_warn("Nginx не запустился — journalctl -u nginx -n 20")
+
+    # Ждём Unix-сокет ПОСЕ старта nginx.
+    # FIX (раньше был ложный варнинг "Сокет не появился"):
+    # сокет /dev/shm/<pid>.socket создаёт ИМЕННО NGINX (через директиву
+    # `listen unix:/dev/shm/<pid>.socket ssl http2 proxy_protocol`), а НЕ Xray.
+    # В xray config.json этот путь указан только в `dest` REALITY — это
+    # upstream для проверки SNI-мимикрии (куда xray ходит за "образцом"
+    # TLS-сервера), а не listen-socket. Раньше блок "Ожидание Unix-сокета"
+    # стоял МЕЖДУ `start xray` и `start nginx`, и через 20 секунд всегда
+    # выдавал ложный [WARN] "Сокет не появился" — потому что сокету взяться
+    # было неоткуда: nginx ещё не запущен. Перенёс проверку после старта
+    # nginx: теперь сокет создаётся почти мгновенно (nginx listen-инициализация
+    # выполняется синхронно в master-процессе при запуске).
+    # Проверка релевантна только для REALITY без AWG — при AWG Xray слушает
+    # на TCP-порту, сокета нет (PARAM_SOCKET_PATH пуст или не используется).
+    if PROTOCOL_MODE == "reality" and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
+        if nginx_ok:
+            _box_row(f"  {DIM}Ожидание Unix-сокета (создаёт nginx)...{NC}")
+            sock_ready = False
+            for _ in range(10):
+                if Path(PARAM_SOCKET_PATH).is_socket():
+                    _box_ok(f"Сокет готов: {PARAM_SOCKET_PATH}")
+                    sock_ready = True
+                    break
+                time.sleep(1)
+            if not sock_ready:
+                _box_warn(f"Сокет не появился — проверьте: journalctl -u nginx -n 20 "
+                          f"(путь: {PARAM_SOCKET_PATH})")
+        else:
+            # nginx не запустился — некому создавать сокет
+            _box_warn("Nginx не активен — Unix-сокет не будет создан "
+                      "(REALITY dest недоступен, SNI-мимикрия отключена)")
 
     # ── ШАГ 6: опциональные сервисы (fail2ban, irqbalance, WARP) ─────────────
     _box_row()
