@@ -334,13 +334,23 @@ def _audit_active_now() -> None:
             info("Нет активных соединений с процессом xray")
             return
 
-        # Парсинг через regex — надёжно работает на всех версиях ss.
-        # Формат (iproute2 5.x+): tcp ESTAB 0 0 local:port peer:port users:(("xray",pid=N,fd=N))
-        # Формат (старые): tcp ESTAB 0 local:port peer:port users:(...)
+        # Парсинг через regex — надёжно работает на всех версиях ss / iproute2.
+        #
+        # Форматы вывода ss -tnpH state established (только ESTABLISHED, с -H без заголовка):
+        #   • iproute2 6.x (новые): "0 0 local:port peer:port users:(("xray",pid=N,fd=N))"
+        #     — БЕЗ префикса "tcp ESTAB" (state filter убирает колонку State и Proto).
+        #   • iproute2 6.x без state filter: "ESTAB 0 0 local:port peer:port users:..."
+        #     — только State (1 слово, без "tcp").
+        #   • Старые iproute2 (5.x и ниже): "tcp ESTAB 0 0 local:port peer:port users:..."
+        #     — с префиксом tcp ESTAB (2 слова).
+        #   • Совсем старые: "tcp ESTAB 0 local:port peer:port users:..." (1 число Recv-Q).
         # IPv6-адреса в квадратных скобках: [::ffff:1.2.3.4]:55164
-        # (?:\d+\s+){1,2} — 1 или 2 числовых столбца (Recv-Q, опционально Send-Q)
+        #
+        # `(?:\S+\s+){0,2}` — опционально 0-2 слова в начале (tcp, ESTAB, или ничего)
+        # `(?:\d+\s+){1,2}` — 1-2 числовых столбца (Recv-Q, опционально Send-Q)
         pat = re.compile(
-            r'^\S+\s+\S+\s+(?:\d+\s+){1,2}'
+            r'^(?:\S+\s+){0,2}'
+            r'(?:\d+\s+){1,2}'
             r'(?P<local>\[[^\]]+\]:\d+|[^\s:]+:\d+)\s+'
             r'(?P<peer>\[[^\]]+\]:\d+|[^\s:]+:\d+)\s+'
             r'users:\(\("(?P<proc>[^"]+)"'
