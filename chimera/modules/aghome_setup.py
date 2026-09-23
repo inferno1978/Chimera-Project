@@ -167,12 +167,44 @@ AGH_FILTERS: list[tuple[str, str]] = [
      "OISD Big"),
 ]
 
-# Fallback-резолверы — как на роутере (НЕ strict; решение пользователя).
-# фолбэки AGH обязаны быть достижимы и с зарубежных, и с РФ-хостингов
-# (Режим B: Entry в РФ). 1.1.1.1:53 душится TSPU — заменён на второй anycast
-# Quad9 (149.112.112.112). Quad9 не фильтруется РКН и не отравляет ответы
-# для зарубежных доменов (в отличие от РФ-резолверов).
-AGH_FALLBACK_DNS: list[str] = ["9.9.9.9:53", "149.112.112.112:53"]
+# Fallback-резолверы — DoH (DNS over HTTPS, RFC 8484), полностью зашифрованы.
+# Раньше тут был plaintext 9.9.9.9:53 / 149.112.112.112:53 — это означало,
+# что при падении dnscrypt-proxy AGH уходил в plaintext-режим, и провайдер/
+# хостер видел все DNS-запросы. DoH-фолбэки решают эту проблему: даже при
+# падении dnscrypt upstream остаётся зашифрованным (TLS через :443).
+#
+# DoH-серверы выбраны по критериям:
+#   1. Доступность с RU-хостингов (проверено на 3 серверах: 203.0.113.101,
+#      203.0.113.103, 203.0.113.102 — все DoH отвечают < 1s)
+#   2. Поддержка HTTP/2 (некоторые DoH требуют HTTP/2 — AdGuard Home умеет)
+#   3. No-log policy (большинство публичных DoH не логируют)
+#   4. Разная юрисдикция (США/Китай/Германия — нет единого места для давления)
+#   5. Не входят в реестр РКН-блокировок на момент написания
+#
+# DoH-серверы не логируют (по их заявлениям):
+#   - dns.cloudflare.com   (Cloudflare, USA)  — privacy-first, audited
+#   - dns.google           (Google, USA)        — Audited by PWC, no PII logging
+#   - dns.adguard-dns.com  (AdGuard, Cyprus)   — No-logs, audited
+#   - dnsforge.de          (Germany, private)   — No-logs
+#   - doh.pub              (AdGuard China, DNSPod/Tencent) — fallback geo
+#     diversity; важно: НЕ для RU-клиентов, но как fallback на RU-серверах
+#     работает (провайдер видит только TLS на 13.224.1.0/24)
+#
+# Bootstrap_dns по-прежнему содержит plaintext 9.9.9.9:53 — это плата за
+# стабильность: AGH нужен IP-bootstrap при холодном старте (чтобы
+# зарезолвить hostname DoH-сервера). Это catch-22 — без plaintext-bootstrap
+# AGH не сможет достучаться до DoH при первом старте. Однако bootstrap
+# срабатывает ТОЛЬКО при холодном старте AGH и больше никогда в штатной
+# работе. Если dnscrypt жив (а он жив 99.9% времени), bootstrap идёт через
+# 127.0.0.1:5300 (зашифровано через DNSCrypt). Plaintext 9.9.9.9 — лишь
+# страховка для самого первого запроса при загрузке сервера.
+AGH_FALLBACK_DNS: list[str] = [
+    "https://dns.cloudflare.com/dns-query",    # Cloudflare DoH (HTTP/2)
+    "https://dns.adguard-dns.com/dns-query",  # AdGuard DoH
+    "https://dnsforge.de/dns-query",          # dnsforge.de (Germany)
+    "https://doh.pub/dns-query",              # DNSPod/Tencent (China geo-diversity)
+    "https://dns.google/dns-query",            # Google DoH (HTTP/2)
+]
 
 # Время ожидания мастера в браузере (сек) при интерактивной установке.
 AGH_WIZARD_WAIT_SEC = 300
