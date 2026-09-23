@@ -925,11 +925,15 @@ def _diag_check_access_log(counters: list) -> dict:
     bytes_by_tag: dict[str, int] = {}
 
     if not DIAG_ACCESS_LOG.exists():
-        _box_warn(f"{DIAG_ACCESS_LOG} не существует — лог не настроен или нет подключений")
+        _box_info(f"{DIAG_ACCESS_LOG} не существует — лог не настроен или нет подключений")
         return bytes_by_tag
     size = DIAG_ACCESS_LOG.stat().st_size
     if size == 0:
-        _box_warn("access.log пустой — нет подключений")
+        # FIX: пустой access.log — это НЕ варнинг. Это либо новый сервер,
+        # либо сейчас нет активных подключений. Использовать _box_warn
+        # здесь было неправильно: визуальный [WARN] без инкремента счётчика
+        # сбивал с толку (пользователь видел [WARN], но "Предупреждений: 0").
+        _box_info("access.log пустой — нет подключений (норма для нового сервера)")
         return bytes_by_tag
 
     try:
@@ -1000,7 +1004,11 @@ def _diag_check_access_log(counters: list) -> dict:
             for tag, cnt in Counter(t for _, _, t in via_exit).most_common():
                 _box_dim(f"    {tag}: {cnt} ({cnt/len(via_exit)*100:.0f}%)")
         else:
-            _box_warn("Через chain-exit (proxy): 0 соединений")
+            # FIX: 0 соединений через chain-exit — это НЕ варнинг. Сейчас
+            # просто нет активных проксируемых подключений (например, на
+            # свежезапущенном сервере). Ранее использовался _box_warn, что
+            # сбивало с толку: визуальный [WARN] без инкремента счётчика.
+            _box_info("Через chain-exit (proxy): 0 соединений (нет подключений сейчас)")
         if via_direct:
             _diag_ok(f"Напрямую (direct): {len(via_direct)} соед.")
             for h, p in via_direct[:5]:
@@ -1059,6 +1067,35 @@ def _diag_check_error_log(counters: list) -> None:
         "failed to set tcp_user_timeout",
         "failed to apply socket options",
         "protocol not available",      # сопутствует TCP_USER_TIMEOUT на старых ядрах
+        # ── FIX: REALITY-сканеры, стучащие с некорректным/пустым ClientHello,
+        # генерируют строки вида:
+        #   [Info] transport/internet/tcp: REALITY: processed invalid connection
+        #   from <bot-ip>:<port>: failed to read client hello
+        # Это [Info]-level от xray — штатное событие, не ошибка. Ранее они
+        # попадали в "нештатные ошибки" из-за слов "invalid"/"failed" и
+        # инкрементировали counters[2], что вызывало ложный варнинг
+        # "Split tunneling работает, есть замечания" без явного [WARN].
+        "reality: processed invalid connection",
+        "failed to read client hello",
+        "invalid connection from",
+        # ── FIX: попытки сканеров подсоединиться к VLESS/REALITY без
+        # валидного UUID тоже пишутся как [Info]-сообщение и не являются
+        # ошибкой сервера.
+        "invalid user",
+        "rejected by reality",
+        # ── FIX: REALITY пишет в лог [Info]-сообщения, когда внутренний
+        # dial до unix-сокета (/dev/shm/*.socket) провалился — это
+        # бывает, когда клиент рвёт соединение раньше времени или
+        # внутренний transport ещё не поднялся. Сообщение выглядит так:
+        #   [Info] transport/internet/tcp: REALITY: failed to dial dest:
+        #     dial unix /dev/shm/<pid>.socket: connect: no such file or directory
+        # Это [Info]-level от xray, не app/error — штатное событие.
+        # ВНИМАНИЕ: паттерн "no such file or directory" слишком общий и
+        # может замаскировать реальную ошибку (например, отсутствие geoip.dat),
+        # поэтому используем только специфичные части — `reality: failed to
+        # dial dest` и `dial unix /dev/shm`.
+        "reality: failed to dial dest",
+        "dial unix /dev/shm",
     ]
 
     def _is_benign(line: str) -> bool:
@@ -1098,12 +1135,25 @@ def _diag_check_error_log(counters: list) -> None:
             ("validation criteria not met",    "REALITY отверг постороннее подключение (норма)"),
             ("tcp_user_timeout",               "TCP_USER_TIMEOUT — ядро не поддерживает опцию (не критично)"),
             ("protocol not available",         "protocol not available — сопутствует TCP_USER_TIMEOUT на старых ядрах"),
+            # FIX: подсказки для новых benign-паттернов REALITY-сканеров
+            ("reality: processed invalid connection",
+                                               "REALITY: processed invalid — сканер стучался с битым ClientHello (норма)"),
+            ("failed to read client hello",    "failed to read client hello — то же, сканер/бот не дотянул TLS (норма)"),
+            ("invalid connection from",        "invalid connection from <ip> — сканер отвергнут REALITY (норма)"),
+            ("invalid user",                   "invalid user — сканер пытался подсоединиться без валидного UUID (норма)"),
+            ("rejected by reality",            "rejected by REALITY — посторонний клиент отвергнут (норма)"),
+            ("reality: failed to dial dest",   "REALITY: failed to dial dest — клиент рано закрыл соединение (норма)"),
+            ("dial unix /dev/shm",             "dial unix /dev/shm — внутренний transport ещё не готов / отвал (норма)"),
         ]:
             if any(pattern_note[0] in l.lower() for l in benign):
                 _box_dim(f"  · {pattern_note[1]}")
 
     if critical:
-        _box_info(f"{BOLD}Нештатные ошибки: {len(critical)} строк (последние 3):{NC}")
+        # FIX: выводим как [WARN] (а не [INFO]), чтобы пользователь ВИДЕЛ
+        # конкретную причину варнинга в итоговой сводке. Ранее использовался
+        # _box_info, и в отчёте "Предупреждений: 1" появлялось без явной
+        # строки [WARN], что было совершенно неинформативно.
+        _box_warn(f"Нештатные строки в error.log: {len(critical)} (последние 3):")
         for line in critical[-3:]:
             _print_log_line(line)
         counters[2] += 1
