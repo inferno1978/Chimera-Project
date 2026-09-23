@@ -383,6 +383,26 @@ def _audit_active_now() -> None:
         _box_sep()
         shown = 0
         no_email_count = 0
+
+        def _norm_addr_for_display(addr: str) -> str:
+            """Нормализация адреса для display в таблице:
+               [::ffff:1.2.3.4]:443 → 1.2.3.4:443
+               [2001:db8::1]:443     → [2001:db8::1]:443  (настоящий IPv6 оставляем в скобках)
+               1.2.3.4:443           → 1.2.3.4:443       (IPv4 без изменений)
+            Это сокращает длину IPv4-mapped IPv6 адресов с 28 до 19 символов,
+            чтобы строка помещалась в box width 66 и email не переносился
+            на следующую строку (UX баг: таблица ломалась при IPv6 выводе).
+            """
+            if addr.startswith("["):
+                inner = addr[1:].split("]", 1)[0]
+                port_part = addr.rsplit(":", 1)[1] if ":" in addr.split("]", 1)[1] else ""
+                if inner.startswith("::ffff:"):
+                    # IPv4-mapped IPv6 → показываем как обычный IPv4
+                    return f"{inner[7:]}:{port_part}" if port_part else inner[7:]
+                # Настоящий IPv6 — оставляем в скобках для однозначности
+                return addr
+            return addr
+
         for line in lines[:50]:
             m = pat.match(line.strip())
             if not m:
@@ -424,8 +444,31 @@ def _audit_active_now() -> None:
             else:
                 email_display = f"{YELLOW}{email[:26]}{NC}"
 
+            # Нормализуем для display — убираем IPv4-mapped IPv6 overhead
+            # чтобы строка помещалась в box width 66.
+            local_disp = _norm_addr_for_display(local)
+            peer_disp  = _norm_addr_for_display(peer)
+
+            # Динамическое обрезание email — чтобы вся строка помещалась в box.
+            # Раньше использовался padding {local:<28}, который делал короткие IPv4
+            # адреса (19 chars) padded до 28 chars — суммарная длина строки получалась
+            # 86 chars и не помещалась в box width 66 → email уезжал на новую строку.
+            # Теперь: убираем padding, считаем доступное место под email динамически.
+            # Layout: 2 leading + local + 1 sep + peer + 1 sep + email ≤ 66
+            local_w = len(local_disp)
+            peer_w = len(peer_disp)
+            max_email = max(8, 62 - local_w - peer_w)  # минимум 8, иначе будет пусто
+            max_email = min(max_email, 26)              # не больше 26
+            if not email:
+                email_short = "(не сопоставлен)"
+            elif len(email) > max_email:
+                email_short = email[:max_email - 1] + "…"
+            else:
+                email_short = email
+            email_display = f"{YELLOW}{email_short}{NC}" if email else f"{DIM}{email_short}{NC}"
+
             _box_row(
-                f"  {CYAN}{local:<28}{NC} {GREEN}{peer:<28}{NC} {email_display}"
+                f"  {CYAN}{local_disp}{NC} {GREEN}{peer_disp}{NC} {email_display}"
             )
             shown += 1
 
