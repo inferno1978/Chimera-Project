@@ -2,6 +2,86 @@
 
 ---
 
+## FIX(tg_client_bot): остановить client-бота на secondary-серверах — Telegram 409 Conflict — 24 сентября 2026
+
+**Кейс:** пользователь сообщил что в `@ChimeraVPNClient_bot` при `/menu`
+приходило **два** меню одновременно, и непонятно какое от какого
+сервера. Третьего меню не было вообще. Пользователь: «В клиентском
+боте ввожу /menu — там два меню появляется, и не понятно какое из них
+какое от какого сервера. И третьего почему то нет».
+
+**Причина:** client-бот был запущен на всех 3 серверах с **одним
+токеном** (8859136245:AAFb...). При таком сценарии Telegram Bot API
+возвращает HTTP **409 Conflict** при вызове `getUpdates` — Telegram
+**блокирует всех** long-pollers одновременно (строже чем я думал —
+раньше предполагал что отдаёт первому успевшему, как с admin-ботом).
+
+В логах chimera.log на всех 3 серверах:
+```
+[TG-CLIENT-BOT] API error getUpdates: HTTP Error 409: Conflict
+[TG-CLIENT-BOT] Poll: нет ответа от API (10 попыток подряд)
+```
+
+Из-за 409 ни один бот не мог стабильно поллить — иногда race condition
+прорывал блокировку и 2 бота успевали ответить, иногда 0. Никогда 3.
+
+**Дополнительный контекст:** на всех 3 серверах **cascade mode B**
+(`state.json install_mode=B`, `chain_nodes=4`). Это значит primary
+сервер (chimeraprodvpn.online) держит всех клиентов (UUID, REALITY
+keys, etc), а server 2/3 — просто **cascade exit-ноды** (relay для
+смены exit-IP через каскад). У server 2/3 **нет своих клиентов** —
+`/config` там вернул бы пустоту.
+
+**Фикс:** остановлен client-бот (`xray-tg-client`) на server 2 и 3:
+```bash
+systemctl stop xray-tg-client
+systemctl disable xray-tg-client
+```
+
+Оставлен только на primary (server 1), с restart для очистки 409
+состояния:
+```bash
+systemctl restart xray-tg-client
+```
+
+После фикса в chimera.log на primary:
+```
+[2026-09-24 12:10:34] [TG-CLIENT-BOT] Client bot started
+```
+Больше нет 409 Conflict, long-polling работает стабильно.
+
+**Архитектурное решение:** cascade mode B = client-бот только на primary
+(как уже сделано с admin-ботом в предыдущей итерации). Cron-уведомления
+продолжают работать на всех 3 серверах — там нет long-polling, нет 409.
+
+**Что осталось работать:**
+- Server 1: `xray-tg-client: active` (теперь стабильно отвечает на
+  /menu, /config, /qr, /status, /protocols, /guide)
+- Server 2: `xray-tg-client: inactive` (не нужен — нет своих клиентов)
+- Server 3: `xray-tg-client: inactive` (не нужен — нет своих клиентов)
+- Server 1: `xray-tg-bot: active` (admin-бот с cascade_peers)
+- Server 2: `xray-tg-bot: inactive` (admin-бот остановлен ранее)
+- Server 3: `xray-tg-bot: inactive` (admin-бот остановлен ранее)
+- Все 3 сервера: `/etc/cron.d/xray-tg-monitor` — cron каждые 5 мин
+  (push-уведомления, не long-polling, нет конкуренции)
+
+**Если в будущем захочешь client-бота на secondary:**
+В cascade mode B это не нужно (один VLESS на primary). Но если решишь
+перевести server 2/3 в standalone mode (3 отдельных VLESS-сервера с
+разными клиентами), нужно:
+1. Создать **отдельных ботов** в @BotFather для каждого сервера
+   (token2, token3 — помимо существующего token1 на primary)
+2. Настроить client-бота на каждом сервере со своим токеном
+3. Пользователь сам выбирает к какому серверу подключаться через бота
+
+Альтернатива — усложнить client-бота primary аналогично admin-боту:
+cascade_peers + SSH-агрегация конфигов. Тогда primary client-бот
+собирает ссылки со всех 3 серверов и в /config выдаёт список всех
+доступных. Но это большая работа (~2-3 часа) и не нужна для cascade
+mode B.
+
+---
+
 ## FEAT(tg_bots v6): 25+ новых admin-команд + client-команды + расширенный /help + /menu inline-клавиатуры — 24 сентября 2026
 
 **Кейс:** пользователю было неудобно каждый раз лезть по SSH на сервер
