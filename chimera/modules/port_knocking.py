@@ -586,6 +586,12 @@ def _pk_install(state: dict) -> bool:
 
         # 4b. Install iptables (IPv4) rules — идемпотентно через -C
         for rule in _pk_build_iptables_rules(port, state):
+            # Skip xray_manual_ban rule if ipset doesn't exist on this server
+            if _PK_MANUAL_BAN_SET in rule["spec"] and \
+                    not _pk_ipset_exists(_PK_MANUAL_BAN_SET):
+                _info(f"Skipping {_PK_MANUAL_BAN_SET} rule — ipset not "
+                      f"found (configure IP ban in ipban TUI to enable)")
+                continue
             # Skip clients_wl rule if ipset doesn't exist on this server
             if _PK_WL_SET in rule["spec"] and not _pk_ipset_exists(_PK_WL_SET):
                 _info(f"Skipping {_PK_WL_SET} rule — ipset not found "
