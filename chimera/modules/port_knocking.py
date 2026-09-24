@@ -313,7 +313,7 @@ def _pk_build_ipset_create_cmd(state: dict) -> list:
     `exist` flag — идемпотентность: не падает если set уже есть.
     """
     return ["ipset", "create", _PK_KNOCKED_SET, "hash:ip",
-            "timeout", str(int(state["whitelist_ttl_sec"])), "exist"]
+            "timeout", str(int(state["whitelist_ttl_sec"])), "-exist"]
 
 
 def _pk_rule_exists(spec: list) -> bool:
