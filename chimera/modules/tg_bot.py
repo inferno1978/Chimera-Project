@@ -362,11 +362,29 @@ def _generate_bot_script(bot_cfg: dict, notif_cfg: dict) -> str:
     """
     Генерирует Python-скрипт бота (long-polling, без внешних зависимостей).
     Скрипт запускается как systemd-сервис.
+
+    Опциональное поле bot_cfg['cascade_peers']: список удалённых серверов
+    для multi-server /status через SSH. Формат:
+        [
+            {"host": "203.0.113.103", "user": "root", "port": 22,
+             "name": "Server 2", "sudo": false},
+            {"host": "203.0.113.102", "user": "inferno1978", "port": 22,
+             "name": "Server 3", "sudo": true},
+            ...
+        ]
+    Если cascade_peers задан и непустой — /status собирает сводку со всех
+    серверов через SSH (нужен passwordless SSH-ключ на этом сервере к каждому
+    peer). Если cascade_peers пустой/отсутствует — /status работает как
+    раньше (только локальный статус текущего сервера).
     """
     token        = json.dumps(bot_cfg.get("token") or notif_cfg.get("token", ""), ensure_ascii=False)
     admin_id     = json.dumps(str(bot_cfg.get("admin_id") or notif_cfg.get("chat_id", "")), ensure_ascii=False)
     allowed      = json.dumps(bot_cfg.get("allowed_users", []), ensure_ascii=False)
     invite_tokens = json.dumps(bot_cfg.get("invite_tokens", {}), ensure_ascii=False)
+    # NOTE: для cascade_peers используем repr() а не json.dumps(), потому что
+    # в Python значения True/False (а в JSON — true/false). repr() даёт
+    # валидный Python-литерал.
+    cascade_peers = repr(bot_cfg.get("cascade_peers", []))
     state_file   = str(_STATE_FILE)
     bot_file     = str(_BOT_FILE)
 
@@ -381,6 +399,7 @@ from datetime import datetime
 
 TOKEN    = {token}
 ADMIN_ID = {admin_id}
+CASCADE_PEERS = {cascade_peers}
 BOT_FILE = Path("{bot_file}")
 STATE_F  = Path("{state_file}")
 LOG_F    = Path("/var/log/chimera.log")
@@ -485,6 +504,138 @@ def get_status_text():
             + (f"Аптайм: {{up}}\\n" if up else "") +
             f"\\n<i>{{ts}}</i>")
 
+def _local_status_dict():
+    """Собирает локальный статус в dict (для агрегации с remote)."""
+    st = _state()
+    try:
+        host = subprocess.check_output(["hostname", "-s"], text=True).strip()
+    except Exception:
+        host = "localhost"
+    try:
+        r = subprocess.run(["systemctl", "is-active", "xray"],
+                           capture_output=True, text=True, timeout=5)
+        xray_status = r.stdout.strip()
+    except Exception:
+        xray_status = "unknown"
+    try:
+        up = subprocess.check_output(["uptime", "-p"], text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        up = ""
+    return {{
+        "host":     host,
+        "xray":     xray_status,
+        "proto":    st.get("protocol_mode", "?"),
+        "port":     st.get("server_port", "?"),
+        "mode":     st.get("install_mode", "?"),
+        "uptime":   up,
+        "local":    True,
+    }}
+
+def _remote_status_dict(peer):
+    """Получает статус с удалённого сервера через SSH.
+
+    peer = dict с ключами host, user, port, name, sudo (bool).
+    Удалённый сервер должен иметь /usr/local/bin/chimera-remote-status.py
+    (этот скрипт деплоится chimera-setup).
+
+    Возвращает dict (при успехе) или dict с ключом 'error' (при ошибке).
+    """
+    host = peer.get("host", "")
+    user = peer.get("user", "root")
+    port = peer.get("port", 22)
+    name = peer.get("name", host)
+    use_sudo = peer.get("sudo", False)
+
+    # SSH target (user@host or just host if root)
+    ssh_target = f"{{user}}@{{host}}" if user != "root" else host
+
+    # Build ssh argv list. We invoke /usr/local/bin/chimera-remote-status.py
+    # on remote — no shell-interpolation issues, just one path argument.
+    # If use_sudo (non-root SSH user with sudo NOPASSWD) — prefix with sudo -n.
+    ssh_cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-p", str(port),
+        ssh_target,
+    ]
+    if use_sudo:
+        ssh_cmd.extend(["sudo", "-n", "/usr/local/bin/chimera-remote-status.py"])
+    else:
+        ssh_cmd.extend(["/usr/local/bin/chimera-remote-status.py"])
+
+    try:
+        r = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            return {{"error": f"exit={{r.returncode}}: {{r.stderr.strip()[:80]}}"}}
+        out = r.stdout.strip()
+        # Output is single JSON line (chimera-remote-status.py:print(json.dumps(...)))
+        try:
+            data = json.loads(out.split("\\n")[-1])
+            data["name"] = name
+            data["local"] = False
+            return data
+        except Exception:
+            # Fallback — maybe stderr warnings pollute stdout
+            for line in out.split("\\n"):
+                line = line.strip()
+                if line.startswith("{{"):
+                    try:
+                        data = json.loads(line)
+                        data["name"] = name
+                        data["local"] = False
+                        return data
+                    except Exception:
+                        continue
+            return {{"error": f"parse fail: {{out[:80]}}"}}
+    except subprocess.TimeoutExpired:
+        return {{"error": "timeout (>20s)"}}
+    except Exception as e:
+        return {{"error": str(e)[:80]}}
+
+
+
+def get_status_text_all():
+    """Агрегированный статус: локальный + все cascade_peers через SSH.
+
+    Возвращает HTML-сообщение со списком всех серверов.
+    """
+    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+    lines = [f"📊 <b>Статус каскада ({{ts}})</b>\\n"]
+
+    # Локальный статус (этот сервер)
+    local = _local_status_dict()
+    lines.append(_format_status_line(local, is_first=True))
+
+    # Remote peers
+    for peer in CASCADE_PEERS:
+        name = peer.get("name", peer.get("host", "?"))
+        r = _remote_status_dict(peer)
+        if "error" in r:
+            lines.append(f"\\n• <b>{{name}}</b> ({{peer.get('host')}}): ❌ {{r['error']}}")
+        else:
+            lines.append(_format_status_line(r, is_first=False))
+
+    return "\\n".join(lines)
+
+def _format_status_line(d, is_first=False):
+    """Форматирует dict статуса в HTML-строку."""
+    if "error" in d:
+        return f"• <b>{{d.get('name', '?')}}</b>: ❌ {{d['error']}}"
+    host = d.get("host", "?")
+    name = d.get("name", host) if not d.get("local") else host
+    xray = d.get("xray", "?")
+    xray_emoji = "🟢" if xray == "active" else "🔴" if xray in ("inactive", "failed") else "❓"
+    proto = str(d.get("proto", "?")).upper()
+    port = d.get("port", "?")
+    mode = d.get("mode", "?")
+    up = d.get("uptime", "")
+    up_str = f" | Апт: {{up}}" if up else ""
+    return (f"{{'•' if not is_first else '•'}} <b>{{name}}</b> ({{host}})\\n"
+            f"   {{xray_emoji}} Xray={{xray}} | {{proto}}:{{port}} | М={{mode}}{{up_str}}")
+
+
 def get_users_text():
     """Список пользователей Xray (из config.json)."""
     cfg_paths = [
@@ -532,12 +683,13 @@ def handle_start(msg, args):
         send(uid, (
             "👋 <b>VLESS Admin Bot</b>\\n\\n"
             "Команды:\\n"
-            "/config — ваша VLESS-ссылка\\n"
-            "/status — статус сервера\\n"
-            "/users  — список пользователей\\n"
-            "/invite — сгенерировать invite-ссылку\\n"
+            "/config       — ваша VLESS-ссылка\\n"
+            "/status       — статус каскада (агрегированный со всех серверов через SSH)\\n"
+            "/status_local — статус только текущего сервера\\n"
+            "/users        — список пользователей\\n"
+            "/invite       — сгенерировать invite-ссылку\\n"
             "/broadcast &lt;текст&gt; — разослать всем пользователям\\n"
-            "/help   — справка"
+            "/help         — справка"
         ))
     elif is_allowed(uid):
         send(uid, "👋 Привет! Используйте /config для получения вашей ссылки.")
@@ -564,6 +716,19 @@ def handle_config(msg):
     _log(f"Config sent to user {{uid}}")
 
 def handle_status(msg):
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    # FIX: если cascade_peers задан — /status возвращает агрегированную сводку
+    # со всех серверов (через SSH). Иначе — старый локальный /status.
+    if CASCADE_PEERS:
+        send(uid, get_status_text_all())
+    else:
+        send(uid, get_status_text())
+
+def handle_status_local(msg):
+    """Локальный статус текущего сервера — без агрегации."""
     uid = msg["from"]["id"]
     if not is_admin(uid):
         send(uid, "⛔ Только для администратора.")
@@ -632,10 +797,11 @@ def handle_help(msg):
     if is_admin(uid):
         text += (
             "\\n<b>Только для администратора:</b>\\n"
-            "/status    — статус сервера\\n"
-            "/users     — список пользователей\\n"
-            "/invite    — создать invite-ссылку\\n"
-            "/broadcast — рассылка всем пользователям"
+            "/status       — статус каскада (агрегированный со всех серверов через SSH)\\n"
+            "/status_local — статус только текущего сервера\\n"
+            "/users        — список пользователей\\n"
+            "/invite       — создать invite-ссылку\\n"
+            "/broadcast    — рассылка всем пользователям"
         )
     send(uid, text)
 
@@ -650,6 +816,7 @@ def process_update(update):
     if cmd == "/start":   handle_start(msg, args)
     elif cmd == "/config": handle_config(msg)
     elif cmd == "/status": handle_status(msg)
+    elif cmd == "/status_local": handle_status_local(msg)
     elif cmd == "/users":  handle_users(msg)
     elif cmd == "/invite": handle_invite(msg)
     elif cmd == "/broadcast": handle_broadcast(msg, args)
