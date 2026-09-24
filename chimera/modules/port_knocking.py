@@ -5,12 +5,15 @@ Port Knocking — динамический ACL для защиты VPN-порт�
 интернет-сканеров (Censys, Shodan) и пассивного DPI-фингерпринтинга.
 
 Концепция:
-  • iptables DROP by default на защищаемом порту (например :443)
+  • iptables/ip6tables DROP by default на защищаемом порту (например :443)
   • Каждый SYN-пакет трекается через `recent` iptables-модуль
-  • После N SYN за W секунд → IP добавляется в ipset `xray_knocked` (с TTL)
-  • Если IP в `xray_knocked` → SYN ACCEPTED → VLESS REALITY handshake проходит
-  • Whitelist IPs в существующем ipset `clients_wl` → обходят knocking (приоритет)
-  • Существующий `xray_manual_ban` ipset → DROP независимо от knocking
+  • После N SYN за W секунд → IP добавляется в ipset `xray_knocked`
+    (или `xray_knocked6` для IPv6) с TTL
+  • Если IP в `xray_knocked`/`xray_knocked6` → SYN ACCEPTED → handshake
+  • Whitelist IPs в существующем ipset `clients_wl` → обходят knocking
+    (приоритет, только IPv4 — whitelist модуль хранит IPv4)
+  • Существующие `xray_manual_ban`/`xray_manual_ban6` ipsets → DROP независимо
+    от knocking
 
 Порядок правил iptables (приоритет — позиция в INPUT):
   1. INSERT 1: -m set --match-set xray_manual_ban src -j DROP    (бан от ipban.py)
@@ -18,8 +21,23 @@ Port Knocking — динамический ACL для защиты VPN-порт�
   3. INSERT 3: -m set --match-set xray_knocked src    -j ACCEPT  (кто постучался)
   4. APPEND:   --syn -m recent --name KNOCK{port} --set           (трекать SYN)
   5. APPEND:   --syn -m recent --rcheck --seconds W --hitcount N
-              -m set --add-set xray_knocked src                    (повысить до knocked)
+              -j SET --add-set xray_knocked src                    (повысить до knocked)
   6. APPEND:   --syn -j DROP                                       (default deny)
+
+Аналогично для ip6tables (IPv6):
+  1. INSERT 1: -m set --match-set xray_manual_ban6 src -j DROP
+  2. INSERT 2: -m set --match-set xray_knocked6 src    -j ACCEPT
+  3. APPEND:   --syn -m recent --name KNOCK{port}v6 --set
+  4. APPEND:   --syn -m recent --rcheck ... -j SET --add-set xray_knocked6 src
+  5. APPEND:   --syn -j DROP
+
+  (нет clients_wl для IPv6 — whitelist модуль хранит только IPv4)
+
+UFW-конфликт:
+  При install: ufw delete allow <port>/tcp (убирает ACCEPT :port от UFW,
+  чтобы knocking-правила не обходились через UFW chain).
+  При remove: ufw allow <port>/tcp comment "chimera-vless VLESS REALITY :<port>"
+  (восстанавливает IPv4+IPv6 ACCEPT от UFW).
 
 Точка входа из _core.py:
     from chimera.modules.port_knocking import do_manage_port_knocking
@@ -67,15 +85,21 @@ _PK_STATE_FILE = Path("/var/lib/xray-installer/port_knocking.json")
 _PK_LOG_FILE   = Path("/var/log/chimera.log")
 
 # ipset-имена:
-#   `xray_knocked`    — СОЗДАЁТСЯ этим модулем (с TTL timeout)
+#   `xray_knocked`    — СОЗДАЁТСЯ этим модулем (с TTL timeout), IPv4
+#   `xray_knocked6`   — СОЗДАЁТСЯ этим модулем (с TTL timeout), IPv6 (family inet6)
 #   `clients_wl`      — уже существует (user_ip_whitelist.py) — читаем, не трогаем
-#   `xray_manual_ban` — уже существует (ipban.py) — читаем, не трогаем
-_PK_KNOCKED_SET    = "xray_knocked"
-_PK_MANUAL_BAN_SET = "xray_manual_ban"
-_PK_WL_SET         = "clients_wl"
+#   `xray_manual_ban`  — уже существует (ipban.py) — читаем, не трогаем
+#   `xray_manual_ban6` — может существовать (ipban.py для IPv6) — читаем, не трогаем
+_PK_KNOCKED_SET       = "xray_knocked"
+_PK_KNOCKED_SET_V6    = "xray_knocked6"   # IPv6 ipset name
+_PK_MANUAL_BAN_SET    = "xray_manual_ban"
+_PK_MANUAL_BAN_SET_V6 = "xray_manual_ban6"  # IPv6 manual ban
+_PK_WL_SET            = "clients_wl"
 
-# Comment-маркер для всех iptables-правил модуля — для идемпотентной установки
-# и безопасной очистки при remove(): ищем/удаляем только свои правила.
+# Comment-маркер для всех iptables/ip6tables-правил модуля — для идемпотентной
+# установки и безопасной очистки при remove(): ищем/удаляем только свои правила.
+# IPv6 rules use suffixed comments like "chimera-port-knocking:DROP-ban6" —
+# grep by tag substring works for both.
 _PK_COMMENT_TAG = "chimera-port-knocking"
 
 # ── Дефолты (с объяснениями) ──────────────────────────────────────────────────
@@ -99,7 +123,7 @@ def _pk_default_state() -> dict:
         "enabled":           False,
         "ports":             list(_DEFAULT_PORTS),
         "knock_count":       _DEFAULT_KNOCK_COUNT,
-        "knock_window_sec":  _DEFAULT_KNOCK_WINDOW_SEC,
+        "knock_window_sec": _DEFAULT_KNOCK_WINDOW_SEC,
         "whitelist_ttl_sec": _DEFAULT_WHITELIST_TTL_SEC,
         "log_success":       _DEFAULT_LOG_SUCCESS,
         "installed_at":      "",
@@ -225,7 +249,7 @@ def _pk_validate(state: dict) -> list:
 
 # ── iptables rules ─────────────────────────────────────────────────────────────
 def _pk_recent_name(port: int) -> str:
-    """Имя recent-таблицы для порта (уникальное per-port).
+    """Имя recent-таблицы для порта (уникальное per-port, IPv4).
 
     xt_recent имеет глобальный лимит на размер таблицы (ip_list_tot, default 100).
     Уникальное имя per-port (KNOCK443, KNOCK9443) позволяет независимо трекать
@@ -234,8 +258,17 @@ def _pk_recent_name(port: int) -> str:
     return f"KNOCK{port}"
 
 
+def _pk_recent_name_v6(port: int) -> str:
+    """Имя recent-таблицы для порта (IPv6).
+
+    Должно отличаться от IPv4-имени, т.к. xt_recent использует отдельные таблицы
+    для ip6tables (разное пространство имён в /proc/net/xt_recent).
+    """
+    return f"KNOCK{port}v6"
+
+
 def _pk_build_iptables_rules(port: int, state: dict) -> list:
-    """Строит список iptables rule descriptors для порта.
+    """Строит список iptables rule descriptors для порта (IPv4).
 
     Возвращает list of dicts:
       {"op": "insert", "pos": 1, "spec": [...]}   # iptables -I INPUT <pos> <spec>
@@ -287,7 +320,7 @@ def _pk_build_iptables_rules(port: int, state: dict) -> list:
          "spec": base + ["--syn",
                          "-m", "recent", "--name", recent_name, "--set"] + comment},
         # 5. Если N SYN за W секунд → добавить src в xray_knocked (с TTL)
-        #    FIX: iptables-nft (nf_tables backend) не поддерживает
+        #    FIX (Bug 5): iptables-nft (nf_tables backend) не поддерживает
         #    `-m set --add-set` — нужно использовать target SET:
         #    `-j SET --add-set xray_knocked src`
         #    (пакет продолжает падать ниже по цепочке → правило 6 его
@@ -308,20 +341,99 @@ def _pk_build_iptables_rules(port: int, state: dict) -> list:
     return insert_rules + append_rules
 
 
+def _pk_build_ip6tables_rules(port: int, state: dict) -> list:
+    """Строит список ip6tables rule descriptors для порта (IPv6).
+
+    Аналог _pk_build_iptables_rules, но для IPv6:
+      • Использует xray_manual_ban6 / xray_knocked6 ipsets
+      • Использует KNOCK{port}v6 recent-имя (отдельное пространство имён)
+      • Без clients_wl (whitelist модуль хранит только IPv4)
+      • Comment имеет суффикс :...6 для отладки
+
+    Возвращает 5 rules (2 INSERT + 3 APPEND).
+    """
+    knock_count  = int(state["knock_count"])
+    knock_window = int(state["knock_window_sec"])
+    recent_name  = _pk_recent_name_v6(port)
+    port_str     = str(port)
+
+    base = ["-p", "tcp", "--dport", port_str]
+
+    # ── INSERT rules (priority: ban6 > knocked6; no wl6) ─────────────────────
+    insert_rules = [
+        # 1. DROP для ipset xray_manual_ban6 (IPv6 бан)
+        {"op": "insert", "pos": 1,
+         "spec": base + ["-m", "set", "--match-set", _PK_MANUAL_BAN_SET_V6, "src",
+                         "-j", "DROP",
+                         "-m", "comment", "--comment",
+                         f"{_PK_COMMENT_TAG}:DROP-ban6"]},
+        # 2. ACCEPT для ipset xray_knocked6 (IPv6 postучавшие)
+        {"op": "insert", "pos": 2,
+         "spec": base + ["-m", "set", "--match-set", _PK_KNOCKED_SET_V6, "src",
+                         "-j", "ACCEPT",
+                         "-m", "comment", "--comment",
+                         f"{_PK_COMMENT_TAG}:ACCEPT-knocked6"]},
+    ]
+
+    # ── APPEND rules (track → promote → drop) ────────────────────────────────
+    append_rules = [
+        # 3. Записать каждый SYN в recent-таблицу KNOCK{port}v6
+        {"op": "append",
+         "spec": base + ["--syn",
+                         "-m", "recent", "--name", recent_name, "--set",
+                         "-m", "comment", "--comment",
+                         f"{_PK_COMMENT_TAG}:recent-set6"]},
+        # 4. Если N SYN за W секунд → добавить src в xray_knocked6 (с TTL)
+        #    FIX (Bug 5): используем -j SET --add-set (iptables-nft совместимо)
+        {"op": "append",
+         "spec": base + ["--syn",
+                         "-m", "recent", "--name", recent_name,
+                         "--rcheck", "--seconds", str(knock_window),
+                         "--hitcount", str(knock_count),
+                         "-j", "SET", "--add-set", _PK_KNOCKED_SET_V6, "src",
+                         "-m", "comment", "--comment",
+                         f"{_PK_COMMENT_TAG}:recent-check-add6"]},
+        # 5. Default deny: DROP всех остальных SYN на этом порту
+        {"op": "append",
+         "spec": base + ["--syn", "-j", "DROP",
+                         "-m", "comment", "--comment",
+                         f"{_PK_COMMENT_TAG}:DROP-default6"]},
+    ]
+
+    return insert_rules + append_rules
+
+
 def _pk_build_ipset_create_cmd(state: dict) -> list:
-    """Команда создания ipset xray_knocked с TTL timeout.
+    """Команда создания ipset xray_knocked с TTL timeout (IPv4).
 
-        ipset create xray_knocked hash:ip timeout 3600 exist
+        ipset create xray_knocked hash:ip timeout 3600 -exist
 
-    `exist` flag — идемпотентность: не падает если set уже есть.
+    `-exist` flag — идемпотентность: не падает если set уже есть.
+    FIX (Bug 4): используем `-exist` (с dash), не `exist`.
     """
     return ["ipset", "create", _PK_KNOCKED_SET, "hash:ip",
             "timeout", str(int(state["whitelist_ttl_sec"])), "-exist"]
 
 
-def _pk_rule_exists(spec: list) -> bool:
-    """Проверяет наличие правила через `iptables -C INPUT <spec>`."""
-    cmd = ["iptables", "-C", "INPUT"] + spec
+def _pk_build_ipset_create_cmd_v6(state: dict) -> list:
+    """Команда создания ipset xray_knocked6 с TTL timeout (IPv6, family inet6).
+
+        ipset create xray_knocked6 hash:ip timeout 3600 family inet6 -exist
+
+    `family inet6` обязателен для IPv6 ipset — должен быть указан при создании,
+    после создания изменить нельзя. Поэтому отдельный set от IPv4.
+    """
+    return ["ipset", "create", _PK_KNOCKED_SET_V6, "hash:ip",
+            "timeout", str(int(state["whitelist_ttl_sec"])),
+            "family", "inet6", "-exist"]
+
+
+def _pk_rule_exists(spec: list, table: str = "iptables") -> bool:
+    """Проверяет наличие правила через `<table> -C INPUT <spec>`.
+
+    table = "iptables" (IPv4) или "ip6tables" (IPv6).
+    """
+    cmd = [table, "-C", "INPUT"] + spec
     return _run(cmd, quiet=True).returncode == 0
 
 
@@ -333,13 +445,13 @@ def _pk_ipset_exists(name: str) -> bool:
 
 # ── Persistence (best-effort, без падения если tools отсутствуют) ────────────
 def _pk_persist() -> None:
-    """Сохраняет iptables-правила и ipset, чтобы пережить reboot.
+    """Сохраняет iptables/ip6tables-правила и ipset, чтобы пережить reboot.
 
     Best-effort: если netfilter-persistent/iptables-save/ipset save недоступны
     или нет прав на запись — молча пропускаем (правила не переживут reboot,
     но модуль можно повторно активировать через меню).
     """
-    # iptables
+    # iptables (IPv4)
     try:
         import shutil
         if shutil.which("netfilter-persistent"):
@@ -352,28 +464,85 @@ def _pk_persist() -> None:
                     rules_path.write_text(r.stdout)
     except Exception:
         pass
-    # ipset
+    # ip6tables (IPv6)
+    try:
+        import shutil
+        rules_path = Path("/etc/iptables/rules.v6")
+        if rules_path.parent.exists():
+            r = _run(["ip6tables-save"], capture=True)
+            if r.returncode == 0 and r.stdout:
+                rules_path.write_text(r.stdout)
+    except Exception:
+        pass
+    # ipset (both IPv4 + IPv6)
     try:
         ipset_save_path = Path("/etc/iptables/ipsets")
-        if ipset_save_path.parent.exists() and _pk_ipset_exists(_PK_KNOCKED_SET):
-            r = _run(["ipset", "save", _PK_KNOCKED_SET], capture=True)
-            if r.returncode == 0 and r.stdout:
-                ipset_save_path.write_text(r.stdout)
+        if ipset_save_path.parent.exists():
+            for set_name in (_PK_KNOCKED_SET, _PK_KNOCKED_SET_V6):
+                if _pk_ipset_exists(set_name):
+                    r = _run(["ipset", "save", set_name], capture=True)
+                    if r.returncode == 0 and r.stdout:
+                        # append (both sets in same file)
+                        with ipset_save_path.open("a") as f:
+                            f.write(r.stdout)
     except Exception:
         pass
 
 
 # ── Install / Remove ───────────────────────────────────────────────────────────
+def _pk_find_rule_lines(table: str) -> list:
+    """Возвращает номера строк правил с нашим comment-тегом в `<table> -L INPUT`.
+
+    Алгоритм (Bug 1 fix):
+      • `<table> -L INPUT --line-numbers -n` → вывод с номерами строк
+      • Фильтруем строки с _PK_COMMENT_TAG (substring match — работает и для
+        IPv4 cвойствa "chimera-port-knocking", и для IPv6 с суффиксами
+        "chimera-port-knocking:DROP-ban6" и т.д.)
+      • Извлекаем ведущее число (номер строки)
+      • Сортируем по убыванию (bottom-up delete — чтобы номера строк не
+        сдвигались при удалении)
+
+    Возвращает list[int] отсортированный по убыванию.
+    """
+    r = _run([table, "-L", "INPUT", "--line-numbers", "-n"], capture=True)
+    if r.returncode != 0:
+        return []
+    lines: list[int] = []
+    for line in (r.stdout or "").splitlines():
+        if _PK_COMMENT_TAG not in line:
+            continue
+        m = re.match(r"\s*(\d+)", line)
+        if m:
+            lines.append(int(m.group(1)))
+    # Сортируем по убыванию — удаляем снизу вверх (номера не сдвигаются)
+    return sorted(lines, reverse=True)
+
+
 def _pk_install(state: dict) -> bool:
-    """Устанавливает ipset + iptables-правила для всех портов в state['ports'].
+    """Устанавливает ipset + iptables + ip6tables-правила для всех портов.
 
-    Идемпотентно:
-      • ipset создаётся с флагом `exist` (не падает если уже есть)
-      • каждое iptables-правило проверяется через `-C` перед `-I`/`-A`
-        (не дублирует уже установленные правила)
+    FIX (Bug 2): сначала вызывает _pk_remove() чтобы удалить ВСЕ старые правила
+    (даже если порядок был нарушен), потом ставит свежие правила в правильном
+    порядке. Идемпотентно — повторный install полностью пересоздаёт состояние.
 
-    При успехе обновляет state (enabled=True, installed_at=сейчас) и вызывает
-    _pk_persist() для сохранения правил через reboot.
+    FIX (Bug 3): для каждого порта удаляет UFW-правило `allow <port>/tcp` —
+    иначе UFW ACCEPT'ит :port ДО достижения knocking-правил, делая knocking
+    бесполезным. При remove UFW восстанавливается.
+
+    Шаги:
+      1. Валидация state.
+      2. _pk_remove() — очистка всех старых правил + восстановление UFW
+         (для старого набора портов).
+      3. Создаём ipset xray_knocked (IPv4) — идемпотентно через `-exist`.
+      4. Создаём ipset xray_knocked6 (IPv6, family inet6) — идемпотентно.
+      5. Для каждого порта:
+         a. ufw delete allow <port>/tcp (Bug 3 fix)
+         b. iptables-правила IPv4 (3 INSERT + 3 APPEND) — skip clients_wl
+            если ipset не существует; идемпотентно через -C check.
+         c. ip6tables-правила IPv6 (2 INSERT + 3 APPEND) — skip
+            xray_manual_ban6 если ipset не существует; идемпотентно через -C.
+      6. Сохраняем state (enabled=True, installed_at=сейчас).
+      7. _pk_persist() для survive reboot.
     """
     errors = _pk_validate(state)
     if errors:
@@ -384,26 +553,45 @@ def _pk_install(state: dict) -> bool:
         _warn("No ports configured — nothing to install")
         return False
 
-    # 1. Создаём ipset xray_knocked (идемпотентно через `exist` flag)
+    # 1. Bug 2 fix: clean ALL old rules first (correct order every time).
+    #    _pk_remove loads state from disk (old state), removes old rules,
+    #    restores UFW for old ports, saves state with enabled=False.
+    _pk_remove()
+
+    # 2. Создаём ipset xray_knocked (IPv4, идемпотентно через -exist)
     ipset_cmd = _pk_build_ipset_create_cmd(state)
     r = _run(ipset_cmd, capture=True)
     if r.returncode != 0:
-        _err(f"ipset create failed: {(r.stderr or '').strip()[:120]}")
+        _err(f"ipset create (IPv4) failed: {(r.stderr or '').strip()[:120]}")
         return False
     _log("INFO", f"ipset {_PK_KNOCKED_SET} ready "
                  f"(timeout={state['whitelist_ttl_sec']}s)")
 
-    # 2. Устанавливаем правила для каждого порта (идемпотентно через -C)
+    # 3. Создаём ipset xray_knocked6 (IPv6, family inet6, идемпотентно)
+    ipset_cmd_v6 = _pk_build_ipset_create_cmd_v6(state)
+    r = _run(ipset_cmd_v6, capture=True)
+    if r.returncode != 0:
+        _err(f"ipset create (IPv6) failed: {(r.stderr or '').strip()[:120]}")
+        return False
+    _log("INFO", f"ipset {_PK_KNOCKED_SET_V6} ready (family inet6, "
+                 f"timeout={state['whitelist_ttl_sec']}s)")
+
+    # 4. Bug 3 fix: для каждого порта удаляем UFW-правило allow <port>/tcp.
+    #    ufw delete removes BOTH IPv4 and IPv6 rules for that port.
+    #    Затем устанавливаем knocking-правила (IPv4 + IPv6).
     installed_rules = 0
     for port in state["ports"]:
-        rules = _pk_build_iptables_rules(port, state)
-        for rule in rules:
+        # 4a. Delete UFW allow rule for this port (Bug 3 fix)
+        _run(["ufw", "delete", "allow", f"{port}/tcp"], quiet=True)
+
+        # 4b. Install iptables (IPv4) rules — идемпотентно через -C
+        for rule in _pk_build_iptables_rules(port, state):
             # Skip clients_wl rule if ipset doesn't exist on this server
             if _PK_WL_SET in rule["spec"] and not _pk_ipset_exists(_PK_WL_SET):
                 _info(f"Skipping {_PK_WL_SET} rule — ipset not found "
                       f"(configure whitelist in chimera TUI to enable)")
                 continue
-            if _pk_rule_exists(rule["spec"]):
+            if _pk_rule_exists(rule["spec"], "iptables"):
                 continue  # уже есть — пропускаем (идемпотентность)
             if rule["op"] == "insert":
                 cmd = ["iptables", "-I", "INPUT", str(rule["pos"])] + rule["spec"]
@@ -418,83 +606,124 @@ def _pk_install(state: dict) -> bool:
                 continue
             installed_rules += 1
 
-    # 3. Обновляем state
+        # 4c. Install ip6tables (IPv6) rules — идемпотентно через -C
+        for rule in _pk_build_ip6tables_rules(port, state):
+            # Skip xray_manual_ban6 rule if ipset doesn't exist on this server
+            if _PK_MANUAL_BAN_SET_V6 in rule["spec"] and \
+                    not _pk_ipset_exists(_PK_MANUAL_BAN_SET_V6):
+                _info(f"Skipping {_PK_MANUAL_BAN_SET_V6} rule — ipset not "
+                      f"found (configure IPv6 ban in ipban TUI to enable)")
+                continue
+            if _pk_rule_exists(rule["spec"], "ip6tables"):
+                continue
+            if rule["op"] == "insert":
+                cmd = ["ip6tables", "-I", "INPUT", str(rule["pos"])] + rule["spec"]
+            else:  # append
+                cmd = ["ip6tables", "-A", "INPUT"] + rule["spec"]
+            r = _run(cmd, capture=True)
+            if r.returncode != 0:
+                _err(f"ip6tables rule failed ({_cmd_str(cmd)}): "
+                     f"{(r.stderr or '').strip()[:120]}")
+                continue
+            installed_rules += 1
+
+    # 5. Обновляем state
     state["enabled"] = True
     state["installed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     _pk_state_save(state)
 
-    # 4. Persist для survive reboot
+    # 6. Persist для survive reboot
     _pk_persist()
 
     _success(f"Port knocking installed: ports={state['ports']}, "
              f"knock={state['knock_count']}/{state['knock_window_sec']}s, "
              f"ttl={state['whitelist_ttl_sec']}s "
-             f"({installed_rules} new rules)")
+             f"({installed_rules} new rules, IPv4+IPv6)")
     _log("INFO", f"installed: ports={state['ports']}, "
-                 f"new_rules={installed_rules}")
+                 f"new_rules={installed_rules}, ip6tables=included")
 
     _tg_notify_event("port_knocking",
         f"<b>Port knocking</b> enabled: ports={state['ports']}, "
         f"knock={state['knock_count']}/{state['knock_window_sec']}s, "
-        f"ttl={state['whitelist_ttl_sec']}s")
+        f"ttl={state['whitelist_ttl_sec']}s (IPv4+IPv6)")
     return True
 
 
 def _pk_remove() -> bool:
-    """Удаляет все iptables-правила с нашим comment-тегом + flush/destroy ipset.
+    """Удаляет все iptables/ip6tables-правила с нашим comment-тегом + ipsets.
 
     Безопасно вызывать многократно: если правил/сет нет — ничего не делает.
 
+    FIX (Bug 1): удаляет правила по НОМЕРУ СТРОКИ (а не по -D с неполным spec,
+    который не работает т.к. iptables -D требует точного совпадения всех
+    аргументов). Алгоритм:
+      1. `<table> -L INPUT --line-numbers -n | grep <tag>` → номера строк
+      2. Сортируем по убыванию (bottom-up — чтобы номера не сдвигались)
+      3. `<table> -D INPUT <N>` для каждого номера
+
+    FIX (Bug 3): после удаления правил восстанавливает UFW-правило
+    `allow <port>/tcp comment "chimera-vless VLESS REALITY :<port>"` —
+    это возвращает IPv4+IPv6 ACCEPT от UFW для портов, которые мы ранее
+    закрывали knocking-ом. Восстановление делается только если state.enabled
+    было True (т.е. install ранее действительно удалил UFW).
+
     Алгоритм:
-      1. В цикле `iptables -S INPUT` → найти строки с _PK_COMMENT_TAG →
-         конвертировать `-A INPUT <spec>` → `-D INPUT <spec>` → выполнить.
-         Повторять пока не останется наших правил (защита от бесконечного
-         цикла — 60 итераций = 6 правил × 10 портов максимум).
-      2. `ipset flush xray_knocked` + `ipset destroy xray_knocked`
-         (этот set создан нами — безопасно уничтожать; clients_wl и
-         xray_manual_ban не трогаем — они чужие).
-      3. Обновляем state (enabled=False, installed_at='').
-      4. _pk_persist() чтобы сохранить ОЧИЩЕННОЕ состояние iptables.
+      1. _pk_state_load() — узнать был ли модуль включён и список портов.
+      2. Для iptables и ip6tables: найти номера строк наших правил, удалить
+         снизу вверх по номеру.
+      3. Flush + destroy ipset xray_knocked и xray_knocked6 (созданы нами).
+      4. Если было включено — восстановить UFW для каждого порта.
+      5. Сохранить state (enabled=False, installed_at='').
+      6. _pk_persist() чтобы сохранить ОЧИЩЕННОЕ состояние.
     """
     removed_rules = 0
 
-    # 1. Удаляем все iptables-правила с нашим comment-тегом
-    for _ in range(60):  # защита от бесконечного цикла
-        r = _run(["iptables", "-S", "INPUT"], capture=True)
-        lines = [l for l in (r.stdout or "").splitlines()
-                 if _PK_COMMENT_TAG in l]
-        if not lines:
-            break
-        line = lines[0]
-        if not line.startswith("-A INPUT"):
-            break
-        # Конвертируем "-A INPUT <spec>" → "-D INPUT <spec>"
-        del_args = ["iptables", "-D", "INPUT"] + line.split()[2:]
-        r2 = _run(del_args, capture=True)
-        if r2.returncode != 0:
-            break
-        removed_rules += 1
-
-    # 2. Flush + destroy ipset xray_knocked (создан нами — безопасно)
-    if _pk_ipset_exists(_PK_KNOCKED_SET):
-        _run(["ipset", "flush", _PK_KNOCKED_SET], quiet=True)
-        r = _run(["ipset", "destroy", _PK_KNOCKED_SET], capture=True)
-        if r.returncode != 0:
-            _log("WARN", f"ipset destroy failed: "
-                         f"{(r.stderr or '').strip()[:120]}")
-
-    # 3. Обновляем state
+    # 1. State: узнать старый статус и порты (для UFW restore)
     state = _pk_state_load()
+    was_enabled = bool(state.get("enabled", False))
+    ports = list(state.get("ports", []))
+
+    # 2. Bug 1 fix: удаляем правила по номеру строки в ОБЕИХ таблицах
+    for table in ("iptables", "ip6tables"):
+        line_nums = _pk_find_rule_lines(table)
+        for n in line_nums:  # уже отсортированы по убыванию
+            r = _run([table, "-D", "INPUT", str(n)], capture=True)
+            if r.returncode == 0:
+                removed_rules += 1
+            else:
+                _log("WARN", f"{table} -D INPUT {n} failed: "
+                             f"{(r.stderr or '').strip()[:120]}")
+
+    # 3. Flush + destroy оба ipset (созданы нами — безопасно)
+    for set_name in (_PK_KNOCKED_SET, _PK_KNOCKED_SET_V6):
+        if _pk_ipset_exists(set_name):
+            _run(["ipset", "flush", set_name], quiet=True)
+            r = _run(["ipset", "destroy", set_name], capture=True)
+            if r.returncode != 0:
+                _log("WARN", f"ipset destroy {set_name} failed: "
+                             f"{(r.stderr or '').strip()[:120]}")
+
+    # 4. Bug 3 fix: восстанавливаем UFW (IPv4 + IPv6) — только если
+    #    модуль был включён (т.е. install ранее удалил UFW).
+    if was_enabled:
+        for port in ports:
+            _run(["ufw", "allow", f"{port}/tcp", "comment",
+                  f"chimera-vless VLESS REALITY :{port}"], quiet=True)
+            _log("INFO", f"UFW restored: allow {port}/tcp")
+
+    # 5. Обновляем state
     state["enabled"] = False
     state["installed_at"] = ""
     _pk_state_save(state)
 
-    # 4. Persist очищенного состояния
+    # 6. Persist очищенного состояния
     _pk_persist()
 
     _success(f"Port knocking removed ({removed_rules} rules deleted, "
-             f"ipset {_PK_KNOCKED_SET} destroyed)")
-    _log("INFO", f"removed: deleted_rules={removed_rules}")
+             f"ipsets {_PK_KNOCKED_SET}+{_PK_KNOCKED_SET_V6} destroyed"
+             + (f", UFW restored for {ports}" if was_enabled else "") + ")")
+    _log("INFO", f"removed: deleted_rules={removed_rules}, "
+                 f"was_enabled={was_enabled}")
 
     _tg_notify_event("port_knocking", "<b>Port knocking</b> disabled")
     return True
@@ -502,9 +731,16 @@ def _pk_remove() -> bool:
 
 # ── Status ──────────────────────────────────────────────────────────────────────
 def _pk_is_active() -> bool:
-    """Активен ли модуль сейчас (есть ли правила с нашим тегом в iptables)."""
-    r = _run(["iptables", "-S", "INPUT"], capture=True)
-    return _PK_COMMENT_TAG in (r.stdout or "")
+    """Активен ли модуль сейчас (есть ли правила с нашим тегом в iptables
+    ИЛИ ip6tables).
+
+    Проверяет обе таблицы — даже если правила только в одной, считаем активным.
+    """
+    for table in ("iptables", "ip6tables"):
+        r = _run([table, "-S", "INPUT"], capture=True, quiet=True)
+        if r.returncode == 0 and _PK_COMMENT_TAG in (r.stdout or ""):
+            return True
+    return False
 
 
 def _pk_ipset_size(name: str) -> int:
@@ -517,11 +753,20 @@ def _pk_ipset_size(name: str) -> int:
 
 
 def _pk_recent_stats(port: int) -> dict:
-    """Статистика recent-таблицы для порта через /proc/net/xt_recent.
+    """Статистика recent-таблицы для порта через /proc/net/xt_recent (IPv4).
 
     Возвращает dict {name, exists, entries}.
     """
-    name = _pk_recent_name(port)
+    return _pk_recent_stats_by_name(_pk_recent_name(port))
+
+
+def _pk_recent_stats_v6(port: int) -> dict:
+    """Статистика recent-таблицы для порта (IPv6, имя KNOCK{port}v6)."""
+    return _pk_recent_stats_by_name(_pk_recent_name_v6(port))
+
+
+def _pk_recent_stats_by_name(name: str) -> dict:
+    """Shared helper: читает /proc/net/xt_recent/<name>."""
     proc_file = Path("/proc/net/xt_recent") / name
     if not proc_file.exists():
         return {"name": name, "exists": False, "entries": 0}
@@ -532,11 +777,29 @@ def _pk_recent_stats(port: int) -> dict:
         return {"name": name, "exists": False, "entries": 0}
 
 
+def _pk_ipv6_available() -> bool:
+    """Доступен ли IPv6 loopback (::1) на этой машине.
+
+    Простая проверка: создаём AF_INET6 socket. Если ядро не поддерживает
+    AF_INET6 — исключение → IPv6 не доступен. Если поддерживает, считаем
+    что loopback ::1 доступен (стандарт для всех современных Linux/macOS).
+    """
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        s.settimeout(0.1)
+        s.close()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _pk_status() -> str:
     """Возвращает форматированный статус-строку (ANSI-color, для терминала).
 
-    Включает: enabled/active, порты, knock-параметры, размер ipset
-    xray_knocked, статистику recent-таблиц на порт, installed_at.
+    Включает: enabled/active, порты, knock-параметры, размеры ipset
+    xray_knocked (IPv4) + xray_knocked6 (IPv6), статистику recent-таблиц
+    на порт (IPv4 KNOCK{port} + IPv6 KNOCK{port}v6), число правил в
+    iptables/ip6tables, installed_at.
     """
     state = _pk_state_load()
     active = _pk_is_active()
@@ -548,7 +811,10 @@ def _pk_status() -> str:
     else:
         status_line = f"{DIM}○ inactive{NC}"
 
-    knocked_size = _pk_ipset_size(_PK_KNOCKED_SET) if active else 0
+    knocked_size_v4 = _pk_ipset_size(_PK_KNOCKED_SET) if active else 0
+    knocked_size_v6 = _pk_ipset_size(_PK_KNOCKED_SET_V6) if active else 0
+    rules_v4 = len(_pk_find_rule_lines("iptables")) if active else 0
+    rules_v6 = len(_pk_find_rule_lines("ip6tables")) if active else 0
 
     lines = [
         f"<b>Port Knocking</b> {status_line}",
@@ -556,13 +822,20 @@ def _pk_status() -> str:
         f"Knock:           {state['knock_count']} SYN / "
         f"{state['knock_window_sec']}s",
         f"Whitelist TTL:   {state['whitelist_ttl_sec']}s",
-        f"xray_knocked:    {knocked_size} IPs",
+        f"xray_knocked:    {knocked_size_v4} IPs (IPv4)",
+        f"xray_knocked6:   {knocked_size_v6} IPs (IPv6)",
+        f"Rules:           iptables={rules_v4}, ip6tables={rules_v6}",
     ]
     if active:
         for port in state["ports"]:
-            rs = _pk_recent_stats(port)
-            if rs["exists"]:
-                lines.append(f"  recent KNOCK{port}: {rs['entries']} tracked IPs")
+            rs_v4 = _pk_recent_stats(port)
+            rs_v6 = _pk_recent_stats_v6(port)
+            if rs_v4["exists"]:
+                lines.append(f"  recent KNOCK{port}: "
+                             f"{rs_v4['entries']} tracked IPs (IPv4)")
+            if rs_v6["exists"]:
+                lines.append(f"  recent KNOCK{port}v6: "
+                             f"{rs_v6['entries']} tracked IPs (IPv6)")
     if state.get("installed_at"):
         lines.append(f"Installed:       {DIM}{state['installed_at']}{NC}")
 
@@ -571,26 +844,34 @@ def _pk_status() -> str:
 
 # ── Test knock ──────────────────────────────────────────────────────────────────
 def _pk_test_knock(port: int) -> dict:
-    """Тест: отправляет N SYN на localhost:port, проверяет добавление в xray_knocked.
+    """Тест: отправляет N SYN на localhost:port для IPv4 и IPv6, проверяет
+    добавление в xray_knocked / xray_knocked6.
 
-    Шаги:
-      1. Очищает 127.0.0.1 из xray_knocked (если уже там)
-      2. Очищает 127.0.0.1 из recent-таблицы (через /proc/net/xt_recent/<name>)
-      3. Отправляет knock_count SYN на 127.0.0.1:port (connect_ex, короткий timeout)
+    Шаги (для каждой семьи):
+      1. Очищает loopback IP из ipset (если уже там)
+      2. Очищает loopback IP из recent-таблицы (через /proc/net/xt_recent/<name>)
+      3. Отправляет knock_count SYN на <loopback>:port (connect_ex, timeout 0.3)
       4. Ждёт 0.3с для обработки в kernel
-      5. Проверяет, что 127.0.0.1 в ipset list xray_knocked
+      5. Проверяет, что loopback IP в ipset list
 
-    Возвращает dict: {port, sent_syns, knock_count, in_xray_knocked, success}.
+    IPv4: 127.0.0.1 → xray_knocked, recent KNOCK{port}
+    IPv6: ::1 (если доступен) → xray_knocked6, recent KNOCK{port}v6
+
+    Возвращает dict (плоский, для backward-compat с TUI):
+      {port, knock_count,
+       sent_syns (IPv4), in_xray_knocked (IPv4), success (IPv4),
+       ipv6_available, ipv6_sent_syns (IPv6),
+       in_xray_knocked6 (IPv6), ipv6_success (IPv6)}
     """
     state = _pk_state_load()
     knock_count = int(state["knock_count"])
+    recent_name    = _pk_recent_name(port)
+    recent_name_v6 = _pk_recent_name_v6(port)
 
-    # 1. Очищаем 127.0.0.1 из xray_knocked (если уже там)
+    # ── IPv4 test ─────────────────────────────────────────────────────────────
+    # 1. Clear 127.0.0.1 from xray_knocked
     _run(["ipset", "del", _PK_KNOCKED_SET, "127.0.0.1"], quiet=True)
-
-    # 2. Очищаем 127.0.0.1 из recent-таблицы
-    #    /proc/net/xt_recent/<name> принимает команды: +IP (add), -IP (remove)
-    recent_name = _pk_recent_name(port)
+    # 2. Clear 127.0.0.1 from recent table
     recent_proc = Path("/proc/net/xt_recent") / recent_name
     if recent_proc.exists():
         try:
@@ -598,36 +879,68 @@ def _pk_test_knock(port: int) -> dict:
                 f.write("-127.0.0.1\n")
         except Exception:
             pass
-
-    # 3. Отправляем N SYN на localhost:port
-    #    connect_ex возвращает 0 при успехе (соединение установлено) или
-    #    errno при ошибке (ECONNREFUSED/ETIMEDOUT). Нам неважно — мы только
-    #    инициируем SYN, который пройдёт через iptables INPUT и обновит recent.
-    sent = 0
+    # 3. Send N SYN to 127.0.0.1:port
+    sent_v4 = 0
     for _ in range(knock_count):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(0.3)
             sock.connect_ex(("127.0.0.1", port))
             sock.close()
-            sent += 1
+            sent_v4 += 1
         except Exception:
             pass
         time.sleep(0.05)  # небольшая пауза между SYN
-
-    # 4. Ждём обработки в kernel (recent --set, --rcheck, --add-set)
+    # 4. Wait for kernel processing
     time.sleep(0.3)
-
-    # 5. Проверяем, что 127.0.0.1 в xray_knocked
+    # 5. Check 127.0.0.1 in xray_knocked
     r = _run(["ipset", "list", _PK_KNOCKED_SET], capture=True)
-    in_set = "127.0.0.1" in (r.stdout or "")
+    in_set_v4 = "127.0.0.1" in (r.stdout or "")
+
+    # ── IPv6 test ────────────────────────────────────────────────────────────
+    ipv6_available = _pk_ipv6_available()
+    sent_v6 = 0
+    in_set_v6 = False
+    if ipv6_available:
+        # 1. Clear ::1 from xray_knocked6
+        _run(["ipset", "del", _PK_KNOCKED_SET_V6, "::1"], quiet=True)
+        # 2. Clear ::1 from recent v6 table
+        recent_proc_v6 = Path("/proc/net/xt_recent") / recent_name_v6
+        if recent_proc_v6.exists():
+            try:
+                with recent_proc_v6.open("w") as f:
+                    f.write("-::1\n")
+            except Exception:
+                pass
+        # 3. Send N SYN to [::1]:port
+        for _ in range(knock_count):
+            try:
+                sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                sock.settimeout(0.3)
+                sock.connect_ex(("::1", port))
+                sock.close()
+                sent_v6 += 1
+            except Exception:
+                pass
+            time.sleep(0.05)
+        # 4. Wait for kernel processing
+        time.sleep(0.3)
+        # 5. Check ::1 in xray_knocked6
+        r = _run(["ipset", "list", _PK_KNOCKED_SET_V6], capture=True)
+        in_set_v6 = "::1" in (r.stdout or "")
 
     return {
-        "port":            port,
-        "sent_syns":       sent,
-        "knock_count":     knock_count,
-        "in_xray_knocked": in_set,
-        "success":         in_set,
+        "port":              port,
+        "knock_count":       knock_count,
+        # IPv4 (backward-compat fields used by TUI menu)
+        "sent_syns":         sent_v4,
+        "in_xray_knocked":   in_set_v4,
+        "success":           in_set_v4,
+        # IPv6 (new fields)
+        "ipv6_available":     ipv6_available,
+        "ipv6_sent_syns":     sent_v6,
+        "in_xray_knocked6":   in_set_v6,
+        "ipv6_success":       in_set_v6,
     }
 
 
@@ -859,15 +1172,25 @@ def _pk_menu_test(state: dict) -> None:
     print()
     _box_top("🚪  PORT KNOCKING — РЕЗУЛЬТАТ ТЕСТА")
     _box_row(f"  Порт:              {CYAN}{result['port']}{NC}")
-    _box_row(f"  Отправлено SYN:    {result['sent_syns']}/"
+    _box_row(f"  IPv4 SYN:          {result['sent_syns']}/"
              f"{result['knock_count']}")
     if result["success"]:
         _box_row(f"  127.0.0.1 в xray_knocked: {GREEN}ДА{NC}")
-        _box_row(f"  {GREEN}✓ Тест пройден — knocking работает{NC}")
+        _box_row(f"  {GREEN}✓ IPv4 knocking работает{NC}")
     else:
         _box_row(f"  127.0.0.1 в xray_knocked: {RED}НЕТ{NC}")
-        _box_row(f"  {RED}✗ Тест не пройден — проверьте правила "
-                 f"iptables{NC}")
+        _box_row(f"  {RED}✗ IPv4 тест не пройден{NC}")
+    if result.get("ipv6_available"):
+        _box_row(f"  IPv6 SYN:          {result['ipv6_sent_syns']}/"
+                 f"{result['knock_count']}")
+        if result.get("ipv6_success"):
+            _box_row(f"  ::1 в xray_knocked6:    {GREEN}ДА{NC}")
+            _box_row(f"  {GREEN}✓ IPv6 knocking работает{NC}")
+        else:
+            _box_row(f"  ::1 в xray_knocked6:    {RED}НЕТ{NC}")
+            _box_row(f"  {RED}✗ IPv6 тест не пройден{NC}")
+    else:
+        _box_row(f"  IPv6:               {DIM}недоступен{NC}")
     _box_bottom()
 
 
