@@ -287,15 +287,18 @@ def _pk_build_iptables_rules(port: int, state: dict) -> list:
          "spec": base + ["--syn",
                          "-m", "recent", "--name", recent_name, "--set"] + comment},
         # 5. Если N SYN за W секунд → добавить src в xray_knocked (с TTL)
-        #    (без -j target: --add-set — side-effect match, пакет продолжает
-        #     падать ниже → правило 6 его дропнет; но IP уже в xray_knocked,
-        #     следующий SYN попадёт в INSERT #3 и будет ACCEPT)
+        #    FIX: iptables-nft (nf_tables backend) не поддерживает
+        #    `-m set --add-set` — нужно использовать target SET:
+        #    `-j SET --add-set xray_knocked src`
+        #    (пакет продолжает падать ниже по цепочке → правило 6 его
+        #     дропнет; но IP уже в xray_knocked, следующий SYN попадёт
+        #     в INSERT #3 и будет ACCEPT)
         {"op": "append",
          "spec": base + ["--syn",
                          "-m", "recent", "--name", recent_name,
                          "--rcheck", "--seconds", str(knock_window),
                          "--hitcount", str(knock_count),
-                         "-m", "set", "--add-set", _PK_KNOCKED_SET,
+                         "-j", "SET", "--add-set", _PK_KNOCKED_SET,
                          "src"] + comment},
         # 6. Default deny: DROP всех остальных SYN на этом порту
         {"op": "append",
@@ -395,6 +398,11 @@ def _pk_install(state: dict) -> bool:
     for port in state["ports"]:
         rules = _pk_build_iptables_rules(port, state)
         for rule in rules:
+            # Skip clients_wl rule if ipset doesn't exist on this server
+            if _PK_WL_SET in rule["spec"] and not _pk_ipset_exists(_PK_WL_SET):
+                _info(f"Skipping {_PK_WL_SET} rule — ipset not found "
+                      f"(configure whitelist in chimera TUI to enable)")
+                continue
             if _pk_rule_exists(rule["spec"]):
                 continue  # уже есть — пропускаем (идемпотентность)
             if rule["op"] == "insert":
