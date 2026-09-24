@@ -858,6 +858,20 @@ def _bind_tg_user(tg_user_id, email):
     return user
 
 def _lookup_user(tg_user_id):
+    # FIX: админ (chat_id == ADMIN_ID) автоматически привязывается к primary
+    # UUID из state.json — без необходимости делать /start <token>. Это
+    # решает проблему "Вы не зарегистрированы" для админа.
+    if str(tg_user_id) == ADMIN_ID:
+        st = _state()
+        primary_uuid = st.get("uuid", "")
+        if primary_uuid:
+            # Попытаться найти этого user по UUID в config.json
+            user = _find_user_by_uuid(primary_uuid)
+            if user:
+                return user
+            # Если primary_uuid нет в config.json (например, использует
+            # другой режим), создать minimal stub — достаточно для /config
+            return {{"id": primary_uuid, "email": "admin", "level": 0}}
     data = _map_load()
     info = data.get(str(tg_user_id))
     if not info:
