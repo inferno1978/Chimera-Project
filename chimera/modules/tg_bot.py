@@ -385,6 +385,10 @@ def _generate_bot_script(bot_cfg: dict, notif_cfg: dict) -> str:
     # в Python значения True/False (а в JSON — true/false). repr() даёт
     # валидный Python-литерал.
     cascade_peers = repr(bot_cfg.get("cascade_peers", []))
+    # Локальные метаданные для primary-сервера (этот сервер). Выводятся в
+    # /status перед локальным hostname, чтобы было видно какой это сервер.
+    local_name = repr(bot_cfg.get("local_name", ""))
+    local_ip   = repr(bot_cfg.get("local_ip", ""))
     state_file   = str(_STATE_FILE)
     bot_file     = str(_BOT_FILE)
 
@@ -400,6 +404,8 @@ from datetime import datetime
 TOKEN    = {token}
 ADMIN_ID = {admin_id}
 CASCADE_PEERS = {cascade_peers}
+LOCAL_NAME = {local_name}
+LOCAL_IP   = {local_ip}
 BOT_FILE = Path("{bot_file}")
 STATE_F  = Path("{state_file}")
 LOG_F    = Path("/var/log/chimera.log")
@@ -523,6 +529,9 @@ def _local_status_dict():
         up = ""
     return {{
         "host":     host,
+        # Локальные метаданные из bot_cfg — используются в выводе
+        "name":     LOCAL_NAME or host,
+        "ip":       LOCAL_IP,
         "xray":     xray_status,
         "proto":    st.get("protocol_mode", "?"),
         "port":     st.get("server_port", "?"),
@@ -574,6 +583,7 @@ def _remote_status_dict(peer):
         try:
             data = json.loads(out.split("\\n")[-1])
             data["name"] = name
+            data["ip"] = host  # IP peer (peer["host"])
             data["local"] = False
             return data
         except Exception:
@@ -584,6 +594,7 @@ def _remote_status_dict(peer):
                     try:
                         data = json.loads(line)
                         data["name"] = name
+                        data["ip"] = host
                         data["local"] = False
                         return data
                     except Exception:
@@ -613,18 +624,30 @@ def get_status_text_all():
         name = peer.get("name", peer.get("host", "?"))
         r = _remote_status_dict(peer)
         if "error" in r:
-            lines.append(f"\\n• <b>{{name}}</b> ({{peer.get('host')}}): ❌ {{r['error']}}")
+            # ошибка remote: показываем peer name + peer IP + причину
+            peer_ip = peer.get("host", "?")
+            lines.append(f"\\n• <b>{{name}}</b> ({{peer_ip}}): ❌ {{r['error']}}")
         else:
             lines.append(_format_status_line(r, is_first=False))
 
     return "\\n".join(lines)
 
 def _format_status_line(d, is_first=False):
-    """Форматирует dict статуса в HTML-строку."""
+    """Форматирует dict статуса в HTML-строку.
+
+    Формат:  • <name> (<host>) — <ip>
+                🟢 Xray=active | REALITY:443 | М=B | Апт: up X days
+    """
     if "error" in d:
-        return f"• <b>{{d.get('name', '?')}}</b>: ❌ {{d['error']}}"
+        ip = d.get("ip", "")
+        ip_part = f" — {{ip}}" if ip else ""
+        return f"• <b>{{d.get('name', '?')}}</b> ({{d.get('host', '?')}}){{ip_part}}: ❌ {{d['error']}}"
     host = d.get("host", "?")
-    name = d.get("name", host) if not d.get("local") else host
+    # name: для local используем LOCAL_NAME (или host если пусто),
+    # для remote — peer["name"] (или host если пусто)
+    name = d.get("name") or host
+    ip = d.get("ip", "")
+    ip_part = f" — <code>{{ip}}</code>" if ip else ""
     xray = d.get("xray", "?")
     xray_emoji = "🟢" if xray == "active" else "🔴" if xray in ("inactive", "failed") else "❓"
     proto = str(d.get("proto", "?")).upper()
@@ -632,7 +655,7 @@ def _format_status_line(d, is_first=False):
     mode = d.get("mode", "?")
     up = d.get("uptime", "")
     up_str = f" | Апт: {{up}}" if up else ""
-    return (f"{{'•' if not is_first else '•'}} <b>{{name}}</b> ({{host}})\\n"
+    return (f"• <b>{{name}}</b> ({{host}}){{ip_part}}\\n"
             f"   {{xray_emoji}} Xray={{xray}} | {{proto}}:{{port}} | М={{mode}}{{up_str}}")
 
 
