@@ -101,6 +101,7 @@ from chimera.modules.fingerprint_manager import (
 from chimera.modules.dnscrypt_selector import do_dnscrypt_selector_menu
 from chimera.modules.dnscrypt_advanced import do_dnscrypt_advanced_menu
 from chimera.modules.honeypot      import do_manage_honeypot
+from chimera.modules.port_knocking import do_manage_port_knocking
 from chimera.modules.fail2ban_manager import do_manage_fail2ban
 from chimera.modules.scheduler     import render_scheduler_menu
 from chimera.modules.updater       import do_manage_update, update_hint_line
@@ -9151,6 +9152,7 @@ def _menu_security() -> None:
         _box_item("H", f"🔒 SSH Hardening  {DIM}(порт / ключи / AllowUsers){NC}")
         _box_sep()
         _box_item("P", f"🍯 Honeypot-порт  {DIM}(ловушка для сканеров){NC}")
+        _box_item("PK", f"🚪 Port Knocking  {DIM}(динамический ACL — Censys/Shodan не найдут){NC}")
         _box_item("D", f"🔍 DPI-детектор  {DIM}(блокировка зондирования){NC}")
         _box_item("CS", f"🛰️  Проверка цензуры провайдера  {DIM}(TLS/TCP/HTTP/DNS снаружи){NC}")
         _box_item("B", f"⚡ Smart Balancer{_bal_na}")
@@ -9220,6 +9222,8 @@ def _menu_security() -> None:
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch.lower() == "p":
             do_manage_honeypot()
+        elif ch.lower() == "pk":
+            do_manage_port_knocking()
         elif ch.lower() == "d":
             do_manage_dpi_detector()
         elif ch.lower() == "cs":
