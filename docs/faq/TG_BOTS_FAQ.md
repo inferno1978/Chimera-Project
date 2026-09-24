@@ -853,6 +853,56 @@ Client-бот и cron-уведомления ОСТАВИТЬ — у них от
 админ. Для admin-бота рекомендуется использовать только личный чат с
 `@<bot_username>`. Группы не поддерживаются по умолчанию.
 
+### Проблема 6: В client-боте приходят 2 меню на /menu
+
+**Симптом:** Пользователь пишет `/menu` в `@ChimeraVPNClient_bot` —
+приходит **два** сообщения с inline-клавиатурой одновременно, и
+непонятно какое от какого сервера. Третьего нет.
+
+**Причина:** Client-бот запущен на нескольких серверах с **одним
+токеном**. Telegram Bot API при нескольких long-pollers с одним
+токеном возвращает HTTP **409 Conflict** — блокирует всех. Иногда
+race condition прорывает блокировку — 2 бота успевают ответить.
+
+В `chimera.log` на всех 3 серверах:
+```
+[TG-CLIENT-BOT] API error getUpdates: HTTP Error 409: Conflict
+[TG-CLIENT-BOT] Poll: нет ответа от API (10 попыток подряд)
+```
+
+**Решение:** Остановить client-бота на secondary-серверах, оставить
+только на primary (как уже сделано с admin-ботом):
+```bash
+# На server 2 и 3
+systemctl stop xray-tg-client
+systemctl disable xray-tg-client
+
+# На primary (server 1) — restart для очистки 409 состояния
+systemctl restart xray-tg-client
+```
+
+После рестарта primary в логе:
+```
+[TG-CLIENT-BOT] Client bot started
+```
+Больше нет 409 Conflict, long-polling работает стабильно.
+
+**Почему так (архитектурно):** в cascade mode B primary сервер
+держит всех клиентов (UUID, REALITY keys, etc), а server 2/3 —
+просто cascade exit-ноды (relay для смены exit-IP). У server 2/3
+нет своих клиентов — `/config` там вернул бы пустоту.
+
+Альтернативы если нужны client-боты на нескольких серверах:
+1. **Отдельные боты в @BotFather** для каждого сервера (token1 на
+   primary, token2 на secondary 1, token3 на secondary 2). Тогда
+   пользователь имеет 3 разных бота в контактах — сам решает к
+   какому серверу подключаться. Это для standalone mode (3 разных
+   VLESS-сервера с разными клиентами).
+2. **Cascade_peers для client-бота** (аналогично admin-боту) —
+   primary client-бот через SSH ходит на secondary и собирает
+   конфиги. Тогда `/config` выдаёт список всех доступных ссылок.
+   Но это большая работа (~2-3 часа) и не нужна для cascade mode B.
+
 ---
 
 ## 13. Шпаргалка по командам
