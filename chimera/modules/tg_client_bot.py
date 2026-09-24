@@ -865,12 +865,24 @@ def _lookup_user(tg_user_id):
         st = _state()
         primary_uuid = st.get("uuid", "")
         if primary_uuid:
-            # Попытаться найти этого user по UUID в config.json
+            # Попытаться найти user по UUID в users.json (через _find_user_by_uuid).
             user = _find_user_by_uuid(primary_uuid)
             if user:
                 return user
-            # Если primary_uuid нет в config.json (например, использует
-            # другой режим), создать minimal stub — достаточно для /config
+            # FIX: если users.json пустой/отсутствует (старая установка),
+            # fallback — прочитать /etc/xray/config.json напрямую и найти
+            # client по UUID. Возвращает полный dict с правильным email
+            # (это важно — иначе _is_user_blocked(email) скажет "no_user").
+            try:
+                cfg = json.loads(Path("/etc/xray/config.json").read_text())
+                for ib in cfg.get("inbounds", []):
+                    for c in ib.get("settings", {{}}).get("clients", []):
+                        if c.get("id") == primary_uuid:
+                            return c
+            except Exception:
+                pass
+            # Final fallback — minimal stub (но тогда email="admin" не
+            # найдётся в users.json, и _is_user_blocked скажет "no_user").
             return {{"id": primary_uuid, "email": "admin", "level": 0}}
     data = _map_load()
     info = data.get(str(tg_user_id))
