@@ -787,13 +787,6 @@ def handle_status_local(msg):
         return
     send(uid, get_status_text())
 
-def handle_users(msg):
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    send(uid, get_users_text())
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  НОВЫЕ ADMIN-КОМАНДЫ (v6+):
 #    /restart /reload_nginx /logs /health
@@ -831,94 +824,438 @@ def _validate_ip(ip_str):
     import re
     return bool(re.match(r"^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$", ip_str))
 
-def handle_restart(msg, args):
-    """Перезапуск сервиса на текущем сервере. /restart <service>"""
+# ══════════════════════════════════════════════════════════════════════════════
+#  CASCADE EXEC HELPERS — для каскадного выполнения команд на peer'ах
+#  через SSH + chimera-remote-cmd.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Whitelist команд которые можно выполнять каскадно (через chimera-remote-cmd.py)
+# На peer'ах — единственный executor. Локально (на primary) — handle_* функции
+# с той же логикой, для скорости (без subprocess overhead).
+CASCADE_REMOTE_COMMANDS = {{
+    "ban", "unban", "banlist", "whitelist", "wl_add", "wl_del",
+    "geo", "f2b", "restart", "reload_nginx", "logs",
+    "users", "users_active", "user", "traffic", "status", "version",
+}}
+
+def _parse_server_arg(args):
+    """Парсит опциональный последний аргумент [server].
+
+    Возвращает (args_without_server, server_target) где:
+    - server_target: None/'local' (primary), '1'/'2'/'3' (peer), 'all' (cascade)
+    - args_without_server: список аргументов без последнего server-маркера
+
+    Примеры:
+        ['1.2.3.4']             → (['1.2.3.4'], None)
+        ['1.2.3.4', 'all']      → (['1.2.3.4'], 'all')
+        ['1.2.3.4', '2']        → (['1.2.3.4'], '2')
+        ['xray']                → (['xray'], None)
+        ['xray', '3']           → (['xray'], '3')
+        ['nginx', '50', 'all']  → (['nginx', '50'], 'all')
+    """
+    if not args:
+        return args, None
+    last = args[-1].lower()
+    if last in ("all", "1", "2", "3", "local"):
+        return args[:-1], last
+    return args, None
+
+
+def _exec_remote_via_ssh(peer, command, *cmd_args):
+    """Выполняет chimera-remote-cmd.py на peer через SSH.
+
+    peer: dict с host/user/port/sudo (CASCADE_PEERS)
+    command: имя команды ('ban', 'unban', 'restart', etc.)
+    cmd_args: tuple аргументов команды
+
+    Возвращает: dict {{"ok": bool, "output": str}} (формат chimera-remote-cmd.py)
+    или {{"ok": False, "output": "<error>"}} при ошибке SSH.
+    """
+    host = peer.get("host", "")
+    user = peer.get("user", "root")
+    port = peer.get("port", 22)
+    use_sudo = peer.get("sudo", False)
+    ssh_target = f"{{user}}@{{host}}" if user != "root" else host
+
+    # Build argv for chimera-remote-cmd.py on remote
+    remote_argv = ["/usr/local/bin/chimera-remote-cmd.py", command] + [str(a) for a in cmd_args]
+
+    # Build ssh command argv (no shell-interpolation)
+    ssh_cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-p", str(port),
+        ssh_target,
+    ]
+    if use_sudo:
+        ssh_cmd.extend(["sudo", "-n"] + remote_argv)
+    else:
+        ssh_cmd.extend(remote_argv)
+
+    try:
+        r = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            return {{"ok": False, "output": f"SSH exit={{r.returncode}}: {{r.stderr.strip()[:200]}}"}}
+        out = r.stdout.strip()
+        # Try to parse as JSON (chimera-remote-cmd.py returns single JSON line)
+        try:
+            return json.loads(out.split("\\n")[-1])
+        except Exception:
+            return {{"ok": False, "output": f"parse fail: {{out[:200]}}"}}
+    except subprocess.TimeoutExpired:
+        return {{"ok": False, "output": "timeout (>20s)"}}
+    except Exception as e:
+        return {{"ok": False, "output": str(e)[:100]}}
+
+
+def _exec_cascade(server_target, command, *cmd_args):
+    """Выполняет command с cmd_args на указанном сервере (или на всех).
+
+    server_target: None/'local'/'1' (primary), '2'/'3' (peer), 'all' (cascade)
+    command: имя команды для chimera-remote-cmd.py
+    cmd_args: tuple аргументов команды
+
+    Возвращает: список tuples [(server_name, result_dict), ...]
+    """
+    results = []
+
+    # Primary (local execution через chimera-remote-cmd.py на primary)
+    if server_target in (None, "local", "1", "all"):
+        primary_name = LOCAL_NAME or "primary"
+        # Execute locally
+        try:
+            local_argv = ["/usr/local/bin/chimera-remote-cmd.py", command] + [str(a) for a in cmd_args]
+            r = subprocess.run(local_argv, capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                try:
+                    result = json.loads(r.stdout.strip().split("\\n")[-1])
+                except Exception:
+                    result = {{"ok": False, "output": f"parse fail: {{r.stdout.strip()[:200]}}"}}
+            else:
+                result = {{"ok": False, "output": f"local exit={{r.returncode}}: {{r.stderr.strip()[:200]}}"}}
+        except Exception as e:
+            result = {{"ok": False, "output": str(e)[:100]}}
+        results.append((primary_name, result))
+        if server_target in (None, "local", "1"):
+            return results  # only primary
+
+    # Remote peers
+    if server_target == "all":
+        for peer in CASCADE_PEERS:
+            peer_name = peer.get("name", peer.get("host", "?"))
+            result = _exec_remote_via_ssh(peer, command, *cmd_args)
+            results.append((peer_name, result))
+    elif server_target in ("2", "3"):
+        # Нумерация peers в CASCADE_PEERS: '2' = peer[0], '3' = peer[1]
+        peer_idx = int(server_target) - 2
+        if peer_idx < 0 or peer_idx >= len(CASCADE_PEERS):
+            return [(f"server{{server_target}}", {{"ok": False, "output": f"no peer with number {{server_target}}"}})]
+        peer = CASCADE_PEERS[peer_idx]
+        peer_name = peer.get("name", peer.get("host", "?"))
+        result = _exec_remote_via_ssh(peer, command, *cmd_args)
+        results.append((peer_name, result))
+
+    return results
+
+
+def _format_cascade_results(results, command_intro=""):
+    """Форматирует список [(server_name, result_dict), ...] в HTML-сообщение."""
+    lines = []
+    if command_intro:
+        lines.append(command_intro)
+        lines.append("")
+    for server_name, result in results:
+        ok = result.get("ok", False)
+        output = result.get("output", "(no output)")
+        # Truncate output to keep message within Telegram 4096 limit
+        if len(output) > 1000:
+            output = "..." + output[-1000:]
+        emoji = "✅" if ok else "❌"
+        lines.append(f"{{emoji}} <b>{{server_name}}</b>")
+        # Output may be multiline — wrap each line with indent
+        for out_line in output.split("\\n"):
+            lines.append(f"   <code>{{out_line}}</code>")
+        lines.append("")
+    return "\\n".join(lines)
+
+
+
+def handle_ban(msg, args):
+    """Ручной бан IP в xray_manual_ban ipset. /ban <ip> [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    # Парсим [server] из args
+    args_no_server, server_target = _parse_server_arg(args)
+    if not args_no_server or not _validate_ip(args_no_server[0]):
+        send(uid, "Использование: <code>/ban &lt;ip&gt; [1|2|3|all|local]</code>\\n"
+                  "Например: <code>/ban 1.2.3.4</code> (primary), <code>/ban 1.2.3.4 all</code> (cascade)")
+        return
+    ip = args_no_server[0]
+    # Execute on target(s)
+    results = _exec_cascade(server_target, "ban", ip)
+    intro = f"🛡️ <b>Ban {{ip}}</b>" + (f" (cascade)" if server_target == "all" else
+            (f" (server {{server_target}})" if server_target else ""))
+    send(uid, _format_cascade_results(results, intro))
+    # Audit log
+    target_str = server_target or "local"
+    _log(f"Ban {{ip}} on {{target_str}} by admin {{uid}}: result={{results[0][1].get('ok') if results else 'no_result'}}")
+
+
+def handle_unban(msg, args):
+    """Разбан IP. /unban <ip> [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args)
+    if not args_no_server or not _validate_ip(args_no_server[0]):
+        send(uid, "Использование: <code>/unban &lt;ip&gt; [1|2|3|all|local]</code>")
+        return
+    ip = args_no_server[0]
+    results = _exec_cascade(server_target, "unban", ip)
+    intro = f"✅ <b>Unban {{ip}}</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+    _log(f"Unban {{ip}} on {{server_target or 'local'}} by admin {{uid}}")
+
+
+def handle_banlist(msg, args=None):
+    """Список забаненных IP. /banlist [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args or [])
+    results = _exec_cascade(server_target, "banlist")
+    intro = "📋 <b>Ban list</b>" + (f" (cascade)" if server_target == "all" else
+            (f" (server {{server_target}})" if server_target else " (primary)"))
+    send(uid, _format_cascade_results(results, intro))
+
+
+def handle_whitelist(msg, args=None):
+    """Список whitelist IP. /whitelist [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args or [])
+    results = _exec_cascade(server_target, "whitelist")
+    intro = "📋 <b>Whitelist</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+
+
+def handle_wl_add(msg, args):
+    """Добавить IP в whitelist. /wl_add <ip> [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args)
+    if not args_no_server or not _validate_ip(args_no_server[0]):
+        send(uid, "Использование: <code>/wl_add &lt;ip&gt; [1|2|3|all|local]</code>")
+        return
+    ip = args_no_server[0]
+    results = _exec_cascade(server_target, "wl_add", ip)
+    intro = f"✅ <b>WL add {{ip}}</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+    _log(f"WL add {{ip}} on {{server_target or 'local'}} by admin {{uid}}")
+
+
+def handle_wl_del(msg, args):
+    """Удалить IP из whitelist. /wl_del <ip> [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args)
+    if not args_no_server or not _validate_ip(args_no_server[0]):
+        send(uid, "Использование: <code>/wl_del &lt;ip&gt; [1|2|3|all|local]</code>")
+        return
+    ip = args_no_server[0]
+    results = _exec_cascade(server_target, "wl_del", ip)
+    intro = f"✅ <b>WL del {{ip}}</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+    _log(f"WL del {{ip}} on {{server_target or 'local'}} by admin {{uid}}")
+
+
+def handle_geo(msg, args=None):
+    """Статус ingress GeoIP-блокировки. /geo [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args or [])
+    results = _exec_cascade(server_target, "geo")
+    intro = "🌍 <b>GeoIP</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+
+
+def handle_geo_toggle(msg):
+    """Вкл/выкл ingress GeoIP-блокировку (ОТКЛЮЧЕНО из TG)."""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    send(uid, "⚠️ Toggle ingress GeoIP — это потенциально опасная операция.\\n"
+              "Используйте chimera TUI на сервере: Меню → Управление GeoIP → [3] Toggle.\\n"
+              "Из Telegram эта команда отключена в целях безопасности.")
+    _log(f"Geo toggle requested by admin {{uid}} — denied (use TUI)")
+
+
+def handle_f2b(msg, args=None):
+    """Статус fail2ban + список забаненных. /f2b [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args or [])
+    results = _exec_cascade(server_target, "f2b")
+    intro = "🛡️ <b>fail2ban</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+
+
+def handle_traffic(msg, args):
+    """Топ пользователей по трафику. /traffic [n] [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args)
+    n = "10"
+    if args_no_server and args_no_server[0].isdigit():
+        n = str(min(int(args_no_server[0]), 50))
+    results = _exec_cascade(server_target, "traffic", n)
+    intro = f"📊 <b>Traffic top {{n}}</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+
+
+def handle_traffic_top(msg):
+    """Алиас к /traffic 20."""
+    handle_traffic(msg, ["20"])
+
+
+def handle_users(msg, args=None):
+    """Список пользователей Xray. /users [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args or [])
+    results = _exec_cascade(server_target, "users")
+    intro = "👥 <b>Users</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+
+
+def handle_users_active(msg, args=None):
+    """Активные пользователи за последний час. /users_active [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args or [])
+    results = _exec_cascade(server_target, "users_active")
+    intro = "👥 <b>Active users</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+
+
+def handle_user(msg, args):
+    """Детальная инфа по пользователю. /user <email> [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args)
+    if not args_no_server:
+        send(uid, "Использование: <code>/user &lt;email&gt; [1|2|3|all|local]</code>")
+        return
+    email = args_no_server[0]
+    results = _exec_cascade(server_target, "user", email)
+    intro = f"👤 <b>{{email}}</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+
+
+def handle_reset_user(msg, args):
+    """Сброс трафик-счётчика (отключено из TG)."""
     uid = msg["from"]["id"]
     if not is_admin(uid):
         send(uid, "⛔ Только для администратора.")
         return
     if not args:
-        send(uid, "Использование: <code>/restart &lt;service&gt;</code>\\n"
-                  "Доступные: <code>" + ", ".join(sorted(ALLOWED_RESTART_SERVICES.keys())) + "</code>")
+        send(uid, "Использование: <code>/reset_user &lt;email&gt;</code>")
         return
-    svc = args[0].lower()
+    email = args[0]
+    send(uid, f"⚠️ Сброс трафика для <code>{{email}}</code> — требует chimera TUI.\\n"
+              f"Из Telegram отключено в целях безопасности. Используйте: Меню → Управление пользователями → Сброс трафика.")
+    _log(f"Reset user {{email}} requested by admin {{uid}} — denied (use TUI)")
+
+
+def handle_restart(msg, args):
+    """Перезапуск сервиса. /restart <service> [1|2|3|all|local]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    args_no_server, server_target = _parse_server_arg(args)
+    if not args_no_server:
+        send(uid, "Использование: <code>/restart &lt;service&gt; [1|2|3|all|local]</code>\\n"
+                  f"Доступные: <code>{{', '.join(sorted(ALLOWED_RESTART_SERVICES.keys()))}}</code>")
+        return
+    svc = args_no_server[0].lower()
     if svc not in ALLOWED_RESTART_SERVICES:
         send(uid, f"❌ Неизвестный сервис: <code>{{svc}}</code>\\n"
                   f"Доступные: <code>{{', '.join(sorted(ALLOWED_RESTART_SERVICES.keys()))}}</code>")
         return
-    cmd = list(ALLOWED_RESTART_SERVICES[svc])
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if r.returncode == 0:
-            send(uid, f"✅ Перезапущен: <code>{{svc}}</code>\\n"
-                       f"<i>{{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}}</i>")
-        else:
-            send(uid, f"❌ Ошибка перезапуска {{svc}} (exit={{r.returncode}}):\\n"
-                       f"<code>{{r.stderr.strip()[:200]}}</code>")
-    except subprocess.TimeoutExpired:
-        send(uid, f"⚠️ Таймаут перезапуска {{svc}} (>30s)")
-    except Exception as e:
-        send(uid, f"❌ Исключение: {{str(e)[:100]}}")
-    _log(f"Restart {{svc}} by admin {{uid}}: rc={{r.returncode}}")
+    results = _exec_cascade(server_target, "restart", svc)
+    intro = f"🔄 <b>Restart {{svc}}</b>" + (f" (cascade)" if server_target == "all" else
+            (f" (server {{server_target}})" if server_target else ""))
+    send(uid, _format_cascade_results(results, intro))
+    _log(f"Restart {{svc}} on {{server_target or 'local'}} by admin {{uid}}")
 
-def handle_reload_nginx(msg):
-    """Мягкий reload nginx без обрыва соединений."""
+
+def handle_reload_nginx(msg, args=None):
+    """Мягкий reload nginx. /reload_nginx [1|2|3|all|local]"""
     uid = msg["from"]["id"]
     if not is_admin(uid):
         send(uid, "⛔ Только для администратора.")
         return
-    try:
-        r = subprocess.run(["nginx", "-s", "reload"], capture_output=True, text=True, timeout=15)
-        if r.returncode == 0:
-            send(uid, "✅ Nginx перезагружен (reload)\\n"
-                      f"<i>{{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}}</i>")
-        else:
-            send(uid, f"❌ Ошибка nginx reload (exit={{r.returncode}}):\\n<code>{{r.stderr.strip()[:200]}}</code>")
-    except Exception as e:
-        send(uid, f"❌ Исключение: {{str(e)[:100]}}")
-    _log(f"Nginx reload by admin {{uid}}")
+    args_no_server, server_target = _parse_server_arg(args or [])
+    results = _exec_cascade(server_target, "reload_nginx")
+    intro = "🔄 <b>nginx reload</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+    _log(f"Nginx reload on {{server_target or 'local'}} by admin {{uid}}")
+
 
 def handle_logs(msg, args):
-    """Последние строки лога. /logs [service] [n_lines]"""
+    """Последние строки лога. /logs [service] [n] [1|2|3|all|local]"""
     uid = msg["from"]["id"]
     if not is_admin(uid):
         send(uid, "⛔ Только для администратора.")
         return
-    service = args[0].lower() if args else "xray"
+    args_no_server, server_target = _parse_server_arg(args)
+    service = args_no_server[0].lower() if args_no_server else "xray"
     n_lines = 20
-    if len(args) > 1 and args[1].isdigit():
-        n_lines = min(int(args[1]), 100)  # cap at 100
-    log_path = LOG_PATHS.get(service)
-    if not log_path:
+    if len(args_no_server) > 1 and args_no_server[1].isdigit():
+        n_lines = min(int(args_no_server[1]), 100)
+    if service not in LOG_PATHS:
         send(uid, f"❌ Неизвестный лог: <code>{{service}}</code>\\n"
                   f"Доступные: <code>{{', '.join(sorted(LOG_PATHS.keys()))}}</code>")
         return
-    try:
-        if not Path(log_path).exists():
-            send(uid, f"❌ Файл не найден: <code>{{log_path}}</code>")
-            return
-        r = subprocess.run(["tail", f"-n{{n_lines}}", log_path],
-                           capture_output=True, text=True, timeout=10)
-        if r.returncode == 0 and r.stdout.strip():
-            # Limit total message size (Telegram max 4096 chars)
-            content = r.stdout.strip()
-            if len(content) > 3800:
-                content = "..." + content[-3800:]
-            send(uid, f"📄 Последние {{n_lines}} строк <code>{{service}}</code>:\\n\\n<code>{{content}}</code>")
-        else:
-            send(uid, f"Лог <code>{{service}}</code> пуст или недоступен")
-    except Exception as e:
-        send(uid, f"❌ Ошибка чтения лога: {{str(e)[:80]}}")
+    results = _exec_cascade(server_target, "logs", service, n_lines)
+    intro = f"📄 <b>Logs {{service}} {{n_lines}} lines</b>" + (f" (cascade)" if server_target == "all" else "")
+    send(uid, _format_cascade_results(results, intro))
+
 
 def handle_health(msg):
-    """Запускает chimera diagnostics и возвращает summary."""
+    """Запускает chimera diagnostics и возвращает summary (primary-only)."""
     uid = msg["from"]["id"]
     if not is_admin(uid):
         send(uid, "⛔ Только для администратора.")
         return
     send(uid, "⏳ Запускаю диагностику... (может занять до 30 сек)")
     try:
-        # Run chimera diagnostics script directly (not interactive)
         r = subprocess.run(
             ["python3", "-c",
              "import sys; sys.path.insert(0, '/opt/chimera'); "
@@ -941,349 +1278,6 @@ def handle_health(msg):
         send(uid, "⚠️ Диагностика превысила 60 сек — возможно зависла")
     except Exception as e:
         send(uid, f"❌ Ошибка: {{str(e)[:100]}}")
-
-def handle_ban(msg, args):
-    """Ручной бан IP в xray_manual_ban ipset. /ban <ip>"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    if not args or not _validate_ip(args[0]):
-        send(uid, "Использование: <code>/ban &lt;ip&gt;</code>\\nНапример: <code>/ban 1.2.3.4</code>")
-        return
-    ip = args[0]
-    try:
-        r = subprocess.run(["ipset", "add", "xray_manual_ban", ip],
-                           capture_output=True, text=True, timeout=10)
-        # Also save to /etc/ipset.conf (persists)
-        if r.returncode == 0:
-            subprocess.run(["ipset", "save", "xray_manual_ban"],
-                           capture_output=True, text=True, timeout=10,
-                           stdout=open("/dev/null", "w"))
-            # Better: write to /etc/ipset.conf
-            subprocess.run("ipset save > /etc/ipset.conf", shell=True, timeout=10)
-            send(uid, f"✅ IP <code>{{ip}}</code> добавлен в <code>xray_manual_ban</code>\\n"
-                       f"Запись сохранена в /etc/ipset.conf")
-        elif "already in set" in r.stderr.lower():
-            send(uid, f"ℹ️ IP <code>{{ip}}</code> уже в бан-листе")
-        else:
-            send(uid, f"❌ Ошибка бана (exit={{r.returncode}}):\\n<code>{{r.stderr.strip()[:200]}}</code>")
-    except Exception as e:
-        send(uid, f"❌ Исключение: {{str(e)[:100]}}")
-    _log(f"Ban {{ip}} by admin {{uid}}")
-
-def handle_unban(msg, args):
-    """Разбан IP. /unban <ip>"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    if not args or not _validate_ip(args[0]):
-        send(uid, "Использование: <code>/unban &lt;ip&gt;</code>")
-        return
-    ip = args[0]
-    try:
-        r = subprocess.run(["ipset", "del", "xray_manual_ban", ip],
-                           capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            subprocess.run("ipset save > /etc/ipset.conf", shell=True, timeout=10)
-            send(uid, f"✅ IP <code>{{ip}}</code> удалён из <code>xray_manual_ban</code>")
-        else:
-            send(uid, f"❌ Ошибка разбана (exit={{r.returncode}}):\\n<code>{{r.stderr.strip()[:200]}}</code>")
-    except Exception as e:
-        send(uid, f"❌ Исключение: {{str(e)[:100]}}")
-    _log(f"Unban {{ip}} by admin {{uid}}")
-
-def handle_banlist(msg):
-    """Список забаненных IP. /banlist"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    try:
-        r = subprocess.run(["ipset", "list", "xray_manual_ban"],
-                           capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            out = r.stdout
-            # Extract just IP entries (filter headers)
-            lines = [l for l in out.split("\\n") if _validate_ip(l.strip())]
-            if not lines:
-                send(uid, "📋 <b>xray_manual_ban:</b> пуст\\n"
-                          "(нет забаненных IP)")
-            else:
-                content = "\\n".join(lines[:50])
-                suffix = f"\\n... и ещё {{len(lines)-50}}" if len(lines) > 50 else ""
-                send(uid, f"📋 <b>xray_manual_ban</b> ({{len(lines)}} IP):\\n\\n<code>{{content}}</code>{{suffix}}")
-        else:
-            send(uid, f"❌ ipset не найден (exit={{r.returncode}})")
-    except Exception as e:
-        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
-
-def handle_whitelist(msg):
-    """Список whitelist IP. /whitelist"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    try:
-        r = subprocess.run(["ipset", "list", "clients_wl"],
-                           capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            out = r.stdout
-            lines = [l for l in out.split("\\n") if _validate_ip(l.strip())]
-            if not lines:
-                send(uid, "📋 <b>clients_wl:</b> пуст")
-            else:
-                content = "\\n".join(lines)
-                send(uid, f"📋 <b>clients_wl</b> ({{len(lines)}} IP):\\n\\n<code>{{content}}</code>")
-        else:
-            send(uid, f"❌ ipset clients_wl не найден (exit={{r.returncode}})")
-    except Exception as e:
-        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
-
-def handle_wl_add(msg, args):
-    """Добавить IP в whitelist. /wl_add <ip>"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    if not args or not _validate_ip(args[0]):
-        send(uid, "Использование: <code>/wl_add &lt;ip&gt;</code>")
-        return
-    ip = args[0]
-    try:
-        r = subprocess.run(["ipset", "add", "clients_wl", ip],
-                           capture_output=True, text=True, timeout=10)
-        if r.returncode == 0 or "already" in r.stderr.lower():
-            subprocess.run("ipset save > /etc/ipset.conf", shell=True, timeout=10)
-            send(uid, f"✅ IP <code>{{ip}}</code> добавлен в <code>clients_wl</code>")
-        else:
-            send(uid, f"❌ Ошибка: {{r.stderr.strip()[:200]}}")
-    except Exception as e:
-        send(uid, f"❌ {{str(e)[:80]}}")
-    _log(f"WL add {{ip}} by admin {{uid}}")
-
-def handle_wl_del(msg, args):
-    """Удалить IP из whitelist. /wl_del <ip>"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    if not args or not _validate_ip(args[0]):
-        send(uid, "Использование: <code>/wl_del &lt;ip&gt;</code>")
-        return
-    ip = args[0]
-    try:
-        r = subprocess.run(["ipset", "del", "clients_wl", ip],
-                           capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            subprocess.run("ipset save > /etc/ipset.conf", shell=True, timeout=10)
-            send(uid, f"✅ IP <code>{{ip}}</code> удалён из <code>clients_wl</code>")
-        else:
-            send(uid, f"❌ {{r.stderr.strip()[:200]}}")
-    except Exception as e:
-        send(uid, f"❌ {{str(e)[:80]}}")
-    _log(f"WL del {{ip}} by admin {{uid}}")
-
-def handle_geo(msg):
-    """Статус ingress GeoIP-блокировки. /geo"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    try:
-        # Check ipset size for xray_ru_block
-        r4 = subprocess.run(["ipset", "list", "xray_ru_block"],
-                            capture_output=True, text=True, timeout=10)
-        v4_count = 0
-        if r4.returncode == 0:
-            v4_count = sum(1 for l in r4.stdout.split("\\n") if _validate_ip(l.strip()))
-        # IPv6
-        r6 = subprocess.run(["ipset", "list", "xray_ru_block6"],
-                            capture_output=True, text=True, timeout=10)
-        v6_count = 0
-        if r6.returncode == 0:
-            v6_count = sum(1 for l in r6.stdout.split("\\n") if ":" in l and l.strip() and not l.startswith("Name") and not l.startswith("Type") and not l.startswith("Header") and not l.startswith("Size") and not l.startswith("Revision") and l != "members:")
-        # Check iptables rule
-        r_ipt = subprocess.run(["iptables", "-S", "INPUT"],
-                               capture_output=True, text=True, timeout=10)
-        has_rule = "xray_ru_block" in r_ipt.stdout if r_ipt.returncode == 0 else False
-        send(uid, f"🌍 <b>Ingress GeoIP-блокировка</b>\\n\\n"
-                  f"IPv4 blocked: <code>{{v4_count}}</code> CIDR\\n"
-                  f"IPv6 blocked: <code>{{v6_count}}</code> CIDR\\n"
-                  f"iptables rule: {{'✅ установлен' if has_rule else '❌ НЕТ'}}\\n"
-                  f"\\nИспользуйте <code>/geo_toggle</code> для вкл/выкл")
-    except Exception as e:
-        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
-
-def handle_geo_toggle(msg):
-    """Вкл/выкл ingress GeoIP-блокировку."""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    send(uid, "⚠️ Toggle ingress GeoIP — это потенциально опасная операция.\\n"
-              "Используйте chimera TUI на сервере: Меню → Управление GeoIP → [3] Toggle.\\n"
-              "Из Telegram эта команда отключена в целях безопасности.")
-    _log(f"Geo toggle requested by admin {{uid}} — denied (use TUI)")
-
-def handle_f2b(msg):
-    """Статус fail2ban + список забаненных. /f2b"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    try:
-        r = subprocess.run(["fail2ban-client", "status"],
-                           capture_output=True, text=True, timeout=15)
-        if r.returncode != 0:
-            send(uid, f"❌ fail2ban-client не запущен или не установлен:\\n<code>{{r.stderr.strip()[:200]}}</code>")
-            return
-        jails = r.stdout.strip().split(",")[-1].strip().split()
-        lines = ["🛡️ <b>fail2ban status</b>\\n"]
-        for jail in jails[:5]:  # top 5 jails
-            rj = subprocess.run(["fail2ban-client", "status", jail],
-                                capture_output=True, text=True, timeout=10)
-            if rj.returncode == 0:
-                # Extract total + banned
-                total = "?"
-                banned = "?"
-                for line in rj.stdout.split("\\n"):
-                    if "Currently banned" in line:
-                        banned = line.split(":")[-1].strip()
-                    elif "Total banned" in line:
-                        total = line.split(":")[-1].strip()
-                lines.append(f"<b>{{jail}}</b>: banned={{banned}} (total={{total}})")
-        send(uid, "\\n".join(lines))
-    except Exception as e:
-        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
-
-def handle_traffic(msg, args):
-    """Топ пользователей по трафику сегодня. /traffic [n]"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    n = 10
-    if args and args[0].isdigit():
-        n = min(int(args[0]), 50)
-    try:
-        # Xray stats API — query all users stats
-        # The simpler approach: read /var/log/xray/access.log and aggregate by email
-        # Or: use xray api via /usr/local/bin/xray api inbounds
-        # For now — read access.log (last 10000 lines) and count bytes by email
-        log_path = Path("/var/log/xray/access.log")
-        if not log_path.exists():
-            send(uid, "❌ access.log не найден — трафик-трекинг не настроен")
-            return
-        # Use awk for fast aggregation
-        cmd = [
-            "awk", "-v", "RS=\\n",
-            # match pattern: "..." email ... upload/down bytes
-            # Use simpler: tail -n 10000 + grep accepted + count by email
-            "tail", "-n", "10000", str(log_path)
-        ]
-        # Just do simple pipeline
-        r = subprocess.run(
-            f"tail -n 10000 {{log_path}} 2>/dev/null | "
-            f"grep -oE '\\\\[(email:)?[^]]*\\\\]' | sort | uniq -c | sort -rn | head -{{n}}".format(
-                log_path=log_path, n=n),
-            shell=True, capture_output=True, text=True, timeout=15)
-        if r.returncode == 0 and r.stdout.strip():
-            send(uid, f"📊 <b>Топ {{n}} по подключениям (за последние 10000 строк лога):</b>\\n\\n<code>{{r.stdout.strip()}}</code>")
-        else:
-            send(uid, "access.log пуст или нет подключений")
-    except Exception as e:
-        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
-
-def handle_traffic_top(msg):
-    """Алиас к /traffic с топ-20."""
-    handle_traffic(msg, ["20"])
-
-def handle_user(msg, args):
-    """Детальная инфа по пользователю. /user <email>"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    if not args:
-        send(uid, "Использование: <code>/user &lt;email&gt;</code>\\nНапример: <code>/user user@panel.example</code>")
-        return
-    email = args[0]
-    # Search in /etc/xray/users.json (if exists) and /etc/xray/config.json
-    try:
-        cfg = json.loads(Path("/etc/xray/config.json").read_text())
-        found = None
-        for ib in cfg.get("inbounds", []):
-            for c in ib.get("settings", {{}}).get("clients", []):
-                if c.get("email") == email:
-                    found = c
-                    break
-        if not found:
-            send(uid, f"❌ Пользователь <code>{{email}}</code> не найден в config.json")
-            return
-        # Show details
-        uuid_short = found.get("id", "")[:8] + "..."
-        text = (f"👤 <b>{{email}}</b>\\n\\n"
-                f"UUID: <code>{{uuid_short}}</code>\\n"
-                f"Flow: <code>{{found.get('flow', '—')}}</code>\\n"
-                f"Email: <code>{{found.get('email', '—')}}</code>\\n"
-                f"Level: <code>{{found.get('level', 0)}}</code>")
-        # Check TTL file
-        ttl_path = Path("/var/lib/xray-installer/ttl_users.json")
-        if ttl_path.exists():
-            ttl_data = json.loads(ttl_path.read_text())
-            if email in ttl_data:
-                ttl_info = ttl_data[email]
-                text += f"\\n\\n⏰ TTL: <code>{{ttl_info}}</code>"
-        # Check traffic limits
-        limits_path = Path("/var/lib/xray-installer/traffic_limits.json")
-        if limits_path.exists():
-            limits_data = json.loads(limits_path.read_text())
-            if email in limits_data:
-                text += f"\\n📊 Лимит: <code>{{limits_data[email]}}</code>"
-        send(uid, text)
-    except Exception as e:
-        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
-
-def handle_reset_user(msg, args):
-    """Сброс трафик-счётчика пользователя. /reset_user <email>"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    if not args:
-        send(uid, "Использование: <code>/reset_user &lt;email&gt;</code>")
-        return
-    email = args[0]
-    send(uid, f"⚠️ Сброс трафика для <code>{{email}}</code> — требует chimera TUI.\\n"
-              f"Из Telegram отключено в целях безопасности. Используйте: Меню → Управление пользователями → Сброс трафика.")
-    _log(f"Reset user {{email}} requested by admin {{uid}} — denied (use TUI)")
-
-def handle_users_active(msg):
-    """Активные пользователи за последний час. /users_active"""
-    uid = msg["from"]["id"]
-    if not is_admin(uid):
-        send(uid, "⛔ Только для администратора.")
-        return
-    # Read access.log, find unique emails in last 5000 lines
-    log_path = Path("/var/log/xray/access.log")
-    if not log_path.exists():
-        send(uid, "❌ access.log не найден")
-        return
-    try:
-        r = subprocess.run(
-            f"tail -n 5000 {{log_path}} 2>/dev/null | "
-            f"grep -oE 'email: [^]]+' | sort -u".format(log_path=log_path),
-            shell=True, capture_output=True, text=True, timeout=15)
-        if r.returncode == 0 and r.stdout.strip():
-            count = len(r.stdout.strip().split("\\n"))
-            send(uid, f"👥 <b>Активные пользователи (за последние 5000 строк лога):</b> "
-                      f"<code>{{count}}</code>\\n\\n<code>{{r.stdout.strip()}}</code>")
-        else:
-            send(uid, "Нет активных пользователей в access.log")
-    except Exception as e:
-        send(uid, f"❌ {{str(e)[:80]}}")
 
 def handle_nodes(msg):
     """Список exit-нод каскада + TCP-ping. /nodes"""
@@ -1317,6 +1311,7 @@ def handle_nodes(msg):
                           f"  SNI: <code>{{sni}}</code>")
     send(uid, "\\n".join(text_lines))
 
+
 def handle_probe(msg, args):
     """TCP-ping до произвольного IP/port. /probe <ip> [port]"""
     uid = msg["from"]["id"]
@@ -1339,6 +1334,7 @@ def handle_probe(msg, args):
     except Exception as e:
         send(uid, f"❌ {{str(e)[:80]}}")
 
+
 def handle_cert(msg):
     """Статус TLS-сертификатов на всех 3 серверах. /cert"""
     uid = msg["from"]["id"]
@@ -1354,7 +1350,6 @@ def handle_cert(msg):
                                capture_output=True, text=True, timeout=10)
             if r.returncode == 0:
                 exp_date = r.stdout.split("=")[-1].strip()
-                # Calculate days left
                 r2 = subprocess.run(["bash", "-c",
                                      f"days=$((( $(date -d '{{exp_date}}' +%s) - $(date +%s) ) / 86400)); echo $days"],
                                     capture_output=True, text=True, timeout=10)
@@ -1398,31 +1393,19 @@ def handle_cert(msg):
             text_lines.append(f"<b>{{name}}</b> ({{host}})\\n  ❌ ошибка: {{str(e)[:60]}}\\n")
     send(uid, "\\n".join(text_lines))
 
+
 def handle_version(msg):
     """Версия chimera + последний коммит + uptime бота. /version"""
     uid = msg["from"]["id"]
     if not is_admin(uid):
         send(uid, "⛔ Только для администратора.")
         return
-    # Git commit
     try:
         r = subprocess.run(["git", "-C", "/opt/chimera", "log", "--oneline", "-1"],
                            capture_output=True, text=True, timeout=10)
         commit = r.stdout.strip() if r.returncode == 0 else "??"
     except Exception:
         commit = "??"
-    # Bot uptime (process start)
-    try:
-        import os
-        bot_pid = os.getpid()
-        with open(f"/proc/{{bot_pid}}/stat") as f:
-            stat = f.read().split()
-            start_ticks = int(stat[21])
-        import time
-        uptime_s = int((time.time() - start_ticks / 100))  # wrong calc but approximate
-    except Exception:
-        uptime_s = 0
-    # Hostname
     try:
         host = subprocess.check_output(["hostname", "-s"], text=True).strip()
     except Exception:
@@ -1430,9 +1413,9 @@ def handle_version(msg):
     send(uid, f"📋 <b>Chimera version</b>\\n\\n"
               f"Git commit: <code>{{commit}}</code>\\n"
               f"Host: <code>{{host}}</code>\\n"
-              f"Bot uptime: <code>{{uptime_s}}s</code>\\n"
               f"Local: <code>{{LOCAL_NAME}}</code> ({{LOCAL_IP}})\\n"
               f"Cascade peers: <code>{{len(CASCADE_PEERS)}}</code>")
+
 
 def handle_menu(msg):
     """Inline-клавиатура с кнопками для всех admin-команд."""
@@ -1440,7 +1423,6 @@ def handle_menu(msg):
     if not is_admin(uid):
         send(uid, "⛔ Только для администратора.")
         return
-    # Inline keyboard with callback_data
     keyboard = {{
         "inline_keyboard": [
             [{{"text": "📊 Статус каскада", "callback_data": "/status"}}],
@@ -1533,33 +1515,44 @@ def handle_help(msg):
         "/version          — версия chimera + последний git commit\\n"
         "/cert             — статус TLS-сертификатов на всех серверах\\n"
         "\\n<b>👥 Пользователи</b>\\n"
-        "/users            — список пользователей Xray (email, UUID)\\n"
-        "/users_active     — активные за последний час (из access.log)\\n"
-        "/user &lt;email&gt;   — детальная инфа по пользователю (UUID, TTL, лимит)\\n"
+        "/users [N]        — список пользователей Xray (N=1|2|3|all — на каком сервере)\\n"
+        "/users_active [N] — активные за последний час\\n"
+        "/user &lt;email&gt; [N]   — детальная инфа (UUID, TTL, лимит)\\n"
         "/reset_user &lt;email&gt; — сброс трафик-счётчика (требует TUI)\\n"
-        "/traffic [n]      — топ-N пользователей по подключениям (дефолт 10)\\n"
-        "/traffic_top      — алиас для /traffic 20\\n"
+        "/traffic [n] [N]  — топ-N по подключениям (дефолт 10)\\n"
+        "/traffic_top [N]  — алиас для /traffic 20\\n"
         "/invite           — создать одноразовую invite-ссылку\\n"
         "/broadcast &lt;текст&gt; — рассылка всем привязанным пользователям\\n"
         "\\n<b>🛡️ Бан-лист и whitelist</b>\\n"
-        "/ban &lt;ip&gt;        — ручной бан IP в xray_manual_ban\\n"
-        "/unban &lt;ip&gt;      — разбан IP\\n"
-        "/banlist          — список забаненных IP\\n"
-        "/whitelist        — список whitelist IP (clients_wl)\\n"
-        "/wl_add &lt;ip&gt;     — добавить IP в whitelist (защита от autoban)\\n"
-        "/wl_del &lt;ip&gt;     — удалить IP из whitelist\\n"
+        "/ban &lt;ip&gt; [N]    — ручной бан IP (N=all → на всех серверах)\\n"
+        "/unban &lt;ip&gt; [N]  — разбан IP\\n"
+        "/banlist [N]      — список забаненных IP\\n"
+        "/whitelist [N]    — список whitelist IP (clients_wl)\\n"
+        "/wl_add &lt;ip&gt; [N] — добавить IP в whitelist (защита от autoban)\\n"
+        "/wl_del &lt;ip&gt; [N] — удалить IP из whitelist\\n"
         "\\n<b>🌍 GeoIP и fail2ban</b>\\n"
-        "/geo              — статус ingress GeoIP-блокировки (вкл/выкл, размер)\\n"
+        "/geo [N]          — статус ingress GeoIP-блокировки\\n"
         "/geo_toggle       — переключить (отключено из TG — используйте TUI)\\n"
-        "/f2b              — статус fail2ban + список забаненных по jail'ам\\n"
+        "/f2b [N]          — статус fail2ban + список banned по jail'ам\\n"
         "\\n<b>🔗 Каскад и ноды</b>\\n"
         "/nodes            — список exit-нод каскада + TCP-ping до каждой\\n"
         "/probe &lt;ip/host&gt; [port] — TCP-ping до произвольного адреса (дефолт 443)\\n"
         "\\n<b>🔄 Управление сервисами</b>\\n"
-        "/restart &lt;service&gt; — перезапуск сервиса (xray/nginx/dnscrypt/agh/fail2ban/warp)\\n"
-        "/reload_nginx     — мягкий reload nginx без обрыва соединений\\n"
-        "/logs [service] [n] — последние N строк лога (дефолт xray, 20 строк)\\n"
+        "/restart &lt;service&gt; [N] — перезапуск (xray/nginx/dnscrypt/agh/fail2ban/warp)\\n"
+        "/reload_nginx [N] — мягкий reload nginx без обрыва соединений\\n"
+        "/logs [service] [n] [N] — последние N строк лога (дефолт xray, 20)\\n"
         "                     services: xray, xray_acc, nginx, nginx_acc, chimera, fail2ban, dnscrypt, system\\n"
+        "\\n<b>🎯 Каскадное выполнение (опциональный последний аргумент N)</b>\\n"
+        "  <code>N=1</code>     — только primary (по умолчанию)\\n"
+        "  <code>N=2</code>     — server 2 (через SSH к cascade_peers[0])\\n"
+        "  <code>N=3</code>     — server 3 (через SSH к cascade_peers[1])\\n"
+        "  <code>N=all</code>   — на ВСЕХ серверах (cascade)\\n"
+        "  <code>N=local</code> — то же что N=1\\n\\n"
+        "  Примеры:\\n"
+        "  <code>/ban 1.2.3.4 all</code>     — бан на всех 3 серверах\\n"
+        "  <code>/restart xray 2</code>      — restart xray на server 2\\n"
+        "  <code>/logs nginx 50 all</code>   — логи nginx со всех 3\\n"
+        "  <code>/users 2</code>             — пользователи server 2\\n"
         "\\n<i>Команды выполняются на текущем (primary) сервере: {{LOCAL_NAME or 'localhost'}}</i>\\n"
         "<i>Если нужен статус с других серверов каскада — используйте /status</i>"
     )
