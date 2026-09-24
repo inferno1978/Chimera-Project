@@ -2,6 +2,141 @@
 
 ---
 
+## FEAT(port_knocking): динамический ACL — защита VPN-портов от Censys/Shodan через SYN-counter — 24 сентября 2026
+
+**Кейс:** пользователь прислал ссылку на проект
+[shanker-sec/docker-dynamic-ACL](https://github.com/shanker-sec/docker-dynamic-ACL)
+и статью [Практические варианты использования port knocking](https://habr.com/ru/articles/855536/).
+Идея: скрыть VLESS REALITY-сервис на :443 от публичных сканеров (Censys,
+Shodan, Shadowserver) через port knocking — DROP по умолчанию, ACCEPT
+только после N SYN-retry за W секунд.
+
+В Chimera этого не было — есть honeypot (противоположный подход — ловит
+сканеров), autoban (банит после TLS-errors), ingress-GeoIP (DROP по
+РФ-подсетям), но не проактивный port knocking.
+
+**Реализация:** новый модуль `chimera/modules/port_knocking.py` (902 строки),
+TUI-меню `[PK]` в главном меню, 52 unit-теста (все проходят), полный FAQ
+`docs/faq/PORT_KNOCKING_FAQ.md` (12 разделов).
+
+### Архитектура
+
+Чистый Linux `iptables` + `ipset` + `xt_recent` (kernel module) — без
+внешних демонов (не требует knockd, как в shanker-sec/docker-dynamic-ACL).
+
+**Правила iptables** (для порта 443, knock_count=3, window=10s, ttl=3600s):
+
+```bash
+# ipset с TTL — временный whitelist (1 час = 3600 сек)
+ipset create xray_knocked hash:ip timeout 3600 exist
+
+# INSERT — приоритетные проверки (top-down, первое совпадение = действие)
+iptables -I INPUT 1 -p tcp --dport 443 -m set --match-set xray_manual_ban src -j DROP  # бан навсегда
+iptables -I INPUT 2 -p tcp --dport 443 -m set --match-set clients_wl src      -j ACCEPT  # whitelist админа
+iptables -I INPUT 3 -p tcp --dport 443 -m set --match-set xray_knocked src  -j ACCEPT  # после knocking
+
+# APPEND — knocking logic (после whitelist/ban checks)
+iptables -A INPUT -p tcp --dport 443 --syn -m recent --name KNOCK443 --set  # считать SYN
+iptables -A INPUT -p tcp --dport 443 --syn -m recent --name KNOCK443 --rcheck --seconds 10 --hitcount 3 \
+         -m set --add-set xray_knocked src  # N SYN → добавить в whitelist
+iptables -A INPUT -p tcp --dport 443 --syn -j DROP  # default deny — "порт закрыт" для сканеров
+```
+
+**Логика:**
+- Сканер делает 1 SYN → DROP (видит "порт закрыт", переходит к следующему IP)
+- Реальный VPN-клиент делает TCP retry (3-5 SYN за 5-10 сек — стандартное
+  TCP-поведение при дропе на Linux/macOS/iOS/Android)
+- `xt_recent` module считает SYN — при достижении N=3 за W=10 сек →
+  IP добавляется в ipset `xray_knocked` (с TTL=3600 сек)
+- Дальнейшие SYN с этого IP проходят (ipset → ACCEPT) → TCP handshake →
+  REALITY handshake → клиент подключён
+- Через TTL=3600 сек без новых соединений — IP автоматически удаляется
+  из ipset (нужно снова knocking)
+
+### Дефолтные параметры (с обоснованием)
+
+| Параметр | Дефолт | Обоснование |
+|---|---|---|
+| `knock_count` | 3 | Покрывает Linux (4 SYN за 15с), macOS/iOS (5 SYN за 10с), Windows (5-9 SYN за 10с), Android (4 SYN за 15с) — все ОС делают ≥ 4 SYN за 10с |
+| `knock_window_sec` | 10 | Стандартное TCP retry окно для всех ОС |
+| `whitelist_ttl_sec` | 3600 (1 час) | Баланс: клиенты не knocking каждый час, но botnet-IP не задерживается в whitelist слишком долго |
+| `ports` | [443] | VLESS REALITY default. Можно добавить 9443 и др. |
+| `log_success` | false | Логировать successful knocks только для дебага |
+
+### TUI-меню `[PK]` (в _core.py main_menu)
+
+| Пункт | Что делает |
+|---|---|
+| `[1]` Enable/disable | Install/remove iptables rules + ipset |
+| `[2]` Configure parameters | knock_count, knock_window_sec, whitelist_ttl_sec |
+| `[3]` Add/remove port | Управление списком защищаемых портов |
+| `[4]` Status | Активные rules, ipset size, recent table stats |
+| `[5]` Test knocking | Отправить N SYN на localhost:port, проверить что IP попал в xray_knocked |
+| `[6]` View knocked IPs | Список IP в xray_knocked (с TTL для каждого) |
+
+### 52 unit-теста (все проходят)
+
+| Class | Tests | Covers |
+|---|---|---|
+| `TestStateLoadSave` | 6 | JSON I/O, default-merge, chmod 600, corrupt file |
+| `TestValidation` | 10 | ranges/types for all fields |
+| `TestBuildIptablesRules` | 10 | 6 rules/port, INSERT/APPEND order, ipset refs, recent name per-port, comment tag |
+| `TestBuildIpsetCreateCmd` | 2 | command structure + ttl propagation |
+| `TestInstall` | 6 | creates ipset+rules, idempotent (no duplicates), skips empty ports, rejects invalid state, multi-port |
+| `TestRemove` | 4 | deletes 6 rules by comment, no-crash when empty, does NOT touch clients_wl/xray_manual_ban |
+| `TestIsActive` | 2 | false when no rules, true when tag present |
+| `TestStatus` | 3 | returns str, has key fields, inactive when no rules |
+| `TestTestKnock` | 4 | dict shape, success/fail paths |
+| `TestMenuWiring` | 4 | do_manage_port_knocking callable, all public functions present |
+
+### Совместимость
+
+- **Honeypot** ✅ — не конфликтуют (honeypot на фейковом порту, knocking на реальном)
+- **AutoBan** ✅ — autoban после TLS-handshake, knocking до
+- **Ingress GeoIP** ⚠️ — порядок правил (GeoIP должен быть выше knocking)
+- **fail2ban** ✅ — fail2ban на SSH, knocking на VPN
+- **clients_wl** ✅ — приоритетнее knocking (IP в whitelist сразу ACCEPT)
+- **xray_manual_ban** ✅ — приоритетнее (DROP всегда)
+- **fw_guard** ✅ — восстанавливает knocking rules из snapshot
+- **Telemt** ⚠️ — НЕ рекомендуется (Telemt-клиенты не делают TCP retry)
+- **Port Hopping** ⚠️ — конфликт на том же порту (knocking на 443, hopping на 8000-9000)
+
+### Интеграция с _core.py
+
+- Import: `from chimera.modules.port_knocking import do_manage_port_knocking`
+- Menu item: `_box_item("PK", f"🚪 Port Knocking {DIM}(динамический ACL — Censys/Shodan не найдут){NC}")`
+- Dispatch: `elif ch.lower() == "pk": do_manage_port_knocking()`
+
+### Деплой
+
+Не выполнен автоматически — пользователь должен включить knocking
+вручную через `[PK]` в TUI на каждом сервере. Это сделано специально:
+knocking может сломать подключения текущих VPN-клиентов (если
+knock_count слишком высокий) — нужно включать осознанно, после
+тестирования.
+
+**Рекомендуемая последовательность:**
+1. Настроить параметры (knock_count=3, window=10, ttl=3600)
+2. Добавить порты (443 на server 1/3, 9443 на server 2 — Telemt)
+3. Сначала включить на одном сервере (например server 3)
+4. Подождать 30 минут — проверить что VPN-клиенты подключаются
+5. Если OK — включить на остальных серверах
+6. Через 24-48 часов проверить на Censys/Shodan
+
+### Связанные артефакты
+
+- `chimera/modules/port_knocking.py` (902 строки) — модуль
+- `tests/test_port_knocking.py` (823 строки, 52 теста) — unit-тесты
+- `docs/faq/PORT_KNOCKING_FAQ.md` — большой FAQ (12 разделов)
+- `scripts/analyze_knock_patterns.py` — анализ access.log для подбора knock_count
+
+### Источники
+
+- https://github.com/shanker-sec/docker-dynamic-ACL — вдохновивший проект
+- https://habr.com/ru/articles/855536/ — статья про port knocking
+
+---
+
 ## FIX(tg_client_bot): остановить client-бота на secondary-серверах — Telegram 409 Conflict — 24 сентября 2026
 
 **Кейс:** пользователь сообщил что в `@ChimeraVPNClient_bot` при `/menu`
