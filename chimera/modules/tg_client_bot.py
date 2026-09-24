@@ -1435,6 +1435,80 @@ def _format_status_msg(uid):
         lines.append("📅 Срок действия: <b>бессрочно</b>")
     return "\\n".join(lines)
 
+def handle_protocols(msg):
+    """Список доступных протоколов с описаниями."""
+    chat_id = msg["chat"]["id"]
+    send(chat_id,
+        "🔌 <b>Доступные протоколы</b>\\n\\n"
+        "<b>VLESS REALITY</b>\\n"
+        "  Самый незаметный — маскируется под TLS к настоящему сайту.\\n"
+        "  Используйте, если ничего другое не работает.\\n"
+        "  Клиенты: NekoBox, v2rayNG, Happ, Streisand, Hiddify\\n\\n"
+        "<b>VLESS xHTTP</b>\\n"
+        "  REALITY через HTTP/2 — лучше работает при жёстком DPI.\\n"
+        "  Рекомендуется для мобильных сетей РФ.\\n\\n"
+        "<b>AWG (AmneziaWG)</b>\\n"
+        "  WireGuard с обфускацией — для случаев когда VPN-протокол\\n"
+        "  детектируется ТСПУ. Настройка через отдельного клиента.\\n\\n"
+        "<b>Hysteria2</b>\\n"
+        "  QUIC-based — для нестабильных/мобильных соединений.\\n"
+        "  Быстрее при lossy networks.\\n\\n"
+        "<b>Mieru</b>\\n"
+        "  Mitsuka-bypass — работает в самых жёстких условиях.\\n"
+        "  Используйте только если всё остальное заблокировано.\\n\\n"
+        "<b>NaiveProxy</b>\\n"
+        "  HTTP/2 masquerading — режется редко.\\n\\n"
+        "<b>sing-box (multi)</b>\\n"
+        "  Подписка со всеми протоколами в одном конфиге —\\n"
+        "  клиент сам выбирает лучший.\\n\\n"
+        "📖 <b>Клиенты по платформам:</b>\\n"
+        "  • <b>Android</b>: NekoBox, v2rayNG, Hiddify\\n"
+        "  • <b>iOS</b>: V2Box, Streisand, Hiddify\\n"
+        "  • <b>Windows</b>: NekoRay, v2rayN, Hiddify\\n"
+        "  • <b>macOS</b>: Hiddify, Foxray\\n"
+        "  • <b>Linux</b>: NekoRay, v2rayA\\n\\n"
+        f"Для своего подключения используйте /config.")
+
+def handle_guide(msg):
+    """Краткое руководство по клиентам."""
+    chat_id = msg["chat"]["id"]
+    send(chat_id,
+        "📘 <b>Руководство по подключению</b>\\n\\n"
+        "<b>1. Получите конфиг</b>\\n"
+        "  /config — список всех доступных ссылок + кнопки для QR\\n\\n"
+        "<b>2. Выберите протокол</b>\\n"
+        "  • VLESS REALITY — для большинства случаев\\n"
+        "  • VLESS xHTTP — при жёстком DPI (мобильные сети)\\n"
+        "  • AWG/Hysteria2/Mieru — если REALITY заблокирован\\n\\n"
+        "<b>3. Установите клиент</b>\\n"
+        "  Android: <a href=\\\"https://play.google.com/store/apps/details?id=com.nekoroid.nekoray\\\">NekoBox</a> или v2rayNG\\n"
+        "  iOS: V2Box или Streisand\\n"
+        "  Windows: <a href=\\\"https://github.com/MatsuriDayo/nekoray\\\">NekoRay</a>\\n\\n"
+        "<b>4. Импортируйте конфиг</b>\\n"
+        "  Скопируйте vless:// ссылку → вставьте в клиент → Подключиться\\n\\n"
+        "<b>5. Проверьте статус</b>\\n"
+        "  /status — трафик + TTL + лимит\\n\\n"
+        "💡 <b>Совет</b>: если соединение нестабильно — попробуйте\\n"
+        "другой протокол из /config. Каждый работает по-разному в\\n"
+        "зависимости от провайдера и времени суток.")
+
+def handle_menu(msg):
+    """Inline-клавиатура с кнопками для всех client-команд."""
+    chat_id = msg["chat"]["id"]
+    keyboard = {{
+        "inline_keyboard": [
+            [{{"text": "🔗 Получить конфиг", "callback_data": "menu:config"}}],
+            [{{"text": "📊 Трафик и TTL", "callback_data": "menu:status"}}],
+            [{{"text": "🔌 Протоколы", "callback_data": "menu:protocols"}}],
+            [{{"text": "📘 Руководство", "callback_data": "menu:guide"}}],
+            [{{"text": "❓ Помощь", "callback_data": "menu:help"}}],
+        ]
+    }}
+    api("sendMessage", chat_id=str(chat_id),
+        text="🎛️ <b>Меню</b>\\n\\nВыберите действие:",
+        parse_mode="HTML",
+        reply_markup=json.dumps(keyboard))
+
 def handle_help(msg):
     chat_id = msg["chat"]["id"]
     send(chat_id,
@@ -1444,8 +1518,12 @@ def handle_help(msg):
         "/config — список ссылок + кнопки для QR\\n"
         "/qr &lt;протокол&gt; — QR-код конкретного протокола\\n"
         "/status — трафик, TTL, лимит\\n"
+        "/protocols — описание протоколов + клиенты по платформам\\n"
+        "/guide — краткое руководство по подключению\\n"
+        "/menu — inline-клавиатура с кнопками\\n"
         "/help — эта справка\\n\\n"
-        "<b>Протоколы:</b> vless, awg, hysteria2, mieru, naive, singbox_*\\n\\n"
+        "<b>Протоколы</b>: vless (REALITY), vless-xhttp, awg, hysteria2, mieru, naive, singbox\\n\\n"
+        "<b>Алиасы</b>: /traffic = /status\\n\\n"
         "По всем вопросам обращайтесь к администратору сервера.")
 
 def handle_callback(update):
@@ -1457,13 +1535,23 @@ def handle_callback(update):
     chat_id = msg.get("chat", {{}}).get("id")
     uid = cb.get("from", {{}}).get("id")
     data = cb.get("data", "")
-    if not data.startswith("qr:"):
-        return
-    protocol = data[3:]
-    # Отвечаем на callback (убираем loading)
+    # Answer callback (remove spinner)
     api("answerCallbackQuery", callback_query_id=cb.get("id", ""))
-    # Эмулируем вызов /qr <protocol>
-    handle_qr({{"chat": {{"id": chat_id}}, "from": {{"id": uid}}}}, [protocol])
+    # QR callback (existing)
+    if data.startswith("qr:"):
+        protocol = data[3:]
+        handle_qr({{"chat": {{"id": chat_id}}, "from": {{"id": uid}}}}, [protocol])
+        return
+    # Menu callback (new)
+    if data.startswith("menu:"):
+        action = data[5:]
+        fake_msg = {{"chat": {{"id": chat_id}}, "from": {{"id": uid}}}}
+        if action == "config":      handle_config(fake_msg)
+        elif action == "status":    handle_status(fake_msg)
+        elif action == "protocols": handle_protocols(fake_msg)
+        elif action == "guide":     handle_guide(fake_msg)
+        elif action == "help":      handle_help(fake_msg)
+        return
 
 # ── Диспетчер ─────────────────────────────────────────────────────────────────
 def process_update(update):
@@ -1482,6 +1570,9 @@ def process_update(update):
     elif cmd == "/config":    handle_config(msg)
     elif cmd == "/qr":        handle_qr(msg, args)
     elif cmd == "/status" or cmd == "/traffic": handle_status(msg)
+    elif cmd == "/protocols": handle_protocols(msg)
+    elif cmd == "/guide":     handle_guide(msg)
+    elif cmd == "/menu":      handle_menu(msg)
     elif cmd == "/help":      handle_help(msg)
 
 def main():
