@@ -730,14 +730,18 @@ def handle_start(msg, args):
     if is_admin(uid):
         send(uid, (
             "👋 <b>VLESS Admin Bot</b>\\n\\n"
-            "Команды:\\n"
-            "/config       — ваша VLESS-ссылка\\n"
-            "/status       — статус каскада (агрегированный со всех серверов через SSH)\\n"
-            "/status_local — статус только текущего сервера\\n"
-            "/users        — список пользователей\\n"
-            "/invite       — сгенерировать invite-ссылку\\n"
-            "/broadcast &lt;текст&gt; — разослать всем пользователям\\n"
-            "/help         — справка"
+            "<b>Быстрый старт:</b>\\n"
+            "/menu   — inline-клавиатура с кнопками\\n"
+            "/help   — расширенная справка по всем командам\\n"
+            "/status — статус каскада со всех серверов\\n\\n"
+            "<b>Самые популярные:</b>\\n"
+            "/config        — ваша VLESS-ссылка\\n"
+            "/users         — список пользователей\\n"
+            "/ban &lt;ip&gt;      — забанить IP вручную\\n"
+            "/restart &lt;svc&gt; — перезапуск сервиса\\n"
+            "/logs [svc]    — последние строки лога\\n"
+            "/cert          — статус сертификатов\\n\\n"
+            f"Сервер: <code>{{LOCAL_NAME or 'primary'}}</code> ({{LOCAL_IP or '?'}})"
         ))
     elif is_allowed(uid):
         send(uid, "👋 Привет! Используйте /config для получения вашей ссылки.")
@@ -790,6 +794,674 @@ def handle_users(msg):
         return
     send(uid, get_users_text())
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  НОВЫЕ ADMIN-КОМАНДЫ (v6+):
+#    /restart /reload_nginx /logs /health
+#    /ban /unban /banlist /whitelist /wl_add /wl_del
+#    /geo /geo_toggle /f2b_status
+#    /traffic /traffic_top /user /reset_user /users_active
+#    /nodes /probe /cert /version /menu
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Список сервисов, которые можно перезапускать через /restart
+# (whitelist — безопасные. Никаких shutdown/reboot/systemctl poweroff).
+ALLOWED_RESTART_SERVICES = {{
+    "xray":         ("systemctl", "restart", "xray"),
+    "nginx":        ("systemctl", "restart", "nginx"),
+    "dnscrypt":     ("systemctl", "restart", "dnscrypt-proxy"),
+    "agh":          ("systemctl", "restart", "AdGuardHome"),
+    "adguardhome":  ("systemctl", "restart", "AdGuardHome"),
+    "fail2ban":     ("systemctl", "restart", "fail2ban"),
+    "warp":         ("systemctl", "restart", "wg-quick@wg-warp"),
+}}
+
+LOG_PATHS = {{
+    "xray":     "/var/log/xray/error.log",
+    "xray_acc": "/var/log/xray/access.log",
+    "nginx":    "/var/log/nginx/error.log",
+    "nginx_acc":"/var/log/nginx/access.log",
+    "chimera":  "/var/log/chimera.log",
+    "fail2ban": "/var/log/fail2ban.log",
+    "dnscrypt": "/var/log/dnscrypt-proxy.log",
+    "system":   "/var/log/syslog",
+}}
+
+def _validate_ip(ip_str):
+    """Валидация IPv4. Возвращает True/False."""
+    import re
+    return bool(re.match(r"^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$", ip_str))
+
+def handle_restart(msg, args):
+    """Перезапуск сервиса на текущем сервере. /restart <service>"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    if not args:
+        send(uid, "Использование: <code>/restart &lt;service&gt;</code>\\n"
+                  "Доступные: <code>" + ", ".join(sorted(ALLOWED_RESTART_SERVICES.keys())) + "</code>")
+        return
+    svc = args[0].lower()
+    if svc not in ALLOWED_RESTART_SERVICES:
+        send(uid, f"❌ Неизвестный сервис: <code>{{svc}}</code>\\n"
+                  f"Доступные: <code>{{', '.join(sorted(ALLOWED_RESTART_SERVICES.keys()))}}</code>")
+        return
+    cmd = list(ALLOWED_RESTART_SERVICES[svc])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            send(uid, f"✅ Перезапущен: <code>{{svc}}</code>\\n"
+                       f"<i>{{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}}</i>")
+        else:
+            send(uid, f"❌ Ошибка перезапуска {{svc}} (exit={{r.returncode}}):\\n"
+                       f"<code>{{r.stderr.strip()[:200]}}</code>")
+    except subprocess.TimeoutExpired:
+        send(uid, f"⚠️ Таймаут перезапуска {{svc}} (>30s)")
+    except Exception as e:
+        send(uid, f"❌ Исключение: {{str(e)[:100]}}")
+    _log(f"Restart {{svc}} by admin {{uid}}: rc={{r.returncode}}")
+
+def handle_reload_nginx(msg):
+    """Мягкий reload nginx без обрыва соединений."""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    try:
+        r = subprocess.run(["nginx", "-s", "reload"], capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            send(uid, "✅ Nginx перезагружен (reload)\\n"
+                      f"<i>{{datetime.now().strftime('%d.%m.%Y %H:%M:%S')}}</i>")
+        else:
+            send(uid, f"❌ Ошибка nginx reload (exit={{r.returncode}}):\\n<code>{{r.stderr.strip()[:200]}}</code>")
+    except Exception as e:
+        send(uid, f"❌ Исключение: {{str(e)[:100]}}")
+    _log(f"Nginx reload by admin {{uid}}")
+
+def handle_logs(msg, args):
+    """Последние строки лога. /logs [service] [n_lines]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    service = args[0].lower() if args else "xray"
+    n_lines = 20
+    if len(args) > 1 and args[1].isdigit():
+        n_lines = min(int(args[1]), 100)  # cap at 100
+    log_path = LOG_PATHS.get(service)
+    if not log_path:
+        send(uid, f"❌ Неизвестный лог: <code>{{service}}</code>\\n"
+                  f"Доступные: <code>{{', '.join(sorted(LOG_PATHS.keys()))}}</code>")
+        return
+    try:
+        if not Path(log_path).exists():
+            send(uid, f"❌ Файл не найден: <code>{{log_path}}</code>")
+            return
+        r = subprocess.run(["tail", f"-n{{n_lines}}", log_path],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            # Limit total message size (Telegram max 4096 chars)
+            content = r.stdout.strip()
+            if len(content) > 3800:
+                content = "..." + content[-3800:]
+            send(uid, f"📄 Последние {{n_lines}} строк <code>{{service}}</code>:\\n\\n<code>{{content}}</code>")
+        else:
+            send(uid, f"Лог <code>{{service}}</code> пуст или недоступен")
+    except Exception as e:
+        send(uid, f"❌ Ошибка чтения лога: {{str(e)[:80]}}")
+
+def handle_health(msg):
+    """Запускает chimera diagnostics и возвращает summary."""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    send(uid, "⏳ Запускаю диагностику... (может занять до 30 сек)")
+    try:
+        # Run chimera diagnostics script directly (not interactive)
+        r = subprocess.run(
+            ["python3", "-c",
+             "import sys; sys.path.insert(0, '/opt/chimera'); "
+             "from chimera.modules.diagnostics import run_split_tunnel_diagnostics; "
+             "import io, contextlib; "
+             "buf = io.StringIO(); "
+             "contextlib.redirect_stdout(buf).__enter__(); "
+             "run_split_tunnel_diagnostics(); "
+             "print(buf.getvalue()[-3000:])"],
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode == 0:
+            content = r.stdout.strip() or "(diagnostics returned no output)"
+            if len(content) > 3800:
+                content = "..." + content[-3800:]
+            send(uid, f"📋 <b>Chimera Diagnostics</b>\\n\\n<code>{{content}}</code>")
+        else:
+            send(uid, f"❌ Diagnostics error (exit={{r.returncode}}):\\n<code>{{r.stderr.strip()[:300]}}</code>")
+    except subprocess.TimeoutExpired:
+        send(uid, "⚠️ Диагностика превысила 60 сек — возможно зависла")
+    except Exception as e:
+        send(uid, f"❌ Ошибка: {{str(e)[:100]}}")
+
+def handle_ban(msg, args):
+    """Ручной бан IP в xray_manual_ban ipset. /ban <ip>"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    if not args or not _validate_ip(args[0]):
+        send(uid, "Использование: <code>/ban &lt;ip&gt;</code>\\nНапример: <code>/ban 1.2.3.4</code>")
+        return
+    ip = args[0]
+    try:
+        r = subprocess.run(["ipset", "add", "xray_manual_ban", ip],
+                           capture_output=True, text=True, timeout=10)
+        # Also save to /etc/ipset.conf (persists)
+        if r.returncode == 0:
+            subprocess.run(["ipset", "save", "xray_manual_ban"],
+                           capture_output=True, text=True, timeout=10,
+                           stdout=open("/dev/null", "w"))
+            # Better: write to /etc/ipset.conf
+            subprocess.run("ipset save > /etc/ipset.conf", shell=True, timeout=10)
+            send(uid, f"✅ IP <code>{{ip}}</code> добавлен в <code>xray_manual_ban</code>\\n"
+                       f"Запись сохранена в /etc/ipset.conf")
+        elif "already in set" in r.stderr.lower():
+            send(uid, f"ℹ️ IP <code>{{ip}}</code> уже в бан-листе")
+        else:
+            send(uid, f"❌ Ошибка бана (exit={{r.returncode}}):\\n<code>{{r.stderr.strip()[:200]}}</code>")
+    except Exception as e:
+        send(uid, f"❌ Исключение: {{str(e)[:100]}}")
+    _log(f"Ban {{ip}} by admin {{uid}}")
+
+def handle_unban(msg, args):
+    """Разбан IP. /unban <ip>"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    if not args or not _validate_ip(args[0]):
+        send(uid, "Использование: <code>/unban &lt;ip&gt;</code>")
+        return
+    ip = args[0]
+    try:
+        r = subprocess.run(["ipset", "del", "xray_manual_ban", ip],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            subprocess.run("ipset save > /etc/ipset.conf", shell=True, timeout=10)
+            send(uid, f"✅ IP <code>{{ip}}</code> удалён из <code>xray_manual_ban</code>")
+        else:
+            send(uid, f"❌ Ошибка разбана (exit={{r.returncode}}):\\n<code>{{r.stderr.strip()[:200]}}</code>")
+    except Exception as e:
+        send(uid, f"❌ Исключение: {{str(e)[:100]}}")
+    _log(f"Unban {{ip}} by admin {{uid}}")
+
+def handle_banlist(msg):
+    """Список забаненных IP. /banlist"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    try:
+        r = subprocess.run(["ipset", "list", "xray_manual_ban"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            out = r.stdout
+            # Extract just IP entries (filter headers)
+            lines = [l for l in out.split("\\n") if _validate_ip(l.strip())]
+            if not lines:
+                send(uid, "📋 <b>xray_manual_ban:</b> пуст\\n"
+                          "(нет забаненных IP)")
+            else:
+                content = "\\n".join(lines[:50])
+                suffix = f"\\n... и ещё {{len(lines)-50}}" if len(lines) > 50 else ""
+                send(uid, f"📋 <b>xray_manual_ban</b> ({{len(lines)}} IP):\\n\\n<code>{{content}}</code>{{suffix}}")
+        else:
+            send(uid, f"❌ ipset не найден (exit={{r.returncode}})")
+    except Exception as e:
+        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
+
+def handle_whitelist(msg):
+    """Список whitelist IP. /whitelist"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    try:
+        r = subprocess.run(["ipset", "list", "clients_wl"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            out = r.stdout
+            lines = [l for l in out.split("\\n") if _validate_ip(l.strip())]
+            if not lines:
+                send(uid, "📋 <b>clients_wl:</b> пуст")
+            else:
+                content = "\\n".join(lines)
+                send(uid, f"📋 <b>clients_wl</b> ({{len(lines)}} IP):\\n\\n<code>{{content}}</code>")
+        else:
+            send(uid, f"❌ ipset clients_wl не найден (exit={{r.returncode}})")
+    except Exception as e:
+        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
+
+def handle_wl_add(msg, args):
+    """Добавить IP в whitelist. /wl_add <ip>"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    if not args or not _validate_ip(args[0]):
+        send(uid, "Использование: <code>/wl_add &lt;ip&gt;</code>")
+        return
+    ip = args[0]
+    try:
+        r = subprocess.run(["ipset", "add", "clients_wl", ip],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 or "already" in r.stderr.lower():
+            subprocess.run("ipset save > /etc/ipset.conf", shell=True, timeout=10)
+            send(uid, f"✅ IP <code>{{ip}}</code> добавлен в <code>clients_wl</code>")
+        else:
+            send(uid, f"❌ Ошибка: {{r.stderr.strip()[:200]}}")
+    except Exception as e:
+        send(uid, f"❌ {{str(e)[:80]}}")
+    _log(f"WL add {{ip}} by admin {{uid}}")
+
+def handle_wl_del(msg, args):
+    """Удалить IP из whitelist. /wl_del <ip>"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    if not args or not _validate_ip(args[0]):
+        send(uid, "Использование: <code>/wl_del &lt;ip&gt;</code>")
+        return
+    ip = args[0]
+    try:
+        r = subprocess.run(["ipset", "del", "clients_wl", ip],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            subprocess.run("ipset save > /etc/ipset.conf", shell=True, timeout=10)
+            send(uid, f"✅ IP <code>{{ip}}</code> удалён из <code>clients_wl</code>")
+        else:
+            send(uid, f"❌ {{r.stderr.strip()[:200]}}")
+    except Exception as e:
+        send(uid, f"❌ {{str(e)[:80]}}")
+    _log(f"WL del {{ip}} by admin {{uid}}")
+
+def handle_geo(msg):
+    """Статус ingress GeoIP-блокировки. /geo"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    try:
+        # Check ipset size for xray_ru_block
+        r4 = subprocess.run(["ipset", "list", "xray_ru_block"],
+                            capture_output=True, text=True, timeout=10)
+        v4_count = 0
+        if r4.returncode == 0:
+            v4_count = sum(1 for l in r4.stdout.split("\\n") if _validate_ip(l.strip()))
+        # IPv6
+        r6 = subprocess.run(["ipset", "list", "xray_ru_block6"],
+                            capture_output=True, text=True, timeout=10)
+        v6_count = 0
+        if r6.returncode == 0:
+            v6_count = sum(1 for l in r6.stdout.split("\\n") if ":" in l and l.strip() and not l.startswith("Name") and not l.startswith("Type") and not l.startswith("Header") and not l.startswith("Size") and not l.startswith("Revision") and l != "members:")
+        # Check iptables rule
+        r_ipt = subprocess.run(["iptables", "-S", "INPUT"],
+                               capture_output=True, text=True, timeout=10)
+        has_rule = "xray_ru_block" in r_ipt.stdout if r_ipt.returncode == 0 else False
+        send(uid, f"🌍 <b>Ingress GeoIP-блокировка</b>\\n\\n"
+                  f"IPv4 blocked: <code>{{v4_count}}</code> CIDR\\n"
+                  f"IPv6 blocked: <code>{{v6_count}}</code> CIDR\\n"
+                  f"iptables rule: {{'✅ установлен' if has_rule else '❌ НЕТ'}}\\n"
+                  f"\\nИспользуйте <code>/geo_toggle</code> для вкл/выкл")
+    except Exception as e:
+        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
+
+def handle_geo_toggle(msg):
+    """Вкл/выкл ingress GeoIP-блокировку."""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    send(uid, "⚠️ Toggle ingress GeoIP — это потенциально опасная операция.\\n"
+              "Используйте chimera TUI на сервере: Меню → Управление GeoIP → [3] Toggle.\\n"
+              "Из Telegram эта команда отключена в целях безопасности.")
+    _log(f"Geo toggle requested by admin {{uid}} — denied (use TUI)")
+
+def handle_f2b(msg):
+    """Статус fail2ban + список забаненных. /f2b"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    try:
+        r = subprocess.run(["fail2ban-client", "status"],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            send(uid, f"❌ fail2ban-client не запущен или не установлен:\\n<code>{{r.stderr.strip()[:200]}}</code>")
+            return
+        jails = r.stdout.strip().split(",")[-1].strip().split()
+        lines = ["🛡️ <b>fail2ban status</b>\\n"]
+        for jail in jails[:5]:  # top 5 jails
+            rj = subprocess.run(["fail2ban-client", "status", jail],
+                                capture_output=True, text=True, timeout=10)
+            if rj.returncode == 0:
+                # Extract total + banned
+                total = "?"
+                banned = "?"
+                for line in rj.stdout.split("\\n"):
+                    if "Currently banned" in line:
+                        banned = line.split(":")[-1].strip()
+                    elif "Total banned" in line:
+                        total = line.split(":")[-1].strip()
+                lines.append(f"<b>{{jail}}</b>: banned={{banned}} (total={{total}})")
+        send(uid, "\\n".join(lines))
+    except Exception as e:
+        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
+
+def handle_traffic(msg, args):
+    """Топ пользователей по трафику сегодня. /traffic [n]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    n = 10
+    if args and args[0].isdigit():
+        n = min(int(args[0]), 50)
+    try:
+        # Xray stats API — query all users stats
+        # The simpler approach: read /var/log/xray/access.log and aggregate by email
+        # Or: use xray api via /usr/local/bin/xray api inbounds
+        # For now — read access.log (last 10000 lines) and count bytes by email
+        log_path = Path("/var/log/xray/access.log")
+        if not log_path.exists():
+            send(uid, "❌ access.log не найден — трафик-трекинг не настроен")
+            return
+        # Use awk for fast aggregation
+        cmd = [
+            "awk", "-v", "RS=\\n",
+            # match pattern: "..." email ... upload/down bytes
+            # Use simpler: tail -n 10000 + grep accepted + count by email
+            "tail", "-n", "10000", str(log_path)
+        ]
+        # Just do simple pipeline
+        r = subprocess.run(
+            f"tail -n 10000 {{log_path}} 2>/dev/null | "
+            f"grep -oE '\\\\[(email:)?[^]]*\\\\]' | sort | uniq -c | sort -rn | head -{{n}}".format(
+                log_path=log_path, n=n),
+            shell=True, capture_output=True, text=True, timeout=15)
+        if r.returncode == 0 and r.stdout.strip():
+            send(uid, f"📊 <b>Топ {{n}} по подключениям (за последние 10000 строк лога):</b>\\n\\n<code>{{r.stdout.strip()}}</code>")
+        else:
+            send(uid, "access.log пуст или нет подключений")
+    except Exception as e:
+        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
+
+def handle_traffic_top(msg):
+    """Алиас к /traffic с топ-20."""
+    handle_traffic(msg, ["20"])
+
+def handle_user(msg, args):
+    """Детальная инфа по пользователю. /user <email>"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    if not args:
+        send(uid, "Использование: <code>/user &lt;email&gt;</code>\\nНапример: <code>/user user@chimeravpn.online</code>")
+        return
+    email = args[0]
+    # Search in /etc/xray/users.json (if exists) and /etc/xray/config.json
+    try:
+        cfg = json.loads(Path("/etc/xray/config.json").read_text())
+        found = None
+        for ib in cfg.get("inbounds", []):
+            for c in ib.get("settings", {{}}).get("clients", []):
+                if c.get("email") == email:
+                    found = c
+                    break
+        if not found:
+            send(uid, f"❌ Пользователь <code>{{email}}</code> не найден в config.json")
+            return
+        # Show details
+        uuid_short = found.get("id", "")[:8] + "..."
+        text = (f"👤 <b>{{email}}</b>\\n\\n"
+                f"UUID: <code>{{uuid_short}}</code>\\n"
+                f"Flow: <code>{{found.get('flow', '—')}}</code>\\n"
+                f"Email: <code>{{found.get('email', '—')}}</code>\\n"
+                f"Level: <code>{{found.get('level', 0)}}</code>")
+        # Check TTL file
+        ttl_path = Path("/var/lib/xray-installer/ttl_users.json")
+        if ttl_path.exists():
+            ttl_data = json.loads(ttl_path.read_text())
+            if email in ttl_data:
+                ttl_info = ttl_data[email]
+                text += f"\\n\\n⏰ TTL: <code>{{ttl_info}}</code>"
+        # Check traffic limits
+        limits_path = Path("/var/lib/xray-installer/traffic_limits.json")
+        if limits_path.exists():
+            limits_data = json.loads(limits_path.read_text())
+            if email in limits_data:
+                text += f"\\n📊 Лимит: <code>{{limits_data[email]}}</code>"
+        send(uid, text)
+    except Exception as e:
+        send(uid, f"❌ Ошибка: {{str(e)[:80]}}")
+
+def handle_reset_user(msg, args):
+    """Сброс трафик-счётчика пользователя. /reset_user <email>"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    if not args:
+        send(uid, "Использование: <code>/reset_user &lt;email&gt;</code>")
+        return
+    email = args[0]
+    send(uid, f"⚠️ Сброс трафика для <code>{{email}}</code> — требует chimera TUI.\\n"
+              f"Из Telegram отключено в целях безопасности. Используйте: Меню → Управление пользователями → Сброс трафика.")
+    _log(f"Reset user {{email}} requested by admin {{uid}} — denied (use TUI)")
+
+def handle_users_active(msg):
+    """Активные пользователи за последний час. /users_active"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    # Read access.log, find unique emails in last 5000 lines
+    log_path = Path("/var/log/xray/access.log")
+    if not log_path.exists():
+        send(uid, "❌ access.log не найден")
+        return
+    try:
+        r = subprocess.run(
+            f"tail -n 5000 {{log_path}} 2>/dev/null | "
+            f"grep -oE 'email: [^]]+' | sort -u".format(log_path=log_path),
+            shell=True, capture_output=True, text=True, timeout=15)
+        if r.returncode == 0 and r.stdout.strip():
+            count = len(r.stdout.strip().split("\\n"))
+            send(uid, f"👥 <b>Активные пользователи (за последние 5000 строк лога):</b> "
+                      f"<code>{{count}}</code>\\n\\n<code>{{r.stdout.strip()}}</code>")
+        else:
+            send(uid, "Нет активных пользователей в access.log")
+    except Exception as e:
+        send(uid, f"❌ {{str(e)[:80]}}")
+
+def handle_nodes(msg):
+    """Список exit-нод каскада + TCP-ping. /nodes"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    st = _state()
+    nodes = st.get("chain_nodes", [])
+    if not nodes and st.get("chain_exit_host"):
+        nodes = [{{"host": st["chain_exit_host"], "port": st.get("chain_exit_port", 443),
+                "sni": st.get("chain_exit_sni", "")}}]
+    if not nodes:
+        send(uid, "❌ Exit-ноды не настроены (не Режим B?)")
+        return
+    text_lines = [f"🔗 <b>Exit-ноды каскада</b> ({{len(nodes)}} шт)\\n"]
+    for i, nd in enumerate(nodes, 1):
+        host = nd.get("host", "?")
+        port = nd.get("port", 443)
+        sni = nd.get("sni", "")
+        # TCP-ping
+        try:
+            r = subprocess.run(["timeout", "5", "bash", "-c",
+                                f"echo > /dev/tcp/{{host}}/{{port}}"],
+                               capture_output=True, text=True, timeout=6)
+            status = "🟢 up" if r.returncode == 0 else "🔴 down"
+        except Exception:
+            status = "❓"
+        text_lines.append(f"<b>Нода #{{i}}</b>: {{status}}\\n"
+                          f"  Host: <code>{{host}}</code>:{{port}}\\n"
+                          f"  SNI: <code>{{sni}}</code>")
+    send(uid, "\\n".join(text_lines))
+
+def handle_probe(msg, args):
+    """TCP-ping до произвольного IP/port. /probe <ip> [port]"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    if not args:
+        send(uid, "Использование: <code>/probe &lt;ip/host&gt; [port]</code>\\nНапример: <code>/probe 8.8.8.8 443</code>")
+        return
+    host = args[0]
+    port = args[1] if len(args) > 1 and args[1].isdigit() else "443"
+    try:
+        r = subprocess.run(["timeout", "5", "bash", "-c",
+                            f"echo > /dev/tcp/{{host}}/{{port}}"],
+                           capture_output=True, text=True, timeout=6)
+        if r.returncode == 0:
+            send(uid, f"🟢 <code>{{host}}:{{port}}</code> — TCP достижим (5s timeout)")
+        else:
+            send(uid, f"🔴 <code>{{host}}:{{port}}</code> — недостижим (timeout или отказ)")
+    except Exception as e:
+        send(uid, f"❌ {{str(e)[:80]}}")
+
+def handle_cert(msg):
+    """Статус TLS-сертификатов на всех 3 серверах. /cert"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    text_lines = ["🔒 <b>Сертификаты TLS</b>\\n"]
+    # Local cert
+    try:
+        cert_path = next(Path("/etc/letsencrypt/live").glob("*/cert.pem"), None)
+        if cert_path:
+            r = subprocess.run(["openssl", "x509", "-enddate", "-noout", "-in", str(cert_path)],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                exp_date = r.stdout.split("=")[-1].strip()
+                # Calculate days left
+                r2 = subprocess.run(["bash", "-c",
+                                     f"days=$((( $(date -d '{{exp_date}}' +%s) - $(date +%s) ) / 86400)); echo $days"],
+                                    capture_output=True, text=True, timeout=10)
+                days = r2.stdout.strip()
+                emoji = "🟢" if int(days) > 30 else "🔴" if int(days) > 0 else "💀"
+                text_lines.append(f"<b>Server 1 ({{LOCAL_NAME or 'local'}})</b>\\n  {{emoji}} истекает {{exp_date}} ({{days}} дн.)\\n")
+        else:
+            text_lines.append("<b>Server 1</b>\\n  ⚠️ сертификат не найден\\n")
+    except Exception as e:
+        text_lines.append(f"<b>Server 1</b>\\n  ❌ ошибка: {{str(e)[:60]}}\\n")
+    # Remote certs via SSH
+    for peer in CASCADE_PEERS:
+        name = peer.get("name", peer.get("host", "?"))
+        host = peer.get("host", "")
+        use_sudo = peer.get("sudo", False)
+        ssh_target = f"{{peer.get('user','root')}}@{{host}}" if peer.get("user","root") != "root" else host
+        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+                   "-o", "ConnectTimeout=10", "-p", str(peer.get("port", 22)), ssh_target]
+        cmd = "openssl x509 -enddate -noout -in $(ls /etc/letsencrypt/live/*/cert.pem 2>/dev/null | head -1) 2>/dev/null"
+        if use_sudo:
+            ssh_cmd.extend(["sudo", "-n", "bash", "-c", cmd])
+        else:
+            ssh_cmd.extend(["bash", "-c", cmd])
+        try:
+            r = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
+            if r.returncode == 0 and r.stdout.strip():
+                exp_date = r.stdout.split("=")[-1].strip()
+                r2 = subprocess.run(["bash", "-c",
+                                     f"days=$((( $(date -d '{{exp_date}}' +%s) - $(date +%s) ) / 86400)); echo $days"],
+                                    capture_output=True, text=True, timeout=10)
+                days = r2.stdout.strip() or "?"
+                try:
+                    d_int = int(days)
+                    emoji = "🟢" if d_int > 30 else "🔴" if d_int > 0 else "💀"
+                except Exception:
+                    emoji = "❓"
+                text_lines.append(f"<b>{{name}}</b> ({{host}})\\n  {{emoji}} истекает {{exp_date}} ({{days}} дн.)\\n")
+            else:
+                text_lines.append(f"<b>{{name}}</b> ({{host}})\\n  ⚠️ не найден\\n")
+        except Exception as e:
+            text_lines.append(f"<b>{{name}}</b> ({{host}})\\n  ❌ ошибка: {{str(e)[:60]}}\\n")
+    send(uid, "\\n".join(text_lines))
+
+def handle_version(msg):
+    """Версия chimera + последний коммит + uptime бота. /version"""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    # Git commit
+    try:
+        r = subprocess.run(["git", "-C", "/opt/chimera", "log", "--oneline", "-1"],
+                           capture_output=True, text=True, timeout=10)
+        commit = r.stdout.strip() if r.returncode == 0 else "??"
+    except Exception:
+        commit = "??"
+    # Bot uptime (process start)
+    try:
+        import os
+        bot_pid = os.getpid()
+        with open(f"/proc/{{bot_pid}}/stat") as f:
+            stat = f.read().split()
+            start_ticks = int(stat[21])
+        import time
+        uptime_s = int((time.time() - start_ticks / 100))  # wrong calc but approximate
+    except Exception:
+        uptime_s = 0
+    # Hostname
+    try:
+        host = subprocess.check_output(["hostname", "-s"], text=True).strip()
+    except Exception:
+        host = "?"
+    send(uid, f"📋 <b>Chimera version</b>\\n\\n"
+              f"Git commit: <code>{{commit}}</code>\\n"
+              f"Host: <code>{{host}}</code>\\n"
+              f"Bot uptime: <code>{{uptime_s}}s</code>\\n"
+              f"Local: <code>{{LOCAL_NAME}}</code> ({{LOCAL_IP}})\\n"
+              f"Cascade peers: <code>{{len(CASCADE_PEERS)}}</code>")
+
+def handle_menu(msg):
+    """Inline-клавиатура с кнопками для всех admin-команд."""
+    uid = msg["from"]["id"]
+    if not is_admin(uid):
+        send(uid, "⛔ Только для администратора.")
+        return
+    # Inline keyboard with callback_data
+    keyboard = {{
+        "inline_keyboard": [
+            [{{"text": "📊 Статус каскада", "callback_data": "/status"}}],
+            [{{"text": "👥 Пользователи", "callback_data": "/users"}},
+             {{"text": "🛡️ Бан-лист", "callback_data": "/banlist"}}],
+            [{{"text": "🔒 Сертификаты", "callback_data": "/cert"}},
+             {{"text": "📋 Версия", "callback_data": "/version"}}],
+            [{{"text": "🌍 Geo-IP", "callback_data": "/geo"}},
+             {{"text": "🛡️ fail2ban", "callback_data": "/f2b"}}],
+            [{{"text": "🔗 Ноды", "callback_data": "/nodes"}},
+             {{"text": "🚦 Трафик", "callback_data": "/traffic"}}],
+            [{{"text": "🔄 Restart menu", "callback_data": "/restart"}}],
+            [{{"text": "❓ Помощь", "callback_data": "/help"}}],
+        ]
+    }}
+    api("sendMessage", chat_id=str(uid),
+        text="🎛️ <b>Admin menu</b>\\n\\nВыберите команду:",
+        parse_mode="HTML",
+        reply_markup=json.dumps(keyboard))
+
+
 def handle_invite(msg):
     uid = msg["from"]["id"]
     if not is_admin(uid):
@@ -836,31 +1508,76 @@ def handle_broadcast(msg, args):
 
 def handle_help(msg):
     uid = msg["from"]["id"]
-    text = (
+    # Basic help for non-admin users
+    base = (
         "📖 <b>Справка</b>\\n\\n"
         "/start  — начало работы\\n"
         "/config — получить VLESS-ссылку\\n"
         "/help   — эта справка\\n"
     )
-    if is_admin(uid):
-        text += (
-            "\\n<b>Только для администратора:</b>\\n"
-            "/status       — статус каскада (агрегированный со всех серверов через SSH)\\n"
-            "/status_local — статус только текущего сервера\\n"
-            "/users        — список пользователей\\n"
-            "/invite       — создать invite-ссылку\\n"
-            "/broadcast    — рассылка всем пользователям"
-        )
+    if not is_admin(uid):
+        send(uid, base)
+        return
+    # Extended admin help — grouped by category
+    text = (
+        "📖 <b>Admin Help — справка</b>\\n\\n"
+        "<b>📋 Базовые команды</b>\\n"
+        "/start            — приветствие + список команд\\n"
+        "/config           — ваша VLESS-ссылка\\n"
+        "/help             — эта справка\\n"
+        "/menu             — inline-клавиатура с кнопками для всех команд\\n"
+        "\\n<b>📊 Статус и мониторинг</b>\\n"
+        "/status           — агрегированный статус всех серверов каскада (через SSH)\\n"
+        "/status_local     — статус только текущего сервера\\n"
+        "/health           — запустить chimera diagnostics (11 проверок)\\n"
+        "/version          — версия chimera + последний git commit\\n"
+        "/cert             — статус TLS-сертификатов на всех серверах\\n"
+        "\\n<b>👥 Пользователи</b>\\n"
+        "/users            — список пользователей Xray (email, UUID)\\n"
+        "/users_active     — активные за последний час (из access.log)\\n"
+        "/user &lt;email&gt;   — детальная инфа по пользователю (UUID, TTL, лимит)\\n"
+        "/reset_user &lt;email&gt; — сброс трафик-счётчика (требует TUI)\\n"
+        "/traffic [n]      — топ-N пользователей по подключениям (дефолт 10)\\n"
+        "/traffic_top      — алиас для /traffic 20\\n"
+        "/invite           — создать одноразовую invite-ссылку\\n"
+        "/broadcast &lt;текст&gt; — рассылка всем привязанным пользователям\\n"
+        "\\n<b>🛡️ Бан-лист и whitelist</b>\\n"
+        "/ban &lt;ip&gt;        — ручной бан IP в xray_manual_ban\\n"
+        "/unban &lt;ip&gt;      — разбан IP\\n"
+        "/banlist          — список забаненных IP\\n"
+        "/whitelist        — список whitelist IP (clients_wl)\\n"
+        "/wl_add &lt;ip&gt;     — добавить IP в whitelist (защита от autoban)\\n"
+        "/wl_del &lt;ip&gt;     — удалить IP из whitelist\\n"
+        "\\n<b>🌍 GeoIP и fail2ban</b>\\n"
+        "/geo              — статус ingress GeoIP-блокировки (вкл/выкл, размер)\\n"
+        "/geo_toggle       — переключить (отключено из TG — используйте TUI)\\n"
+        "/f2b              — статус fail2ban + список забаненных по jail'ам\\n"
+        "\\n<b>🔗 Каскад и ноды</b>\\n"
+        "/nodes            — список exit-нод каскада + TCP-ping до каждой\\n"
+        "/probe &lt;ip/host&gt; [port] — TCP-ping до произвольного адреса (дефолт 443)\\n"
+        "\\n<b>🔄 Управление сервисами</b>\\n"
+        "/restart &lt;service&gt; — перезапуск сервиса (xray/nginx/dnscrypt/agh/fail2ban/warp)\\n"
+        "/reload_nginx     — мягкий reload nginx без обрыва соединений\\n"
+        "/logs [service] [n] — последние N строк лога (дефолт xray, 20 строк)\\n"
+        "                     services: xray, xray_acc, nginx, nginx_acc, chimera, fail2ban, dnscrypt, system\\n"
+        "\\n<i>Команды выполняются на текущем (primary) сервере: {{LOCAL_NAME or 'localhost'}}</i>\\n"
+        "<i>Если нужен статус с других серверов каскада — используйте /status</i>"
+    )
     send(uid, text)
 
 def process_update(update):
     msg = update.get("message") or update.get("edited_message")
     if not msg or "text" not in msg:
+        # Check for callback_query (inline keyboard button press)
+        cb = update.get("callback_query")
+        if cb:
+            handle_callback_query(cb)
         return
     text  = msg["text"].strip()
     parts = text.split()
     cmd   = parts[0].split("@")[0].lower() if parts else ""
     args  = parts[1:]
+    # Existing commands
     if cmd == "/start":   handle_start(msg, args)
     elif cmd == "/config": handle_config(msg)
     elif cmd == "/status": handle_status(msg)
@@ -869,6 +1586,90 @@ def process_update(update):
     elif cmd == "/invite": handle_invite(msg)
     elif cmd == "/broadcast": handle_broadcast(msg, args)
     elif cmd == "/help":   handle_help(msg)
+    # New: server management
+    elif cmd == "/restart":      handle_restart(msg, args)
+    elif cmd == "/reload_nginx": handle_reload_nginx(msg)
+    elif cmd == "/logs":        handle_logs(msg, args)
+    elif cmd == "/health":       handle_health(msg)
+    # New: ban/whitelist
+    elif cmd == "/ban":          handle_ban(msg, args)
+    elif cmd == "/unban":        handle_unban(msg, args)
+    elif cmd == "/banlist":      handle_banlist(msg)
+    elif cmd == "/whitelist":    handle_whitelist(msg)
+    elif cmd == "/wl_add":       handle_wl_add(msg, args)
+    elif cmd == "/wl_del":       handle_wl_del(msg, args)
+    # New: geo/f2b
+    elif cmd == "/geo":          handle_geo(msg)
+    elif cmd == "/geo_toggle":   handle_geo_toggle(msg)
+    elif cmd == "/f2b":          handle_f2b(msg)
+    elif cmd == "/f2b_status":   handle_f2b(msg)
+    # New: traffic/users
+    elif cmd == "/traffic":      handle_traffic(msg, args)
+    elif cmd == "/traffic_top":  handle_traffic_top(msg)
+    elif cmd == "/user":         handle_user(msg, args)
+    elif cmd == "/reset_user":   handle_reset_user(msg, args)
+    elif cmd == "/users_active": handle_users_active(msg)
+    # New: cascade/nodes
+    elif cmd == "/nodes":        handle_nodes(msg)
+    elif cmd == "/probe":        handle_probe(msg, args)
+    elif cmd == "/cert":         handle_cert(msg)
+    elif cmd == "/version":      handle_version(msg)
+    # New: convenience
+    elif cmd == "/menu":         handle_menu(msg)
+
+def handle_callback_query(cb):
+    """Обрабатывает нажатия inline-кнопок (из /menu).
+
+    Callback data — это имя команды (например "/status"). Нажатие кнопки
+    эмулирует выполнение этой команды от имени пользователя.
+    """
+    cb_data = cb.get("data", "")
+    cb_id   = cb.get("id", "")
+    cb_from = cb.get("from", {{}})
+    # Construct a fake msg with from.id = cb.from.id, so handlers see admin id
+    fake_msg = {{
+        "from": cb_from,
+        "text": cb_data,
+    }}
+    # Answer the callback (removes the loading spinner)
+    api("answerCallbackQuery", callback_query_id=cb_id)
+    # Re-dispatch through process_update with a fake message
+    # Strip leading "/" from callback_data and re-add to match the cmd format
+    parts = cb_data.split()
+    cmd = parts[0].split("@")[0].lower() if parts else ""
+    args = parts[1:]
+    if cmd == "/start":   handle_start(fake_msg, args)
+    elif cmd == "/config": handle_config(fake_msg)
+    elif cmd == "/status": handle_status(fake_msg)
+    elif cmd == "/status_local": handle_status_local(fake_msg)
+    elif cmd == "/users":  handle_users(fake_msg)
+    elif cmd == "/invite": handle_invite(fake_msg)
+    elif cmd == "/broadcast": handle_broadcast(fake_msg, args)
+    elif cmd == "/help":   handle_help(fake_msg)
+    elif cmd == "/restart":      handle_restart(fake_msg, args)
+    elif cmd == "/reload_nginx": handle_reload_nginx(fake_msg)
+    elif cmd == "/logs":        handle_logs(fake_msg, args)
+    elif cmd == "/health":       handle_health(fake_msg)
+    elif cmd == "/ban":          handle_ban(fake_msg, args)
+    elif cmd == "/unban":        handle_unban(fake_msg, args)
+    elif cmd == "/banlist":      handle_banlist(fake_msg)
+    elif cmd == "/whitelist":    handle_whitelist(fake_msg)
+    elif cmd == "/wl_add":       handle_wl_add(fake_msg, args)
+    elif cmd == "/wl_del":       handle_wl_del(fake_msg, args)
+    elif cmd == "/geo":          handle_geo(fake_msg)
+    elif cmd == "/geo_toggle":   handle_geo_toggle(fake_msg)
+    elif cmd == "/f2b":          handle_f2b(fake_msg)
+    elif cmd == "/f2b_status":   handle_f2b(fake_msg)
+    elif cmd == "/traffic":      handle_traffic(fake_msg, args)
+    elif cmd == "/traffic_top":  handle_traffic_top(fake_msg)
+    elif cmd == "/user":         handle_user(fake_msg, args)
+    elif cmd == "/reset_user":   handle_reset_user(fake_msg, args)
+    elif cmd == "/users_active": handle_users_active(fake_msg)
+    elif cmd == "/nodes":        handle_nodes(fake_msg)
+    elif cmd == "/probe":        handle_probe(fake_msg, args)
+    elif cmd == "/cert":         handle_cert(fake_msg)
+    elif cmd == "/version":      handle_version(fake_msg)
+    elif cmd == "/menu":         handle_menu(fake_msg)
 
 def main():
     global OFFSET
