@@ -2,6 +2,253 @@
 
 ---
 
+## FEAT(tg_bots v6): 25+ новых admin-команд + client-команды + расширенный /help + /menu inline-клавиатуры — 24 сентября 2026
+
+**Кейс:** пользователю было неудобно каждый раз лезть по SSH на сервер
+для рутинных операций — бан IP, перезапуск xray/nginx, просмотр логов,
+проверка сертификатов, гео-статус, fail2ban, traffic-top. Также
+текущий `/help` был куцым — без группировки и примеров, приходилось
+держать в голове синтаксис каждой команды. Пользователь: «Реализуем
+сразу всё + расширенный /help. Справишься? Думаю, что будет не очень
+сложно, доступы у тебя все есть».
+
+Реализовано **25+ новых admin-команд** в `chimera/modules/tg_bot.py`
+(+837 строк), 3 новые client-команды в `chimera/modules/tg_client_bot.py`
+(+105 строк), расширенные /help для обоих ботов, и inline-клавиатуры
+`/menu` для управления кнопками вместо печати команд.
+
+### Admin-бот (`@Chimeravpnproject_bot`, на primary-сервере)
+
+**Группа «Базовые команды»:**
+- `/start` — приветствие + список самых популярных команд
+- `/config` — VLESS-ссылка текущего пользователя
+- `/help` — расширенная справка с группировкой по 7 категориям
+- `/menu` — inline-клавиатура с кнопками для всех команд
+
+**Группа «Статус и мониторинг»:**
+- `/status` — агрегированный статус каскада со всех серверов (через SSH
+  к cascade_peers + локальный статус) — добавлен в предыдущей итерации
+- `/status_local` — статус только текущего (primary) сервера
+- `/health` — запускает chimera diagnostics (11 проверок) и возвращает
+  результат в Telegram как `<code>` блок
+- `/version` — git commit + hostname + bot uptime + cascade peers count
+- `/cert` — статус TLS-сертификатов на всех серверах каскада: для
+  primary — локально, для cascade_peers — через SSH к каждому peer с
+  `openssl x509 -enddate`. Возвращает дату истечения + дни до истечения
+  (🟢 >30 дней, 🔴 <30 дней, 💀 истёк)
+
+**Группа «Пользователи»:**
+- `/users` — список пользователей Xray (email + UUID short)
+- `/users_active` — активные пользователи за последние 5000 строк
+  access.log (grep email + sort -u)
+- `/user <email>` — детальная инфа по пользователю (UUID, flow, level,
+  TTL из ttl_users.json, лимит из traffic_limits.json)
+- `/reset_user <email>` — сброс traffic counter (ОТКЛЮЧЕНО из TG в
+  целях безопасности — требует chimera TUI)
+- `/traffic [n]` — топ-N пользователей по подключениям (по умолчанию 10,
+  cap 50) — парсит access.log, считает email-mentions, sort -rn
+- `/traffic_top` — алиас для `/traffic 20`
+- `/invite` — создать одноразовую invite-ссылку для нового пользователя
+  (через deep-link `?start=<token>`)
+- `/broadcast <текст>` — рассылка всем привязанным пользователям в боте
+
+**Группа «Бан-лист и whitelist»:**
+- `/ban <ip>` — ручной бан IP в `xray_manual_ban` ipset + сохранение в
+  `/etc/ipset.conf` через `ipset save`. Валидация IPv4 regex
+- `/unban <ip>` — разбан IP
+- `/banlist` — список забаненных IP (до 50, с суффиксом «... и ещё N»)
+- `/whitelist` — список whitelist IP (ipset `clients_wl`)
+- `/wl_add <ip>` — добавить IP в whitelist (защита от autoban)
+- `/wl_del <ip>` — удалить IP из whitelist
+
+**Группа «GeoIP и fail2ban»:**
+- `/geo` — статус ingress GeoIP-блокировки: размер ipset `xray_ru_block`
+  (IPv4 CIDR count) + `xray_ru_block6` (IPv6 CIDR count) + наличие
+  iptables INPUT rule
+- `/geo_toggle` — переключить (ОТКЛЮЧЕНО из TG — требует chimera TUI для
+  безопасности, так как может вырубить весь трафик)
+- `/f2b` (алиас `/f2b_status`) — статус fail2ban-client + топ-5 jails с
+  currently banned / total banned
+
+**Группа «Каскад и ноды»:**
+- `/nodes` — список exit-нод каскада из state.json `chain_nodes` +
+  TCP-ping (`echo > /dev/tcp/host/port`) до каждой ноды
+- `/probe <ip/host> [port]` — TCP-ping до произвольного адреса (по
+  умолчанию порт 443) — для диагностики блокировок ТСПУ
+
+**Группа «Управление сервисами»:**
+- `/restart <service>` — перезапуск сервиса через `systemctl restart`.
+  Whitelist разрешённых сервисов (безопасные — никаких shutdown/reboot):
+  `xray`, `nginx`, `dnscrypt`, `agh`/`adguardhome`, `fail2ban`, `warp`
+- `/reload_nginx` — мягкий reload nginx без обрыва соединений
+  (`nginx -s reload`)
+- `/logs [service] [n]` — последние N строк лога (по умолчанию xray, 20
+  строк, cap 100). Доступные services: `xray`, `xray_acc`, `nginx`,
+  `nginx_acc`, `chimera`, `fail2ban`, `dnscrypt`, `system`. Сообщение
+  обрезается до 3800 символов (Telegram limit 4096)
+
+**Inline-клавиатура `/menu`:**
+```
+🎛️ Admin menu — выберите команду:
+
+[📊 Статус каскада]
+[👥 Пользователи] [🛡️ Бан-лист]
+[🔒 Сертификаты] [📋 Версия]
+[🌍 Geo-IP] [🛡️ fail2ban]
+[🔗 Ноды] [🚦 Трафик]
+[🔄 Restart menu]
+[❓ Помощь]
+```
+Каждая кнопка — `callback_data` с именем команды. Нажатие обрабатывается
+новым `handle_callback_query(cb)` который эмулирует вызов команды с
+fake_msg от имени пользователя, нажавшего кнопку.
+
+**Расширенный `/help`:**
+Сгруппирован по 7 категориям:
+1. Базовые команды
+2. Статус и мониторинг
+3. Пользователи
+4. Бан-лист и whitelist
+5. GeoIP и fail2ban
+6. Каскад и ноды
+7. Управление сервисами
+
+Каждая команда с описанием и примером. В конце — текущий primary-сервер
+(LOCAL_NAME) + напоминание про /status для каскада.
+
+**Обновлённый `/start` для админа:**
+```
+👋 VLESS Admin Bot
+
+Быстрый старт:
+/menu   — inline-клавиатура с кнопками
+/help   — расширенная справка по всем командам
+/status — статус каскада со всех серверов
+
+Самые популярные:
+/config        — ваша VLESS-ссылка
+/users         — список пользователей
+/ban <ip>      — забанить IP вручную
+/restart <svc> — перезапуск сервиса
+/logs [svc]    — последние строки лога
+/cert          — статус сертификатов
+
+Сервер: <local_name> (<local_ip>)
+```
+
+### Client-бот (`@ChimeraVPNClient_bot`, на всех 3 серверах)
+
+**Новые команды:**
+- `/protocols` — описание всех доступных протоколов (VLESS REALITY,
+  VLESS xHTTP, AWG, Hysteria2, Mieru, NaiveProxy, sing-box) с
+  рекомендациями по применению + список клиентов по платформам
+  (Android/iOS/Windows/macOS/Linux)
+- `/guide` — 5-шаговое руководство по подключению: получить конфиг →
+  выбрать протокол → установить клиент → импортировать → проверить
+  статус. Со ссылками на клиенты (NekoBox, NekoRay)
+- `/menu` — inline-клавиатура с 5 кнопками:
+  - 🔗 Получить конфиг (callback: menu:config)
+  - 📊 Трафик и TTL (callback: menu:status)
+  - 🔌 Протоколы (callback: menu:protocols)
+  - 📘 Руководство (callback: menu:guide)
+  - ❓ Помощь (callback: menu:help)
+
+**Расширенный `/help`:**
+```
+📖 Справка
+
+Доступные команды:
+/start [token] — привязка аккаунта (один раз)
+/config — список ссылок + кнопки для QR
+/qr <протокол> — QR-код конкретного протокола
+/status — трафик, TTL, лимит
+/protocols — описание протоколов + клиенты по платформам
+/guide — краткое руководство по подключению
+/menu — inline-клавиатура с кнопками
+/help — эта справка
+
+Протоколы: vless (REALITY), vless-xhttp, awg, hysteria2, mieru, naive, singbox
+
+Алиасы: /traffic = /status
+```
+
+**handle_callback расширен:**
+Теперь обрабатывает callback'и не только от inline-кнопок `/qr`
+(`qr:protocol`), но и от `/menu` (`menu:action`) — 5 действий:
+config/status/protocols/guide/help. Эмулирует вызов соответствующей
+handle_* функции с fake_msg.
+
+### Архитектура
+
+**Константы в `_generate_bot_script` (admin-бот):**
+- `ALLOWED_RESTART_SERVICES` — whitelist сервисов для /restart (dict
+  service_name → tuple cmd). Никаких shutdown/reboot — только безопасные
+  рестарты.
+- `LOG_PATHS` — маппинг service_name → path (8 логов: xray error/access,
+  nginx error/access, chimera, fail2ban, dnscrypt, syslog)
+- `_validate_ip(ip_str)` — валидация IPv4 regex `^\d{1,3}\.\d{1,3}\...`
+- `LOCAL_NAME`, `LOCAL_IP` — из bot_cfg, для отображения в /status и
+  /start (какой это primary-сервер)
+- `CASCADE_PEERS` — из bot_cfg, для SSH-агрегации в /status и /cert
+
+**Callback architecture:**
+- Inline keyboard buttons → callback_data (строка вида "/status" или
+  "menu:config")
+- `process_update` проверяет `update.get("callback_query")` если нет
+  message → вызывает `handle_callback_query(cb)`
+- `handle_callback_query` создаёт fake_msg с `from.id` = `cb.from.id`,
+  парсит callback_data как команду, диспетчеризует в handle_*
+
+**Безопасность:**
+- Все admin-команды начинаются с `if not is_admin(uid): return` —
+  недоступны для обычных пользователей
+- `/reset_user`, `/geo_toggle` — отключены из TG (требуют chimera TUI):
+  эти операции слишком опасны для удалённого выполнения
+- `/restart` — whitelist сервисов, никаких shutdown/reboot
+- `/ban <ip>` — валидация IPv4 regex, сохранение в /etc/ipset.conf
+- Client-бот READ-ONLY — никаких админ-команд
+
+### Деплой (на 3 серверах)
+
+- **Server 1** (45.151.182.204, primary):
+  * `chimera/modules/tg_bot.py` обновлён → `/usr/local/bin/xray-tg-bot.py`
+    регенерирован через `_install_bot_service(bot_cfg)`
+  * `chimera/modules/tg_client_bot.py` обновлён →
+    `/usr/local/bin/xray-tg-client-bot.py` регенерирован через
+    `install_client_bot_service(cfg)`
+  * `xray-tg-bot`: active (admin-бот с cascade_peers=2)
+  * `xray-tg-client`: active
+- **Server 2** (138.124.255.238):
+  * `tg_client_bot.py` обновлён → `/usr/local/bin/xray-tg-client-bot.py`
+  * `xray-tg-client`: active
+  * (admin-бот остановлен — cascade_peers режим, забирает только один
+    long-poller с одним токеном)
+- **Server 3** (91.224.87.154):
+  * `tg_client_bot.py` обновлён → `/usr/local/bin/xray-tg-client-bot.py`
+  * `xray-tg-client`: active
+  * (admin-бот остановлен — cascade_peers режим)
+
+### Связанные артефакты
+
+- `scripts/deploy_full_tg_upgrade.py` — SFTP-деплой tg_bot.py (server 1)
+  и tg_client_bot.py (все 3 сервера) с регенерацией inner-скриптов
+- `scripts/deploy_cascade_status.py` — настройка cascade_peers на server 1
+- `scripts/deploy_server_ip_notif.py` — добавление server_ip в
+  telegram.json + регенерация xray-tg-monitor.sh
+- `docs/faq/TG_BOTS_FAQ.md` — большой FAQ по всем 3 ботам с
+  инициализацией, командами и Q&A
+
+### Тестирование
+
+После деплоя отправлено тестовое сообщение в admin chat (с пометкой
+TEST — после прошлой "автобан-катастрофы" я научился предупреждать
+пользователя перед тестами). Бот перезапущен и активен на всех
+серверах.
+
+**Коммит:** 26a9a63.
+
+---
+
 ## FEAT(aghome): AGH_FALLBACK_DNS → зашифрованные DoH URLs вместо plaintext Quad9 — 24 сентября 2026
 
 **Кейс:** во время DNS-аудита на 3 боевых серверах (45.151.182.204,
