@@ -1781,7 +1781,7 @@ def do_manage_telegram() -> None:
             "traffic_limit":"Трафик пользователя превысил лимит",
             "health_report":"Ежедневный health-отчёт (08:00)",
             "node_down":    "Exit-нода недоступна",
-            "port_blocked": "Порт заблокирован ТСПУ",
+            "port_blocked": "Порт недоступен (ТСПУ/firewall/knocking)",
             "autoban":      "AutoBan — IP забанен автоматически",
         }
 
@@ -1844,7 +1844,7 @@ def do_manage_telegram() -> None:
             ev_labels = [
                 "Xray упал","Xray восстановился","Сертификат истекает",
                 "Лимит трафика","Daily health-отчёт","Exit-нода недоступна",
-                "Порт заблокирован ТСПУ","AutoBan — IP забанен",
+                "Порт недоступен (ТСПУ/firewall/knocking)","AutoBan — IP забанен",
             ]
             events = cfg.get("events", {k: True for k in ev_keys})
             print()

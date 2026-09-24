@@ -328,6 +328,18 @@ if "--h2-watchdog-run" in sys.argv:
     h2_watchdog_run()
     sys.exit(0)
 
+# --- nginx: watchdog (из systemd-timer каждые 2 мин или вручную) ---
+# Запускает _nginx_watchdog_run() — полную проверку с port-availability:
+# systemctl is-active nginx + check VLESS port (детект firewall/knocking
+# блоков) + check xray unix-socket (Reality) + restart при падении +
+# TG-уведомление (xray_up/xray_down/port_blocked).
+if "--nginx-watchdog-run" in sys.argv:
+    if os.geteuid() != 0:
+        sys.exit(1)
+    from chimera.modules.nginx_watchdog import _nginx_watchdog_run
+    _nginx_watchdog_run()
+    sys.exit(0)
+
 # --- Hysteria2: автообновление (из cron ежесуточно) ---
 if "--h2-autoupdate" in sys.argv:
     if os.geteuid() != 0:
