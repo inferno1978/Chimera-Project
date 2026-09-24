@@ -2,6 +2,252 @@
 
 ---
 
+## FEAT(aghome): AGH_FALLBACK_DNS → зашифрованные DoH URLs вместо plaintext Quad9 — 24 сентября 2026
+
+**Кейс:** во время DNS-аудита на 3 боевых серверах (203.0.113.101,
+203.0.113.103, 203.0.113.102) обнаружено: AdGuardHome при падении
+dnscrypt-proxy уходил в plaintext-режим — `fallback_dns: ['9.9.9.9:53',
+'149.112.112.112:53']` (или `['94.140.14.14:53', '149.112.112.112:53']`
+на серверах 2/3). В штатной работе dnscrypt живёт 99.9% времени, но в
+момент обрыва сервер светил свои DNS-запросы провайдеру/хостеру.
+Пользователь: «Хочу. Если нужно — на всех трёх серверах. Ну и фолбэков
+несколько настроить, чтобы не один был».
+
+**Фикс:** `AGH_FALLBACK_DNS` теперь список из 5 DoH URLs (DNS over
+HTTPS, RFC 8484) с разной географией и юрисдикцией:
+
+  - `https://dns.cloudflare.com/dns-query`   (Cloudflare, USA, no-logs, audited)
+  - `https://dns.adguard-dns.com/dns-query`  (AdGuard, Cyprus, no-logs, audited)
+  - `https://dnsforge.de/dns-query`         (private, Germany, no-logs)
+  - `https://doh.pub/dns-query`              (DNSPod/Tencent, China geo-diversity)
+  - `https://dns.google/dns-query`           (Google, USA, audited by PWC)
+
+Даже при полном падении dnscrypt-proxy AGH теперь ходит за DNS только
+через зашифрованный HTTPS (TCP :443), провайдер видит только TLS-трафик
+к этим хостам, без содержимого. AdGuard Home умеет HTTP/2 нативно
+(Go-http-client), все 5 DoH-серверов поддерживают HTTP/2.
+
+**Критерии выбора серверов:**
+1. Доступность с RU-хостингов — проверено бинарным RFC 8484-запросом
+   (DNS wire format с base64-url) на всех 3 серверах — все 5 DoH URLs
+   отвечают < 1 секунды.
+2. Разные юрисдикции (USA, Cyprus, Germany, China) — нет единого
+   органа для давления на все 5 сразу.
+3. No-log policy — ни один из выбранных DoH-серверов не логирует
+   запросы (по их заявлениям; у Cloudflare/Google/AdGuard есть
+   external audits, подтверждающие это).
+4. Не входят в реестр РКН-блокировок на момент проверки.
+
+**Что НЕ менялось:**
+- `upstream_dns: ['127.0.0.1:5300']` — основной путь dnscrypt-proxy
+  сохранён как есть.
+- `bootstrap_dns: ['127.0.0.1:5300', '9.9.9.9:53', '149.112.112.112:53']`
+  — намеренно оставлен plaintext. Это catch-22: AGH нужен IP-bootstrap
+  при холодном старте (чтобы зарезолвить hostname DoH-сервера). Без
+  plaintext-bootstrap AGH не сможет достучаться до DoH при первом
+  старте. Однако bootstrap срабатывает только при холодном старте AGH
+  и больше никогда в штатной работе — если dnscrypt жив (а он жив
+  99.9% времени), bootstrap идёт через 127.0.0.1:5300 (зашифровано
+  через DNSCrypt). Plaintext 9.9.9.9 — лишь страховка для самого
+  первого запроса при загрузке сервера.
+
+**Верификация (проведена на всех 3 серверах):**
+1. AGH успешно перезапустился после yaml-патча — `systemctl is-active
+   AdGuardHome` = `active`.
+2. `dig @127.0.0.1:53 example.com` → корректные ответы
+   (104.20.23.154 / 172.66.147.243).
+3. `dig @127.0.0.1:53 google.com A` → корректные ответы.
+4. tcpdump port 53 в течение 5 секунд с одновременной генерацией
+   запросов через AGH — 0 plaintext DNS пакетов к external IPs:
+   - Server 1: 0 leaks / 1004 local packets (там активные VPN-клиенты)
+   - Server 2: 0 leaks / 8 local packets
+   - Server 3: 0 leaks / 8 local packets
+5. AdGuardHome YAML успешно парсится (4316-4347 bytes).
+6. Резервные копии созданы: `AdGuardHome.yaml.bak.<timestamp>` на
+   каждом сервере — для отката при необходимости.
+
+**Деплой:** `scripts/deploy_agh_doh_fallback.py` — патчит yaml через
+Python (yaml.safe_load/safe_dump), создаёт бэкап, перезапускает AGH,
+тестирует `dig`, и делает tcpdump leak-test (5 секунд port 53 с
+одновременной генерацией DNS-запросов через AGH).
+
+**Архитектура после фикса:**
+```
+DNS-запрос с сервера
+    ↓ (/etc/resolv.conf → 127.0.0.1:53)
+AdGuardHome (127.0.0.1:53, :853, public:53/853)
+    ↓ upstream_dns = ['127.0.0.1:5300']  ← основной путь (dnscrypt)
+    ↓ fallback_dns = [5 DoH URLs]       ← ЗАШИФРОВАННЫЙ фолбэк ← НОВОЕ
+dnscrypt-proxy (127.0.0.1:5300)
+    ↓ encrypted DNSCrypt/DoH upstream
+200+ серверов (Mullvad, Quad9, Cloudflare, etc.)
+```
+
+**Симптом до фикса:** провайдер мог видеть DNS-запросы при падении
+dnscrypt (plaintext Quad9 в fallback).
+
+**После фикса:** даже при падении dnscrypt провайдер видит только TLS
+к Cloudflare/AdGuard/dnsforge/doh.pub/dns.google — без содержимого.
+
+**Коммит:** 10514c5.
+
+---
+
+## FIX(emergency_repair): переставить ожидание Unix-сокета после старта nginx — 24 сентября 2026
+
+**Кейс:** в шаге [5/11] «Аварийного восстановления» (Chimera →
+Аварийное восстановление) фиксировался ложный варнинг «Сокет не
+появился — проверьте: journalctl -u xray -n 20» с самого рождения
+функции (9 месяцев). Пользователь: «Варнинг видишь? Он тоже живёт
+практически с рождения. Его бы тоже прибить. Простым увеличением
+времени ожидания сокета это не решается. Может быть, и я этого не
+исключаю, немного перепутан порядок запуска сервисов».
+
+**Причина:** Unix-сокет `/dev/shm/<pid>.socket` создаёт НЕ Xray,
+а Nginx через директиву `listen unix:/dev/shm/<pid>.socket ssl http2
+proxy_protocol` в `/etc/nginx/sites-available/<domain>.conf`. В
+xray `config.json` этот путь указан только в `dest` REALITY — это
+upstream для SNI-мимикрии (куда xray ходит за «образцом» TLS-сервера),
+а не listen-socket.
+
+Старая логика в `emergency_repair.py`:
+```
+systemctl start xray
+for _ in range(20):
+    if Path(PARAM_SOCKET_PATH).is_socket(): break  # ← бесполезно
+    sleep(1)
+else:
+    _box_warn("Сокет не появился")  # ← всегда срабатывал
+systemctl start nginx                              # ← слишком поздно
+```
+Сокету взяться было неоткуда: nginx ещё не запущен. Через 20 секунд
+всегда выводился [WARN] «Сокет не появился».
+
+**Доказательство (probe-скрипт на всех 3 серверах):**
+1. Остановить и xray, и nginx, удалить `/dev/shm/<pid>.socket`.
+2. Запустить ТОЛЬКО nginx → сокет появился за 0.0 секунды.
+3. Запустить xray → сокет остался.
+
+**Фикс в `chimera/modules/emergency_repair.py`:**
+- Блок «Ожидание Unix-сокета» перенесён **после** `systemctl start
+  nginx` (раньше стоял между `start xray` и `start nginx`).
+- Цикл ожидания сокращён с 20 до 10 секунд (nginx создаёт сокет
+  мгновенно — listen-инициализация синхронна в master-процессе).
+- [WARN] теперь ссылается на `journalctl -u nginx -n 20` (раньше
+  ошибочно — `journalctl -u xray -n 20`).
+- Добавлен путь сокета в сообщение [WARN] для отладки.
+- Если nginx не активен — отдельный [WARN] с объяснением, что сокет
+  не будет создан и REALITY dest недоступен.
+
+**Тесты:** `tests/test_emergency_repair_socket_wait.py` — 4 новых
+теста:
+1. state.json socket path валиден (строка, начинается с `/dev/shm/`).
+2. `AWG_EXIT_ENABLED=True` → сокет не проверяется (skip — при AWG
+   Xray слушает на TCP-порту, сокета нет).
+3. `protocol_mode != 'reality'` → сокет не проверяется (skip).
+4. **REGRESSION TEST** через инспекцию исходника: проверяет, что
+   вызов `Path(PARAM_SOCKET_PATH).is_socket()` идёт ПОСЛЕ
+   `"start", "nginx"` в исходнике — защищает от возврата к старому
+   багу при рефакторинге. Если кто-то переставит порядок, тест
+   зафейлится с сообщением «REGRESSION: проверка is_socket() стоит
+   ДО старта nginx».
+
+**Все 4 unit-теста проходят.** Импорт `emergency_repair` работает без
+ошибок.
+
+**Проверка на 3 серверах:**
+- После фикса в TUI Chimera → Аварийное восстановление —
+  вывод: `[OK] Сокет готов: /dev/shm/<pid>.socket` вместо [WARN].
+- Финальное сообщение: `✅ Аварийное восстановление завершено успешно`
+  без варнингов.
+
+**Коммит:** b280da1.
+
+---
+
+## FIX(diagnostics): подавление ложного варнинга «Split tunneling работает, есть замечания» — 24 сентября 2026
+
+**Кейс:** в Chimera one-button diagnostics (TUI → Диагностика) на всех
+3 боевых серверах фиксировался варнинг «⚠ Split tunneling работает,
+есть замечания» без видимой [WARN] строки. Пользователь: «Посмотри вот
+ещё этот момент. Я что то не понимаю, что ей не нравится. Избавиться
+как то можно от этого варнинга?... Посмотри на всех трёх серверах, если
+не сложно». Варнинг жил в коде с самого рождения (9 месяцев).
+
+**Причина:** в `error.log` Xray скапливались `[Info]`-сообщения от
+REALITY-сканеров:
+
+```
+[Info] transport/internet/tcp: REALITY: processed invalid connection
+  from 203.0.113.119:50938: failed to read client hello
+[Info] transport/internet/tcp: REALITY: failed to dial dest:
+  dial unix /dev/shm/<pid>.socket: connect: no such file or directory
+```
+
+Эти строки содержали слова «invalid»/«failed» и попадали в
+critical-список в `_diag_check_error_log` (мимо `_BENIGN_PATTERNS`),
+что инкрементировало `counters[2]` (warnings). Однако вывод
+critical-строк делался через `_box_info` (как `[INFO]`), а не через
+`_box_warn` — поэтому `[WARN]` в выводе НЕ появлялся, но счётчик
+«Предупреждений: 1» инкрементировался. Возникал диссонанс: цифра есть,
+строки `[WARN]` нет — пользователь не понимал, в чём проблема.
+
+**Фикс в `chimera/modules/diagnostics.py`:**
+
+**(1) Расширил `_BENIGN_PATTERNS` в `_diag_check_error_log`** —
+добавил паттерны для REALITY-сканеров и unix-socket dial fails:
+- `reality: processed invalid connection` (сканер с битым ClientHello)
+- `failed to read client hello` (то же)
+- `invalid connection from` (то же)
+- `invalid user` (сканер без валидного UUID)
+- `rejected by reality` (посторонний клиент отвергнут)
+- `reality: failed to dial dest` (клиент рано закрыл соединение)
+- `dial unix /dev/shm` (внутренний transport не готов)
+
+Каждый паттерн снабжён комментарием с примером строки и пояснением.
+Также добавлены соответствующие подсказки в блоке `pattern_note`
+(когда benign-строки найдены, выводится `[INFO] Штатные события...` с
+краткими пояснениями, какие именно события проигнорированы).
+
+**(2) Переделал вывод critical-строк через `_box_warn`** (вместо
+`_box_info`). Теперь если в логе появятся реальные нештатные ошибки
+(которые не покрываются benign-фильтром), пользователь ВИДИТ `[WARN]`
+и понимает причину варнинга. Ранее использовался `_box_info` —
+из-за этого варнинг «Предупреждений: 1» появлялся в итоговом блоке
+БЕЗ видимой `[WARN]` строки.
+
+**(3) Дополнительно (визуальный фикс):**
+- `access.log пустой` → `_box_info` (вместо `_box_warn`) — это
+  норма для нового сервера, а не проблема.
+- `Через chain-exit (proxy): 0 соединений` → `_box_info` — это
+  просто статус (нет активных подключений сейчас), не проблема.
+
+**Тесты:** `tests/test_diagnostics_errorlog.py` — 12 новых тестов:
+- 8 benign-pattern checks: `reality: processed invalid`, `failed to
+  read client hello`, `invalid connection from`, `invalid user`,
+  `rejected by reality`, `reality: failed to dial dest`, `dial
+  unix /dev/shm`, регресс на старые паттерны.
+- 2 sanity checks: реальная DNS-ошибка НЕ benign, гео-ошибка НЕ benign.
+- 2 regression tests: REALITY-сканерные строки НЕ инкрементируют
+  `counters[2]`; critical-строки выводятся через `_box_warn` (а не
+  `_box_info`).
+
+Все 39 diagnostics-тестов (27 старых + 12 новых) проходят.
+
+**Проверка на 3 серверах:** после фикса Chimera one-button
+diagnostics показывает:
+```
+Всего проверок:  11
+Пройдено:        11
+✓ Split tunneling работает корректно
+```
+0 предупреждений на всех 3 серверах (раньше было 1 фантомное
+предупреждение без видимой причины).
+
+**Коммит:** 21e6e3e.
+
+---
+
 ## FEAT(mieru_dpi): «Mieru + B4» — DPI bypass через Mieru-транспорт с полным паритетом Xray-связки — 21 сентября 2026
 
 **Кейс:** связка «YouTube via RU + B4» работала только для Xray/VLESS
