@@ -163,6 +163,14 @@ def tg_notify_event(event: str, detail: str = "") -> None:
     """
     Отправляет уведомление если соответствующее событие включено.
     Совместим с _tg_notify_event() из _core.py.
+
+    Формат сообщения:
+      {icon} [<hostname> | <server_ip>] {detail}
+      <ts>
+
+    IP берётся из telegram.json → 'server_ip' (если задан).
+    Если server_ip пустой — показывается только hostname (обратная
+    совместимость со старыми конфигами).
     """
     cfg = tg_load()
     if not cfg.get("token") or not cfg.get("chat_id"):
@@ -175,6 +183,14 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         hostname = _run(["hostname", "-s"], capture=True).stdout.strip()
     except Exception:
         pass
+    # IP-адрес сервера — берётся из telegram.json (поле server_ip,
+    # задаётся администратором при настройке). Если пусто — не показываем.
+    server_ip = cfg.get("server_ip", "")
+    # Заголовок сервера: [hostname] или [hostname | ip] если есть IP
+    if server_ip:
+        header = f"[{hostname} | {server_ip}]"
+    else:
+        header = f"[{hostname}]"
     ts = datetime.now().strftime("%d.%m.%Y %H:%M")
     icons = {
         "xray_down":     "🔴",
@@ -189,7 +205,7 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "port_hopping":  "⚡",
     }
     icon = icons.get(event, "ℹ️")
-    text = f"{icon} <b>[{hostname}]</b> {detail}\n<i>{ts}</i>"
+    text = f"{icon} <b>{header}</b> {detail}\n<i>{ts}</i>"
     tg_send(text)
     _log("INFO", f"TG notify: {event} — {detail}")
 
@@ -203,25 +219,34 @@ def _install_monitor_cron() -> None:
         _warn("Сначала настройте токен и Chat ID")
         return
 
+    # IP-адрес сервера из telegram.json (если задан — будет добавлен в
+    # каждое уведомление, для однозначной идентификации источника).
+    server_ip = cfg.get("server_ip", "")
+
     # Экранируем через shlex.quote для безопасной вставки в bash-скрипт
     import shlex
     script = Path("/usr/local/bin/xray-tg-monitor.sh")
+    # В bash используем переменную IP (может быть пустой — тогда
+    # формат вывода = "[$HOST]", иначе = "[$HOST | $IP]").
     script.write_text(
         "#!/bin/bash\n"
         f"TOKEN={shlex.quote(token)}\n"
         f"CHAT={shlex.quote(chat_id)}\n"
+        f"IP={shlex.quote(server_ip)}\n"
         "send() { curl -s -o /dev/null -m 10 "
         "\"https://api.telegram.org/bot$TOKEN/sendMessage\" "
         "-d \"chat_id=$CHAT\" -d \"text=$1\" -d \"parse_mode=HTML\" || true; }\n"
         "HOST=$(hostname -s)\n"
+        # HEADER: "[host]" или "[host | ip]" если IP задан
+        "if [ -n \"$IP\" ]; then HEADER=\"[$HOST | $IP]\"; else HEADER=\"[$HOST]\"; fi\n"
         "TS=$(date '+%d.%m.%Y %H:%M')\n"
         "if ! systemctl is-active --quiet xray 2>/dev/null; then\n"
         "  STAMP=/tmp/xray-tg-down.stamp\n"
         "  if [ ! -f \"$STAMP\" ]; then touch \"$STAMP\";\n"
-        "    send \"🔴 <b>[$HOST]</b> Xray не запущен!\\n<i>$TS</i>\"; fi\n"
+        "    send \"🔴 <b>$HEADER</b> Xray не запущен!\\n<i>$TS</i>\"; fi\n"
         "else\n"
         "  if [ -f /tmp/xray-tg-down.stamp ]; then rm -f /tmp/xray-tg-down.stamp;\n"
-        "    send \"🟢 <b>[$HOST]</b> Xray восстановился.\\n<i>$TS</i>\"; fi\n"
+        "    send \"🟢 <b>$HEADER</b> Xray восстановился.\\n<i>$TS</i>\"; fi\n"
         "fi\n"
         "# Проверка срока сертификата (< 30 дней)\n"
         "CERT=$(find /etc/letsencrypt/live -name 'cert.pem' 2>/dev/null | head -1)\n"
@@ -230,7 +255,7 @@ def _install_monitor_cron() -> None:
         "  if [ -n \"$EXP\" ]; then\n"
         "    DAYS=$(( ( $(date -d \"$EXP\" +%s) - $(date +%s) ) / 86400 ))\n"
         "    if [ \"$DAYS\" -lt 30 ]; then\n"
-        "      send \"🔒 <b>[$HOST]</b> Сертификат истекает через $DAYS дн.\\n<i>$TS</i>\"; fi\n"
+        "      send \"🔒 <b>$HEADER</b> Сертификат истекает через $DAYS дн.\\n<i>$TS</i>\"; fi\n"
         "  fi\n"
         "fi\n"
     )
