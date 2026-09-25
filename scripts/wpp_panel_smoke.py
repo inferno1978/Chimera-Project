@@ -470,6 +470,101 @@ def main() -> int:
         except Exception as exc:
             check("POST /autoupdate/toggle", False, str(exc))
 
+    # ── Phase 3 tests (new session) ──
+    session_cookie = None
+    try:
+        status, headers, _ = _http_post("127.0.0.1", port, "/login",
+                                        {"user": "admin", "password": "testpass"})
+        if status == 303:
+            cookie = _extract_cookie(headers.get("Set-Cookie", ""))
+            if cookie:
+                session_cookie = {cookie[0]: cookie[1]}
+    except Exception:
+        pass
+
+    if session_cookie:
+        # ── 26. GET /components (page) ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/components",
+                                        cookies=session_cookie)
+            check("GET /components → 200", status == 200, f"got {status}")
+            check("GET /components contains 'Компоненты'",
+                  "Компоненты" in body, "missing header")
+        except Exception as exc:
+            check("GET /components", False, str(exc))
+
+        # ── 27. GET /api/components (JSON list) ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/api/components",
+                                        cookies=session_cookie)
+            check("GET /api/components → 200", status == 200, f"got {status}")
+            data = json.loads(body)
+            check("GET /api/components has 'components' list",
+                  isinstance(data.get("components"), list),
+                  f"data={data!r}")
+            n = len(data.get("components", []))
+            check(f"GET /api/components has >=3 components (got {n})", n >= 3)
+            # Проверяем что VLESS и Hysteria2 в списке
+            ids = [c.get("id") for c in data.get("components", [])]
+            check("GET /api/components has 'vless' id", "vless" in ids, f"ids={ids}")
+            check("GET /api/components has 'hysteria' id", "hysteria" in ids, f"ids={ids}")
+        except Exception as exc:
+            check("GET /api/components", False, str(exc))
+
+        # ── 28. GET /api/openflux/profiles (multi-profile list) ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/api/openflux/profiles",
+                                        cookies=session_cookie)
+            check("GET /api/openflux/profiles → 200", status == 200, f"got {status}")
+            data = json.loads(body)
+            check("GET /api/openflux/profiles has 'profiles' list",
+                  isinstance(data.get("profiles"), list),
+                  f"data={data!r}")
+        except Exception as exc:
+            check("GET /api/openflux/profiles", False, str(exc))
+
+        # ── 29. POST /openflux/profiles/create (create profile) ──
+        # NB: smoke test не root — create_profile вернёт False с msg
+        # "Требуется root". Проверяем что endpoint отвечает (не 500).
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/openflux",
+                                        cookies=session_cookie)
+            m = _re_mod.search(r'name="csrf" value="([0-9a-f]+)"', body)
+            csrf_token = m.group(1) if m else ""
+            if csrf_token:
+                status, _, _ = _http_post(
+                    "127.0.0.1", port, "/openflux/profiles/create",
+                    {"csrf": csrf_token, "name": "smoke-test",
+                     "transport": "yandex",
+                     "doc_url": "https://editor.yandex.ru/doc/test?sk=secret"},
+                    cookies=session_cookie,
+                )
+                # 400 = validation error (non-root or invalid) — endpoint exists
+                # 503 = "Требуется root" — endpoint exists
+                # 303 = success (если под root)
+                check("POST /openflux/profiles/create → 303/400/503",
+                      status in (303, 400, 503), f"got {status}")
+        except Exception as exc:
+            check("POST /openflux/profiles/create", False, str(exc))
+
+        # ── 30. POST /components/install (request install) ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/components",
+                                        cookies=session_cookie)
+            m = _re_mod.search(r'name="csrf" value="([0-9a-f]+)"', body)
+            csrf_token = m.group(1) if m else ""
+            if csrf_token:
+                status, _, _ = _http_post(
+                    "127.0.0.1", port, "/components/install",
+                    {"csrf": csrf_token, "protocol": "vless"},
+                    cookies=session_cookie,
+                )
+                # 303 = success (pending install recorded)
+                check("POST /components/install → 303",
+                      status == 303, f"got {status}")
+        except Exception as exc:
+            check("POST /components/install", False, str(exc))
+
     # Cleanup
     tmp_state.unlink(missing_ok=True)
     # Cleanup tmp stub dir
