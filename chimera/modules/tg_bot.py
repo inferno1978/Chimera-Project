@@ -201,7 +201,7 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "health_report": "📋",
         "node_down":     "📡",
         "port_blocked":  "🚫",
-        "autoban":       "🛡️",
+        "autoban":       "🚫",  # FIX-2 (2026-09-25): было 🛡️ — пользователь просил «перечёркнутый красный кружок»
         "port_hopping":  "⚡",
     }
     icon = icons.get(event, "ℹ️")
