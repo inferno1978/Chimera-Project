@@ -2766,6 +2766,7 @@ def do_manage_web_panel() -> None:
         _box_item("6", f"{RED}🗑️  Удалить полностью{NC}")
         _box_item("7", f"🌐 nginx front (TLS) — {'выключен' if not _nginx_front_enabled else 'настройки'}")
         _box_item("8", f"🧩 Triple Panel (Naive+Mieru+H2)  {DIM}(порт RIXXX-панели: установка/обновления/доступ){NC}")
+        _box_item("9", f"🌐 WPP Web Panel  {DIM}(порт POLESNIESOVETI12/web-panel-proxy: VLESS/H2/AWG/MTProto/OpenFlux){NC}")
         _box_item("Q", "Назад")
         _box_bottom()
 
@@ -2907,6 +2908,18 @@ def do_manage_web_panel() -> None:
                 do_triple_panel_menu()
             except Exception as e:
                 warn(f"Не удалось открыть меню Triple Panel: {e}")
+                _input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "9":
+            #  WPP Web Panel — порт POLESNIESOVETI12/web-panel-proxy
+            #  (VLESS/Hysteria2/AWG/MTProto/OpenFlux). Свой сервис/порт/версии.
+            #  По образцу Triple Panel: полностью автономный модуль с lazy
+            #  доступом к chimera._core, не требует изменений в _core.py.
+            try:
+                from chimera.modules.wpp_panel import do_wpp_panel_menu
+                do_wpp_panel_menu()
+            except Exception as e:
+                warn(f"Не удалось открыть меню WPP Web Panel: {e}")
                 _input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch in ("q", ""):
