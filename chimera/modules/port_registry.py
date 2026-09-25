@@ -177,6 +177,12 @@ SERVICE_AGHOME_DOQ     = "aghome_doq"      # AdGuard Home DoQ (:853/udp)
 # деактивации/удалении.
 SERVICE_OPENFLUX        = "openflux"          # exit-нода (исходящий WSS)
 SERVICE_OPENFLUX_BRIDGE = "openflux_bridge"   # bridge SOCKS5 (loopback default)
+# WPP Web Panel (порт POLESNIESOVETI12/web-panel-proxy) — админ-панель
+# управления VPN-подключениями (VLESS/Hysteria2/AWG/OpenFlux/MTProto).
+# Бэкенд слушает на 127.0.0.1 (SSH-tunnel default) или публично через
+# Nginx Front с LE/self-signed TLS (по образцу B4 и Triple Panel).
+SERVICE_WPP_WEB         = "wpp_web"           # WPP backend (loopback, по умолч. 9701)
+SERVICE_WPP_NGINX       = "chimera-wpp-nginx" # nginx front для WPP (TLS)
 
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────
