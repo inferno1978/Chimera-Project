@@ -693,6 +693,151 @@ def _stub_delete_preset(pid: str) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
 
+# ─── COMPONENT INSTALLER (VLESS/H2/AWG/MTProto) ─────────────────────────────
+# Список протоколов + их статус (installed/active). Pattern: components.catalog()
+# из WPP wpp_components.py, но делегирует в chimera modules для реальной установки.
+
+def _list_components() -> dict:
+    """
+    Возвращает список установленных/доступных компонентов:
+        {
+            "components": [
+                {
+                    "id": "vless", "name": "VLESS REALITY",
+                    "installed": True,
+                    "active": True,
+                    "version": "1.8.x",
+                    "install_url": "https://..."
+                },
+                ...
+            ]
+        }
+    """
+    out = []
+
+    # ── VLESS (xray.service) ──
+    vless_active = _is_service_active("xray")
+    vless_version = _get_service_version("xray")
+    out.append({
+        "id":          "vless",
+        "name":        "VLESS REALITY (Xray)",
+        "installed":   vless_active or vless_version != "",
+        "active":      vless_active,
+        "version":     vless_version,
+        "service":     "xray",
+        "install_url": "https://github.com/XTLS/Xray-core",
+    })
+
+    # ── Hysteria2 (hysteria-server.service) ──
+    h2_active = _is_service_active("hysteria-server")
+    h2_version = _get_binary_version("/usr/local/bin/hysteria")
+    out.append({
+        "id":          "hysteria",
+        "name":        "Hysteria2",
+        "installed":   h2_active or h2_version != "",
+        "active":      h2_active,
+        "version":     h2_version,
+        "service":     "hysteria-server",
+        "install_url": "https://github.com/apernet/hysteria",
+    })
+
+    # ── AmneziaWG 2.0/3.1 (awg-quick@wg0.service или awg.service) ──
+    awg_active = _is_service_active("awg-quick@wg0") or _is_service_active("awg")
+    awg_version = _get_binary_version("/usr/local/bin/awg")
+    out.append({
+        "id":          "awg",
+        "name":        "AmneziaWG 2.0/3.1",
+        "installed":   awg_active or awg_version != "",
+        "active":      awg_active,
+        "version":     awg_version,
+        "service":     "awg-quick@wg0",
+        "install_url": "https://github.com/amnezia-vpn/amneziawg-tools",
+    })
+
+    # ── MTProto ──
+    mt_active = _is_service_active("mtproto") or _is_service_active("mtg")
+    out.append({
+        "id":          "mtproto",
+        "name":        "MTProto",
+        "installed":   mt_active,
+        "active":      mt_active,
+        "version":     "",
+        "service":     "mtproto",
+        "install_url": "https://github.com/9seconds/mtg",
+    })
+
+    # ── OpenFlux ──
+    of_state = _chimera_openflux_state()
+    out.append({
+        "id":          "openflux",
+        "name":        "OpenFlux",
+        "installed":   of_state.get("installed", False),
+        "active":      of_state.get("enabled", False),
+        "version":     "",
+        "service":     "openflux",
+        "install_url": "https://github.com/p1neappleXpress/OpenFlux",
+    })
+
+    return {"components": out, "pending_installs": load_state().get("pending_installs", {})}
+
+
+def _is_service_active(service: str) -> bool:
+    """systemctl is-active --quiet <service>."""
+    try:
+        r = subprocess.run(["systemctl", "is-active", "--quiet", service],
+                           capture_output=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _get_binary_version(bin_path: str) -> str:
+    """Возвращает версию бинарника через '<bin> version' или '--version'."""
+    try:
+        if not Path(bin_path).exists():
+            return ""
+        r = subprocess.run([bin_path, "version"], capture_output=True,
+                           text=True, timeout=5, check=False)
+        if r.returncode != 0:
+            r = subprocess.run([bin_path, "--version"], capture_output=True,
+                               text=True, timeout=5, check=False)
+        out = (r.stdout or r.stderr or "").strip()
+        # Берём первую строку (обычно "v1.8.4" или "hysteria version 2.0.x")
+        if out:
+            return out.splitlines()[0][:80]
+    except Exception:
+        pass
+    return ""
+
+
+def _get_service_version(service: str) -> str:
+    """Для xray — пробует /usr/local/bin/xray version. Иначе systemctl status --no-pager."""
+    bin_paths = {
+        "xray":            "/usr/local/bin/xray",
+        "hysteria-server": "/usr/local/bin/hysteria",
+        "awg-quick@wg0":   "/usr/local/bin/awg",
+    }
+    if service in bin_paths:
+        v = _get_binary_version(bin_paths[service])
+        if v:
+            return v
+    return ""
+
+
+def _now_iso() -> str:
+    """Возвращает текущее время в ISO 8601 UTC."""
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _log_openflux_error(msg: str) -> None:
+    """Пишет ошибку OpenFlux в stderr (для journalctl)."""
+    print(f"[WPP-WEB] openflux_profiles error: {msg}", file=sys.stderr, flush=True)
+
+
+
+
+
 
 
 class _WppHandler(BaseHTTPRequestHandler):
@@ -896,6 +1041,9 @@ class _WppHandler(BaseHTTPRequestHandler):
             if path == prefix + "/landing":
                 self.send_html(self._landing_page())
                 return
+            if path == prefix + "/components":
+                self.send_html(self._components_page())
+                return
 
             # ── API endpoints (JSON) ──
             if path == prefix + "/api/stub":
@@ -911,6 +1059,14 @@ class _WppHandler(BaseHTTPRequestHandler):
             if path == prefix + "/api/openflux":
                 self.send_json(_chimera_openflux_state())
                 return
+            if path == prefix + "/api/openflux/profiles":
+                # Multi-profile list (без секретов)
+                try:
+                    from chimera.modules.openflux_profiles import profile_states
+                    self.send_json({"profiles": profile_states()})
+                except Exception as exc:
+                    self.send_json({"error": str(exc), "profiles": []}, status=500)
+                return
             if path == prefix + "/api/subscription":
                 self.send_json(_chimera_subscription_info())
                 return
@@ -920,6 +1076,10 @@ class _WppHandler(BaseHTTPRequestHandler):
                     "front_version": state.get("front_version", ""),
                     "upstream_cache": state.get("upstream_cache", {}),
                 })
+                return
+            if path == prefix + "/api/components":
+                # Component installer — list installed/available protocols
+                self.send_json(_list_components())
                 return
 
             # ── QR codes: /qr/user/<uid>/<protocol> ──
@@ -1102,7 +1262,7 @@ class _WppHandler(BaseHTTPRequestHandler):
                     self.send_html(f"Ошибка: {_esc(msg)}", status=400)
                 return
 
-            # ── OpenFlux: enable/disable/rotate ──
+            # ── OpenFlux: enable/disable/rotate (legacy single-profile) ──
             if path == prefix + "/openflux/enable":
                 ok, msg = _openflux_set_enabled(True)
                 if ok:
@@ -1123,6 +1283,95 @@ class _WppHandler(BaseHTTPRequestHandler):
                     self.redirect("/openflux")
                 else:
                     self.send_html(f"Ошибка: {_esc(msg)}", status=503)
+                return
+
+            # ── Multi-profile OpenFlux: create / enable / disable / rotate / delete ──
+            if path == prefix + "/openflux/profiles/create":
+                try:
+                    from chimera.modules.openflux_profiles import create_profile
+                    name = form.get("name", "").strip()
+                    transport = form.get("transport", "yandex").strip()
+                    doc_url = form.get("doc_url", "").strip()
+                    ok, msg = create_profile(name, transport, doc_url)
+                    if ok:
+                        self.redirect("/openflux")
+                    else:
+                        self.send_html(f"Ошибка: {_esc(msg)}", status=400)
+                except Exception as exc:
+                    self.send_html(f"Ошибка: {_esc(str(exc))}", status=500)
+                return
+
+            if path == prefix + "/openflux/profiles/enable":
+                try:
+                    from chimera.modules.openflux_profiles import set_enabled
+                    ok, msg = set_enabled(form.get("name", "").strip(), True)
+                    if ok:
+                        self.redirect("/openflux")
+                    else:
+                        self.send_html(f"Ошибка: {_esc(msg)}", status=503)
+                except Exception as exc:
+                    self.send_html(f"Ошибка: {_esc(str(exc))}", status=500)
+                return
+
+            if path == prefix + "/openflux/profiles/disable":
+                try:
+                    from chimera.modules.openflux_profiles import set_enabled
+                    ok, msg = set_enabled(form.get("name", "").strip(), False)
+                    if ok:
+                        self.redirect("/openflux")
+                    else:
+                        self.send_html(f"Ошибка: {_esc(msg)}", status=503)
+                except Exception as exc:
+                    self.send_html(f"Ошибка: {_esc(str(exc))}", status=500)
+                return
+
+            if path == prefix + "/openflux/profiles/rotate":
+                try:
+                    from chimera.modules.openflux_profiles import rotate_key
+                    ok, msg = rotate_key(form.get("name", "").strip())
+                    if ok:
+                        self.redirect("/openflux")
+                    else:
+                        self.send_html(f"Ошибка: {_esc(msg)}", status=503)
+                except Exception as exc:
+                    self.send_html(f"Ошибка: {_esc(str(exc))}", status=500)
+                return
+
+            if path == prefix + "/openflux/profiles/delete":
+                try:
+                    from chimera.modules.openflux_profiles import delete_profile
+                    # Confirm deletion
+                    if form.get("confirm") != "1":
+                        self.send_html("Требуется confirm=1 для удаления", status=400)
+                        return
+                    ok, msg = delete_profile(form.get("name", "").strip())
+                    if ok:
+                        self.redirect("/openflux")
+                    else:
+                        self.send_html(f"Ошибка: {_esc(msg)}", status=503)
+                except Exception as exc:
+                    self.send_html(f"Ошибка: {_esc(str(exc))}", status=500)
+                return
+
+            # ── Component installer: install VLESS/H2/AWG ──
+            if path == prefix + "/components/install":
+                try:
+                    protocol = form.get("protocol", "").strip().lower()
+                    if protocol not in ("vless", "hysteria", "awg", "mtproto"):
+                        self.send_html("Неизвестный протокол", status=400)
+                        return
+                    # Делегируем в chimera CLI (non-interactive вызов —
+                    #NB: install обычно интерактивный, поэтому просто
+                    # записываем "intent" в state и показываем instructions).
+                    state = load_state()
+                    state.setdefault("pending_installs", {})[protocol] = {
+                        "requested_at": _now_iso(),
+                        "requested_by": "wpp_panel",
+                    }
+                    save_state(state)
+                    self.redirect("/components")
+                except Exception as exc:
+                    self.send_html(f"Ошибка: {_esc(str(exc))}", status=500)
                 return
 
             # ── Auto-update toggle ──
@@ -1690,56 +1939,141 @@ Cron: 30 3 * * * root /usr/bin/python3 /opt/chimera/main.py --wpp-autoupdate
 </div></body></html>"""
 
     def _openflux_page(self) -> str:
-        """OpenFlux management page (single-profile — chimera's openflux.py)."""
+        """OpenFlux management page — multi-profile list + create form + legacy single-profile status."""
         prefix = _panel_path()
         csrf = self.csrf()
-        state = _chimera_openflux_state()
-        installed = state.get("installed", False)
-        enabled = state.get("enabled", False)
 
-        if not installed:
-            body = ('<div style="padding:48px;text-align:center;color:#9ab">'
-                    'OpenFlux не установлен. Используйте chimera CLI → '
-                    'раздел "OpenFlux" → установка.</div>')
+        # Multi-profile list
+        try:
+            from chimera.modules.openflux_profiles import profile_states
+            profiles = profile_states()
+        except Exception as exc:
+            profiles = []
+            _log_openflux_error(str(exc))
+
+        # Single-profile state (legacy)
+        legacy = _chimera_openflux_state()
+        legacy_installed = legacy.get("installed", False)
+
+        # Build profiles list HTML
+        if profiles:
+            profile_rows = []
+            for p in profiles:
+                name = _esc(p.get("name", ""))
+                transport = _esc(p.get("transport", ""))
+                enabled = p.get("enabled", False)
+                doc_masked = _esc(p.get("doc_url_masked", ""))
+                created = _esc(p.get("created_at", ""))[:19].replace("T", " ")
+                last_rot = _esc(p.get("last_rotation", ""))[:19].replace("T", " ")
+
+                state_html = "🟢 Активен" if enabled else "🔴 Остановлен"
+
+                # Action buttons
+                if enabled:
+                    toggle_btn = (f'<form method="post" action="{prefix}/openflux/profiles/disable" style="display:inline">'
+                                  f'<input type="hidden" name="csrf" value="{csrf}">'
+                                  f'<input type="hidden" name="name" value="{name}">'
+                                  f'<button type="submit" style="background:#dc2626">Остановить</button></form>')
+                else:
+                    toggle_btn = (f'<form method="post" action="{prefix}/openflux/profiles/enable" style="display:inline">'
+                                  f'<input type="hidden" name="csrf" value="{csrf}">'
+                                  f'<input type="hidden" name="name" value="{name}">'
+                                  f'<button type="submit">Запустить</button></form>')
+                rotate_btn = (f'<form method="post" action="{prefix}/openflux/profiles/rotate" style="display:inline">'
+                              f'<input type="hidden" name="csrf" value="{csrf}">'
+                              f'<input type="hidden" name="name" value="{name}">'
+                              f'<button type="submit" style="background:#7c3aed">Rotate</button></form>')
+                delete_btn = (f'<form method="post" action="{prefix}/openflux/profiles/delete" style="display:inline"'
+                              f' onsubmit="return confirm(\'Удалить профиль {name}?\')"'
+                              f'><input type="hidden" name="csrf" value="{csrf}">'
+                              f'<input type="hidden" name="name" value="{name}">'
+                              f'<input type="hidden" name="confirm" value="1">'
+                              f'<button type="submit" style="background:#b91c1c">Удалить</button></form>')
+
+                profile_rows.append(f"""
+<tr>
+<td style="padding:10px 8px;border-bottom:1px solid #1c2b40"><b>{name}</b></td>
+<td style="padding:10px 8px;border-bottom:1px solid #1c2b40">{transport}</td>
+<td style="padding:10px 8px;border-bottom:1px solid #1c2b40">{state_html}</td>
+<td style="padding:10px 8px;border-bottom:1px solid #1c2b40;max-width:200px;word-break:break-all"><code style="font-size:11px">{doc_masked}</code></td>
+<td style="padding:10px 8px;border-bottom:1px solid #1c2b40;font-size:11px;color:#9ab">{created}</td>
+<td style="padding:10px 8px;border-bottom:1px solid #1c2b40;font-size:11px;color:#9ab">{last_rot}</td>
+<td style="padding:10px 8px;border-bottom:1px solid #1c2b40;white-space:nowrap">{toggle_btn} {rotate_btn} {delete_btn}</td>
+</tr>""")
+            profiles_table = f"""
+<table style="width:100%;border-collapse:collapse;font-size:13px">
+<thead><tr style="color:#9ab;font-size:11px;text-transform:uppercase">
+<th style="text-align:left;padding:8px">Имя</th>
+<th style="text-align:left;padding:8px">Транспорт</th>
+<th style="text-align:left;padding:8px">Статус</th>
+<th style="text-align:left;padding:8px">Doc URL</th>
+<th style="text-align:left;padding:8px">Создан</th>
+<th style="text-align:left;padding:8px">Последний rotate</th>
+<th style="text-align:left;padding:8px">Действия</th>
+</tr></thead>
+<tbody>{''.join(profile_rows)}</tbody>
+</table>"""
         else:
-            transport = _esc(state.get("transport", ""))
-            bridge_active = state.get("bridge_active", False)
-            bridge_port = state.get("bridge_port")
-            bridge_bind = _esc(state.get("bridge_bind", "127.0.0.1"))
-            doc_url = _esc(state.get("doc_url_masked", ""))
-            installed_at = _esc(state.get("installed_at", ""))
+            profiles_table = ('<div style="padding:32px;text-align:center;color:#9ab">'
+                              'Профилей нет. Создайте первый ниже.</div>')
 
-            state_html = ("🟢 Активен" if enabled else "🔴 Остановлен")
-            bridge_html = ("🟢 Активен" if bridge_active else "🔴 Выключен")
+        # Create form
+        create_form = f"""
+<form method="post" action="{prefix}/openflux/profiles/create" style="display:grid;grid-template-columns:1fr 1fr 2fr auto;gap:10px;align-items:end">
+<input type="hidden" name="csrf" value="{csrf}">
+<div><label style="display:block;margin:0 0 4px;color:#9ab;font-size:12px">Имя (1-32, [a-z0-9-])</label>
+<input type="text" name="name" required pattern="[a-z0-9][a-z0-9-]*" maxlength="32" placeholder="ios-prof" style="width:100%;padding:8px;border:1px solid #1c2b40;border-radius:8px;background:#0a121d;color:#fff;font:inherit"></div>
+<div><label style="display:block;margin:0 0 4px;color:#9ab;font-size:12px">Транспорт</label>
+<select name="transport" style="width:100%;padding:8px;border:1px solid #1c2b40;border-radius:8px;background:#0a121d;color:#fff;font:inherit">
+<option value="yandex">Yandex (default)</option>
+<option value="vyandex">vyandex</option>
+<option value="cupsonline">cupsonline</option>
+<option value="oneme">oneme</option>
+<option value="mailru">mailru</option>
+</select></div>
+<div><label style="display:block;margin:0 0 4px;color:#9ab;font-size:12px">Doc URL (с ?sk=...)</label>
+<input type="url" name="doc_url" required placeholder="https://editor.yandex.ru/..." style="width:100%;padding:8px;border:1px solid #1c2b40;border-radius:8px;background:#0a121d;color:#fff;font:inherit"></div>
+<button type="submit" style="padding:9px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;font:inherit;font-weight:600;cursor:pointer;height:36px">{_icon('add')} Создать</button>
+</form>"""
 
-            actions = []
-            if enabled:
-                actions.append(f'<form method="post" action="{prefix}/openflux/disable" style="display:inline">'
-                               f'<input type="hidden" name="csrf" value="{csrf}">'
-                               f'<button type="submit" style="background:#dc2626">Остановить</button></form>')
-            else:
-                actions.append(f'<form method="post" action="{prefix}/openflux/enable" style="display:inline">'
-                               f'<input type="hidden" name="csrf" value="{csrf}">'
-                               f'<button type="submit">Запустить</button></form>')
-            actions.append(f'<form method="post" action="{prefix}/openflux/rotate" style="display:inline">'
-                           f'<input type="hidden" name="csrf" value="{csrf}">'
-                           f'<button type="submit" style="background:#7c3aed">Rotate key</button></form>')
-            actions_html = " ".join(actions)
-
-            body = f"""
-<table style="width:100%;border-collapse:collapse">
-<tr><th style="text-align:left;padding:8px 0;color:#9ab">Транспорт</th><td>{transport}</td></tr>
-<tr><th style="text-align:left;padding:8px 0;color:#9ab">Сервис</th><td>{state_html}</td></tr>
-<tr><th style="text-align:left;padding:8px 0;color:#9ab">Bridge</th><td>{bridge_html} ({bridge_bind}:{bridge_port or '—'})</td></tr>
-<tr><th style="text-align:left;padding:8px 0;color:#9ab">Doc URL</th><td><code>{doc_url}</code> <small style="color:#9ab">(secret скрыт)</small></td></tr>
-<tr><th style="text-align:left;padding:8px 0;color:#9ab">Установлен</th><td>{installed_at}</td></tr>
+        # Legacy single-profile section (collapsed if no migration done)
+        if legacy_installed:
+            legacy_state_html = ("🟢 Активен" if legacy.get("enabled") else "🔴 Остановлен")
+            legacy_section = f"""
+<details style="margin-top:18px;padding:14px;border:1px solid #1c2b40;border-radius:8px;background:#0d1520">
+<summary style="cursor:pointer;font-size:13px;color:#9ab">📋 Legacy single-profile (openflux.service)</summary>
+<table style="width:100%;border-collapse:collapse;margin-top:12px">
+<tr><th style="text-align:left;padding:6px 0;color:#9ab">Транспорт</th><td>{_esc(legacy.get('transport',''))}</td></tr>
+<tr><th style="text-align:left;padding:6px 0;color:#9ab">Сервис</th><td>{legacy_state_html}</td></tr>
+<tr><th style="text-align:left;padding:6px 0;color:#9ab">Doc URL</th><td><code style="font-size:11px">{_esc(legacy.get('doc_url_masked',''))}</code></td></tr>
 </table>
-<div style="margin-top:18px">{actions_html}</div>
-"""
+<div style="margin-top:12px">
+<form method="post" action="{prefix}/openflux/enable" style="display:inline">
+<input type="hidden" name="csrf" value="{csrf}">
+<button type="submit">Запустить</button>
+</form>
+<form method="post" action="{prefix}/openflux/disable" style="display:inline">
+<input type="hidden" name="csrf" value="{csrf}">
+<button type="submit" style="background:#dc2626">Остановить</button>
+</form>
+<form method="post" action="{prefix}/openflux/rotate" style="display:inline">
+<input type="hidden" name="csrf" value="{csrf}">
+<button type="submit" style="background:#7c3aed">Rotate key</button>
+</form>
+</div>
+<small style="display:block;margin-top:12px;color:#9ab">
+Single-profile openflux.service — chimera's original. Multi-profile (выше) использует
+systemd template units openflux@&lt;name&gt;.service. Чтобы мигрировать single-profile
+в multi-profile 'default': python3 chimera/modules/openflux_profiles.py migrate
+</small>
+</details>"""
+        else:
+            legacy_section = ""
+
         return f"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WPP — OpenFlux</title>
+<title>WPP — OpenFlux (multi-profile)</title>
 <style>
 body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
 .head{{display:flex;justify-content:space-between;align-items:center;
@@ -1747,15 +2081,15 @@ padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
 .brand{{font-weight:700;font-size:17px}}
 .nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
 .nav a:hover{{color:#fff}}
-.wrap{{padding:24px;max-width:800px;margin:0 auto}}
-.card{{padding:18px;border:1px solid #1c2b40;border-radius:12px;background:#0d1520}}
+.wrap{{padding:24px;max-width:1280px;margin:0 auto}}
+.card{{margin-bottom:18px;padding:18px;border:1px solid #1c2b40;
+border-radius:12px;background:#0d1520}}
 .card h2{{margin:0 0 12px 0;font-size:16px;font-weight:600}}
-table th,table td{{padding:6px 0}}
-button{{padding:8px 14px;border:0;border-radius:8px;color:#fff;font:inherit;
+button{{padding:6px 10px;border:0;border-radius:6px;color:#fff;font:inherit;
 font-weight:500;cursor:pointer}}
 </style></head><body>
 <div class="head">
-<div class="brand">{_icon('shield')} OpenFlux</div>
+<div class="brand">{_icon('shield')} OpenFlux (multi-profile)</div>
 <div class="nav">
 <a href="{prefix}/dashboard">Дашборд</a>
 <a href="{prefix}/users">Подключения</a>
@@ -1763,11 +2097,123 @@ font-weight:500;cursor:pointer}}
 <a href="{prefix}/settings">Настройки</a>
 <a href="{prefix}/openflux">OpenFlux</a>
 <a href="{prefix}/landing">Лендинг</a>
+<a href="{prefix}/components">Компоненты</a>
+<a href="{prefix}/logout">{_icon('logout')} Выход</a>
+</div></div>
+<div class="wrap">
+<div class="card">
+<h2>Профили OpenFlux ({len(profiles)})</h2>
+{profiles_table}
+</div>
+<div class="card">
+<h2>Создать новый профиль</h2>
+<small style="display:block;margin-bottom:14px;color:#9ab">
+Каждый профиль — отдельный systemd unit openflux@&lt;name&gt;.service с собственными env/key файлами.
+</small>
+{create_form}
+</div>
+{legacy_section}
+</div></body></html>"""
+
+    def _components_page(self) -> str:
+        """Component installer — список установленных/доступных протоколов."""
+        prefix = _panel_path()
+        csrf = self.csrf()
+        components_data = _list_components()
+        components = components_data.get("components", [])
+        pending = components_data.get("pending_installs", {})
+
+        # Build rows
+        rows_html = []
+        for c in components:
+            cid = _esc(c.get("id", ""))
+            name = _esc(c.get("name", ""))
+            installed = c.get("installed", False)
+            active = c.get("active", False)
+            version = _esc(c.get("version", ""))
+            service = _esc(c.get("service", ""))
+            url = _esc(c.get("install_url", ""))
+
+            if active:
+                status_html = "🟢 Активен"
+            elif installed:
+                status_html = "🟡 Установлен (не активен)"
+            else:
+                status_html = "🔴 Не установлен"
+
+            version_html = f"<code>{version}</code>" if version else "—"
+
+            if installed:
+                install_btn = f'<span style="color:#9ab">Уже установлен</span>'
+            else:
+                # Show install button (records intent in state — real install через chimera CLI)
+                if cid in pending:
+                    install_btn = (f'<span style="color:#f59e0b">⏳ Запрошена установка</span>'
+                                  f' — выполните через chimera CLI')
+                else:
+                    install_btn = (f'<form method="post" action="{prefix}/components/install" style="display:inline">'
+                                  f'<input type="hidden" name="csrf" value="{csrf}">'
+                                  f'<input type="hidden" name="protocol" value="{cid}">'
+                                  f'<button type="submit" style="background:#2563eb">Запросить установку</button></form>'
+                                  f' <small style="color:#9ab">(выполнить через chimera CLI)</small>')
+
+            external_link = f'<a href="{url}" target="_blank" rel="noopener" style="color:#56decb;font-size:11px">↗ GitHub</a>' if url else ""
+
+            rows_html.append(f"""
+<tr>
+<td style="padding:10px 8px;border-bottom:1px solid #1c2b40"><b>{name}</b><br><small style="color:#9ab">service: {service or '—'}</small></td>
+<td style="padding:10px 8px;border-bottom:1px solid #1c2b40">{status_html}</td>
+<td style="padding:10px 8px;border-bottom:1px solid #1c2b40">{version_html}</td>
+<td style="padding:10px 8px;border-bottom:1px solid #1c2b40">{install_btn} {external_link}</td>
+</tr>""")
+
+        components_table = f"""
+<table style="width:100%;border-collapse:collapse;font-size:13px">
+<thead><tr style="color:#9ab;font-size:11px;text-transform:uppercase">
+<th style="text-align:left;padding:8px">Компонент</th>
+<th style="text-align:left;padding:8px">Статус</th>
+<th style="text-align:left;padding:8px">Версия</th>
+<th style="text-align:left;padding:8px">Действие</th>
+</tr></thead>
+<tbody>{''.join(rows_html)}</tbody>
+</table>"""
+
+        return f"""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WPP — Компоненты</title>
+<style>
+body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
+.head{{display:flex;justify-content:space-between;align-items:center;
+padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
+.brand{{font-weight:700;font-size:17px}}
+.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
+.nav a:hover{{color:#fff}}
+.wrap{{padding:24px;max-width:1280px;margin:0 auto}}
+.card{{padding:18px;border:1px solid #1c2b40;border-radius:12px;background:#0d1520}}
+.card h2{{margin:0 0 12px 0;font-size:16px;font-weight:600}}
+button{{padding:6px 10px;border:0;border-radius:6px;color:#fff;font:inherit;
+font-weight:500;cursor:pointer}}
+</style></head><body>
+<div class="head">
+<div class="brand">{_icon('settings')} Компоненты</div>
+<div class="nav">
+<a href="{prefix}/dashboard">Дашборд</a>
+<a href="{prefix}/users">Подключения</a>
+<a href="{prefix}/nodes">Ноды</a>
+<a href="{prefix}/settings">Настройки</a>
+<a href="{prefix}/openflux">OpenFlux</a>
+<a href="{prefix}/landing">Лендинг</a>
+<a href="{prefix}/components">Компоненты</a>
 <a href="{prefix}/logout">{_icon('logout')} Выход</a>
 </div></div>
 <div class="wrap"><div class="card">
-<h2>OpenFlux (single-profile)</h2>
-{body}
+<h2>Установленные протоколы</h2>
+<small style="display:block;margin-bottom:14px;color:#9ab">
+Полная установка — через chimera CLI (интерактив). Здесь — список + индикация статуса.
+При запросе — помечается в state, install выполняется в chimera CLI.
+</small>
+{components_table}
 </div></div></body></html>"""
 
     def _landing_page(self) -> str:
