@@ -1205,6 +1205,9 @@ class _WppHandler(BaseHTTPRequestHandler):
             if path == prefix + "/nodes":
                 self.send_html(self._nodes_page())
                 return
+            if path == prefix + "/updates":
+                self.send_html(self._updates_page())
+                return
             if path == prefix + "/settings":
                 self.send_html(self._settings_page())
                 return
@@ -1216,6 +1219,25 @@ class _WppHandler(BaseHTTPRequestHandler):
                 return
             if path == prefix + "/components":
                 self.send_html(self._components_page())
+                return
+
+            # ── JSON API endpoints (для JS в dashboard_page и updates_ui) ──
+            # /dashboard-data?hours=N — возвращает JSON {html, update} для live-refresh
+            if path == prefix + "/dashboard-data":
+                parsed_q = urlparse(self.path)
+                hours_str = parse_qs(parsed_q.query).get("hours", ["1"])[0]
+                try:
+                    hours = int(hours_str)
+                    if hours not in (1, 3, 6, 12, 24):
+                        hours = 1
+                except ValueError:
+                    hours = 1
+                self.send_json(self._dashboard_data(hours))
+                return
+
+            # /update-status — текущий статус обновления (available/current/latest)
+            if path == prefix + "/update-status":
+                self.send_json(self._update_status())
                 return
 
             # ── API endpoints (JSON) ──
@@ -1547,6 +1569,28 @@ class _WppHandler(BaseHTTPRequestHandler):
                     self.send_html(f"Ошибка: {_esc(str(exc))}", status=500)
                 return
 
+            # ── Update check/start (для JS в dashboard_page и updates_ui) ──
+            if path in (prefix + "/update-check", prefix + "/update-start"):
+                try:
+                    if path.endswith("/update-start"):
+                        # Запуск обновления (пока заглушка — реальная установка
+                        # через chimera CLI вручную)
+                        result = {
+                            "available":     False,
+                            "current":       _wpp_state_front_version(),
+                            "latest":         None,
+                            "checked":        int(time.time()),
+                            "phase":          "idle",
+                            "message":        "Update через chimera CLI: 1 → W → 9 → 2 (Обновить фронт)",
+                        }
+                    else:
+                        # Проверка наличия обновления
+                        result = self._update_status()
+                    self.send_json(result)
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, status=500)
+                return
+
             # ── Auto-update toggle ──
             if path == prefix + "/autoupdate/toggle":
                 enable = form.get("enable", "") == "1"
@@ -1812,23 +1856,21 @@ background:#2563eb;color:#fff;font:inherit;font-weight:600;cursor:pointer}}
 </div></body></html>"""
 
     def _dashboard_page(self) -> str:
-        """Главная страница панели — дашборд с метриками.
-        Использует wpp_ui.page_layout для профессионального CSS
-        (theme toggle dark/light, SVG icons, top nav, social links)."""
+        """Главная страница панели — использует wpp_ui.dashboard_page с live JS.
+        JS fetch'ит /dashboard-data?hours=N каждые 5 секунд для авто-refresh."""
         prefix = _panel_path()
         csrf = self.csrf()
+        state = _chimera_state()
+        domain = state.get("domain", "—")
         users = _chimera_users()
         traffic = _chimera_traffic()
         total_up = sum(t.get("up", 0) for t in traffic.values())
         total_down = sum(t.get("down", 0) for t in traffic.values())
         active = sum(1 for t in traffic.values() if t.get("enabled", True))
-        state = _chimera_state()
-        domain = state.get("domain", "—")
 
-        # Body content (простые карточки с метриками)
+        # Body content (5 метрик-карточек) — будет live-patched через JS
         body = f"""
-<div class="page-head"><div><h1>Дашборд</h1><p>Сервер, подключения и использование трафика</p></div></div>
-<div class="dashboard-grid">
+<div class="dashboard-overview" data-live-block="overview">
 <section class="card"><div class="card-title"><h3>Сервер</h3></div><div class="metric">{_esc(domain)}</div></section>
 <section class="card"><div class="card-title"><h3>Пользователей</h3></div><div class="metric">{len(users)}</div></section>
 <section class="card"><div class="card-title"><h3>Активных</h3></div><div class="metric">{active}</div></section>
@@ -1839,26 +1881,13 @@ background:#2563eb;color:#fff;font:inherit;font-weight:600;cursor:pointer}}
 
         try:
             from chimera.modules import wpp_ui
-            return wpp_ui.page_layout("Дашборд", body, prefix, "dashboard", domain)
+            # dashboard_page добавляет live-indicator + JS для fetch'а
+            # /dashboard-data каждые 5 секунд + refresh button + auto-update check
+            body_full = wpp_ui.dashboard_page(body, prefix, csrf)
+            return wpp_ui.page_layout("Дашборд", body_full, prefix, "dashboard", domain)
         except Exception as exc:
-            self.log_message("page_layout fallback: %s: %s", type(exc).__name__, exc)
-            # Fallback на простой inline HTML
-            return f"""<!doctype html><html lang="ru"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WPP — Дашборд</title>
-<style>body{{margin:0;background:#060910;color:#fff;font:15px system-ui}}
-.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;padding:24px}}
-.card{{padding:20px;border:1px solid #1c2b40;border-radius:14px;background:#0d1520}}
-.card h3{{margin:0 0 8px 0;font-size:13px;color:#9ab}}
-.card .v{{font-size:24px;font-weight:700}}
-</style></head><body>
-<div class="cards">
-<div class="card"><h3>Сервер</h3><div class="v">{_esc(domain)}</div></div>
-<div class="card"><h3>Пользователей</h3><div class="v">{len(users)}</div></div>
-<div class="card"><h3>Активных</h3><div class="v">{active}</div></div>
-<div class="card"><h3>↑ Входящий</h3><div class="v">{_size(total_up)}</div></div>
-<div class="card"><h3>↓ Исходящий</h3><div class="v">{_size(total_down)}</div></div>
-</div></body></html>"""
+            self.log_message("page_layout fallback (dashboard): %s: %s", type(exc).__name__, exc)
+            return f"<!doctype html><html><body><div class='wrap'>{body}</div></body></html>"
 
     def _users_page(self) -> str:
         """Список пользователей Chimera (VLESS source of truth).
@@ -2392,6 +2421,102 @@ systemd template units openflux@&lt;name&gt;.service. Чтобы мигриро�
         except Exception as exc:
             self.log_message("page_layout fallback (landing): %s: %s", type(exc).__name__, exc)
             return f"<!doctype html><html><body><div class='wrap'>{body}</div></body></html>"
+
+    def _updates_page(self) -> str:
+        """Страница управления обновлениями — использует wpp_ui.updates_ui.
+        Показывает: текущую версию, доступные релизы (пока заглушка),
+        компоненты Xray/OpenFlux."""
+        prefix = _panel_path()
+        csrf = self.csrf()
+        current = _wpp_state_front_version()
+        try:
+            from chimera.modules import wpp_ui
+            body = wpp_ui.updates_ui(prefix, csrf, current)
+            state = _chimera_state()
+            domain = state.get("domain", "—")
+            return wpp_ui.page_layout("Обновления", body, prefix, "updates", domain)
+        except Exception as exc:
+            self.log_message("updates_ui fallback: %s: %s", type(exc).__name__, exc)
+            return f"""<!doctype html><html><body><div class='wrap'>
+<h1>Обновления</h1>
+<p>Текущая версия фронта: <code>{_esc(current)}</code></p>
+<p>Полное управление обновлениями — через chimera CLI: 1 → W → 9 → 2 (Обновить фронт)</p>
+</div></body></html>"""
+
+    def _dashboard_data(self, hours: int = 1) -> dict:
+        """
+        JSON для /dashboard-data?hours=N — используется JS в dashboard_page
+        для live-refresh (fetch каждые 5 секунд).
+
+        Returns: {html: <dashboard_body_html>, update: <update_status>}
+        """
+        try:
+            from chimera.modules import wpp_ui
+            state = _chimera_state()
+            domain = state.get("domain", "—")
+            users = _chimera_users()
+            traffic = _chimera_traffic()
+            total_up = sum(t.get("up", 0) for t in traffic.values())
+            total_down = sum(t.get("down", 0) for t in traffic.values())
+            active = sum(1 for t in traffic.values() if t.get("enabled", True))
+
+            # Простая dashboard body (без subscription cards — нет модели)
+            body = f"""
+<div class="dashboard-overview" data-live-block="overview">
+<section class="card"><div class="card-title"><h3>Сервер</h3></div><div class="metric">{_esc(domain)}</div></section>
+<section class="card"><div class="card-title"><h3>Пользователей</h3></div><div class="metric">{len(users)}</div></section>
+<section class="card"><div class="card-title"><h3>Активных</h3></div><div class="metric">{active}</div></section>
+<section class="card"><div class="card-title"><h3>↑ Входящий</h3></div><div class="metric">{_size(total_up)}</div></section>
+<section class="card"><div class="card-title"><h3>↓ Исходящий</h3></div><div class="metric">{_size(total_down)}</div></section>
+</div>
+"""
+            update_status = self._update_status()
+            return {"html": body, "update": update_status}
+        except Exception as exc:
+            self.log_message("_dashboard_data failed: %s: %s", type(exc).__name__, exc)
+            return {"html": "<p>Ошибка генерации dashboard</p>", "update": {}}
+
+    def _update_status(self) -> dict:
+        """
+        JSON статус обновления: {available, current, latest, checked, message}
+        Используется JS в dashboard_page + updates_ui + release banner.
+        """
+        try:
+            from chimera.modules.wpp_panel import _detect_upstream_version, _load_state, _version_key
+            state = _load_state()
+            current = state.get("front_version", "") or ""
+            latest, ok = _detect_upstream_version(force=False)
+            available = bool(current and latest and
+                             _version_key(latest) > _version_key(current))
+            return {
+                "available":  available,
+                "current":    current,
+                "latest":     latest if ok else None,
+                "checked":    int(time.time()),
+                "ok":         ok,
+                "message":    ("Доступна новая версия " + latest) if available
+                              else ("Актуально" if current and latest else "Не удалось проверить"),
+            }
+        except Exception as exc:
+            return {
+                "available": False,
+                "current":   _wpp_state_front_version(),
+                "latest":     None,
+                "checked":    int(time.time()),
+                "ok":         False,
+                "message":    f"Ошибка: {type(exc).__name__}: {exc}",
+            }
+
+
+# ─── Helpers ────────────────────────────────────────────────────────────────
+
+def _wpp_state_front_version() -> str:
+    """Возвращает front_version из wpp_state. Fallback '2.4.2'."""
+    try:
+        from chimera.modules.wpp_state import load_state
+        return str(load_state().get("front_version", "") or "2.4.2")
+    except Exception:
+        return "2.4.2"
 
 
 # ─── START SERVER ────────────────────────────────────────────────────────────
