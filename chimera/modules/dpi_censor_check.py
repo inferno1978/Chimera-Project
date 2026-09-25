@@ -188,6 +188,21 @@ def _vendor_version() -> str:
     return ""
 
 
+def _parse_dir_version(d: Path) -> str:
+    """Читает CURRENT_VERSION из каталога копии dpi-detector.
+    Проверяет несколько файлов — в v4.2+ CURRENT_VERSION переместилась
+    из dpi_detector.py в app/banner.py.
+    """
+    for rel in ["dpi_detector.py", "app/banner.py", "core/__init__.py",
+                "app/__init__.py", "__init__.py", "version.py"]:
+        p = d / rel
+        if p.is_file():
+            v = _parse_entry_version(p)
+            if v:
+                return v
+    return ""
+
+
 def _runtime_copies() -> List[Tuple[Path, str]]:
     """Список (каталог, версия) runtime-копий в _RUNTIME_ROOT."""
     out: List[Tuple[Path, str]] = []
@@ -198,10 +213,14 @@ def _runtime_copies() -> List[Tuple[Path, str]]:
             try:
                 if not d.is_dir() or d.name.startswith(".staging"):
                     continue
+                # FIX: в v4.2+ dpi_detector.py может не содержать CURRENT_VERSION
+                # (перемещена в app/banner.py). Проверяем все возможные файлы.
                 entry = d / "dpi_detector.py"
                 if not entry.is_file():
-                    continue
-                out.append((d, _parse_entry_version(entry)))
+                    # Maybe restructured — check if any .py files exist
+                    if not any(d.glob("*.py")) and not any(d.glob("app/*.py")):
+                        continue
+                out.append((d, _parse_dir_version(d)))
             except OSError:
                 continue
     except OSError:
@@ -224,9 +243,20 @@ def _installed_copy() -> dict:
     if not candidates:
         return {}
     _, d, v, src = max(candidates, key=lambda c: c[0])
+    # FIX: в v4.2+ dpi_detector.py может импортировать CURRENT_VERSION
+    # из app/banner.py. Но точка входа для запуска — всё ещё dpi_detector.py
+    # (если он есть). Если нет — ищем альтернативную точку входа.
+    entry = d / "dpi_detector.py"
+    if not entry.is_file():
+        # Альтернативная точка входа (v5+ может иметь __main__.py)
+        for alt in ["__main__.py", "main.py", "cli/__init__.py"]:
+            alt_p = d / alt
+            if alt_p.is_file():
+                entry = alt_p
+                break
     return {
         "dir": d, "version": v, "source": src,
-        "entry": d / "dpi_detector.py", "reqs": d / "requirements.txt",
+        "entry": entry, "reqs": d / "requirements.txt",
     }
 
 
