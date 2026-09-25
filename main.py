@@ -348,6 +348,18 @@ if "--h2-autoupdate" in sys.argv:
     h2_autoupdate_cron()
     sys.exit(0)
 
+# --- WPP Web Panel: автообновление фронта (из cron ежесуточно, 03:30) ---
+# v88: cron /etc/cron.d/wpp-autoupdate запускает main.py --wpp-autoupdate.
+# Не-интерактивно: проверка GitHub API → fetch_package(WPP_FRONT_SPEC) →
+# atomic-swap staging→www → systemctl restart wpp-web → smoke GET / →
+# rollback при провале. Делегирует в chimera.modules.wpp_autoupdate.
+if "--wpp-autoupdate" in sys.argv:
+    if os.geteuid() != 0:
+        sys.exit(1)
+    from chimera.modules.wpp_autoupdate import wpp_autoupdate_cron
+    wpp_autoupdate_cron()
+    sys.exit(0)
+
 # --- Upstream-модули (Turnable/CSQTT/qWDTT): автообновление из апстримов ---
 # v75: вызывается systemd-таймером chimera-upstream-update.timer (04:40)
 # или вручную. Не-интерактивно: проверка GitHub API → fetch_package →
