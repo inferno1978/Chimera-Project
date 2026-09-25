@@ -202,6 +202,9 @@ class _PortKnockingBase(unittest.TestCase):
         # ipset del <name> <ip>
         if cmd[1] == "del":
             return _cp(cmd, 0, "", "")
+        # ipset test <name> <ip> — returns 0 if IP is in set, 1 if not
+        if cmd[1] == "test":
+            return _cp(cmd, 1, "", "IP not in set")  # default: not in set
         # ipset save <name>
         if cmd[1] == "save":
             return _cp(cmd, 0, "", "")
@@ -1263,37 +1266,50 @@ class TestStatus(_PortKnockingBase):
 # =============================================================================
 class TestTestKnock(_PortKnockingBase):
 
+    def _mock_public_ips(self):
+        """Patch _get_server_ipv4 and _get_server_ipv6 to return test IPs."""
+        return [
+            patch("chimera.modules.port_knocking._get_server_ipv4",
+                  return_value="192.0.2.1"),
+            patch("chimera.modules.port_knocking._get_server_ipv6",
+                  return_value="2001:db8::1"),
+        ]
+
     def test_test_knock_returns_dict_with_expected_fields(self):
         from chimera.modules.port_knocking import _pk_test_knock
-        # Pre-set ipset exists + has 127.0.0.1 after knock
         self._ipset_exists["xray_knocked"] = True
         self._ipset_list_lines["xray_knocked"] = (
             "Name: xray_knocked\nNumber of entries: 1\n"
-            "127.0.0.1 timeout 3599\n"
+            "192.0.2.1 timeout 3599\n"
         )
-        with patch("chimera.modules.port_knocking.socket.socket") as msock:
+        patches = self._mock_public_ips()
+        with patch("chimera.modules.port_knocking.socket.socket") as msock, \
+             patches[0], patches[1]:
             msock.return_value.connect_ex.return_value = 0
             result = _pk_test_knock(443)
         self.assertIsInstance(result, dict)
         self.assertEqual(result["port"], 443)
-        self.assertEqual(result["knock_count"], 3)  # default
+        self.assertEqual(result["knock_count"], 3)
         self.assertIn("sent_syns", result)
         self.assertIn("in_xray_knocked", result)
         self.assertIn("success", result)
-        # IPv6 fields (new)
         self.assertIn("ipv6_available", result)
         self.assertIn("ipv6_sent_syns", result)
         self.assertIn("in_xray_knocked6", result)
         self.assertIn("ipv6_success", result)
+        self.assertIn("ipv4_ip", result)
+        self.assertIn("ipv6_ip", result)
 
     def test_test_knock_success_when_ip_in_set(self):
         from chimera.modules.port_knocking import _pk_test_knock
         self._ipset_exists["xray_knocked"] = True
         self._ipset_list_lines["xray_knocked"] = (
             "Name: xray_knocked\nNumber of entries: 1\n"
-            "127.0.0.1 timeout 3599\n"
+            "192.0.2.1 timeout 3599\n"
         )
-        with patch("chimera.modules.port_knocking.socket.socket") as msock:
+        patches = self._mock_public_ips()
+        with patch("chimera.modules.port_knocking.socket.socket") as msock, \
+             patches[0], patches[1]:
             msock.return_value.connect_ex.return_value = 0
             result = _pk_test_knock(443)
         self.assertTrue(result["success"])
@@ -1305,44 +1321,45 @@ class TestTestKnock(_PortKnockingBase):
         self._ipset_list_lines["xray_knocked"] = (
             "Name: xray_knocked\nNumber of entries: 0\n"
         )
-        with patch("chimera.modules.port_knocking.socket.socket") as msock:
+        patches = self._mock_public_ips()
+        with patch("chimera.modules.port_knocking.socket.socket") as msock, \
+             patches[0], patches[1]:
             msock.return_value.connect_ex.return_value = 0
             result = _pk_test_knock(443)
         self.assertFalse(result["success"])
         self.assertFalse(result["in_xray_knocked"])
 
     def test_test_knock_clears_ip_before_test(self):
-        """Перед тестом 127.0.0.1 (IPv4) и ::1 (IPv6, если доступен)
-        должны быть удалены из ipset."""
+        """Перед тестом публичный IP должен быть удалён из ipset."""
         from chimera.modules.port_knocking import _pk_test_knock
         self._ipset_exists["xray_knocked"] = True
         self._ipset_exists["xray_knocked6"] = True
-        with patch("chimera.modules.port_knocking.socket.socket") as msock:
+        patches = self._mock_public_ips()
+        with patch("chimera.modules.port_knocking.socket.socket") as msock, \
+             patches[0], patches[1]:
             msock.return_value.connect_ex.return_value = 0
             _pk_test_knock(443)
-        # ipset del was called — at least once for IPv4 127.0.0.1
-        del_calls = [c for c in self._calls
-                     if c[:2] == ["ipset", "del"]]
+        del_calls = [c for c in self._calls if c[:2] == ["ipset", "del"]]
         self.assertGreaterEqual(len(del_calls), 1)
-        # IPv4 127.0.0.1 del always present
-        self.assertTrue(any("127.0.0.1" in c for c in del_calls))
-        # IPv6 ::1 del present when IPv6 available
-        if del_calls and any("::1" in c for c in del_calls):
-            # Should be 2 del calls (v4 + v6)
-            self.assertEqual(len(del_calls), 2)
+        # IPv4 public IP del
+        self.assertTrue(any("192.0.2.1" in c for c in del_calls))
+        # IPv6 public IP del when available
+        if any("2001:db8::1" in c for c in del_calls):
+            self.assertGreaterEqual(len(del_calls), 2)
 
     def test_test_knock_ipv6_path_runs_when_available(self):
-        """When IPv6 is available (::1), IPv6 knock path is executed."""
+        """When IPv6 available, IPv6 knock path is executed with public IP."""
         from chimera.modules.port_knocking import _pk_test_knock
         self._ipset_exists["xray_knocked6"] = True
         self._ipset_list_lines["xray_knocked6"] = (
             "Name: xray_knocked6\nNumber of entries: 1\n"
-            "::1 timeout 3599\n"
+            "2001:db8::1 timeout 3599\n"
         )
-        with patch("chimera.modules.port_knocking.socket.socket") as msock:
+        patches = self._mock_public_ips()
+        with patch("chimera.modules.port_knocking.socket.socket") as msock, \
+             patches[0], patches[1]:
             msock.return_value.connect_ex.return_value = 0
             result = _pk_test_knock(443)
-        # IPv6 path executed (mocked socket allows AF_INET6)
         self.assertTrue(result["ipv6_available"])
         self.assertEqual(result["ipv6_sent_syns"], 3)
         self.assertTrue(result["in_xray_knocked6"])
@@ -1351,9 +1368,9 @@ class TestTestKnock(_PortKnockingBase):
     def test_test_knock_ipv6_skipped_when_unavailable(self):
         """When IPv6 socket fails (no AF_INET6), IPv6 path is skipped."""
         from chimera.modules.port_knocking import _pk_test_knock
-        # Make socket.socket raise for AF_INET6 — but allow AF_INET.
-        # We patch _pk_ipv6_available directly to return False.
-        with patch("chimera.modules.port_knocking.socket.socket") as msock:
+        patches = self._mock_public_ips()
+        with patch("chimera.modules.port_knocking.socket.socket") as msock, \
+             patches[0], patches[1]:
             msock.return_value.connect_ex.return_value = 0
             with patch("chimera.modules.port_knocking._pk_ipv6_available",
                        return_value=False):
@@ -1362,10 +1379,9 @@ class TestTestKnock(_PortKnockingBase):
         self.assertEqual(result["ipv6_sent_syns"], 0)
         self.assertFalse(result["in_xray_knocked6"])
         self.assertFalse(result["ipv6_success"])
-        # No ipset del for ::1
         del_calls = [c for c in self._calls if c[:2] == ["ipset", "del"]]
         for c in del_calls:
-            self.assertNotIn("::1", c)
+            self.assertNotIn("2001:db8::1", c)
 
 
 # =============================================================================
