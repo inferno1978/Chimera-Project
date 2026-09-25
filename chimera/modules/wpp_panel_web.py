@@ -1857,15 +1857,29 @@ background:#2563eb;color:#fff;font:inherit;font-weight:600;cursor:pointer}}
 
     def _dashboard_page(self) -> str:
         """Главная страница панели — использует wpp_ui.dashboard_page с live JS.
-        JS fetch'ит /dashboard-data?hours=N каждые 5 секунд для авто-refresh."""
+        JS fetch'ит /dashboard-data?hours=N каждые 5 секунд для авто-refresh.
+
+        CRITICAL: initial body должен быть ПОЛНЫЙ dashboard_body() output
+        (со всеми data-live-block секциями), иначе patchLive() не найдёт
+        блоки для обновления и они никогда не появятся.
+        """
         prefix = _panel_path()
         csrf = self.csrf()
         state = _chimera_state()
         domain = state.get("domain", "—")
 
-        # Начальный body — пустой, JS его заполнит через /dashboard-data
-        # (dashboard_page вызовет refresh() сразу после load)
-        initial_body = '<div data-live-block="overview"></div>'
+        # Initial body — FULL dashboard_body output (so all live-blocks exist
+        # in the DOM, then patchLive() can update them as metrics change).
+        # Раньше тут был пустой '<div data-live-block="overview"></div>' —
+        # баг: только overview stats показывались, chart/resources/services
+        # отсутствовали потому что их не было в initial DOM.
+        try:
+            initial_body = self._build_dashboard_body(1)
+        except Exception as exc:
+            self.log_message("_dashboard_page initial body failed: %s: %s",
+                             type(exc).__name__, exc)
+            initial_body = (f'<div data-live-block="overview">'
+                            f'<p>Ошибка генерации: {_esc(str(exc))}</p></div>')
 
         try:
             from chimera.modules import wpp_ui
@@ -1879,6 +1893,82 @@ background:#2563eb;color:#fff;font:inherit;font-weight:600;cursor:pointer}}
 <h1>Дашборд</h1><p>Сервер: {_esc(domain)}</p>
 <p>Ошибка: {_esc(str(exc))}</p>
 </body></html>"""
+
+    def _build_dashboard_body(self, hours: int = 1) -> str:
+        """
+        Строит HTML body для dashboard (используется и в _dashboard_page
+        initial render, и в _dashboard_data live-refresh).
+
+        Источники данных:
+          • wpp_metrics.dashboard_data(hours) — из state file (собирается
+            wpp-metrics.timer каждые 10 секунд)
+          • _chimera_users() — список пользователей из /etc/xray/users.json
+          • traffic — БЕРЁТСЯ ИЗ METRICS STATE (не из chimera._core live,
+            потому что в wpp-web процессе chimera._core может не загрузиться
+            полностью и traffic API вернёт 0).
+
+        Returns: full HTML body for dashboard_body().
+        """
+        from chimera.modules import wpp_metrics, wpp_ui
+        state = _chimera_state()
+        domain = state.get("domain", "—")
+        csrf = self.csrf()
+
+        # Получаем метрики из state file (уже собранные wpp-metrics.timer)
+        metrics_data = wpp_metrics.dashboard_data(hours)
+        latest = metrics_data.get("latest", {})
+
+        # Traffic dict — build из metrics latest (агрегированные значения).
+        # ВАЖНО: не вызываем _chimera_traffic() здесь (она идёт в
+        # chimera._core._users_get_traffic_extended которая может не работать
+        # в wpp-web systemd process). Вместо этого берём totals из metrics
+        # state — там уже всё посчитано wpp-metrics.timer'ом.
+        up_total = int(latest.get("up", 0) or 0)
+        down_total = int(latest.get("down", 0) or 0)
+        traffic_fresh = bool(latest.get("traffic_fresh", False))
+        service_active = bool(latest.get("services", {}).get("xray", {}).get("state") == "active")
+
+        # traffic dict for dashboard_body — single aggregated entry.
+        # dashboard_body использует traffic.values() для total_up/down.
+        traffic = {
+            "_aggregated": {
+                "up":             up_total,
+                "down":           down_total,
+                "service_active": service_active and traffic_fresh,
+                "last_change":    latest.get("time", 0),
+            }
+        } if latest else {}
+
+        # Users as profiles (WPP-style — для client_records в dashboard_body)
+        users = _chimera_users()
+        profiles = []
+        for u in users:
+            email = str(u.get("email") or "")
+            if not email:
+                continue
+            profiles.append({
+                "id":              str(u.get("uuid") or ""),
+                "name":            str(u.get("name") or email),
+                "protocol":        "vless",  # canonical chimera
+                "enabled":         not u.get("disabled") and not u.get("blocked"),
+                "secret":          "",
+                "backend_port":    443,
+                "subscription_id": None,
+                "username":        email.split("@")[0],
+            })
+
+        # proxy_link function
+        def _proxy_link(protocol: str, secret: str, port: int,
+                        name: str = "", username: str = "") -> str:
+            return _chimera_proxy_link(protocol, secret, port, name, username)
+
+        current = _wpp_state_front_version()
+        body_html = wpp_ui.dashboard_body(
+            metrics_data, [], profiles, traffic,
+            _panel_path(), domain, csrf, _proxy_link,
+            current, hours,
+        )
+        return body_html
 
     def _users_page(self) -> str:
         """Список пользователей Chimera (VLESS source of truth).
@@ -2441,72 +2531,10 @@ systemd template units openflux@&lt;name&gt;.service. Чтобы мигриро�
 
         Returns: {html: <dashboard_body_html>, update: <update_status>}
 
-        Делегирует в:
-          • chimera.modules.wpp_metrics.dashboard_data(hours) — real metrics
-            (latest + history for chart)
-          • chimera.modules.wpp_ui.dashboard_body() — full dashboard HTML
-            (resources, chart, services, traffic totals, user glances)
+        Делегирует в _build_dashboard_body() (тот же код что и initial render).
         """
         try:
-            from chimera.modules import wpp_metrics, wpp_ui
-            state = _chimera_state()
-            domain = state.get("domain", "—")
-            csrf = self.csrf()
-
-            # Получаем метрики (latest + history for chart)
-            metrics_data = wpp_metrics.dashboard_data(hours)
-
-            # Traffic dict {email: {up, down, ...}} —
-            # для dashboard_body: нужен dict {uid_or_email: {up, down, ...}}
-            traffic = _chimera_traffic()
-
-            # Subscriptions (chimera не имеет WPP-style subscriptions — empty)
-            subs = []
-            # Profiles (chimera users = "profiles" в WPP терминах)
-            profiles = []
-            for u in _chimera_users():
-                email = str(u.get("email") or "")
-                if not email:
-                    continue
-                profiles.append({
-                    "id":              str(u.get("uuid") or ""),
-                    "name":            str(u.get("name") or email),
-                    "protocol":        "vless",  # canonical
-                    "enabled":         not u.get("disabled") and not u.get("blocked"),
-                    "secret":          "",  # не показываем
-                    "backend_port":    443,
-                    "subscription_id": None,
-                    "username":        email.split("@")[0],
-                })
-
-            # proxy_link function (для client_records / direct_card)
-            def _proxy_link(protocol: str, secret: str, port: int,
-                            name: str = "", username: str = "") -> str:
-                return _chimera_proxy_link(protocol, secret, port, name, username)
-
-            # Генерируем dashboard body —
-            # NB: dashboard_body ожидает subs в формате WPP (с token, devices, и т.д.),
-            # profiles — список WPP-профилей. У нас упрощённая модель, поэтому
-            # передаём как есть. dashboard_body вызовет client_records() который
-            # адаптирует к формату карточек.
-            current = _wpp_state_front_version()
-            try:
-                body_html = wpp_ui.dashboard_body(
-                    metrics_data, subs, profiles, traffic,
-                    _panel_path(), domain, csrf, _proxy_link,
-                    current, hours,
-                )
-            except Exception as exc:
-                self.log_message("dashboard_body failed: %s: %s",
-                                 type(exc).__name__, exc)
-                # Fallback на простой body если dashboard_body упала
-                body_html = f"""
-<div class="dashboard-overview" data-live-block="overview">
-<section class="card"><h3>Сервер</h3><div class="metric">{_esc(domain)}</div></section>
-<section class="card"><h3>Пользователей</h3><div class="metric">{len(profiles)}</div></section>
-</div>
-"""
-
+            body_html = self._build_dashboard_body(hours)
             update_status = self._update_status()
             return {"html": body_html, "update": update_status}
         except Exception as exc:
