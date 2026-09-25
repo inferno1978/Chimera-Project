@@ -849,25 +849,58 @@ def _pk_status() -> str:
 
 
 # ── Test knock ──────────────────────────────────────────────────────────────────
+def _get_server_ipv4():
+    """Возвращает публичный IPv4 сервера (из hostname -I).
+    Нужно для теста knocking — 127.0.0.1 обходит knocking через
+    UFW lo-bypass, поэтому тестировать надо с публичного IP.
+    """
+    r = _run(["hostname", "-I"], capture=True, quiet=True)
+    if r.stdout.strip():
+        ips = r.stdout.strip().split()
+        # Берем первый non-loopback IPv4
+        for ip in ips:
+            if not ip.startswith("127.") and "." in ip:
+                return ip
+    return ""
+
+
+def _get_server_ipv6():
+    """Возвращает глобальный IPv6 адрес сервера."""
+    r = _run(["ip", "-6", "addr", "show", "dev", "ens3"], capture=True, quiet=True)
+    if r.stdout:
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("inet6 ") and "scope global" in line:
+                # Извлекаем адрес: "inet6 2a12:bec4:.../64 scope global"
+                parts = line.split()
+                if len(parts) >= 2:
+                    addr = parts[1].split("/")[0]
+                    return addr
+    return ""
+
+
 def _pk_test_knock(port: int) -> dict:
-    """Тест: отправляет N SYN на localhost:port для IPv4 и IPv6, проверяет
-    добавление в xray_knocked / xray_knocked6.
+    """Тест: отправляет N SYN на **публичный IP**:port для IPv4 и IPv6,
+    проверяет добавление в xray_knocked / xray_knocked6.
 
-    Шаги (для каждой семьи):
-      1. Очищает loopback IP из ipset (если уже там)
-      2. Очищает loopback IP из recent-таблицы (через /proc/net/xt_recent/<name>)
-      3. Отправляет knock_count SYN на <loopback>:port (connect_ex, timeout 0.3)
-      4. Ждёт 0.3с для обработки в kernel
-      5. Проверяет, что loopback IP в ipset list
+    FIX: раньше тестировал с 127.0.0.1 — но UFW имеет правило
+    `-A ufw-before-input -i lo -j ACCEPT` которое обходит все
+    knocking-правила для localhost. Поэтому 127.0.0.1 всегда
+    "connected" но никогда не попадал в xray_knocked.
 
-    IPv4: 127.0.0.1 → xray_knocked, recent KNOCK{port}
-    IPv6: ::1 (если доступен) → xray_knocked6, recent KNOCK{port}v6
+    Теперь тест использует публичный IP сервера (из hostname -I),
+    который идёт через ens3 (не lo) и реально проходит через
+    knocking-правила.
 
-    Возвращает dict (плоский, для backward-compat с TUI):
-      {port, knock_count,
-       sent_syns (IPv4), in_xray_knocked (IPv4), success (IPv4),
-       ipv6_available, ipv6_sent_syns (IPv6),
-       in_xray_knocked6 (IPv6), ipv6_success (IPv6)}
+    Если IP в xray_ru_block (GeoIP) — тест пропускается (GeoIP
+    DROP маскирует knocking, нужно тестить с внешнего IP).
+
+    Шаги:
+      1. Получает публичный IPv4/IPv6 сервера
+      2. Проверяет что IP не в xray_ru_block
+      3. Очищает IP из ipset + recent
+      4. Отправляет knock_count SYN на <pub_ip>:port
+      5. Проверяет что IP в xray_knocked
     """
     state = _pk_state_load()
     knock_count = int(state["knock_count"])
@@ -875,79 +908,117 @@ def _pk_test_knock(port: int) -> dict:
     recent_name_v6 = _pk_recent_name_v6(port)
 
     # ── IPv4 test ─────────────────────────────────────────────────────────────
-    # 1. Clear 127.0.0.1 from xray_knocked
-    _run(["ipset", "del", _PK_KNOCKED_SET, "127.0.0.1"], quiet=True)
-    # 2. Clear 127.0.0.1 from recent table
-    recent_proc = Path("/proc/net/xt_recent") / recent_name
-    if recent_proc.exists():
-        try:
-            with recent_proc.open("w") as f:
-                f.write("-127.0.0.1\n")
-        except Exception:
-            pass
-    # 3. Send N SYN to 127.0.0.1:port
+    pub_v4 = _get_server_ipv4()
+    skip_v4 = False
+    skip_v4_reason = ""
     sent_v4 = 0
-    for _ in range(knock_count):
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(0.3)
-            sock.connect_ex(("127.0.0.1", port))
-            sock.close()
-            sent_v4 += 1
-        except Exception:
-            pass
-        time.sleep(0.05)  # небольшая пауза между SYN
-    # 4. Wait for kernel processing
-    time.sleep(0.3)
-    # 5. Check 127.0.0.1 in xray_knocked
-    r = _run(["ipset", "list", _PK_KNOCKED_SET], capture=True)
-    in_set_v4 = "127.0.0.1" in (r.stdout or "")
+    in_set_v4 = False
+
+    if not pub_v4:
+        skip_v4 = True
+        skip_v4_reason = "Не удалось определить публичный IPv4"
+    else:
+        # Check if pub_v4 is in xray_ru_block (GeoIP would DROP before knocking)
+        r_ru = _run(["ipset", "test", "xray_ru_block", pub_v4], quiet=True)
+        if r_ru.returncode == 0:
+            skip_v4 = True
+            skip_v4_reason = f"IP {pub_v4} в xray_ru_block (GeoIP DROP маскирует knocking)"
+        else:
+            # 1. Clear pub_v4 from xray_knocked
+            _run(["ipset", "del", _PK_KNOCKED_SET, pub_v4], quiet=True)
+            # 2. Clear pub_v4 from recent table
+            recent_proc = Path("/proc/net/xt_recent") / recent_name
+            if recent_proc.exists():
+                try:
+                    with recent_proc.open("w") as f:
+                        f.write(f"-{pub_v4}\n")
+                except Exception:
+                    pass
+            # 3. Send N SYN to pub_v4:port
+            for _ in range(knock_count):
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(0.5)
+                    sock.connect_ex((pub_v4, port))
+                    sock.close()
+                    sent_v4 += 1
+                except Exception:
+                    pass
+                time.sleep(0.05)
+            # 4. Wait for kernel processing
+            time.sleep(0.5)
+            # 5. Check pub_v4 in xray_knocked
+            r = _run(["ipset", "list", _PK_KNOCKED_SET], capture=True)
+            in_set_v4 = pub_v4 in (r.stdout or "")
 
     # ── IPv6 test ────────────────────────────────────────────────────────────
+    pub_v6 = _get_server_ipv6()
     ipv6_available = _pk_ipv6_available()
+    skip_v6 = False
+    skip_v6_reason = ""
     sent_v6 = 0
     in_set_v6 = False
-    if ipv6_available:
-        # 1. Clear ::1 from xray_knocked6
-        _run(["ipset", "del", _PK_KNOCKED_SET_V6, "::1"], quiet=True)
-        # 2. Clear ::1 from recent v6 table
-        recent_proc_v6 = Path("/proc/net/xt_recent") / recent_name_v6
-        if recent_proc_v6.exists():
-            try:
-                with recent_proc_v6.open("w") as f:
-                    f.write("-::1\n")
-            except Exception:
-                pass
-        # 3. Send N SYN to [::1]:port
-        for _ in range(knock_count):
-            try:
-                sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-                sock.settimeout(0.3)
-                sock.connect_ex(("::1", port))
-                sock.close()
-                sent_v6 += 1
-            except Exception:
-                pass
-            time.sleep(0.05)
-        # 4. Wait for kernel processing
-        time.sleep(0.3)
-        # 5. Check ::1 in xray_knocked6
-        r = _run(["ipset", "list", _PK_KNOCKED_SET_V6], capture=True)
-        in_set_v6 = "::1" in (r.stdout or "")
+
+    if not ipv6_available:
+        skip_v6 = True
+        skip_v6_reason = "IPv6 loopback недоступен"
+    elif not pub_v6:
+        skip_v6 = True
+        skip_v6_reason = "Не удалось определить публичный IPv6"
+    else:
+        # Check if pub_v6 is in xray_ru_block6
+        r_ru6 = _run(["ipset", "test", "xray_ru_block6", pub_v6], quiet=True)
+        if r_ru6.returncode == 0:
+            skip_v6 = True
+            skip_v6_reason = f"IPv6 {pub_v6} в xray_ru_block6 (GeoIP DROP)"
+        else:
+            # 1. Clear pub_v6 from xray_knocked6
+            _run(["ipset", "del", _PK_KNOCKED_SET_V6, pub_v6], quiet=True)
+            # 2. Clear pub_v6 from recent v6 table
+            recent_proc_v6 = Path("/proc/net/xt_recent") / recent_name_v6
+            if recent_proc_v6.exists():
+                try:
+                    with recent_proc_v6.open("w") as f:
+                        f.write(f"-{pub_v6}\n")
+                except Exception:
+                    pass
+            # 3. Send N SYN to [pub_v6]:port
+            for _ in range(knock_count):
+                try:
+                    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                    sock.settimeout(0.5)
+                    sock.connect_ex((pub_v6, port))
+                    sock.close()
+                    sent_v6 += 1
+                except Exception:
+                    pass
+                time.sleep(0.05)
+            # 4. Wait for kernel processing
+            time.sleep(0.5)
+            # 5. Check pub_v6 in xray_knocked6
+            r = _run(["ipset", "list", _PK_KNOCKED_SET_V6], capture=True)
+            in_set_v6 = pub_v6 in (r.stdout or "")
 
     return {
         "port":              port,
         "knock_count":       knock_count,
-        # IPv4 (backward-compat fields used by TUI menu)
+        # IPv4
+        "ipv4_ip":           pub_v4,
         "sent_syns":         sent_v4,
         "in_xray_knocked":   in_set_v4,
         "success":           in_set_v4,
-        # IPv6 (new fields)
+        "ipv4_skip":         skip_v4,
+        "ipv4_skip_reason":  skip_v4_reason,
+        # IPv6
         "ipv6_available":     ipv6_available,
+        "ipv6_ip":           pub_v6,
         "ipv6_sent_syns":     sent_v6,
         "in_xray_knocked6":   in_set_v6,
         "ipv6_success":       in_set_v6,
+        "ipv6_skip":          skip_v6,
+        "ipv6_skip_reason":  skip_v6_reason,
     }
+
 
 
 # ── Box renderer (импорт после хелперов — паттерн honeypot/smart_balancer) ────
@@ -975,7 +1046,7 @@ def do_manage_port_knocking() -> None:
       [2] Настроить параметры (knock_count, window, ttl)
       [3] Добавить/удалить защищаемый порт
       [4] Показать статус (активные правила, ipset, recent)
-      [5] Тест knocking (N SYN → localhost:port)
+      [5] Тест knocking (N SYN → публичный IP:port)
       [6] Список knocked IP (ipset list xray_knocked)
       [Q] Назад в главное меню
     """
@@ -1010,7 +1081,7 @@ def do_manage_port_knocking() -> None:
         _box_item("2", f"Настроить параметры {DIM}(knock/window/ttl){NC}")
         _box_item("3", f"Управление портами {DIM}({len(state['ports'])} шт.){NC}")
         _box_item("4", "Показать статус")
-        _box_item("5", f"Тест knocking {DIM}(N SYN → localhost:port){NC}")
+        _box_item("5", f"Тест knocking {DIM}(N SYN → публичный IP:port){NC}")
         _box_item("6", f"Список knocked IP {DIM}({knocked} шт.){NC}")
         _box_back()
         _box_bottom()
@@ -1162,7 +1233,7 @@ def _pk_menu_test(state: dict) -> None:
     print()
     _box_top("🚪  PORT KNOCKING — ТЕСТ")
     for i, p in enumerate(state["ports"], 1):
-        _box_row(f"  {DIM}[{i}]{NC}  localhost:{CYAN}{p}{NC}")
+        _box_row(f"  {DIM}[{i}]{NC}  port {CYAN}{p}{NC}")
     _box_bottom()
 
     raw = _pk_input(f"  {CYAN}Выбор порта "
@@ -1172,7 +1243,7 @@ def _pk_menu_test(state: dict) -> None:
         return
 
     port = state["ports"][int(raw) - 1]
-    _info(f"Отправляем {state['knock_count']} SYN на localhost:{port}...")
+    _info(f"Отправляем {state['knock_count']} SYN на публичный IP:{port}...")
     result = _pk_test_knock(port)
 
     print()
@@ -1181,19 +1252,23 @@ def _pk_menu_test(state: dict) -> None:
     _box_row(f"  IPv4 SYN:          {result['sent_syns']}/"
              f"{result['knock_count']}")
     if result["success"]:
-        _box_row(f"  127.0.0.1 в xray_knocked: {GREEN}ДА{NC}")
+        ip_v4 = result.get('ipv4_ip', '?')
+        _box_row(f"  {ip_v4} в xray_knocked: {GREEN}ДА{NC}")
         _box_row(f"  {GREEN}✓ IPv4 knocking работает{NC}")
     else:
-        _box_row(f"  127.0.0.1 в xray_knocked: {RED}НЕТ{NC}")
+        ip_v4 = result.get('ipv4_ip', '?')
+        _box_row(f"  {ip_v4} в xray_knocked: {RED}НЕТ{NC}")
         _box_row(f"  {RED}✗ IPv4 тест не пройден{NC}")
     if result.get("ipv6_available"):
         _box_row(f"  IPv6 SYN:          {result['ipv6_sent_syns']}/"
                  f"{result['knock_count']}")
         if result.get("ipv6_success"):
-            _box_row(f"  ::1 в xray_knocked6:    {GREEN}ДА{NC}")
+            ip_v6 = result.get('ipv6_ip', '?')
+            _box_row(f"  {ip_v6} в xray_knocked6: {GREEN}ДА{NC}")
             _box_row(f"  {GREEN}✓ IPv6 knocking работает{NC}")
         else:
-            _box_row(f"  ::1 в xray_knocked6:    {RED}НЕТ{NC}")
+            ip_v6 = result.get('ipv6_ip', '?')
+            _box_row(f"  {ip_v6} в xray_knocked6: {RED}НЕТ{NC}")
             _box_row(f"  {RED}✗ IPv6 тест не пройден{NC}")
     else:
         _box_row(f"  IPv6:               {DIM}недоступен{NC}")
