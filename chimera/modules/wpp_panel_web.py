@@ -1773,12 +1773,17 @@ class _WppHandler(BaseHTTPRequestHandler):
     # ─── HTML PAGES (упрощённые; полный UI — отдельный подпроект) ───────────
 
     def _login_page(self) -> str:
-        """HTML страница логина (минимальный inline CSS, без зависимостей)."""
+        """HTML страница логина — использует wpp_ui.login_ui (профессиональный
+        CSS с theme toggle, SVG logo placeholder, dark/light)."""
         prefix = _panel_path()
-        return f"""<!doctype html>
-<html lang="ru"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+        try:
+            from chimera.modules import wpp_ui
+            return wpp_ui.login_ui(prefix)
+        except Exception as exc:
+            # Fallback на простой inline HTML если wpp_ui недоступен
+            self.log_message("login_ui fallback: %s: %s", type(exc).__name__, exc)
+            return f"""<!doctype html><html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WPP Web Panel — вход</title>
 <style>
 body{{margin:0;min-height:100vh;display:grid;place-items:center;
@@ -1793,8 +1798,6 @@ border:1px solid #1c2b40;border-radius:10px;background:#0a121d;color:#fff;font:i
 input:focus{{outline:none;border-color:#3b6ea5}}
 button{{width:100%;padding:11px;margin-top:18px;border:0;border-radius:10px;
 background:#2563eb;color:#fff;font:inherit;font-weight:600;cursor:pointer}}
-button:hover{{background:#1d4ed8}}
-.err{{color:#f87171;margin:14px 0 0 0;font-size:13px}}
 </style></head><body>
 <div class="b">
 <h1>{_icon('shield')} WPP Web Panel</h1>
@@ -1809,7 +1812,9 @@ button:hover{{background:#1d4ed8}}
 </div></body></html>"""
 
     def _dashboard_page(self) -> str:
-        """Главная страница панели — дашборд с метриками."""
+        """Главная страница панели — дашборд с метриками.
+        Использует wpp_ui.page_layout для профессионального CSS
+        (theme toggle dark/light, SVG icons, top nav, social links)."""
         prefix = _panel_path()
         csrf = self.csrf()
         users = _chimera_users()
@@ -1820,42 +1825,40 @@ button:hover{{background:#1d4ed8}}
         state = _chimera_state()
         domain = state.get("domain", "—")
 
-        return f"""<!doctype html>
-<html lang="ru"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+        # Body content (простые карточки с метриками)
+        body = f"""
+<div class="page-head"><div><h1>Дашборд</h1><p>Сервер, подключения и использование трафика</p></div></div>
+<div class="dashboard-grid">
+<section class="card"><div class="card-title"><h3>Сервер</h3></div><div class="metric">{_esc(domain)}</div></section>
+<section class="card"><div class="card-title"><h3>Пользователей</h3></div><div class="metric">{len(users)}</div></section>
+<section class="card"><div class="card-title"><h3>Активных</h3></div><div class="metric">{active}</div></section>
+<section class="card"><div class="card-title"><h3>↑ Входящий</h3></div><div class="metric">{_size(total_up)}</div></section>
+<section class="card"><div class="card-title"><h3>↓ Исходящий</h3></div><div class="metric">{_size(total_down)}</div></section>
+</div>
+"""
+
+        try:
+            from chimera.modules import wpp_ui
+            return wpp_ui.page_layout("Дашборд", body, prefix, "dashboard", domain)
+        except Exception as exc:
+            self.log_message("page_layout fallback: %s: %s", type(exc).__name__, exc)
+            # Fallback на простой inline HTML
+            return f"""<!doctype html><html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WPP — Дашборд</title>
-<style>
-body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
-.head{{display:flex;justify-content:space-between;align-items:center;
-padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
-.brand{{font-weight:700;font-size:17px}}
-.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
-.nav a:hover{{color:#fff}}
-.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
-gap:16px;padding:24px;max-width:1280px;margin:0 auto}}
+<style>body{{margin:0;background:#060910;color:#fff;font:15px system-ui}}
+.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;padding:24px}}
 .card{{padding:20px;border:1px solid #1c2b40;border-radius:14px;background:#0d1520}}
-.card h3{{margin:0 0 8px 0;font-size:13px;color:#9ab;font-weight:500}}
+.card h3{{margin:0 0 8px 0;font-size:13px;color:#9ab}}
 .card .v{{font-size:24px;font-weight:700}}
 </style></head><body>
-<div class="head">
-<div class="brand">{_icon('grid')} WPP Web Panel</div>
-<div class="nav">
-<a href="{prefix}/dashboard">Дашборд</a>
-<a href="{prefix}/users">Подключения</a>
-<a href="{prefix}/nodes">Ноды</a>
-<a href="{prefix}/settings">Настройки</a>
-<a href="{prefix}/logout">{_icon('logout')} Выход</a>
-</div>
-</div>
 <div class="cards">
 <div class="card"><h3>Сервер</h3><div class="v">{_esc(domain)}</div></div>
 <div class="card"><h3>Пользователей</h3><div class="v">{len(users)}</div></div>
 <div class="card"><h3>Активных</h3><div class="v">{active}</div></div>
-<div class="card"><h3>Входящий трафик</h3><div class="v">{_size(total_up)}</div></div>
-<div class="card"><h3>Исходящий трафик</h3><div class="v">{_size(total_down)}</div></div>
-</div>
-</body></html>"""
+<div class="card"><h3>↑ Входящий</h3><div class="v">{_size(total_up)}</div></div>
+<div class="card"><h3>↓ Исходящий</h3><div class="v">{_size(total_down)}</div></div>
+</div></body></html>"""
 
     def _users_page(self) -> str:
         """Список пользователей Chimera (VLESS source of truth).
@@ -1928,64 +1931,47 @@ gap:16px;padding:24px;max-width:1280px;margin:0 auto}}
             "Пользователей нет — создайте первого ↓</td></tr>"
         )
 
-        return f"""<!doctype html>
-<html lang="ru"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WPP — Подключения</title>
-<style>
-body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
-.head{{display:flex;justify-content:space-between;align-items:center;
-padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
-.brand{{font-weight:700;font-size:17px}}
-.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
-.nav a:hover{{color:#fff}}
-.table-wrap{{padding:24px;max-width:1280px;margin:0 auto}}
-table{{width:100%;border-collapse:collapse;font-size:14px}}
-th,td{{padding:10px 12px;text-align:left;border-bottom:1px solid #1c2b40}}
-th{{color:#9ab;font-weight:500;font-size:12px;text-transform:uppercase}}
-button{{padding:6px 10px;border:0;border-radius:6px;color:#fff;font:inherit;
-font-weight:500;cursor:pointer}}
-.pill{{display:inline-block;padding:2px 8px;margin-right:4px;border-radius:10px;
-background:#1c2b40;color:#56decb;font-size:11px;font-weight:500}}
-.create-form{{margin:24px 0;padding:18px;border:1px solid #1c2b40;
-border-radius:12px;background:#0d1520;display:flex;gap:10px;flex-wrap:wrap}}
-.create-form input,.create-form select{{padding:8px 12px;border:1px solid #1c2b40;
-border-radius:8px;background:#0a121d;color:#fff;font:inherit}}
-.create-form button{{background:#2563eb;padding:8px 14px}}
-</style></head><body>
-<div class="head">
-<div class="brand">{_icon('users')} Подключения</div>
-<div class="nav">
-<a href="{prefix}/dashboard">Дашборд</a>
-<a href="{prefix}/users">Подключения</a>
-<a href="{prefix}/nodes">Ноды</a>
-<a href="{prefix}/settings">Настройки</a>
-<a href="{prefix}/logout">{_icon('logout')} Выход</a>
-</div>
-</div>
-<div class="table-wrap">
-<form class="create-form" method="post" action="{prefix}/create-account">
+        # Body content (простая таблица пользователей с multi-protocol badges)
+        body = f"""
+<div class="page-head"><div><h1>Подключения</h1><p>Пользователи Chimera и их протоколы (VLESS/AWG/MTProto)</p></div>
+<form class="inline-form" method="post" action="{prefix}/create-account">
 <input type="hidden" name="csrf" value="{csrf}">
-<input type="text" name="name" placeholder="Имя пользователя" required
- maxlength="80" autocomplete="off">
+<input type="text" name="name" placeholder="Имя или email" required maxlength="80" autocomplete="off">
 <select name="protocol">
-<option value="vless">VLESS REALITY</option>
-<option value="hysteria">Hysteria2</option>
-<option value="mtproto">MTProto</option>
-<option value="awg20">AmneziaWG 2.0</option>
-<option value="awg31">AmneziaWG 3.1</option>
+<option value="vless">VLESS REALITY (+AWG+MTProto)</option>
+<option value="mtproto">MTProto (+VLESS)</option>
+<option value="awg20">AmneziaWG (+VLESS)</option>
+<option value="awg31">AmneziaWG 3.1 (+VLESS)</option>
 </select>
-<button type="submit">{_icon('add')} Создать</button>
-</form>
-<table>
+<button type="submit" class="primary">{_icon('add')} Создать</button>
+</form></div>
+<table class="data-table">
 <thead><tr><th>Статус</th><th>Имя / Email</th><th>Протоколы</th>
 <th>↑ Входящий</th><th>↓ Исходящий</th><th>Создан</th><th>Действия</th></tr></thead>
 <tbody>
 {rows}
 </tbody></table>
-</div>
-</body></html>"""
+"""
+
+        state = _chimera_state()
+        domain = state.get("domain", "—")
+        try:
+            from chimera.modules import wpp_ui
+            return wpp_ui.page_layout("Подключения", body, prefix, "users", domain)
+        except Exception as exc:
+            self.log_message("page_layout fallback (users): %s: %s", type(exc).__name__, exc)
+            # Fallback inline
+            return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<title>WPP — Подключения</title>
+<style>body{{margin:0;background:#060910;color:#fff;font:15px system-ui}}
+.wrap{{padding:24px;max-width:1280px;margin:0 auto}}
+table{{width:100%;border-collapse:collapse;font-size:14px}}
+th,td{{padding:10px 12px;text-align:left;border-bottom:1px solid #1c2b40}}
+th{{color:#9ab;font-size:12px;text-transform:uppercase}}
+button{{padding:6px 10px;border:0;border-radius:6px;color:#fff;cursor:pointer}}
+.pill{{display:inline-block;padding:2px 8px;margin-right:4px;border-radius:10px;
+background:#1c2b40;color:#56decb;font-size:11px}}
+</style></head><body><div class="wrap">{body}</div></body></html>"""
 
     def _nodes_page(self) -> str:
         """Страница нод каскада (read-only на первом этапе)."""
@@ -1993,7 +1979,7 @@ border-radius:8px;background:#0a121d;color:#fff;font:inherit}}
         state = _chimera_state()
         nodes = state.get("chain_nodes", []) or []
         if not nodes:
-            body = ('<div style="padding:48px;text-align:center;color:#9ab">'
+            body_content = ('<div style="padding:48px;text-align:center;color:#9ab">'
                     'Ноды каскада не настроены. Используйте раздел '
                     '"Установка и Система → Каскад нод" в chimera CLI.</div>')
         else:
@@ -2004,89 +1990,34 @@ border-radius:8px;background:#0a121d;color:#fff;font:inherit}}
                 role = _esc(n.get("role", ""))
                 rows.append(f"<tr><td>{host}</td><td>{port}</td>"
                             f"<td>{role}</td></tr>")
-            body = (f"<table><thead><tr><th>Host</th><th>Port</th>"
-                    f"<th>Role</th></tr></thead><tbody>"
-                    + "\n".join(rows) + "</tbody></table>")
-        return f"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WPP — Ноды</title>
-<style>
-body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
-.head{{display:flex;justify-content:space-between;align-items:center;
-padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
-.brand{{font-weight:700;font-size:17px}}
-.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
-.nav a:hover{{color:#fff}}
-.wrap{{padding:24px;max-width:1280px;margin:0 auto}}
-table{{width:100%;border-collapse:collapse}}
-th,td{{padding:10px 12px;text-align:left;border-bottom:1px solid #1c2b40}}
-</style></head><body>
-<div class="head">
-<div class="brand">{_icon('nodes')} Ноды каскада</div>
-<div class="nav">
-<a href="{prefix}/dashboard">Дашборд</a>
-<a href="{prefix}/users">Подключения</a>
-<a href="{prefix}/nodes">Ноды</a>
-<a href="{prefix}/settings">Настройки</a>
-<a href="{prefix}/logout">{_icon('logout')} Выход</a>
-</div></div>
-<div class="wrap">{body}</div>
-</body></html>"""
+            body_content = (f'<table class="data-table"><thead><tr><th>Host</th><th>Port</th>'
+                    f'<th>Role</th></tr></thead><tbody>'
+                    + "\n".join(rows) + '</tbody></table>')
+
+        body = f"""
+<div class="page-head"><div><h1>Ноды каскада</h1><p>Удалённые серверы в chain — для multi-node подписок</p></div></div>
+{body_content}
+"""
+        domain = state.get("domain", "—")
+        try:
+            from chimera.modules import wpp_ui
+            return wpp_ui.page_layout("Ноды", body, prefix, "nodes", domain)
+        except Exception as exc:
+            self.log_message("page_layout fallback (nodes): %s: %s", type(exc).__name__, exc)
+            return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<title>WPP — Ноды</title><style>body{{margin:0;background:#060910;color:#fff;font:15px system-ui}}
+.wrap{{padding:24px;max-width:1280px;margin:0 auto}}table{{width:100%;border-collapse:collapse}}
+th,td{{padding:10px 12px;text-align:left;border-bottom:1px solid #1c2b40}}</style></head>
+<body><div class="wrap">{body}</div></body></html>"""
 
     def _settings_page(self) -> str:
-        """Настройки — смена пароля + инфо о сервере."""
+        """Настройки — смена пароля + инфо о сервере + авто-обновление toggle.
+        Обёрнуто в wpp_ui.page_layout для профессионального CSS."""
         prefix = _panel_path()
         csrf = self.csrf()
         state = _chimera_state()
         domain = _esc(state.get("domain", "—"))
         xray_port = state.get("xray_port", "—")
-        return f"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WPP — Настройки</title>
-<style>
-body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
-.head{{display:flex;justify-content:space-between;align-items:center;
-padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
-.brand{{font-weight:700;font-size:17px}}
-.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
-.nav a:hover{{color:#fff}}
-.wrap{{padding:24px;max-width:800px;margin:0 auto}}
-.card{{margin-bottom:18px;padding:18px;border:1px solid #1c2b40;
-border-radius:12px;background:#0d1520}}
-.card h2{{margin:0 0 12px 0;font-size:16px;font-weight:600}}
-.card label{{display:block;margin:10px 0 4px;color:#9ab;font-size:13px}}
-.card input{{width:100%;box-sizing:border-box;padding:9px 12px;
-border:1px solid #1c2b40;border-radius:8px;background:#0a121d;color:#fff;font:inherit}}
-.card button{{margin-top:12px;padding:9px 16px;border:0;border-radius:8px;
-background:#2563eb;color:#fff;font:inherit;font-weight:500;cursor:pointer}}
-</style></head><body>
-<div class="head">
-<div class="brand">{_icon('settings')} Настройки</div>
-<div class="nav">
-<a href="{prefix}/dashboard">Дашборд</a>
-<a href="{prefix}/users">Подключения</a>
-<a href="{prefix}/nodes">Ноды</a>
-<a href="{prefix}/settings">Настройки</a>
-<a href="{prefix}/logout">{_icon('logout')} Выход</a>
-</div></div>
-<div class="wrap">
-<div class="card"><h2>Сервер</h2>
-<p>Domain: <code>{domain}</code></p>
-<p>Xray порт: <code>{xray_port}</code></p>
-</div>
-<div class="card"><h2>Смена пароля</h2>
-<form method="post" action="{prefix}/password">
-<input type="hidden" name="csrf" value="{csrf}">
-<label for="adminNewPassword">Новый пароль</label>
-<input id="adminNewPassword" type="password" name="a" minlength="3"
- required autocomplete="new-password">
-<button type="submit">Сохранить пароль</button>
-<small style="display:block;margin-top:8px;color:#9ab">
-Смена пароля завершит все сессии панели.</small>
-</form></div>
-<div class="card"><h2>Авто-обновление фронта</h2>"""
 
         # Auto-update state
         try:
@@ -2100,71 +2031,42 @@ background:#2563eb;color:#fff;font:inherit;font-weight:500;cursor:pointer}}
         csrf_field = f'<input type="hidden" name="csrf" value="{csrf}">'
         if au_enabled:
             au_state_html = (f'<p>Статус: <b>🟢 Включено</b> (cron в /etc/cron.d/wpp-autoupdate)</p>'
-                             f'<form method="post" action="{prefix}/autoupdate/toggle">'
+                             f'<form method="post" action="{prefix}/autoupdate/toggle" class="inline-form">'
                              f'{csrf_field}<input type="hidden" name="enable" value="0">'
-                             f'<button type="submit" style="background:#dc2626">Выключить</button></form>')
+                             f'<button type="submit" class="danger">Выключить</button></form>')
         else:
             au_state_html = (f'<p>Статус: <b>🔴 Выключено</b></p>'
-                             f'<form method="post" action="{prefix}/autoupdate/toggle">'
+                             f'<form method="post" action="{prefix}/autoupdate/toggle" class="inline-form">'
                              f'{csrf_field}<input type="hidden" name="enable" value="1">'
-                             f'<button type="submit">Включить</button></form>')
+                             f'<button type="submit" class="primary">Включить</button></form>')
         if not cron_installed and au_enabled:
-            au_state_html += '<p style="color:#fbbf24">⚠️ Cron файл не найден — пере-включите авто-обновление.</p>'
+            au_state_html += '<p class="note" style="color:#fbbf24">⚠️ Cron файл не найден — пере-включите авто-обновление.</p>'
 
-        return f"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WPP — Настройки</title>
-<style>
-body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
-.head{{display:flex;justify-content:space-between;align-items:center;
-padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
-.brand{{font-weight:700;font-size:17px}}
-.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
-.nav a:hover{{color:#fff}}
-.wrap{{padding:24px;max-width:800px;margin:0 auto}}
-.card{{margin-bottom:18px;padding:18px;border:1px solid #1c2b40;
-border-radius:12px;background:#0d1520}}
-.card h2{{margin:0 0 12px 0;font-size:16px;font-weight:600}}
-.card label{{display:block;margin:10px 0 4px;color:#9ab;font-size:13px}}
-.card input{{width:100%;box-sizing:border-box;padding:9px 12px;
-border:1px solid #1c2b40;border-radius:8px;background:#0a121d;color:#fff;font:inherit}}
-.card button{{margin-top:12px;padding:9px 16px;border:0;border-radius:8px;
-background:#2563eb;color:#fff;font:inherit;font-weight:500;cursor:pointer}}
-</style></head><body>
-<div class="head">
-<div class="brand">{_icon('settings')} Настройки</div>
-<div class="nav">
-<a href="{prefix}/dashboard">Дашборд</a>
-<a href="{prefix}/users">Подключения</a>
-<a href="{prefix}/nodes">Ноды</a>
-<a href="{prefix}/settings">Настройки</a>
-<a href="{prefix}/openflux">OpenFlux</a>
-<a href="{prefix}/landing">Лендинг</a>
-<a href="{prefix}/logout">{_icon('logout')} Выход</a>
-</div></div>
-<div class="wrap">
-<div class="card"><h2>Сервер</h2>
+        body = f"""
+<div class="page-head"><div><h1>Настройки</h1><p>Сервер, пароль, авто-обновление</p></div></div>
+<section class="card"><div class="card-title"><h2>Сервер</h2></div>
 <p>Domain: <code>{domain}</code></p>
 <p>Xray порт: <code>{xray_port}</code></p>
-</div>
-<div class="card"><h2>Смена пароля</h2>
-<form method="post" action="{prefix}/password">
-<input type="hidden" name="csrf" value="{csrf}">
+</section>
+<section class="card"><div class="card-title"><h2>Смена пароля</h2></div>
+<form method="post" action="{prefix}/password" class="settings-form">
+{csrf_field}
 <label for="adminNewPassword">Новый пароль</label>
-<input id="adminNewPassword" type="password" name="a" minlength="3"
- required autocomplete="new-password">
-<button type="submit">Сохранить пароль</button>
-<small style="display:block;margin-top:8px;color:#9ab">
-Смена пароля завершит все сессии панели.</small>
-</form></div>
-<div class="card"><h2>Авто-обновление фронта</h2>
+<input id="adminNewPassword" type="password" name="a" minlength="3" required autocomplete="new-password">
+<button type="submit" class="primary">Сохранить пароль</button>
+<small class="note">Смена пароля завершит все сессии панели.</small>
+</form></section>
+<section class="card"><div class="card-title"><h2>Авто-обновление фронта</h2></div>
 {au_state_html}
-<small style="display:block;margin-top:8px;color:#9ab">
-Cron: 30 3 * * * root /usr/bin/python3 /opt/chimera/main.py --wpp-autoupdate
-</small>
-</div>
-</div></body></html>"""
+<small class="note">Cron: 30 3 * * * root /usr/bin/python3 /opt/chimera/main.py --wpp-autoupdate</small>
+</section>
+"""
+        try:
+            from chimera.modules import wpp_ui
+            return wpp_ui.page_layout("Настройки", body, prefix, "settings", state.get("domain", "—"))
+        except Exception as exc:
+            self.log_message("page_layout fallback (settings): %s: %s", type(exc).__name__, exc)
+            return f"<!doctype html><html><body><div class='wrap'>{body}</div></body></html>"
 
     def _openflux_page(self) -> str:
         """OpenFlux management page — multi-profile list + create form + legacy single-profile status."""
@@ -2298,50 +2200,27 @@ systemd template units openflux@&lt;name&gt;.service. Чтобы мигриро�
         else:
             legacy_section = ""
 
-        return f"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WPP — OpenFlux (multi-profile)</title>
-<style>
-body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
-.head{{display:flex;justify-content:space-between;align-items:center;
-padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
-.brand{{font-weight:700;font-size:17px}}
-.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
-.nav a:hover{{color:#fff}}
-.wrap{{padding:24px;max-width:1280px;margin:0 auto}}
-.card{{margin-bottom:18px;padding:18px;border:1px solid #1c2b40;
-border-radius:12px;background:#0d1520}}
-.card h2{{margin:0 0 12px 0;font-size:16px;font-weight:600}}
-button{{padding:6px 10px;border:0;border-radius:6px;color:#fff;font:inherit;
-font-weight:500;cursor:pointer}}
-</style></head><body>
-<div class="head">
-<div class="brand">{_icon('shield')} OpenFlux (multi-profile)</div>
-<div class="nav">
-<a href="{prefix}/dashboard">Дашборд</a>
-<a href="{prefix}/users">Подключения</a>
-<a href="{prefix}/nodes">Ноды</a>
-<a href="{prefix}/settings">Настройки</a>
-<a href="{prefix}/openflux">OpenFlux</a>
-<a href="{prefix}/landing">Лендинг</a>
-<a href="{prefix}/components">Компоненты</a>
-<a href="{prefix}/logout">{_icon('logout')} Выход</a>
-</div></div>
-<div class="wrap">
-<div class="card">
-<h2>Профили OpenFlux ({len(profiles)})</h2>
+        body = f"""
+<div class="page-head"><div><h1>OpenFlux (multi-profile)</h1><p>Управление профилями через systemd template units</p></div></div>
+<section class="card">
+<div class="card-title"><h2>Профили OpenFlux ({len(profiles)})</h2></div>
 {profiles_table}
-</div>
-<div class="card">
-<h2>Создать новый профиль</h2>
-<small style="display:block;margin-bottom:14px;color:#9ab">
-Каждый профиль — отдельный systemd unit openflux@&lt;name&gt;.service с собственными env/key файлами.
-</small>
+</section>
+<section class="card">
+<div class="card-title"><h2>Создать новый профиль</h2></div>
+<small class="note">Каждый профиль — отдельный systemd unit openflux@&lt;name&gt;.service с собственными env/key файлами.</small>
 {create_form}
-</div>
+</section>
 {legacy_section}
-</div></body></html>"""
+"""
+        state = _chimera_state()
+        domain = state.get("domain", "—")
+        try:
+            from chimera.modules import wpp_ui
+            return wpp_ui.page_layout("OpenFlux", body, prefix, "settings", domain)
+        except Exception as exc:
+            self.log_message("page_layout fallback (openflux): %s: %s", type(exc).__name__, exc)
+            return f"<!doctype html><html><body><div class='wrap'>{body}</div></body></html>"
 
     def _components_page(self) -> str:
         """Component installer — список установленных/доступных протоколов."""
@@ -2406,43 +2285,22 @@ font-weight:500;cursor:pointer}}
 <tbody>{''.join(rows_html)}</tbody>
 </table>"""
 
-        return f"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WPP — Компоненты</title>
-<style>
-body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
-.head{{display:flex;justify-content:space-between;align-items:center;
-padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
-.brand{{font-weight:700;font-size:17px}}
-.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
-.nav a:hover{{color:#fff}}
-.wrap{{padding:24px;max-width:1280px;margin:0 auto}}
-.card{{padding:18px;border:1px solid #1c2b40;border-radius:12px;background:#0d1520}}
-.card h2{{margin:0 0 12px 0;font-size:16px;font-weight:600}}
-button{{padding:6px 10px;border:0;border-radius:6px;color:#fff;font:inherit;
-font-weight:500;cursor:pointer}}
-</style></head><body>
-<div class="head">
-<div class="brand">{_icon('settings')} Компоненты</div>
-<div class="nav">
-<a href="{prefix}/dashboard">Дашборд</a>
-<a href="{prefix}/users">Подключения</a>
-<a href="{prefix}/nodes">Ноды</a>
-<a href="{prefix}/settings">Настройки</a>
-<a href="{prefix}/openflux">OpenFlux</a>
-<a href="{prefix}/landing">Лендинг</a>
-<a href="{prefix}/components">Компоненты</a>
-<a href="{prefix}/logout">{_icon('logout')} Выход</a>
-</div></div>
-<div class="wrap"><div class="card">
-<h2>Установленные протоколы</h2>
-<small style="display:block;margin-bottom:14px;color:#9ab">
-Полная установка — через chimera CLI (интерактив). Здесь — список + индикация статуса.
-При запросе — помечается в state, install выполняется в chimera CLI.
-</small>
+        body = f"""
+<div class="page-head"><div><h1>Компоненты</h1><p>Установленные протоколы и сервисы</p></div></div>
+<section class="card">
+<div class="card-title"><h2>Установленные протоколы</h2></div>
+<small class="note">Полная установка — через chimera CLI (интерактив). Здесь — список + индикация статуса. При запросе — помечается в state, install выполняется в chimera CLI.</small>
 {components_table}
-</div></div></body></html>"""
+</section>
+"""
+        state = _chimera_state()
+        domain = state.get("domain", "—")
+        try:
+            from chimera.modules import wpp_ui
+            return wpp_ui.page_layout("Компоненты", body, prefix, "settings", domain)
+        except Exception as exc:
+            self.log_message("page_layout fallback (components): %s: %s", type(exc).__name__, exc)
+            return f"<!doctype html><html><body><div class='wrap'>{body}</div></body></html>"
 
     def _landing_page(self) -> str:
         """Landing page editor — HTML editor + presets + draft."""
@@ -2483,85 +2341,57 @@ font-weight:500;cursor:pointer}}
         draft_indicator = ('<p style="color:#fbbf24">📝 Есть несохранённый draft</p>'
                            if has_draft else '')
 
-        return f"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WPP — Лендинг</title>
-<style>
-body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
-.head{{display:flex;justify-content:space-between;align-items:center;
-padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
-.brand{{font-weight:700;font-size:17px}}
-.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
-.nav a:hover{{color:#fff}}
-.wrap{{padding:24px;max-width:1200px;margin:0 auto}}
-.card{{margin-bottom:18px;padding:18px;border:1px solid #1c2b40;
-border-radius:12px;background:#0d1520}}
-.card h2{{margin:0 0 12px 0;font-size:16px;font-weight:600}}
-textarea{{width:100%;min-height:300px;box-sizing:border-box;padding:12px;
-border:1px solid #1c2b40;border-radius:8px;background:#0a121d;color:#fff;
-font-family:ui-monospace,monospace;font-size:13px}}
-button{{padding:8px 16px;border:0;border-radius:8px;color:#fff;font:inherit;
-font-weight:500;cursor:pointer;margin-right:8px;margin-top:12px}}
-button.primary{{background:#2563eb}}button.danger{{background:#dc2626}}
-button.warn{{background:#f59e0b;color:#000}}
-select,input{{padding:8px 12px;border:1px solid #1c2b40;border-radius:8px;
-background:#0a121d;color:#fff;font:inherit}}
-small{{color:#9ab}}
-</style></head><body>
-<div class="head">
-<div class="brand">{_icon('edit')} Лендинг / HTML editor</div>
-<div class="nav">
-<a href="{prefix}/dashboard">Дашборд</a>
-<a href="{prefix}/users">Подключения</a>
-<a href="{prefix}/nodes">Ноды</a>
-<a href="{prefix}/settings">Настройки</a>
-<a href="{prefix}/openflux">OpenFlux</a>
-<a href="{prefix}/landing">Лендинг</a>
-<a href="{prefix}/logout">{_icon('logout')} Выход</a>
-</div></div>
-<div class="wrap">
-<div class="card">
-<h2>HTML редактор лендинга</h2>
+        body = f"""
+<div class="page-head"><div><h1>Лендинг / HTML editor</h1><p>Управление заглушкой / лендингом на /var/www/panel-stub/index.html</p></div></div>
+<section class="card">
+<div class="card-title"><h2>HTML редактор лендинга</h2></div>
 {draft_indicator}
-<small>Лимит: 256 KiB. Публикуется в /var/www/panel-stub/index.html</small>
+<small class="note">Лимит: 256 KiB. Публикуется в /var/www/panel-stub/index.html</small>
 <form method="post" action="{prefix}/stub/publish">
 <input type="hidden" name="csrf" value="{csrf}">
-<textarea name="html" placeholder="<!doctype html>...">{editor_content}</textarea>
+<textarea name="html" placeholder="<!doctype html>..." style="width:100%;min-height:300px;font-family:ui-monospace,monospace;font-size:13px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text)">{editor_content}</textarea>
 <button type="submit" class="primary">Опубликовать</button>
 </form>
-</div>
-<div class="card">
-<h2>Draft</h2>
-<form method="post" action="{prefix}/stub/save-draft">
+</section>
+<section class="card">
+<div class="card-title"><h2>Draft</h2></div>
+<form method="post" action="{prefix}/stub/save-draft" class="inline-form">
 <input type="hidden" name="csrf" value="{csrf}">
 <button type="submit" class="warn">Сохранить текущий textarea как draft</button>
 </form>
-<form method="post" action="{prefix}/stub/discard-draft" style="display:inline">
+<form method="post" action="{prefix}/stub/discard-draft" class="inline-form">
 <input type="hidden" name="csrf" value="{csrf}">
 <button type="submit" class="danger">Удалить draft</button>
 </form>
-</div>
-<div class="card">
-<h2>Готовые пресеты</h2>
-<form method="post" action="{prefix}/stub/apply-preset" style="display:inline">
+</section>
+<section class="card">
+<div class="card-title"><h2>Готовые пресеты</h2></div>
+<form method="post" action="{prefix}/stub/apply-preset" class="inline-form">
 <input type="hidden" name="csrf" value="{csrf}">
 <select name="preset">{preset_options_html}</select>
 <button type="submit">Применить</button>
 </form>
-</div>
-<div class="card">
-<h2>Сохранить как свой preset</h2>
+</section>
+<section class="card">
+<div class="card-title"><h2>Сохранить как свой preset</h2></div>
 <form method="post" action="{prefix}/stub/save-preset">
 <input type="hidden" name="csrf" value="{csrf}">
 <input type="text" name="name" placeholder="Имя (1-80)" maxlength="80" required>
 <input type="text" name="description" placeholder="Описание (опц.)" maxlength="180">
-<textarea name="html" placeholder="<!doctype html>..." style="min-height:100px"></textarea>
+<textarea name="html" placeholder="<!doctype html>..." style="min-height:100px;width:100%;font-family:ui-monospace,monospace;font-size:13px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text)"></textarea>
 <button type="submit" class="primary">Сохранить preset</button>
 </form>
-</div>
+</section>
 {custom_html}
-</div></body></html>"""
+"""
+        state = _chimera_state()
+        domain = state.get("domain", "—")
+        try:
+            from chimera.modules import wpp_ui
+            return wpp_ui.page_layout("Лендинг", body, prefix, "settings", domain)
+        except Exception as exc:
+            self.log_message("page_layout fallback (landing): %s: %s", type(exc).__name__, exc)
+            return f"<!doctype html><html><body><div class='wrap'>{body}</div></body></html>"
 
 
 # ─── START SERVER ────────────────────────────────────────────────────────────
