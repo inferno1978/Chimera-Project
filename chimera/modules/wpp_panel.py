@@ -449,7 +449,7 @@ def _install() -> tuple[bool, str]:
     core = _core_module()
     _box_top = core._box_top
     _box_row = core._box_row
-    _box_bot = core._box_bot
+    _box_bottom = core._box_bottom
 
     # ── 0. Проверка root ──
     if not _is_root():
@@ -464,7 +464,7 @@ def _install() -> tuple[bool, str]:
     _box_top("🌐  WPP WEB PANEL — УСТАНОВКА")
     _box_row(f"  Порт по умолчанию: {_DEFAULT_PORT} (рядом с b4 :9700)")
     _box_row("  Будет запрошен порт — можно выбрать любой свободный 1024-65535")
-    _box_bot()
+    _box_bottom()
 
     port = _ask_web_port(_DEFAULT_PORT)
     if port is None:
@@ -546,7 +546,7 @@ def _install() -> tuple[bool, str]:
     _box_row(f"  Затем в браузере: http://localhost:{port}")
     _box_row("  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄")
     _box_row("  Для публичного доступа (TLS) — включите Nginx Front в меню.")
-    _box_bot()
+    _box_bottom()
 
     return True, "Установлено"
 
@@ -769,7 +769,7 @@ def _change_password() -> tuple[bool, str]:
     core = _core_module()
     _box_top = core._box_top
     _box_row = core._box_row
-    _box_bot = core._box_bot
+    _box_bottom = core._box_bottom
 
     port = state.get("web_port", 0)
     try:
@@ -784,7 +784,7 @@ def _change_password() -> tuple[bool, str]:
     _box_row("  Все активные сессии аннулированы — перелогиньтесь.")
     _box_row(f"  SSH-tunnel: ssh -L {port}:127.0.0.1:{port} root@{public_ip}")
     _box_row(f"  URL:        http://localhost:{port}")
-    _box_bot()
+    _box_bottom()
     return True, "Пароль изменён"
 
 
@@ -928,7 +928,7 @@ def _access_menu() -> None:
         core = _core_module()
         _box_top = core._box_top
         _box_row = core._box_row
-        _box_bot = core._box_bot
+        _box_bottom = core._box_bottom
 
         state = _load_state()
         port = state.get("web_port", 0)
@@ -954,7 +954,7 @@ def _access_menu() -> None:
         _box_row("  ─────────────────────────────────────────")
         _box_row("  1 — Переключить Nginx Front (TLS / SSH-tunnel)")
         _box_row("  Q — Назад")
-        _box_bot()
+        _box_bottom()
 
         try:
             choice = proto_ask("  Выбор: ", c=True).strip().lower()
@@ -987,7 +987,7 @@ def do_wpp_panel_menu() -> None:
     core = _core_module()
     _box_top = core._box_top
     _box_row = core._box_row
-    _box_bot = core._box_bot
+    _box_bottom = core._box_bottom
 
     while True:
         state = _load_state()
@@ -1024,7 +1024,7 @@ def do_wpp_panel_menu() -> None:
         else:
             _box_row("  1 — Установить")
         _box_row("  Q — Назад")
-        _box_bot()
+        _box_bottom()
 
         try:
             choice = proto_ask("  Выбор: ", c=True).strip().lower()
