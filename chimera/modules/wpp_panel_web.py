@@ -1862,32 +1862,23 @@ background:#2563eb;color:#fff;font:inherit;font-weight:600;cursor:pointer}}
         csrf = self.csrf()
         state = _chimera_state()
         domain = state.get("domain", "—")
-        users = _chimera_users()
-        traffic = _chimera_traffic()
-        total_up = sum(t.get("up", 0) for t in traffic.values())
-        total_down = sum(t.get("down", 0) for t in traffic.values())
-        active = sum(1 for t in traffic.values() if t.get("enabled", True))
 
-        # Body content (5 метрик-карточек) — будет live-patched через JS
-        body = f"""
-<div class="dashboard-overview" data-live-block="overview">
-<section class="card"><div class="card-title"><h3>Сервер</h3></div><div class="metric">{_esc(domain)}</div></section>
-<section class="card"><div class="card-title"><h3>Пользователей</h3></div><div class="metric">{len(users)}</div></section>
-<section class="card"><div class="card-title"><h3>Активных</h3></div><div class="metric">{active}</div></section>
-<section class="card"><div class="card-title"><h3>↑ Входящий</h3></div><div class="metric">{_size(total_up)}</div></section>
-<section class="card"><div class="card-title"><h3>↓ Исходящий</h3></div><div class="metric">{_size(total_down)}</div></section>
-</div>
-"""
+        # Начальный body — пустой, JS его заполнит через /dashboard-data
+        # (dashboard_page вызовет refresh() сразу после load)
+        initial_body = '<div data-live-block="overview"></div>'
 
         try:
             from chimera.modules import wpp_ui
             # dashboard_page добавляет live-indicator + JS для fetch'а
             # /dashboard-data каждые 5 секунд + refresh button + auto-update check
-            body_full = wpp_ui.dashboard_page(body, prefix, csrf)
+            body_full = wpp_ui.dashboard_page(initial_body, prefix, csrf)
             return wpp_ui.page_layout("Дашборд", body_full, prefix, "dashboard", domain)
         except Exception as exc:
             self.log_message("page_layout fallback (dashboard): %s: %s", type(exc).__name__, exc)
-            return f"<!doctype html><html><body><div class='wrap'>{body}</div></body></html>"
+            return f"""<!doctype html><html><body>
+<h1>Дашборд</h1><p>Сервер: {_esc(domain)}</p>
+<p>Ошибка: {_esc(str(exc))}</p>
+</body></html>"""
 
     def _users_page(self) -> str:
         """Список пользователей Chimera (VLESS source of truth).
@@ -2449,31 +2440,78 @@ systemd template units openflux@&lt;name&gt;.service. Чтобы мигриро�
         для live-refresh (fetch каждые 5 секунд).
 
         Returns: {html: <dashboard_body_html>, update: <update_status>}
+
+        Делегирует в:
+          • chimera.modules.wpp_metrics.dashboard_data(hours) — real metrics
+            (latest + history for chart)
+          • chimera.modules.wpp_ui.dashboard_body() — full dashboard HTML
+            (resources, chart, services, traffic totals, user glances)
         """
         try:
-            from chimera.modules import wpp_ui
+            from chimera.modules import wpp_metrics, wpp_ui
             state = _chimera_state()
             domain = state.get("domain", "—")
-            users = _chimera_users()
-            traffic = _chimera_traffic()
-            total_up = sum(t.get("up", 0) for t in traffic.values())
-            total_down = sum(t.get("down", 0) for t in traffic.values())
-            active = sum(1 for t in traffic.values() if t.get("enabled", True))
+            csrf = self.csrf()
 
-            # Простая dashboard body (без subscription cards — нет модели)
-            body = f"""
+            # Получаем метрики (latest + history for chart)
+            metrics_data = wpp_metrics.dashboard_data(hours)
+
+            # Traffic dict {email: {up, down, ...}} —
+            # для dashboard_body: нужен dict {uid_or_email: {up, down, ...}}
+            traffic = _chimera_traffic()
+
+            # Subscriptions (chimera не имеет WPP-style subscriptions — empty)
+            subs = []
+            # Profiles (chimera users = "profiles" в WPP терминах)
+            profiles = []
+            for u in _chimera_users():
+                email = str(u.get("email") or "")
+                if not email:
+                    continue
+                profiles.append({
+                    "id":              str(u.get("uuid") or ""),
+                    "name":            str(u.get("name") or email),
+                    "protocol":        "vless",  # canonical
+                    "enabled":         not u.get("disabled") and not u.get("blocked"),
+                    "secret":          "",  # не показываем
+                    "backend_port":    443,
+                    "subscription_id": None,
+                    "username":        email.split("@")[0],
+                })
+
+            # proxy_link function (для client_records / direct_card)
+            def _proxy_link(protocol: str, secret: str, port: int,
+                            name: str = "", username: str = "") -> str:
+                return _chimera_proxy_link(protocol, secret, port, name, username)
+
+            # Генерируем dashboard body —
+            # NB: dashboard_body ожидает subs в формате WPP (с token, devices, и т.д.),
+            # profiles — список WPP-профилей. У нас упрощённая модель, поэтому
+            # передаём как есть. dashboard_body вызовет client_records() который
+            # адаптирует к формату карточек.
+            current = _wpp_state_front_version()
+            try:
+                body_html = wpp_ui.dashboard_body(
+                    metrics_data, subs, profiles, traffic,
+                    _panel_path(), domain, csrf, _proxy_link,
+                    current, hours,
+                )
+            except Exception as exc:
+                self.log_message("dashboard_body failed: %s: %s",
+                                 type(exc).__name__, exc)
+                # Fallback на простой body если dashboard_body упала
+                body_html = f"""
 <div class="dashboard-overview" data-live-block="overview">
-<section class="card"><div class="card-title"><h3>Сервер</h3></div><div class="metric">{_esc(domain)}</div></section>
-<section class="card"><div class="card-title"><h3>Пользователей</h3></div><div class="metric">{len(users)}</div></section>
-<section class="card"><div class="card-title"><h3>Активных</h3></div><div class="metric">{active}</div></section>
-<section class="card"><div class="card-title"><h3>↑ Входящий</h3></div><div class="metric">{_size(total_up)}</div></section>
-<section class="card"><div class="card-title"><h3>↓ Исходящий</h3></div><div class="metric">{_size(total_down)}</div></section>
+<section class="card"><h3>Сервер</h3><div class="metric">{_esc(domain)}</div></section>
+<section class="card"><h3>Пользователей</h3><div class="metric">{len(profiles)}</div></section>
 </div>
 """
+
             update_status = self._update_status()
-            return {"html": body, "update": update_status}
+            return {"html": body_html, "update": update_status}
         except Exception as exc:
-            self.log_message("_dashboard_data failed: %s: %s", type(exc).__name__, exc)
+            self.log_message("_dashboard_data failed: %s: %s",
+                             type(exc).__name__, exc)
             return {"html": "<p>Ошибка генерации dashboard</p>", "update": {}}
 
     def _update_status(self) -> dict:
