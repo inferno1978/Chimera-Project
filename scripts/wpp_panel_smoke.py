@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlencode
 
 # Устанавливаем PANEL_PATH="/" ДО импорта wpp_panel_web — иначе module-level
 # constant PANEL_PATH уже будет захвачен как "/panel", и изменение env
@@ -56,9 +57,10 @@ def _http_get(host: str, port: int, path: str,
 
 def _http_post(host: str, port: int, path: str, form: dict,
                cookies: dict | None = None) -> tuple[int, dict, str]:
-    """POST form. Returns (status, headers, body)."""
+    """POST form. Returns (status, headers, body). URL-encodes values properly."""
     conn = http.client.HTTPConnection(host, port, timeout=5)
-    body = "&".join(f"{k}={v}" for k, v in form.items())
+    # URL-encode values properly (urllib.parse.urlencode handles <, >, etc.)
+    body = urlencode(form)
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     if cookies:
         headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
@@ -111,6 +113,15 @@ def main() -> int:
     # Monkey-patch state file path
     wpp_state.STATE_FILE = tmp_state
     print(f"[smoke] state file: {tmp_state}")
+
+    # Monkey-patch _STUB_FILE / _STUB_DRAFT / _STUB_PRESETS_FILE → writable tmp paths
+    # (smoke test не root, /var/www/ недоступен для записи)
+    tmp_stub_dir = Path(f"/tmp/wpp_smoke_stub_{os.getpid()}")
+    tmp_stub_dir.mkdir(parents=True, exist_ok=True)
+    wpp_panel_web._STUB_FILE = tmp_stub_dir / "index.html"
+    wpp_panel_web._STUB_DRAFT = tmp_stub_dir / "draft.html"
+    wpp_panel_web._STUB_PRESETS_FILE = tmp_stub_dir / "presets.json"
+    print(f"[smoke] stub dir: {tmp_stub_dir}")
 
     # Запускаем сервер в thread
     server_thread = threading.Thread(
@@ -258,8 +269,215 @@ def main() -> int:
         except Exception as exc:
             check("GET /dashboard no auth", False, str(exc))
 
+    # ── 12. New session for Phase 2 endpoints ──
+    session_cookie = None
+    try:
+        status, headers, _ = _http_post("127.0.0.1", port, "/login",
+                                        {"user": "admin", "password": "testpass"})
+        if status == 303:
+            cookie = _extract_cookie(headers.get("Set-Cookie", ""))
+            if cookie:
+                session_cookie = {cookie[0]: cookie[1]}
+    except Exception:
+        pass
+
+    if session_cookie:
+        # ── 13. GET /openflux (page) ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/openflux",
+                                        cookies=session_cookie)
+            check("GET /openflux → 200", status == 200, f"got {status}")
+            check("GET /openflux contains OpenFlux header",
+                  "OpenFlux" in body, "missing OpenFlux text")
+        except Exception as exc:
+            check("GET /openflux", False, str(exc))
+
+        # ── 14. GET /landing (page) ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/landing",
+                                        cookies=session_cookie)
+            check("GET /landing → 200", status == 200, f"got {status}")
+            check("GET /landing contains HTML editor (textarea)",
+                  "textarea" in body.lower(), "no textarea")
+        except Exception as exc:
+            check("GET /landing", False, str(exc))
+
+        # ── 15. GET /api/stub (JSON) ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/api/stub",
+                                        cookies=session_cookie)
+            check("GET /api/stub → 200", status == 200, f"got {status}")
+            data = json.loads(body)
+            check("GET /api/stub has 'html' key", "html" in data,
+                  f"keys={list(data.keys())}")
+        except Exception as exc:
+            check("GET /api/stub", False, str(exc))
+
+        # ── 16. GET /api/stub/presets (JSON) — список пресетов ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/api/stub/presets",
+                                        cookies=session_cookie)
+            check("GET /api/stub/presets → 200", status == 200, f"got {status}")
+            data = json.loads(body)
+            check("GET /api/stub/presets has 'presets' list",
+                  isinstance(data.get("presets"), list),
+                  f"data={data!r}")
+            n = len(data.get("presets", []))
+            check(f"GET /api/stub/presets has >=3 presets (got {n})", n >= 3)
+        except Exception as exc:
+            check("GET /api/stub/presets", False, str(exc))
+
+        # ── 17. POST /stub/publish (publish HTML) — need CSRF ──
+        import re as _re_mod
+        try:
+            # Get CSRF from /landing page
+            status, _, body = _http_get("127.0.0.1", port, "/landing",
+                                        cookies=session_cookie)
+            m = _re_mod.search(r'name="csrf" value="([0-9a-f]+)"', body)
+            csrf_token = m.group(1) if m else ""
+            check("GET /landing has csrf token", bool(csrf_token),
+                  "no csrf in HTML")
+            if csrf_token:
+                status, _, _ = _http_post(
+                    "127.0.0.1", port, "/stub/publish",
+                    {"csrf": csrf_token,
+                     "html": "<!doctype html><title>test</title>"},
+                    cookies=session_cookie,
+                )
+                check("POST /stub/publish → 303", status == 303,
+                      f"got {status}")
+        except Exception as exc:
+            check("POST /stub/publish", False, str(exc))
+
+        # ── 18. GET /api/stub should now return the published HTML ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/api/stub",
+                                        cookies=session_cookie)
+            check("GET /api/stub after publish → 200", status == 200)
+            data = json.loads(body)
+            check("GET /api/stub.html contains 'test'",
+                  "test" in data.get("html", ""))
+        except Exception as exc:
+            check("GET /api/stub after publish", False, str(exc))
+
+        # ── 19. POST /stub/save-draft + verify ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/landing",
+                                        cookies=session_cookie)
+            m = _re_mod.search(r'name="csrf" value="([0-9a-f]+)"', body)
+            csrf_token = m.group(1) if m else ""
+            if csrf_token:
+                status, _, _ = _http_post(
+                    "127.0.0.1", port, "/stub/save-draft",
+                    {"csrf": csrf_token,
+                     "html": "<!doctype html><title>draft</title>"},
+                    cookies=session_cookie,
+                )
+                check("POST /stub/save-draft → 303", status == 303,
+                      f"got {status}")
+                status, _, body = _http_get("127.0.0.1", port,
+                                            "/api/stub/draft",
+                                            cookies=session_cookie)
+                data = json.loads(body)
+                check("GET /api/stub/draft has 'draft' content",
+                      "draft" in data.get("html", ""))
+        except Exception as exc:
+            check("POST /stub/save-draft", False, str(exc))
+
+        # ── 20. POST /stub/discard-draft ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/landing",
+                                        cookies=session_cookie)
+            m = _re_mod.search(r'name="csrf" value="([0-9a-f]+)"', body)
+            csrf_token = m.group(1) if m else ""
+            if csrf_token:
+                status, _, _ = _http_post(
+                    "127.0.0.1", port, "/stub/discard-draft",
+                    {"csrf": csrf_token},
+                    cookies=session_cookie,
+                )
+                check("POST /stub/discard-draft → 303", status == 303,
+                      f"got {status}")
+                status, _, body = _http_get("127.0.0.1", port,
+                                            "/api/stub/draft",
+                                            cookies=session_cookie)
+                data = json.loads(body)
+                check("Draft empty after discard",
+                      not data.get("html"))
+        except Exception as exc:
+            check("POST /stub/discard-draft", False, str(exc))
+
+        # ── 21. GET /api/openflux (JSON state) ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/api/openflux",
+                                        cookies=session_cookie)
+            check("GET /api/openflux → 200", status == 200, f"got {status}")
+            data = json.loads(body)
+            check("GET /api/openflux has 'installed' key",
+                  "installed" in data, f"keys={list(data.keys())}")
+        except Exception as exc:
+            check("GET /api/openflux", False, str(exc))
+
+        # ── 22. GET /api/subscription (admin info) ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/api/subscription",
+                                        cookies=session_cookie)
+            check("GET /api/subscription → 200", status == 200, f"got {status}")
+            data = json.loads(body)
+            check("GET /api/subscription is dict",
+                  isinstance(data, dict), f"got {type(data).__name__}")
+        except Exception as exc:
+            check("GET /api/subscription", False, str(exc))
+
+        # ── 23. GET /api/version ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/api/version",
+                                        cookies=session_cookie)
+            check("GET /api/version → 200", status == 200, f"got {status}")
+            data = json.loads(body)
+            check("GET /api/version has 'front_version'",
+                  "front_version" in data, f"keys={list(data.keys())}")
+        except Exception as exc:
+            check("GET /api/version", False, str(exc))
+
+        # ── 24. GET /qr/user/<invalid-uid>/vless → 404 ──
+        try:
+            status, _, _ = _http_get(
+                "127.0.0.1", port,
+                "/qr/user/0000000000000000/vless",
+                cookies=session_cookie,
+            )
+            check("GET /qr/user/invalid → 404",
+                  status == 404, f"got {status}")
+        except Exception as exc:
+            check("GET /qr/user/invalid", False, str(exc))
+
+        # ── 25. POST /autoupdate/toggle (disable) — endpoint exists ──
+        try:
+            status, _, body = _http_get("127.0.0.1", port, "/settings",
+                                        cookies=session_cookie)
+            m = _re_mod.search(r'name="csrf" value="([0-9a-f]+)"', body)
+            csrf_token = m.group(1) if m else ""
+            if csrf_token:
+                status, _, _ = _http_post(
+                    "127.0.0.1", port, "/autoupdate/toggle",
+                    {"csrf": csrf_token, "enable": "0"},
+                    cookies=session_cookie,
+                )
+                # 303 = success (redirect to /settings), 503 = need root
+                check("POST /autoupdate/toggle → 303 or 503",
+                      status in (303, 503), f"got {status}")
+        except Exception as exc:
+            check("POST /autoupdate/toggle", False, str(exc))
+
     # Cleanup
     tmp_state.unlink(missing_ok=True)
+    # Cleanup tmp stub dir
+    import shutil as _shutil
+    try:
+        _shutil.rmtree(tmp_stub_dir, ignore_errors=True)
+    except Exception:
+        pass
 
     print()
     print(f"=== RESULT: {passed} passed, {failed} failed ===")
