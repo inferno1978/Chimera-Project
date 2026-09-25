@@ -193,13 +193,33 @@ def ask_domain(default: "Optional[str]" = None) -> "Optional[str]":
 
     Args:
       default: домен по умолчанию (если Enter — используется он).
-                Если None — предлагается PARAM_DOMAIN.
+                Если None — предлагается PARAM_DOMAIN из chimera._core,
+                с fallback на state.json 'domain' field (если PARAM_DOMAIN пустой).
+
+    Авто-подстановка выгодна всем панелям (Triple/B4/WPP): домен уже задан
+    при установке Chimera (VLESS REALITY), не нужно вводить руками повторно.
     """
     core = _core_module()
-    CYAN, NC, DIM, YELLOW, GREEN = core.CYAN, core.NC, core.DIM, core.YELLOW, core.GREEN
+    CYAN, NC, DIM, YELLOW, GREEN = core.CYAN, core.YELLOW, core.GREEN
 
     if default is None:
         default = getattr(core, "PARAM_DOMAIN", "") or ""
+
+    # Fallback: если PARAM_DOMAIN пустой (например chimera._core ещё не
+    # загрузил state в globals, или вызывается из под-меню где PARAM_DOMAIN
+    # ещё не инициализирован) — читаем напрямую из state.json.
+    if not default:
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            state_file = _Path("/var/lib/xray-installer/state.json")
+            if state_file.exists():
+                state = _json.loads(state_file.read_text())
+                domain = (state.get("domain") or "").strip()
+                if domain:
+                    default = domain.lower()
+        except Exception:
+            pass
 
     print()
     if default:
@@ -207,13 +227,13 @@ def ask_domain(default: "Optional[str]" = None) -> "Optional[str]":
             ans = input(f"{CYAN}  Домен (Enter={default}): {NC}").strip()
         except (EOFError, KeyboardInterrupt):
             return None
-        return ans or default
+        return (ans or default).lower()
     else:
         try:
             ans = input(f"{CYAN}  Домен: {NC}").strip()
         except (EOFError, KeyboardInterrupt):
             return None
-        return ans or None
+        return (ans or None)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
