@@ -913,6 +913,7 @@ def _pk_test_knock(port: int) -> dict:
     skip_v4_reason = ""
     sent_v4 = 0
     in_set_v4 = False
+    v4_bypass = False  # SYN connected but IP not in xray_knocked → lo-bypass
 
     if not pub_v4:
         skip_v4 = True
@@ -935,13 +936,20 @@ def _pk_test_knock(port: int) -> dict:
                 except Exception:
                     pass
             # 3. Send N SYN to pub_v4:port
+            # NOTE: Linux routes self-connections through lo (loopback),
+            # so UFW's '-A ufw-before-input -i lo -j ACCEPT' will bypass
+            # knocking. We detect this: if SYN connected but IP not in
+            # xray_knocked → lo-bypass detected → report accordingly.
+            connected_v4 = False
             for _ in range(knock_count):
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.settimeout(0.5)
-                    sock.connect_ex((pub_v4, port))
+                    rc = sock.connect_ex((pub_v4, port))
                     sock.close()
                     sent_v4 += 1
+                    if rc == 0:
+                        connected_v4 = True
                 except Exception:
                     pass
                 time.sleep(0.05)
@@ -950,6 +958,9 @@ def _pk_test_knock(port: int) -> dict:
             # 5. Check pub_v4 in xray_knocked
             r = _run(["ipset", "list", _PK_KNOCKED_SET], capture=True)
             in_set_v4 = pub_v4 in (r.stdout or "")
+            # 6. Detect lo-bypass: SYN connected but IP not in xray_knocked
+            if connected_v4 and not in_set_v4:
+                v4_bypass = True
 
     # ── IPv6 test ────────────────────────────────────────────────────────────
     pub_v6 = _get_server_ipv6()
@@ -1009,6 +1020,7 @@ def _pk_test_knock(port: int) -> dict:
         "success":           in_set_v4,
         "ipv4_skip":         skip_v4,
         "ipv4_skip_reason":  skip_v4_reason,
+        "ipv4_bypass":       v4_bypass,
         # IPv6
         "ipv6_available":     ipv6_available,
         "ipv6_ip":           pub_v6,
@@ -1255,6 +1267,16 @@ def _pk_menu_test(state: dict) -> None:
         ip_v4 = result.get('ipv4_ip', '?')
         _box_row(f"  {ip_v4} в xray_knocked: {GREEN}ДА{NC}")
         _box_row(f"  {GREEN}✓ IPv4 knocking работает{NC}")
+    elif result.get("ipv4_bypass"):
+        ip_v4 = result.get('ipv4_ip', '?')
+        _box_row(f"  {ip_v4} в xray_knocked: {YELLOW}НЕТ{NC}")
+        _box_row(f"  {YELLOW}⚠ IPv4 тест невозможен с сервера{NC}")
+        _box_row(f"  {DIM}Linux маршрутизирует self-connections через lo,{NC}")
+        _box_row(f"  {DIM}UFW '-i lo -j ACCEPT' обходит knocking.{NC}")
+        _box_row(f"  {DIM}Knocking работает для внешних IP.{NC}")
+        _box_row(f"  {DIM}Проверьте: /probe <ip> 443 из TG-бота{NC}")
+    elif result.get("ipv4_skip"):
+        _box_row(f"  {YELLOW}⚠ {result.get('ipv4_skip_reason', 'skip')}{NC}")
     else:
         ip_v4 = result.get('ipv4_ip', '?')
         _box_row(f"  {ip_v4} в xray_knocked: {RED}НЕТ{NC}")
@@ -1266,6 +1288,8 @@ def _pk_menu_test(state: dict) -> None:
             ip_v6 = result.get('ipv6_ip', '?')
             _box_row(f"  {ip_v6} в xray_knocked6: {GREEN}ДА{NC}")
             _box_row(f"  {GREEN}✓ IPv6 knocking работает{NC}")
+        elif result.get("ipv6_skip"):
+            _box_row(f"  {YELLOW}⚠ {result.get('ipv6_skip_reason', 'skip')}{NC}")
         else:
             ip_v6 = result.get('ipv6_ip', '?')
             _box_row(f"  {ip_v6} в xray_knocked6: {RED}НЕТ{NC}")
