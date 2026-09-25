@@ -937,10 +937,18 @@ def tg(msg):
     try:
         c = json.loads(TG_CONFIG.read_text()) if TG_CONFIG.exists() else {{}}
         t, ch = c.get('token'), c.get('chat_id')
+        # FIX: добавляем hostname + server_ip в начало сообщения,
+        # чтобы было видно на каком сервере сработал autoban.
+        import socket as _sock
+        _host = _sock.gethostname().split('.')[0]
+        _sip  = c.get('server_ip', '')
+        _header = f'[{_host}' + (f' | {{_sip}}' if _sip else '') + '] '
         if t and ch:
             subprocess.run(['curl','-s','-o','/dev/null','-m','10',
                 f'https://api.telegram.org/bot{{t}}/sendMessage',
-                '-d',f'chat_id={{ch}}','-d',f'text={{msg}}'],capture_output=True)
+                '-d',f'chat_id={{ch}}',
+                '-d',f'text={{_header}}{{msg}}',
+                '-d','parse_mode=HTML'],capture_output=True)
     except: pass
 
 def fw_ban(ip):
@@ -1153,7 +1161,7 @@ for ip, cnt in ip_errors.items():
             BAN_LOG.parent.mkdir(parents=True,exist_ok=True)
             with open(BAN_LOG,'a') as f:
                 f.write(f'[{{datetime.now():%Y-%m-%d %H:%M:%S}}] BAN {{ip}}: {{cnt}} errors\\n')
-            tg(f'AutoBan: {{ip}} banned ({{cnt}} TLS errors in {{window}}min)')
+            tg(f'AutoBan: <b>{{ip}}</b> banned ({{cnt}} TLS errors in {{window}}min)')
             #  FIX: добавляем запись в ban_history — иначе пункт меню [6]
             # «История банов» оставался пустым, хотя banned-список рос.
             # Раньше cron только инициализировал пустой ban_history если
