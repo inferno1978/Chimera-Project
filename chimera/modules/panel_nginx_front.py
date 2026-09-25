@@ -200,7 +200,9 @@ def ask_domain(default: "Optional[str]" = None) -> "Optional[str]":
     при установке Chimera (VLESS REALITY), не нужно вводить руками повторно.
     """
     core = _core_module()
-    CYAN, NC, DIM, YELLOW, GREEN = core.CYAN, core.YELLOW, core.GREEN
+    CYAN, NC, DIM, YELLOW, GREEN = (
+        core.CYAN, core.NC, core.DIM, core.YELLOW, core.GREEN
+    )
 
     if default is None:
         default = getattr(core, "PARAM_DOMAIN", "") or ""
