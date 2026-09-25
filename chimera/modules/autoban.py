@@ -942,7 +942,7 @@ def tg(msg):
         import socket as _sock
         _host = _sock.gethostname().split('.')[0]
         _sip  = c.get('server_ip', '')
-        _header = f'[{_host}' + (f' | {{_sip}}' if _sip else '') + '] '
+        _header = f'[{{_host}}' + (f' | {{_sip}}' if _sip else '') + '] '
         if t and ch:
             subprocess.run(['curl','-s','-o','/dev/null','-m','10',
                 f'https://api.telegram.org/bot{{t}}/sendMessage',
