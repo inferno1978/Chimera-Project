@@ -335,7 +335,365 @@ def _chimera_proxy_link(protocol: str, secret: str, port: int,
         return f"vless://{secret}@{domain}:{port}?type=tcp&security=reality#{name}"
 
 
-# ─── HTTP HANDLER ────────────────────────────────────────────────────────────
+# ─── ADAPTERS к chimera linkqr_lib / subscription / openflux ────────────────
+# Phase 2: QR codes, subscriptions list, OpenFlux state, landing presets.
+
+def _chimera_links_for_user(user_dict: dict) -> dict[str, str]:
+    """
+    Возвращает все доступные client-links для пользователя через
+    chimera.modules.linkqr_lib.build_all_links_for_user(). Pattern:
+      {"vless": "vless://...", "awg": "awg://...", "subscription": "https://.../sub/...",
+       "hysteria2": "hysteria://...", "mieru": "mieru://...", "naive": "naive+https://..."}
+    Пустой dict если linkqr_lib недоступен или user невалиден.
+    """
+    try:
+        from chimera.modules import linkqr_lib
+        return linkqr_lib.build_all_links_for_user(user_dict) or {}
+    except Exception:
+        return {}
+
+
+def _chimera_subscription_info(user_dict: dict | None = None) -> dict:
+    """
+    Возвращает инфо о подписке для пользователя. Если user_dict=None —
+    возвращает admin overview всех подписок.
+    Pattern: chimera.modules.subscription.get_portal_subscription_info(user)
+    или get_admin_subscription_info() если user=None.
+    """
+    try:
+        from chimera.modules import subscription
+        if user_dict is None:
+            return subscription.get_admin_subscription_info() or {}
+        return subscription.get_portal_subscription_info(user_dict) or {}
+    except Exception:
+        return {}
+
+
+def _generate_qr_png_bytes(text: str) -> bytes | None:
+    """
+    Генерирует QR-код как PNG bytes (через chimera.modules.linkqr_lib).
+    Возвращает None при ошибке.
+    """
+    try:
+        from chimera.modules import linkqr_lib
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = Path(f.name)
+        try:
+            ok = linkqr_lib.generate_qr_png(text, tmp_path)
+            if not ok:
+                return None
+            return tmp_path.read_bytes()
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    except Exception:
+        return None
+
+
+# ─── OPENFLUX STATE (single-profile — chimera's openflux.py не имеет multi) ──
+
+_OPENFLUX_STATE_FILE = Path("/var/lib/xray-installer/openflux.json")
+
+
+def _chimera_openflux_state() -> dict:
+    """
+    Возвращает masked-state OpenFlux (без secret-полей типа transport_key).
+    Single-profile — chimera.modules.openflux.py пока не имеет multi-profile API.
+    """
+    try:
+        if not _OPENFLUX_STATE_FILE.exists():
+            return {"installed": False, "enabled": False, "bridge_active": False}
+        data = json.loads(_OPENFLUX_STATE_FILE.read_text())
+        # Убираем секреты
+        safe = {
+            "installed":     bool(data.get("installed_at")),
+            "transport":     data.get("transport", ""),
+            "enabled":       False,  # вычисляем ниже
+            "bridge_active": bool(data.get("bridge_active", False)),
+            "bridge_port":   data.get("bridge_port"),
+            "bridge_bind":   data.get("bridge_bind", "127.0.0.1"),
+            "installed_at":  data.get("installed_at", ""),
+            "doc_url_masked": _mask_doc_url(data.get("doc_url", "")),
+        }
+        # Проверяем активность сервиса
+        try:
+            r = subprocess.run(["systemctl", "is-active", "--quiet", "openflux"],
+                               capture_output=True, timeout=5)
+            safe["enabled"] = (r.returncode == 0)
+        except Exception:
+            pass
+        return safe
+    except Exception:
+        return {"installed": False, "enabled": False, "bridge_active": False}
+
+
+def _mask_doc_url(url: str) -> str:
+    """Маскирует doc_url — оставляет только host + path без query (?sk=...)."""
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    except Exception:
+        return "<masked>"
+
+
+def _openflux_set_enabled(enable: bool) -> tuple[bool, str]:
+    """Включает/выключает OpenFlux сервис."""
+    try:
+        if enable:
+            r = subprocess.run(["systemctl", "enable", "--now", "openflux"],
+                               capture_output=True, text=True, timeout=30)
+        else:
+            r = subprocess.run(["systemctl", "disable", "--now", "openflux"],
+                               capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return False, (r.stderr or r.stdout).strip()[:500]
+        return True, f"OpenFlux {'enabled' if enable else 'disabled'}"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _openflux_rotate_key() -> tuple[bool, str]:
+    """Перегенерирует transport key (rotate). Делегирует в chimera.modules.openflux._rotate_key."""
+    try:
+        from chimera.modules import openflux as of
+        # NB: _rotate_key() — интерактивная функция (TUI). Запускаем с empty input.
+        # Это запишет новый ключ в /etc/openflux/transport.key и перезапустит openflux.service.
+        # TODO: когда в chimera добавят non-interactive rotate_key(name, no_input=True),
+        #       переключиться на него. Пока — напрямую через API.
+        new_key = of._gen_transport_key()
+        if not new_key:
+            return False, "Не удалось сгенерировать ключ"
+        # Записываем ключ
+        key_file = Path("/etc/openflux/transport.key")
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        key_file.write_text(new_key)
+        key_file.chmod(0o600)
+        # Перезапуск
+        subprocess.run(["systemctl", "restart", "openflux"],
+                       capture_output=True, timeout=30)
+        return True, f"Ключ rotated ({new_key[:8]}...)"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+# ─── LANDING PAGE STUB / PRESETS ────────────────────────────────────────────
+# Pattern: triple_panel_web._stub_set / _stub_get (atomic, 256 KiB cap).
+
+_STUB_FILE    = Path("/var/www/panel-stub/index.html")
+_STUB_DRAFT   = Path("/var/lib/xray-installer/wpp_panel_stub.draft.html")
+_STUB_PRESETS_FILE = Path("/var/lib/xray-installer/wpp_panel_presets.json")
+_STUB_LIMIT   = 256 * 1024  # 256 KiB — apstrim contract как в Triple Panel
+
+# Built-in presets (3 базовых страницы для старта).
+_BUILTIN_PRESETS = {
+    "empty": {
+        "name":        "Пустая страница",
+        "description": "Минимальный HTML5 с meta-charset",
+        "html":        "<!doctype html>\n<html lang=\"ru\"><head>\n"
+                       "<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+                       "<title></title>\n</head><body></body></html>\n",
+    },
+    "coming-soon": {
+        "name":        "Скоро открытие",
+        "description": "Лендинг «coming soon» с email-формой",
+        "html":        "<!doctype html>\n<html lang=\"ru\"><head>\n"
+                       "<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+                       "<title>Скоро открытие</title>\n<style>body{margin:0;min-height:100vh;display:grid;"
+                       "place-items:center;background:#0d1520;color:#fff;font:16px system-ui}"
+                       ".b{text-align:center;padding:48px}h1{font-size:28px;margin:0 0 12px}"
+                       "p{color:#9ab;margin:0 0 24px}input{padding:12px 16px;border:1px solid #1c2b40;"
+                       "border-radius:8px;background:#0a121d;color:#fff;font:inherit;width:300px;max-width:90vw}"
+                       "button{padding:12px 20px;border:0;border-radius:8px;background:#2563eb;color:#fff;"
+                       "font:inherit;font-weight:600;cursor:pointer;margin-left:8px}</style></head>\n"
+                       "<body><div class=\"b\"><h1>Скоро открытие</h1>"
+                       "<p>Мы скоро запустимся. Оставьте email — сообщим первыми.</p>"
+                       "<form><input type=\"email\" placeholder=\"you@example.com\" required>"
+                       "<button type=\"submit\">Подписаться</button></form></div></body></html>\n",
+    },
+    "404": {
+        "name":        "404 — не найдено",
+        "description": "Заглушка 404 страницы",
+        "html":        "<!doctype html>\n<html lang=\"ru\"><head>\n<meta charset=\"utf-8\">"
+                       "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                       "<title>404 — Не найдено</title>\n"
+                       "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;"
+                       "background:#0d1520;color:#fff;font:16px system-ui;text-align:center}"
+                       "h1{font-size:96px;margin:0;font-weight:200}p{color:#9ab;margin:8px 0 0}</style></head>"
+                       "<body><div><h1>404</h1><p>Страница не найдена</p></div></body></html>\n",
+    },
+}
+
+
+def _stub_strip(source: str) -> str:
+    """Preprocessing: strip BOM + leading 'Copy' clipboard artifact."""
+    # Pattern: triple_panel_web._stub_set L1246-1248
+    source = source.lstrip("\ufeff")
+    import re
+    source = re.sub(r"^Copy(?=\s*<)", "", source)
+    return source
+
+
+def _stub_get_live() -> str:
+    """Возвращает текущий live HTML из _STUB_FILE (или пустую строку)."""
+    try:
+        if _STUB_FILE.exists():
+            return _STUB_FILE.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return ""
+
+
+def _stub_set_live(html: str) -> tuple[bool, str]:
+    """Атомарно публикует HTML в _STUB_FILE. 256 KiB cap. Возвращает (ok, msg)."""
+    try:
+        source = _stub_strip(html)
+        if len(source.encode("utf-8")) > _STUB_LIMIT:
+            return False, f"HTML слишком большой (>{_STUB_LIMIT} байт)"
+        _STUB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _STUB_FILE.with_name(_STUB_FILE.name + ".new")
+        tmp.write_text(source, encoding="utf-8")
+        tmp.chmod(0o644)
+        tmp.replace(_STUB_FILE)
+        return True, f"Опубликовано ({len(source.encode('utf-8'))} байт)"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _stub_get_draft() -> str:
+    try:
+        if _STUB_DRAFT.exists():
+            return _STUB_DRAFT.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return ""
+
+
+def _stub_save_draft(html: str) -> tuple[bool, str]:
+    try:
+        source = _stub_strip(html)
+        if len(source.encode("utf-8")) > _STUB_LIMIT:
+            return False, f"HTML слишком большой (>{_STUB_LIMIT} байт)"
+        _STUB_DRAFT.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _STUB_DRAFT.with_name(_STUB_DRAFT.name + ".new")
+        tmp.write_text(source, encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(_STUB_DRAFT)
+        return True, f"Draft сохранён ({len(source.encode('utf-8'))} байт)"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _stub_discard_draft() -> None:
+    try:
+        if _STUB_DRAFT.exists():
+            _STUB_DRAFT.unlink()
+    except Exception:
+        pass
+
+
+def _stub_list_presets() -> list[dict]:
+    """Объединяет built-in + custom presets, возвращает [{id, name, description, custom, bytes}]."""
+    out: list[dict] = []
+    for pid, p in _BUILTIN_PRESETS.items():
+        out.append({
+            "id":          pid,
+            "name":        p["name"],
+            "description": p["description"],
+            "custom":      False,
+            "bytes":       len(p["html"].encode("utf-8")),
+        })
+    # Custom presets
+    try:
+        if _STUB_PRESETS_FILE.exists():
+            data = json.loads(_STUB_PRESETS_FILE.read_text())
+            if isinstance(data, list):
+                for p in data:
+                    out.append({
+                        "id":          p.get("id", ""),
+                        "name":        p.get("name", ""),
+                        "description": p.get("description", ""),
+                        "custom":      True,
+                        "bytes":       len((p.get("html", "") or "").encode("utf-8")),
+                    })
+    except Exception:
+        pass
+    return out
+
+
+def _stub_get_preset(pid: str) -> dict | None:
+    """Возвращает preset по id (built-in или custom)."""
+    if pid in _BUILTIN_PRESETS:
+        p = _BUILTIN_PRESETS[pid]
+        return {**p, "id": pid, "custom": False}
+    # Custom
+    try:
+        if _STUB_PRESETS_FILE.exists():
+            data = json.loads(_STUB_PRESETS_FILE.read_text())
+            if isinstance(data, list):
+                for p in data:
+                    if p.get("id") == pid:
+                        return {**p, "custom": True}
+    except Exception:
+        pass
+    return None
+
+
+def _stub_save_preset(name: str, html: str, description: str = "") -> tuple[bool, str]:
+    """Сохраняет custom preset (макс 20 штук)."""
+    try:
+        name = name.strip()
+        if not 1 <= len(name) <= 80:
+            return False, "Имя должно быть 1-80 символов"
+        if len(description) > 180:
+            return False, "Описание ≤ 180 символов"
+        source = _stub_strip(html)
+        if len(source.encode("utf-8")) > _STUB_LIMIT:
+            return False, f"HTML слишком большой (>{_STUB_LIMIT} байт)"
+        # Load existing
+        data = []
+        if _STUB_PRESETS_FILE.exists():
+            data = json.loads(_STUB_PRESETS_FILE.read_text())
+            if not isinstance(data, list):
+                data = []
+        if len(data) >= 20:
+            return False, "Максимум 20 custom presets"
+        new_id = "custom-" + secrets.token_hex(8)
+        data.append({
+            "id":          new_id,
+            "name":        name,
+            "description": description or "Пользовательская заглушка",
+            "html":        source,
+        })
+        _STUB_PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _STUB_PRESETS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        _STUB_PRESETS_FILE.chmod(0o600)
+        return True, f"Preset '{name}' сохранён (id={new_id})"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _stub_delete_preset(pid: str) -> tuple[bool, str]:
+    """Удаляет custom preset по id (built-in нельзя)."""
+    try:
+        if not pid.startswith("custom-"):
+            return False, "Built-in preset нельзя удалить"
+        if not _STUB_PRESETS_FILE.exists():
+            return False, "Preset не найден"
+        data = json.loads(_STUB_PRESETS_FILE.read_text())
+        if not isinstance(data, list):
+            return False, "Список presets повреждён"
+        retained = [p for p in data if p.get("id") != pid]
+        if len(retained) == len(data):
+            return False, "Preset не найден"
+        _STUB_PRESETS_FILE.write_text(json.dumps(retained, indent=2, ensure_ascii=False))
+        return True, "Preset удалён"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+
 
 class _WppHandler(BaseHTTPRequestHandler):
     """
@@ -532,6 +890,90 @@ class _WppHandler(BaseHTTPRequestHandler):
             if path == prefix + "/settings":
                 self.send_html(self._settings_page())
                 return
+            if path == prefix + "/openflux":
+                self.send_html(self._openflux_page())
+                return
+            if path == prefix + "/landing":
+                self.send_html(self._landing_page())
+                return
+
+            # ── API endpoints (JSON) ──
+            if path == prefix + "/api/stub":
+                # GET: вернуть текущий live HTML
+                self.send_json({"html": _stub_get_live(), "path": str(_STUB_FILE)})
+                return
+            if path == prefix + "/api/stub/draft":
+                self.send_json({"html": _stub_get_draft()})
+                return
+            if path == prefix + "/api/stub/presets":
+                self.send_json({"presets": _stub_list_presets()})
+                return
+            if path == prefix + "/api/openflux":
+                self.send_json(_chimera_openflux_state())
+                return
+            if path == prefix + "/api/subscription":
+                self.send_json(_chimera_subscription_info())
+                return
+            if path == prefix + "/api/version":
+                state = load_state()
+                self.send_json({
+                    "front_version": state.get("front_version", ""),
+                    "upstream_cache": state.get("upstream_cache", {}),
+                })
+                return
+
+            # ── QR codes: /qr/user/<uid>/<protocol> ──
+            # /qr/user/<uid>/<protocol> → PNG QR code
+            import re as _re
+            qr_match = _re.fullmatch(
+                re.escape(prefix) + r"/qr/user/([a-f0-9-]{1,64})/([a-z0-9_]+)",
+                path,
+            )
+            if qr_match:
+                uid = qr_match.group(1)
+                protocol = qr_match.group(2)
+                # Находим user
+                user = next((u for u in _chimera_users()
+                             if str(u.get("uuid") or u.get("id") or "") == uid), None)
+                if not user:
+                    self.send_data("User not found", status=404,
+                                   content_type="text/plain; charset=utf-8")
+                    return
+                # Получаем links
+                links = _chimera_links_for_user(user)
+                link = links.get(protocol) or links.get("vless")
+                if not link:
+                    self.send_data("No link for protocol", status=404,
+                                   content_type="text/plain; charset=utf-8")
+                    return
+                png_bytes = _generate_qr_png_bytes(link)
+                if png_bytes is None:
+                    self.send_data("QR generation failed", status=503,
+                                   content_type="text/plain; charset=utf-8")
+                    return
+                self.send_data(png_bytes, content_type="image/png",
+                               headers={"Cache-Control": "private, max-age=60"})
+                return
+
+            # ── Subscription endpoint: /sub/<token> ──
+            # Делегирует в chimera.modules.subscription (если запущен отдельный
+            # подписочный сервер на 8443, этот path НЕ дойдёт сюда — nginx
+            # разрулит первым. Это fallback если nginx front выключен.)
+            sub_match = _re.fullmatch(
+                re.escape(prefix) + r"/sub/([0-9a-f]{24})",
+                path,
+            )
+            if sub_match:
+                # NB: WPP не реализует собственный подписочный сервер —
+                # это прерогатива chimera.modules.subscription. Просто
+                # отдаём 410 Gone с подсказкой.
+                self.send_data(
+                    "Subscription endpoint is served by chimera subscription "
+                    "module on port 8443 — use that URL instead.",
+                    status=410,
+                    content_type="text/plain; charset=utf-8",
+                )
+                return
 
             # ── 404 ──
             self.send_html("Not found", status=404)
@@ -597,6 +1039,104 @@ class _WppHandler(BaseHTTPRequestHandler):
             # ── change password ──
             if path == prefix + "/password":
                 self._handle_change_password(form)
+                return
+
+            # ── Landing page stub: publish ──
+            if path == prefix + "/stub/publish":
+                html = form.get("html", "")
+                ok, msg = _stub_set_live(html)
+                if ok:
+                    self.redirect("/landing")
+                else:
+                    self.send_html(f"Ошибка публикации: {_esc(msg)}", status=400)
+                return
+
+            # ── Landing: apply preset ──
+            if path == prefix + "/stub/apply-preset":
+                preset_id = form.get("preset", "")
+                preset = _stub_get_preset(preset_id)
+                if not preset:
+                    self.send_html("Preset не найден", status=400)
+                    return
+                ok, msg = _stub_set_live(preset.get("html", ""))
+                if ok:
+                    self.redirect("/landing")
+                else:
+                    self.send_html(f"Ошибка: {_esc(msg)}", status=400)
+                return
+
+            # ── Landing: save draft ──
+            if path == prefix + "/stub/save-draft":
+                ok, msg = _stub_save_draft(form.get("html", ""))
+                if ok:
+                    self.redirect("/landing")
+                else:
+                    self.send_html(f"Ошибка: {_esc(msg)}", status=400)
+                return
+
+            # ── Landing: discard draft ──
+            if path == prefix + "/stub/discard-draft":
+                _stub_discard_draft()
+                self.redirect("/landing")
+                return
+
+            # ── Landing: save custom preset ──
+            if path == prefix + "/stub/save-preset":
+                ok, msg = _stub_save_preset(
+                    name=form.get("name", ""),
+                    html=form.get("html", ""),
+                    description=form.get("description", ""),
+                )
+                if ok:
+                    self.redirect("/landing")
+                else:
+                    self.send_html(f"Ошибка: {_esc(msg)}", status=400)
+                return
+
+            # ── Landing: delete custom preset ──
+            if path == prefix + "/stub/delete-preset":
+                ok, msg = _stub_delete_preset(form.get("preset", ""))
+                if ok:
+                    self.redirect("/landing")
+                else:
+                    self.send_html(f"Ошибка: {_esc(msg)}", status=400)
+                return
+
+            # ── OpenFlux: enable/disable/rotate ──
+            if path == prefix + "/openflux/enable":
+                ok, msg = _openflux_set_enabled(True)
+                if ok:
+                    self.redirect("/openflux")
+                else:
+                    self.send_html(f"Ошибка: {_esc(msg)}", status=503)
+                return
+            if path == prefix + "/openflux/disable":
+                ok, msg = _openflux_set_enabled(False)
+                if ok:
+                    self.redirect("/openflux")
+                else:
+                    self.send_html(f"Ошибка: {_esc(msg)}", status=503)
+                return
+            if path == prefix + "/openflux/rotate":
+                ok, msg = _openflux_rotate_key()
+                if ok:
+                    self.redirect("/openflux")
+                else:
+                    self.send_html(f"Ошибка: {_esc(msg)}", status=503)
+                return
+
+            # ── Auto-update toggle ──
+            if path == prefix + "/autoupdate/toggle":
+                enable = form.get("enable", "") == "1"
+                try:
+                    from chimera.modules.wpp_autoupdate import wpp_autoupdate_toggle
+                    ok, msg = wpp_autoupdate_toggle(enable)
+                    if ok:
+                        self.redirect("/settings")
+                    else:
+                        self.send_html(f"Ошибка: {_esc(msg)}", status=503)
+                except Exception as exc:
+                    self.send_html(f"Ошибка: {_esc(str(exc))}", status=500)
                 return
 
             # ── 404 ──
@@ -1069,6 +1609,284 @@ background:#2563eb;color:#fff;font:inherit;font-weight:500;cursor:pointer}}
 <small style="display:block;margin-top:8px;color:#9ab">
 Смена пароля завершит все сессии панели.</small>
 </form></div>
+<div class="card"><h2>Авто-обновление фронта</h2>"""
+
+        # Auto-update state
+        try:
+            from chimera.modules.wpp_autoupdate import _get_auto_update_enabled, load_state as _load_au_state
+            au_enabled = _get_auto_update_enabled()
+            cron_installed = (_load_au_state() or {}).get("auto_update", {}).get("cron_installed", False)
+        except Exception:
+            au_enabled = False
+            cron_installed = False
+
+        csrf_field = f'<input type="hidden" name="csrf" value="{csrf}">'
+        if au_enabled:
+            au_state_html = (f'<p>Статус: <b>🟢 Включено</b> (cron в /etc/cron.d/wpp-autoupdate)</p>'
+                             f'<form method="post" action="{prefix}/autoupdate/toggle">'
+                             f'{csrf_field}<input type="hidden" name="enable" value="0">'
+                             f'<button type="submit" style="background:#dc2626">Выключить</button></form>')
+        else:
+            au_state_html = (f'<p>Статус: <b>🔴 Выключено</b></p>'
+                             f'<form method="post" action="{prefix}/autoupdate/toggle">'
+                             f'{csrf_field}<input type="hidden" name="enable" value="1">'
+                             f'<button type="submit">Включить</button></form>')
+        if not cron_installed and au_enabled:
+            au_state_html += '<p style="color:#fbbf24">⚠️ Cron файл не найден — пере-включите авто-обновление.</p>'
+
+        return f"""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WPP — Настройки</title>
+<style>
+body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
+.head{{display:flex;justify-content:space-between;align-items:center;
+padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
+.brand{{font-weight:700;font-size:17px}}
+.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
+.nav a:hover{{color:#fff}}
+.wrap{{padding:24px;max-width:800px;margin:0 auto}}
+.card{{margin-bottom:18px;padding:18px;border:1px solid #1c2b40;
+border-radius:12px;background:#0d1520}}
+.card h2{{margin:0 0 12px 0;font-size:16px;font-weight:600}}
+.card label{{display:block;margin:10px 0 4px;color:#9ab;font-size:13px}}
+.card input{{width:100%;box-sizing:border-box;padding:9px 12px;
+border:1px solid #1c2b40;border-radius:8px;background:#0a121d;color:#fff;font:inherit}}
+.card button{{margin-top:12px;padding:9px 16px;border:0;border-radius:8px;
+background:#2563eb;color:#fff;font:inherit;font-weight:500;cursor:pointer}}
+</style></head><body>
+<div class="head">
+<div class="brand">{_icon('settings')} Настройки</div>
+<div class="nav">
+<a href="{prefix}/dashboard">Дашборд</a>
+<a href="{prefix}/users">Подключения</a>
+<a href="{prefix}/nodes">Ноды</a>
+<a href="{prefix}/settings">Настройки</a>
+<a href="{prefix}/openflux">OpenFlux</a>
+<a href="{prefix}/landing">Лендинг</a>
+<a href="{prefix}/logout">{_icon('logout')} Выход</a>
+</div></div>
+<div class="wrap">
+<div class="card"><h2>Сервер</h2>
+<p>Domain: <code>{domain}</code></p>
+<p>Xray порт: <code>{xray_port}</code></p>
+</div>
+<div class="card"><h2>Смена пароля</h2>
+<form method="post" action="{prefix}/password">
+<input type="hidden" name="csrf" value="{csrf}">
+<label for="adminNewPassword">Новый пароль</label>
+<input id="adminNewPassword" type="password" name="a" minlength="3"
+ required autocomplete="new-password">
+<button type="submit">Сохранить пароль</button>
+<small style="display:block;margin-top:8px;color:#9ab">
+Смена пароля завершит все сессии панели.</small>
+</form></div>
+<div class="card"><h2>Авто-обновление фронта</h2>
+{au_state_html}
+<small style="display:block;margin-top:8px;color:#9ab">
+Cron: 30 3 * * * root /usr/bin/python3 /opt/chimera/main.py --wpp-autoupdate
+</small>
+</div>
+</div></body></html>"""
+
+    def _openflux_page(self) -> str:
+        """OpenFlux management page (single-profile — chimera's openflux.py)."""
+        prefix = _panel_path()
+        csrf = self.csrf()
+        state = _chimera_openflux_state()
+        installed = state.get("installed", False)
+        enabled = state.get("enabled", False)
+
+        if not installed:
+            body = ('<div style="padding:48px;text-align:center;color:#9ab">'
+                    'OpenFlux не установлен. Используйте chimera CLI → '
+                    'раздел "OpenFlux" → установка.</div>')
+        else:
+            transport = _esc(state.get("transport", ""))
+            bridge_active = state.get("bridge_active", False)
+            bridge_port = state.get("bridge_port")
+            bridge_bind = _esc(state.get("bridge_bind", "127.0.0.1"))
+            doc_url = _esc(state.get("doc_url_masked", ""))
+            installed_at = _esc(state.get("installed_at", ""))
+
+            state_html = ("🟢 Активен" if enabled else "🔴 Остановлен")
+            bridge_html = ("🟢 Активен" if bridge_active else "🔴 Выключен")
+
+            actions = []
+            if enabled:
+                actions.append(f'<form method="post" action="{prefix}/openflux/disable" style="display:inline">'
+                               f'<input type="hidden" name="csrf" value="{csrf}">'
+                               f'<button type="submit" style="background:#dc2626">Остановить</button></form>')
+            else:
+                actions.append(f'<form method="post" action="{prefix}/openflux/enable" style="display:inline">'
+                               f'<input type="hidden" name="csrf" value="{csrf}">'
+                               f'<button type="submit">Запустить</button></form>')
+            actions.append(f'<form method="post" action="{prefix}/openflux/rotate" style="display:inline">'
+                           f'<input type="hidden" name="csrf" value="{csrf}">'
+                           f'<button type="submit" style="background:#7c3aed">Rotate key</button></form>')
+            actions_html = " ".join(actions)
+
+            body = f"""
+<table style="width:100%;border-collapse:collapse">
+<tr><th style="text-align:left;padding:8px 0;color:#9ab">Транспорт</th><td>{transport}</td></tr>
+<tr><th style="text-align:left;padding:8px 0;color:#9ab">Сервис</th><td>{state_html}</td></tr>
+<tr><th style="text-align:left;padding:8px 0;color:#9ab">Bridge</th><td>{bridge_html} ({bridge_bind}:{bridge_port or '—'})</td></tr>
+<tr><th style="text-align:left;padding:8px 0;color:#9ab">Doc URL</th><td><code>{doc_url}</code> <small style="color:#9ab">(secret скрыт)</small></td></tr>
+<tr><th style="text-align:left;padding:8px 0;color:#9ab">Установлен</th><td>{installed_at}</td></tr>
+</table>
+<div style="margin-top:18px">{actions_html}</div>
+"""
+        return f"""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WPP — OpenFlux</title>
+<style>
+body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
+.head{{display:flex;justify-content:space-between;align-items:center;
+padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
+.brand{{font-weight:700;font-size:17px}}
+.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
+.nav a:hover{{color:#fff}}
+.wrap{{padding:24px;max-width:800px;margin:0 auto}}
+.card{{padding:18px;border:1px solid #1c2b40;border-radius:12px;background:#0d1520}}
+.card h2{{margin:0 0 12px 0;font-size:16px;font-weight:600}}
+table th,table td{{padding:6px 0}}
+button{{padding:8px 14px;border:0;border-radius:8px;color:#fff;font:inherit;
+font-weight:500;cursor:pointer}}
+</style></head><body>
+<div class="head">
+<div class="brand">{_icon('shield')} OpenFlux</div>
+<div class="nav">
+<a href="{prefix}/dashboard">Дашборд</a>
+<a href="{prefix}/users">Подключения</a>
+<a href="{prefix}/nodes">Ноды</a>
+<a href="{prefix}/settings">Настройки</a>
+<a href="{prefix}/openflux">OpenFlux</a>
+<a href="{prefix}/landing">Лендинг</a>
+<a href="{prefix}/logout">{_icon('logout')} Выход</a>
+</div></div>
+<div class="wrap"><div class="card">
+<h2>OpenFlux (single-profile)</h2>
+{body}
+</div></div></body></html>"""
+
+    def _landing_page(self) -> str:
+        """Landing page editor — HTML editor + presets + draft."""
+        prefix = _panel_path()
+        csrf = self.csrf()
+        live_html = _stub_get_live()
+        draft_html = _stub_get_draft()
+        has_draft = bool(draft_html)
+        # Если есть draft — показываем его в редакторе, иначе live
+        editor_content = _esc(draft_html or live_html)
+        presets_list = _stub_list_presets()
+
+        # Preset select options
+        preset_options = []
+        for p in presets_list:
+            label = f"{_esc(p['name'])}" + (f" ({p['bytes']} байт)" if p.get("bytes") else "")
+            preset_options.append(f'<option value="{_esc(p["id"])}">{label}</option>')
+        preset_options_html = "\n".join(preset_options)
+
+        # Custom presets delete buttons
+        custom_presets = [p for p in presets_list if p.get("custom")]
+        custom_html = ""
+        if custom_presets:
+            custom_items = []
+            for p in custom_presets:
+                custom_items.append(
+                    f'<li>{_esc(p["name"])} — {_esc(p.get("description",""))} '
+                    f'({p.get("bytes", 0)} байт) '
+                    f'<form method="post" action="{prefix}/stub/delete-preset" style="display:inline">'
+                    f'<input type="hidden" name="csrf" value="{csrf}">'
+                    f'<input type="hidden" name="preset" value="{_esc(p["id"])}">'
+                    f'<button type="submit" style="background:#dc2626">Удалить</button></form></li>'
+                )
+            custom_html = (f'<div class="card"><h2>Свои пресеты ({len(custom_presets)}/20)</h2>'
+                          f'<ul style="list-style:none;padding:0">'
+                          + "\n".join(custom_items) + '</ul></div>')
+
+        draft_indicator = ('<p style="color:#fbbf24">📝 Есть несохранённый draft</p>'
+                           if has_draft else '')
+
+        return f"""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WPP — Лендинг</title>
+<style>
+body{{margin:0;background:#060910;color:#fff;font:15px system-ui,sans-serif}}
+.head{{display:flex;justify-content:space-between;align-items:center;
+padding:16px 24px;border-bottom:1px solid #1c2b40;background:#0d1520}}
+.brand{{font-weight:700;font-size:17px}}
+.nav a{{color:#9ab;margin-left:14px;text-decoration:none;font-size:13px}}
+.nav a:hover{{color:#fff}}
+.wrap{{padding:24px;max-width:1200px;margin:0 auto}}
+.card{{margin-bottom:18px;padding:18px;border:1px solid #1c2b40;
+border-radius:12px;background:#0d1520}}
+.card h2{{margin:0 0 12px 0;font-size:16px;font-weight:600}}
+textarea{{width:100%;min-height:300px;box-sizing:border-box;padding:12px;
+border:1px solid #1c2b40;border-radius:8px;background:#0a121d;color:#fff;
+font-family:ui-monospace,monospace;font-size:13px}}
+button{{padding:8px 16px;border:0;border-radius:8px;color:#fff;font:inherit;
+font-weight:500;cursor:pointer;margin-right:8px;margin-top:12px}}
+button.primary{{background:#2563eb}}button.danger{{background:#dc2626}}
+button.warn{{background:#f59e0b;color:#000}}
+select,input{{padding:8px 12px;border:1px solid #1c2b40;border-radius:8px;
+background:#0a121d;color:#fff;font:inherit}}
+small{{color:#9ab}}
+</style></head><body>
+<div class="head">
+<div class="brand">{_icon('edit')} Лендинг / HTML editor</div>
+<div class="nav">
+<a href="{prefix}/dashboard">Дашборд</a>
+<a href="{prefix}/users">Подключения</a>
+<a href="{prefix}/nodes">Ноды</a>
+<a href="{prefix}/settings">Настройки</a>
+<a href="{prefix}/openflux">OpenFlux</a>
+<a href="{prefix}/landing">Лендинг</a>
+<a href="{prefix}/logout">{_icon('logout')} Выход</a>
+</div></div>
+<div class="wrap">
+<div class="card">
+<h2>HTML редактор лендинга</h2>
+{draft_indicator}
+<small>Лимит: 256 KiB. Публикуется в /var/www/panel-stub/index.html</small>
+<form method="post" action="{prefix}/stub/publish">
+<input type="hidden" name="csrf" value="{csrf}">
+<textarea name="html" placeholder="<!doctype html>...">{editor_content}</textarea>
+<button type="submit" class="primary">Опубликовать</button>
+</form>
+</div>
+<div class="card">
+<h2>Draft</h2>
+<form method="post" action="{prefix}/stub/save-draft">
+<input type="hidden" name="csrf" value="{csrf}">
+<button type="submit" class="warn">Сохранить текущий textarea как draft</button>
+</form>
+<form method="post" action="{prefix}/stub/discard-draft" style="display:inline">
+<input type="hidden" name="csrf" value="{csrf}">
+<button type="submit" class="danger">Удалить draft</button>
+</form>
+</div>
+<div class="card">
+<h2>Готовые пресеты</h2>
+<form method="post" action="{prefix}/stub/apply-preset" style="display:inline">
+<input type="hidden" name="csrf" value="{csrf}">
+<select name="preset">{preset_options_html}</select>
+<button type="submit">Применить</button>
+</form>
+</div>
+<div class="card">
+<h2>Сохранить как свой preset</h2>
+<form method="post" action="{prefix}/stub/save-preset">
+<input type="hidden" name="csrf" value="{csrf}">
+<input type="text" name="name" placeholder="Имя (1-80)" maxlength="80" required>
+<input type="text" name="description" placeholder="Описание (опц.)" maxlength="180">
+<textarea name="html" placeholder="<!doctype html>..." style="min-height:100px"></textarea>
+<button type="submit" class="primary">Сохранить preset</button>
+</form>
+</div>
+{custom_html}
 </div></body></html>"""
 
 
