@@ -266,13 +266,27 @@ def _chimera_state() -> dict:
 
 
 def _chimera_users_file() -> Path:
-    """Путь к users.json Chimera."""
-    return Path("/var/lib/xray-installer/users.json")
+    """
+    Путь к users.json Chimera — это /etc/xray/users.json (CANONICAL,
+    не /var/lib/xray-installer/users.json). См. chimera/_core.py:4941
+    USERS_FILE = CONFIG_DIR / "users.json" где CONFIG_DIR = Path("/etc/xray").
+    """
+    return Path("/etc/xray/users.json")
 
 
 def _chimera_users() -> list[dict]:
-    """Список пользователей Chimera (из users.json).
-    Schema: list of {uuid, name, protocol, enabled, traffic_up, traffic_down, ...}
+    """
+    Список пользователей Chimera (VLESS source of truth) из /etc/xray/users.json.
+
+    Реальная schema chimera:
+        [{uuid, email, name, created, source, device_label,
+          disabled?, disabled_at?, blocked?, blocked_at?, block_reason?,
+          portal_password?}, ...]
+
+    NB: НЕТ поля 'protocol' — пользователь multi-protocol по дизайну Chimera
+    (VLESS=canonical, AWG/MTProto/etc синхронизируются через email или uuid).
+    НЕТ полей traffic_up/traffic_down — трафик берётся через Xray Stats API
+    (см. _chimera_traffic).
     """
     try:
         f = _chimera_users_file()
@@ -289,21 +303,180 @@ def _chimera_users() -> list[dict]:
 
 
 def _chimera_traffic() -> dict:
-    """Словарь трафика по user_id: {uuid: {up: bytes, down: bytes, total: bytes}}."""
-    users = _chimera_users()
+    """
+    Словарь трафика по email: {email: {up: bytes, down: bytes, total: bytes}}.
+
+    Делегирует в chimera._core._users_get_traffic_extended(email) если доступно
+    (Xray Stats API). Иначе fallback на 0 (без stats).
+    """
     out: dict[str, dict] = {}
+    users = _chimera_users()
+    try:
+        core = _core_module()
+        get_traffic = getattr(core, "_users_get_traffic_extended", None)
+    except Exception:
+        get_traffic = None
+
     for u in users:
-        uid = str(u.get("uuid") or u.get("id") or "")
-        if not uid:
+        email = str(u.get("email") or "")
+        uuid = str(u.get("uuid") or "")
+        if not email:
             continue
-        out[uid] = {
-            "up":      int(u.get("traffic_up",   0) or 0),
-            "down":    int(u.get("traffic_down", 0) or 0),
-            "total":   int(u.get("traffic_up",   0) or 0)
-                     + int(u.get("traffic_down", 0) or 0),
-            "enabled": bool(u.get("enabled", True)),
+        up = down = 0
+        if get_traffic:
+            try:
+                # _users_get_traffic_extended возвращает (up, down, proxy, direct)
+                t = get_traffic(email)
+                if isinstance(t, (list, tuple)) and len(t) >= 2:
+                    up, down = int(t[0] or 0), int(t[1] or 0)
+            except Exception:
+                pass
+        out[email] = {
+            "up":      up,
+            "down":    down,
+            "total":   up + down,
+            "enabled": not u.get("disabled") and not u.get("blocked"),
         }
     return out
+
+
+# ─── MULTI-PROTOCOL USER SYNC (через chimera.modules.user_lifecycle) ────────
+# Эти адаптеры используют существующий chimera.modules.user_lifecycle
+# координатор (1967 строк, PROTOCOL_ADAPTERS registry на 9 протоколов),
+# который автоматически синхронизирует:
+#   VLESS (canonical, /etc/xray/users.json) +
+#   AWG (peer добавляется через owner_email) +
+#   MTProto (user через username = email.split('@')[0]) +
+#   Singbox / Mieru / NaiveProxy / FPTN / TrustTunnel (по UUID/email).
+#
+# Транзакционность: snapshot + rollback при ошибке в любом адаптере.
+# Bidirectional sync ВРОЖДЁННАЯ: chimera CLI читает из тех же файлов, что и
+# координатор — изменения из WPP видны сразу в chimera CLI и наоборот.
+
+def _chimera_users_create(name: str, protocols: list[str] | str = "all",
+                          ttl_days: int | None = None,
+                          traffic_limit_gib: int | None = None) -> dict:
+    """
+    Создаёт пользователя Chimera через user_lifecycle.add_user.
+    Bidirectional sync: пользователь сразу попадает в:
+      - /etc/xray/users.json (VLESS)
+      - /var/lib/xray-installer/awg_standalone_state.json (AWG peer)
+      - /etc/telemt/telemt.toml (MTProto user)
+      - (другие протоколы если переданы)
+    + systemctl restart xray/awg/telemt (через adapters)
+
+    :param name:     имя пользователя (или email). Если без @ — синтезируем
+                     email как name@xray.local (как делает _core.py:5566).
+    :param protocols: "all" | list[str] из PROTOCOL_ADAPTERS:
+                      ["vless", "awg", "mtproto", "hysteria2", ...]
+    :param ttl_days: TTL в днях (None = без TTL)
+    :param traffic_limit_gib: лимит трафика в GiB (None = без лимита)
+    :return: {success, applied, failed, errors} от user_lifecycle
+    """
+    try:
+        from chimera.modules import user_lifecycle
+        # Если name не похож на email — синтезируем email
+        if "@" in name:
+            email = name
+        else:
+            # Нормализуем: lowercase, пробелы → _, добавляем @xray.local
+            slug = name.strip().lower().replace(" ", "_")
+            # Уберём спецсимволы кроме [a-z0-9_-]
+            slug = "".join(c for c in slug if c.isalnum() or c in "_-")
+            if not slug:
+                return {"success": False, "errors": ["Пустое имя пользователя"],
+                        "applied": [], "failed": []}
+            email = f"{slug}@xray.local"
+
+        result = user_lifecycle.add_user(
+            email=email,
+            protocols=protocols,
+            ttl=ttl_days,
+            traffic_limit=traffic_limit_gib,
+            name=name,
+        )
+        return result
+    except Exception as exc:
+        return {
+            "success":  False,
+            "applied":  [],
+            "failed":   [protocols] if isinstance(protocols, str) else list(protocols),
+            "errors":   [f"{type(exc).__name__}: {exc}"],
+        }
+
+
+def _chimera_users_delete_by_uuid(uuid: str,
+                                  protocols: list[str] | str = "all") -> dict:
+    """
+    Удаляет пользователя по UUID. Сначала находит email через user_lifecycle
+    (или через прямой read /etc/xray/users.json), потом вызывает
+    user_lifecycle.remove_user(email, protocols=...).
+
+    Bidirectional sync: удаляет из:
+      - /etc/xray/users.json (VLESS)
+      - /var/lib/xray-installer/awg_standalone_state.json (AWG peer)
+      - /etc/telemt/telemt.toml (MTProto user)
+      + systemctl restart соотв. сервисов
+    """
+    try:
+        # Находим email по UUID
+        email = None
+        for u in _chimera_users():
+            if str(u.get("uuid", "")) == uuid:
+                email = u.get("email")
+                break
+        if not email:
+            return {"success": False, "errors": [f"UUID {uuid} не найден"],
+                    "applied": [], "failed": []}
+
+        from chimera.modules import user_lifecycle
+        return user_lifecycle.remove_user(email=email, protocols=protocols)
+    except Exception as exc:
+        return {
+            "success":  False,
+            "applied":  [],
+            "failed":   [],
+            "errors":   [f"{type(exc).__name__}: {exc}"],
+        }
+
+
+def _chimera_users_block(uuid: str, reason: str = "manual") -> dict:
+    """Блокирует пользователя (blocked=True) через user_lifecycle."""
+    try:
+        email = None
+        for u in _chimera_users():
+            if str(u.get("uuid", "")) == uuid:
+                email = u.get("email")
+                break
+        if not email:
+            return {"success": False, "errors": [f"UUID {uuid} не найден"],
+                    "applied": [], "failed": []}
+        from chimera.modules import user_lifecycle
+        return user_lifecycle.block_user(email=email, reason=reason, protocols="all")
+    except Exception as exc:
+        return {"success": False, "errors": [f"{type(exc).__name__}: {exc}"],
+                "applied": [], "failed": []}
+
+
+def _chimera_users_unblock(uuid: str) -> dict:
+    """Разблокирует пользователя через user_lifecycle."""
+    try:
+        email = None
+        for u in _chimera_users():
+            if str(u.get("uuid", "")) == uuid:
+                email = u.get("email")
+                break
+        if not email:
+            return {"success": False, "errors": [f"UUID {uuid} не найден"],
+                    "applied": [], "failed": []}
+        from chimera.modules import user_lifecycle
+        return user_lifecycle.unblock_user(email=email, protocols="all")
+    except Exception as exc:
+        return {"success": False, "errors": [f"{type(exc).__name__}: {exc}"],
+                "applied": [], "failed": []}
+
+
+
 
 
 def _chimera_subscription_link(uid: str, name: str = "") -> str:
@@ -1467,31 +1640,55 @@ class _WppHandler(BaseHTTPRequestHandler):
                            status=400)
             return
 
-        if protocol not in ("vless", "hysteria", "mtproto", "awg20", "awg31"):
+        # Map WPP UI protocol names → chimera user_lifecycle protocol names.
+        # NB: chimera user_lifecycle PROTOCOL_ADAPTERS keys:
+        #   vless, awg, singbox, mieru, mtproto, naiveproxy, fptn,
+        #   hysteria2, trusttunnel
+        # WPP form uses: vless, hysteria, mtproto, awg20, awg31
+        PROTOCOL_MAP = {
+            "vless":     "vless",
+            "hysteria":  "hysteria2",  # NB: shared password — adapter is no-op
+            "mtproto":   "mtproto",
+            "awg20":     "awg",
+            "awg31":     "awg",
+        }
+        if protocol not in PROTOCOL_MAP:
             self.send_html("Неизвестный протокол.", status=400)
             return
+        chimera_proto = PROTOCOL_MAP[protocol]
 
-        # Делегируем в chimera CLI (как WPP делегирует в manager.py).
-        # Pattern: subprocess.run(['python3', '<chimera_root>/main.py',
-        #                          '--user-add', protocol, name])
-        try:
-            chimera_root = str(Path(__file__).resolve().parent.parent.parent)
-            cmd = [
-                sys.executable, f"{chimera_root}/main.py",
-                "--user-add", protocol, name,
-            ]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if r.returncode != 0:
-                err = (r.stderr or r.stdout or "").strip()[:500]
-                self.send_html(f"Не удалось создать: {_esc(err)}", status=503)
-                return
-            self.redirect("/users")
-        except subprocess.TimeoutExpired:
-            self.send_html("Создание превысило таймаут (30s).", status=503)
-        except Exception as exc:
-            self.log_message("create_account failed: %s: %s",
-                             type(exc).__name__, exc)
-            self.send_html("Не удалось создать пользователя.", status=503)
+        # Если выбрана "все протоколы" — добавим canonical vless + 2 ключевых:
+        if chimera_proto == "vless":
+            # По умолчанию для нового пользователя создаём vless+awg+mtproto
+            # (полный набор для всех клиентов: Android/iOS/desktop).
+            # Пользователь может удалить лишние через chimera CLI потом.
+            protocols_list = ["vless", "awg", "mtproto"]
+        elif chimera_proto == "awg":
+            protocols_list = ["vless", "awg"]  # vless canonical + AWG peer
+        elif chimera_proto == "mtproto":
+            protocols_list = ["vless", "mtproto"]
+        else:
+            protocols_list = [chimera_proto]
+
+        result = _chimera_users_create(
+            name=name,
+            protocols=protocols_list,
+        )
+        if not result.get("success"):
+            errors = result.get("errors", [])
+            failed = result.get("failed", [])
+            msg_parts = []
+            if errors:
+                msg_parts.append("; ".join(str(e) for e in errors[:3]))
+            if failed:
+                msg_parts.append(f"failed protocols: {', '.join(failed)}")
+            msg = "; ".join(msg_parts) if msg_parts else "Неизвестная ошибка"
+            self.send_html(f"Не удалось создать: {_esc(msg)}", status=503)
+            return
+        # Show success — applied protocols
+        applied = result.get("applied", [])
+        self.log_message("create_account: %s → applied: %s", name, applied)
+        self.redirect("/users")
 
     # ─── DELETE USER ────────────────────────────────────────────────────────
 
@@ -1500,24 +1697,15 @@ class _WppHandler(BaseHTTPRequestHandler):
         if not re.fullmatch(r"[a-f0-9-]{1,64}", uid):
             self.send_html("Некорректный ID пользователя.", status=400)
             return
-        try:
-            chimera_root = str(Path(__file__).resolve().parent.parent.parent)
-            cmd = [
-                sys.executable, f"{chimera_root}/main.py",
-                "--user-delete", uid,
-            ]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if r.returncode != 0:
-                err = (r.stderr or r.stdout or "").strip()[:500]
-                self.send_html(f"Не удалось удалить: {_esc(err)}", status=503)
-                return
-            self.redirect("/users")
-        except subprocess.TimeoutExpired:
-            self.send_html("Удаление превысило таймаут.", status=503)
-        except Exception as exc:
-            self.log_message("delete_user failed: %s: %s",
-                             type(exc).__name__, exc)
-            self.send_html("Не удалось удалить.", status=503)
+        _log_msg = self.log_message
+        result = _chimera_users_delete_by_uuid(uuid=uid, protocols="all")
+        if not result.get("success"):
+            errors = result.get("errors", [])
+            msg = "; ".join(str(e) for e in errors[:3]) if errors else "Неизвестная ошибка"
+            self.send_html(f"Не удалось удалить: {_esc(msg)}", status=503)
+            return
+        _log_msg("delete_user: uuid=%s → applied: %s", uid, result.get("applied", []))
+        self.redirect("/users")
 
     # ─── CHANGE PASSWORD ────────────────────────────────────────────────────
 
@@ -1670,7 +1858,10 @@ gap:16px;padding:24px;max-width:1280px;margin:0 auto}}
 </body></html>"""
 
     def _users_page(self) -> str:
-        """Список пользователей с возможностью удаления/смены статуса."""
+        """Список пользователей Chimera (VLESS source of truth).
+        Multi-protocol — каждый юзер может иметь vless + awg + mtproto.
+        Bidirectional sync через chimera.modules.user_lifecycle — изменения
+        из chimera CLI видны здесь сразу, и наоборот."""
         prefix = _panel_path()
         csrf = self.csrf()
         users = _chimera_users()
@@ -1678,19 +1869,54 @@ gap:16px;padding:24px;max-width:1280px;margin:0 auto}}
 
         rows_html = []
         for u in users:
-            uid = str(u.get("uuid") or u.get("id") or "")
-            name = _esc(u.get("name", "") or "")
-            protocol = _esc(u.get("protocol", "") or "")
-            enabled = bool(u.get("enabled", True))
-            state_html = ("🟢" if enabled else "🔴")
-            tr = traffic.get(uid, {})
+            uid = str(u.get("uuid") or "")
+            email = _esc(u.get("email", "") or "")
+            name = _esc(u.get("name", "") or email)
+            created = _esc(str(u.get("created", ""))[:19].replace("T", " "))
+            # Multi-protocol: disabled/blocked fields управляют enabled
+            disabled = bool(u.get("disabled"))
+            blocked = bool(u.get("blocked"))
+            enabled = not (disabled or blocked)
+            if blocked:
+                state_html = "🚫 Blocked"
+            elif disabled:
+                state_html = "🔴 Disabled"
+            else:
+                state_html = "🟢 Active"
+
+            # Multi-protocol badge — показываем какие протоколы есть.
+            # (Здесь упрощённо: всегда VLESS canonical, AWG/MTProto отображаем
+            # если есть соответствующие storage через owner_email/username.)
+            protocols_badges = []
+            protocols_badges.append('<span class="pill">VLESS</span>')
+            try:
+                from chimera.modules import awg_state
+                if awg_state.awgs_state_find_peer_by_owner(u.get("email", "")):
+                    protocols_badges.append('<span class="pill">AWG</span>')
+            except Exception:
+                pass
+            try:
+                from chimera.modules import mtproto
+                username = (u.get("email") or "").split("@")[0]
+                mt_users = mtproto._load_users()
+                if mt_users and username in mt_users:
+                    protocols_badges.append('<span class="pill">MTProto</span>')
+            except Exception:
+                pass
+            proto_html = " ".join(protocols_badges)
+
+            tr = traffic.get(u.get("email", ""), {})
             up = _size(tr.get("up", 0))
             down = _size(tr.get("down", 0))
             rows_html.append(
-                f"<tr><td>{state_html}</td><td>{name}</td><td>{protocol}</td>"
-                f"<td>{up}</td><td>{down}</td>"
+                f"<tr><td>{state_html}</td><td><b>{name}</b><br>"
+                f"<small style='color:#9ab;font-size:11px'>{email}</small></td>"
+                f"<td>{proto_html}</td>"
+                f"<td>↑ {up}</td><td>↓ {down}</td>"
+                f"<td><small style='color:#9ab;font-size:11px'>{created}</small></td>"
                 f"<td><form method='post' action='{prefix}/delete-user' "
-                f"style='display:inline'>"
+                f"style='display:inline' "
+                f"onsubmit='return confirm(\"Удалить {name}? Все протоколы будут сняты.\")'>"
                 f"<input type='hidden' name='csrf' value='{csrf}'>"
                 f"<input type='hidden' name='id' value='{_esc(uid)}'>"
                 f"<button type='submit' style='background:#dc2626'>"
@@ -1698,7 +1924,7 @@ gap:16px;padding:24px;max-width:1280px;margin:0 auto}}
             )
 
         rows = "\n".join(rows_html) if rows_html else (
-            "<tr><td colspan='6' style='text-align:center;color:#9ab'>"
+            "<tr><td colspan='7' style='text-align:center;color:#9ab'>"
             "Пользователей нет — создайте первого ↓</td></tr>"
         )
 
@@ -1720,6 +1946,8 @@ th,td{{padding:10px 12px;text-align:left;border-bottom:1px solid #1c2b40}}
 th{{color:#9ab;font-weight:500;font-size:12px;text-transform:uppercase}}
 button{{padding:6px 10px;border:0;border-radius:6px;color:#fff;font:inherit;
 font-weight:500;cursor:pointer}}
+.pill{{display:inline-block;padding:2px 8px;margin-right:4px;border-radius:10px;
+background:#1c2b40;color:#56decb;font-size:11px;font-weight:500}}
 .create-form{{margin:24px 0;padding:18px;border:1px solid #1c2b40;
 border-radius:12px;background:#0d1520;display:flex;gap:10px;flex-wrap:wrap}}
 .create-form input,.create-form select{{padding:8px 12px;border:1px solid #1c2b40;
@@ -1751,8 +1979,8 @@ border-radius:8px;background:#0a121d;color:#fff;font:inherit}}
 <button type="submit">{_icon('add')} Создать</button>
 </form>
 <table>
-<thead><tr><th>Статус</th><th>Имя</th><th>Протокол</th>
-<th>↑ Входящий</th><th>↓ Исходящий</th><th>Действия</th></tr></thead>
+<thead><tr><th>Статус</th><th>Имя / Email</th><th>Протоколы</th>
+<th>↑ Входящий</th><th>↓ Исходящий</th><th>Создан</th><th>Действия</th></tr></thead>
 <tbody>
 {rows}
 </tbody></table>
