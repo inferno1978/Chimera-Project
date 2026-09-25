@@ -939,10 +939,12 @@ def tg(msg):
         t, ch = c.get('token'), c.get('chat_id')
         # FIX: добавляем hostname + server_ip в начало сообщения,
         # чтобы было видно на каком сервере сработал autoban.
+        # FIX-2 (2026-09-25): добавляем эмодзи 🚫 (No Entry, U+1F6AB)
+        # в начало — чтобы уведомление о бане визуально выделялось в чате.
         import socket as _sock
         _host = _sock.gethostname().split('.')[0]
         _sip  = c.get('server_ip', '')
-        _header = f'[{{_host}}' + (f' | {{_sip}}' if _sip else '') + '] '
+        _header = '\U0001f6ab [' + _host + ('] ' if not _sip else ' | ' + _sip + '] ')
         if t and ch:
             subprocess.run(['curl','-s','-o','/dev/null','-m','10',
                 f'https://api.telegram.org/bot{{t}}/sendMessage',
