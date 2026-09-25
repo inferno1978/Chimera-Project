@@ -804,8 +804,10 @@ def _nginx_install() -> tuple[bool, str]:
     """Включает Nginx Front с TLS для WPP (по образцу youtube_b4._b4_nginx_install)."""
     from chimera.modules.panel_nginx_front import (
         panel_nginx_front_install, ask_tls_mode, ask_domain,
-        DEFAULT_FRONT_PORT,
     )
+    # NB: DEFAULT_NGINX_PORT определён локально (= 9744, рядом с b4 :9743).
+    # panel_nginx_front.py не экспортирует дефолт — каждый модуль держит
+    # свой (как triple_panel.DEFAULT_NGINX_PORT=9761, youtube_b4.DEFAULT_B4_NGINX_PORT=9743).
     state = _load_state()
     backend_port = state.get("web_port", 0)
     if not backend_port:
