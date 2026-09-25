@@ -441,6 +441,18 @@ def _download_and_install(version: str) -> Tuple[bool, str]:
         if root is None:
             return False, "неожиданная структура архива (нет dpi_detector.py)"
         got = _parse_entry_version(root / "dpi_detector.py")
+        if not got:
+            # FIX: в v4.2+ CURRENT_VERSION переместилась из dpi_detector.py
+            # в app/banner.py. Пробуем альтернативные пути.
+            for alt in ["app/banner.py", "core/__init__.py", "app/__init__.py",
+                        "__init__.py", "version.py"]:
+                alt_path = root / alt
+                if alt_path.exists():
+                    got = _parse_entry_version(alt_path)
+                    if got:
+                        _log("INFO", f"CURRENT_VERSION найдена в {alt} "
+                                     f"(не в dpi_detector.py)")
+                        break
         if got != v:
             return False, f"в архиве версия {got or 'не определена'}, ожидалась {v}"
 
