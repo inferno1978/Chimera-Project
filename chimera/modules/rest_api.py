@@ -2716,27 +2716,40 @@ def do_manage_web_panel() -> None:
         # меняется на "Установить веб-панель" — логичнее, чем неработающий старт.
         _installed = WEB_SERVICE_FILE.exists()
 
+        # IPv4 (один раз — используется в нескольких блоках ниже)
+        try:
+            ipv4 = core.get_server_ip("4")
+        except Exception:
+            ipv4 = ""
+
+        # Домен (из state.json — VLESS install)
+        try:
+            _domain = getattr(core, "PARAM_DOMAIN", "") or ""
+            if not _domain:
+                import json as _json
+                _st = Path("/var/lib/xray-installer/state.json")
+                if _st.exists():
+                    _domain = (_json.loads(_st.read_text()).get("domain") or "").lower()
+        except Exception:
+            _domain = ""
+
+        # ── БЛОК 1: Chimera default web-panel (vless-web, port 8443) ────────
         if not _installed:
             _box_row(f"  {YELLOW}⚠️  Веб-панель НЕ установлена!{NC}")
             _box_row(f"  {DIM}Используйте пункт 1 для установки.{NC}")
             _box_row()
 
+        _box_row(f"  {BOLD}Chimera default panel (vless-web, :8443){NC}")
         _box_row(f"  Сервис:       {GREEN+'активен'+NC if running else YELLOW+'остановлен'+NC}")
         _box_row(f"  Хост:         {CYAN}{host}{NC} {YELLOW+'(открыто наружу, без TLS!)'+NC if exposed else '(локально, SSH-туннель)'}")
         _box_row(f"  Порт:         {CYAN}{port}{NC}")
         _box_row(f"  Admin:        {CYAN}http://<IP>:{port}/admin/{NC}")
         _box_row(f"  Portal:       {CYAN}http://<IP>:{port}/portal/{NC}")
         _box_row(f"  Admin логин:  {CYAN}{admin_user}{NC}")
+        if ipv4:
+            _box_row(f"  IPv4:         {CYAN}{ipv4}{NC}")
 
-        # IP адреса
-        try:
-            ipv4 = core.get_server_ip("4")
-            if ipv4:
-                _box_row(f"  IPv4:         {CYAN}{ipv4}{NC}")
-        except Exception:
-            pass
-
-        #  nginx front status
+        #  nginx front status (для Chimera default)
         _nginx_front_enabled = False
         _nginx_front_port = 0
         _nginx_front_domain = ""
@@ -2748,11 +2761,96 @@ def do_manage_web_panel() -> None:
             _nginx_front_domain = _nfp_status.get("domain", "")
         except Exception:
             pass
+
+        # ── БЛОК 2: WPP Web Panel (если установлен) ──────────────────────────
+        _wpp_installed = False
+        _wpp_running = False
+        _wpp_port = 0
+        _wpp_nginx_enabled = False
+        _wpp_nginx_port = 0
+        _wpp_nginx_domain = ""
+        try:
+            from chimera.modules import wpp_state
+            _wpp_state_data = wpp_state.load_state()
+            _wpp_installed = bool(_wpp_state_data.get("installed"))
+            _wpp_port = int(_wpp_state_data.get("web_port", 0) or 0)
+            # Проверяем активность сервиса
+            if _wpp_installed:
+                import subprocess as _sp
+                _r = _sp.run(["systemctl", "is-active", "--quiet", "wpp-web"],
+                              capture_output=True, timeout=5)
+                _wpp_running = (_r.returncode == 0)
+            # Читаем WPP nginx front state
+            _wpp_nginx_state_file = Path("/var/lib/xray-installer/wpp_panel_nginx.json")
+            if _wpp_nginx_state_file.exists():
+                import json as _json
+                _wng = _json.loads(_wpp_nginx_state_file.read_text())
+                _wpp_nginx_enabled = bool(_wng.get("enabled"))
+                _wpp_nginx_port = int(_wng.get("port", 0) or 0)
+                _wpp_nginx_domain = _wng.get("domain", "") or _domain
+        except Exception:
+            pass
+
+        if _wpp_installed:
+            _box_sep()
+            _box_row(f"  {BOLD}🌐 WPP Web Panel (POLESNIESOVETI12 порт){NC}")
+            _box_row(f"  Сервис:       {GREEN+'активен'+NC if _wpp_running else YELLOW+'остановлен'+NC}")
+            _box_row(f"  Backend:      {CYAN}127.0.0.1:{_wpp_port}{NC} (loopback)")
+            if _wpp_nginx_enabled:
+                _box_row(f"  Nginx Front:  {GREEN}включён{NC} — {CYAN}https://{_wpp_nginx_domain}:{_wpp_nginx_port}{NC}")
+                _box_row(f"  Публичный URL:{CYAN}https://{_wpp_nginx_domain}:{_wpp_nginx_port}/panel/{NC}")
+            else:
+                _box_row(f"  Nginx Front:  {DIM}выключен (доступ через SSH-туннель){NC}")
+                if ipv4:
+                    _box_row(f"  SSH-туннель:  {CYAN}ssh -L {_wpp_port}:127.0.0.1:{_wpp_port} root@{ipv4}{NC}")
+                    _box_row(f"  Затем браузер:{CYAN}http://localhost:{_wpp_port}/panel/{NC}")
+
+        # ── БЛОК 3: Triple Panel (если установлен) ──────────────────────────
+        _triple_installed = False
+        _triple_running = False
+        _triple_port = 0
+        _triple_nginx_enabled = False
+        _triple_nginx_port = 0
+        _triple_nginx_domain = ""
+        try:
+            _triple_state_file = Path("/var/lib/xray-installer/triple_panel_state.json")
+            if _triple_state_file.exists():
+                import json as _json
+                _tsd = _json.loads(_triple_state_file.read_text())
+                _triple_installed = bool(_tsd.get("installed"))
+                _triple_port = int(_tsd.get("web_port", 0) or 0)
+                if _triple_installed:
+                    import subprocess as _sp
+                    _r = _sp.run(["systemctl", "is-active", "--quiet", "triple-web"],
+                                  capture_output=True, timeout=5)
+                    _triple_running = (_r.returncode == 0)
+                _triple_nginx_state_file = Path("/var/lib/xray-installer/triple_panel_nginx.json")
+                if _triple_nginx_state_file.exists():
+                    _tng = _json.loads(_triple_nginx_state_file.read_text())
+                    _triple_nginx_enabled = bool(_tng.get("enabled"))
+                    _triple_nginx_port = int(_tng.get("port", 0) or 0)
+                    _triple_nginx_domain = _tng.get("domain", "") or _domain
+        except Exception:
+            pass
+
+        if _triple_installed:
+            _box_sep()
+            _box_row(f"  {BOLD}🧩 Triple Panel (Naive+Mieru+H2, RIXXX порт){NC}")
+            _box_row(f"  Сервис:       {GREEN+'активен'+NC if _triple_running else YELLOW+'остановлен'+NC}")
+            _box_row(f"  Backend:      {CYAN}127.0.0.1:{_triple_port}{NC} (loopback)")
+            if _triple_nginx_enabled:
+                _box_row(f"  Nginx Front:  {GREEN}включён{NC} — {CYAN}https://{_triple_nginx_domain}:{_triple_nginx_port}{NC}")
+            else:
+                _box_row(f"  Nginx Front:  {DIM}выключен (доступ через SSH-туннель){NC}")
+                if ipv4:
+                    _box_row(f"  SSH-туннель:  {CYAN}ssh -L {_triple_port}:127.0.0.1:{_triple_port} root@{ipv4}{NC}")
+
+        # ── БЛОК 4: nginx front статус (общий — для Chimera default) ─────────
         _box_sep()
         if _nginx_front_enabled:
-            _box_row(f"  nginx front:  {GREEN}включён{NC} — https://{_nginx_front_domain}:{_nginx_front_port}")
+            _box_row(f"  Chimera nginx front:  {GREEN}включён{NC} — https://{_nginx_front_domain}:{_nginx_front_port}")
         else:
-            _box_row(f"  nginx front:  {DIM}выключен (доступ через SSH-туннель или без TLS){NC}")
+            _box_row(f"  Chimera nginx front:  {DIM}выключен (доступ через SSH-туннель или без TLS){NC}")
 
         _box_sep()
         if not _installed:
