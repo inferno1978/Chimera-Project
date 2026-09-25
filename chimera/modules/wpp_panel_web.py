@@ -1277,6 +1277,14 @@ class _WppHandler(BaseHTTPRequestHandler):
                 self.send_json(_list_components())
                 return
 
+            # ── Component endpoints (для JS в updates_ui + dashboard_page) ──
+            # /component-status — GET, возвращает JSON {catalog, current, phase, message}
+            # /component-check — POST, триггерит проверку версий компонентов
+            # /component-install — POST, устанавливает компонент (alias для /components/install)
+            if path == prefix + "/component-status":
+                self.send_json(self._component_status())
+                return
+
             # ── QR codes: /qr/user/<uid>/<protocol> ──
             # /qr/user/<uid>/<protocol> → PNG QR code
             import re as _re
@@ -1586,6 +1594,15 @@ class _WppHandler(BaseHTTPRequestHandler):
                     else:
                         # Проверка наличия обновления
                         result = self._update_status()
+                    self.send_json(result)
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, status=500)
+                return
+
+            # ── Component check/install (для JS в updates_ui) ──
+            if path in (prefix + "/component-check", prefix + "/component-install"):
+                try:
+                    result = self._component_status()
                     self.send_json(result)
                 except Exception as exc:
                     self.send_json({"error": str(exc)}, status=500)
@@ -2129,14 +2146,18 @@ th,td{{padding:10px 12px;text-align:left;border-bottom:1px solid #1c2b40}}</styl
         domain = _esc(state.get("domain", "—"))
         xray_port = state.get("xray_port", "—")
 
-        # Auto-update state
+        # Xray порт — читаем из state.json (field 'xray_port' или 'vless_port')
+        xray_port = state.get("xray_port") or state.get("vless_port") or 443
+
+        # Cron check — проверяем реальное существование файла, а не state
+        cron_file_exists = Path("/etc/cron.d/wpp-autoupdate").exists()
+
+        # Auto-update enabled state
         try:
-            from chimera.modules.wpp_autoupdate import _get_auto_update_enabled, load_state as _load_au_state
+            from chimera.modules.wpp_autoupdate import _get_auto_update_enabled
             au_enabled = _get_auto_update_enabled()
-            cron_installed = (_load_au_state() or {}).get("auto_update", {}).get("cron_installed", False)
         except Exception:
-            au_enabled = False
-            cron_installed = False
+            au_enabled = cron_file_exists  # fallback: если cron есть — включено
 
         csrf_field = f'<input type="hidden" name="csrf" value="{csrf}">'
         if au_enabled:
@@ -2149,7 +2170,7 @@ th,td{{padding:10px 12px;text-align:left;border-bottom:1px solid #1c2b40}}</styl
                              f'<form method="post" action="{prefix}/autoupdate/toggle" class="inline-form">'
                              f'{csrf_field}<input type="hidden" name="enable" value="1">'
                              f'<button type="submit" class="primary">Включить</button></form>')
-        if not cron_installed and au_enabled:
+        if not cron_file_exists and au_enabled:
             au_state_html += '<p class="note" style="color:#fbbf24">⚠️ Cron файл не найден — пере-включите авто-обновление.</p>'
 
         body = f"""
@@ -2571,6 +2592,43 @@ systemd template units openflux@&lt;name&gt;.service. Чтобы мигриро�
                 "checked":    int(time.time()),
                 "ok":         False,
                 "message":    f"Ошибка: {type(exc).__name__}: {exc}",
+            }
+
+    def _component_status(self) -> dict:
+        """
+        JSON статус компонентов (xray + openflux) для JS в updates_ui.
+        Возвращает {catalog, current, phase, message, checked}.
+
+        JS в updates_ui вызывает:
+          POST /component-check → этот метод
+          POST /component-install → этот метод (пока без реальной установки)
+          GET /component-status → этот метод (every 5s polling)
+        """
+        try:
+            components = _list_components().get("components", [])
+            current = {}
+            for c in components:
+                cid = c.get("id", "")
+                ver = c.get("version", "")
+                if ver and ver != "—":
+                    # Берём только версию (убираем лишнее из вывода --version)
+                    current[cid] = ver.split()[0] if ver else "неизвестно"
+                else:
+                    current[cid] = "неизвестно"
+            return {
+                "catalog":  {},  # Пока нет списка доступных версий с GitHub
+                "current":  current,
+                "phase":    "idle",
+                "checked":  int(time.time()),
+                "message":  "Версии компонентов. Установка через chimera CLI.",
+            }
+        except Exception as exc:
+            return {
+                "catalog":  {},
+                "current":  {},
+                "phase":    "idle",
+                "checked":  int(time.time()),
+                "message":  f"Ошибка: {type(exc).__name__}: {exc}",
             }
 
 
