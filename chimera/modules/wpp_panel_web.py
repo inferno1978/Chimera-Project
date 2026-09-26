@@ -178,8 +178,24 @@ def users():
     try:
         with open(USERS,encoding="utf-8") as f:
             data=json.load(f)
-            # Handle both chimera (list) and WPP (dict with "users" key) formats
-            return data if isinstance(data,list) else data.get("users",[])
+            raw = data if isinstance(data,list) else data.get("users",[])
+            # Transform chimera users → WPP profile format
+            # chimera: {uuid, email, name, disabled, blocked}
+            # WPP expects: {id, name, protocol, enabled, secret, backend_port, username, subscription_id}
+            return [
+                {
+                    "id":              str(u.get("uuid") or u.get("id") or ""),
+                    "name":            str(u.get("name") or u.get("email") or ""),
+                    "protocol":        "vless",
+                    "enabled":         not u.get("disabled") and not u.get("blocked"),
+                    "secret":          str(u.get("uuid") or ""),
+                    "backend_port":    443,
+                    "username":        str(u.get("email","")).split("@")[0],
+                    "subscription_id": None,
+                    "created_at":      0,
+                }
+                for u in raw
+            ]
     except Exception: return []
 def traffic():
     try:
