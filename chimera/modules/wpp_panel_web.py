@@ -185,15 +185,18 @@ def primary():
         with open(PRIMARY,encoding="utf-8") as f: return f.read().strip()
     except Exception: return ""
 def users():
+    """Returns all users from chimera as WPP profiles.
+    Reads VLESS users from /etc/xray/users.json AND MTProto users from
+    /etc/telemt/telemt.toml — combines them into one list.
+    """
+    profiles = []
+    # --- VLESS users from /etc/xray/users.json ---
     try:
         with open(USERS,encoding="utf-8") as f:
             data=json.load(f)
             raw = data if isinstance(data,list) else data.get("users",[])
-            # Transform chimera users → WPP profile format
-            # chimera: {uuid, email, name, disabled, blocked}
-            # WPP expects: {id, name, protocol, enabled, secret, backend_port, username, subscription_id}
-            return [
-                {
+            for u in raw:
+                profiles.append({
                     "id":              str(u.get("uuid") or u.get("id") or ""),
                     "name":            str(u.get("name") or u.get("email") or ""),
                     "protocol":        "vless",
@@ -203,10 +206,47 @@ def users():
                     "username":        str(u.get("email","")).split("@")[0],
                     "subscription_id": None,
                     "created_at":      0,
-                }
-                for u in raw
-            ]
-    except Exception: return []
+                    "device_secrets":  None,
+                })
+    except Exception:
+        pass
+    # --- MTProto users from /etc/telemt/telemt.toml ---
+    try:
+        import re as _re
+        telemt_path = "/etc/telemt/telemt.toml"
+        if os.path.exists(telemt_path):
+            toml_text = open(telemt_path, encoding="utf-8").read()
+            # Parse [access.users] section — keys are usernames, values are hex secrets
+            # Format: username = "67daaf98532fd1ce9e86ef5dcb86a0a4"
+            in_users = False
+            for line in toml_text.splitlines():
+                line = line.strip()
+                if line == "[access.users]":
+                    in_users = True
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    in_users = False
+                    continue
+                if in_users and "=" in line:
+                    parts = line.split("=", 1)
+                    username = parts[0].strip().strip('"')
+                    secret = parts[1].strip().strip('"')
+                    if username and secret and len(secret) >= 32:
+                        profiles.append({
+                            "id":              f"mtproto-{username}",
+                            "name":            username,
+                            "protocol":        "mtproto",
+                            "enabled":         True,
+                            "secret":          secret,
+                            "backend_port":    2398,  # default MTProto port
+                            "username":        username,
+                            "subscription_id": None,
+                            "created_at":      0,
+                            "device_secrets":  [secret],
+                        })
+    except Exception:
+        pass
+    return profiles
 def traffic():
     """Per-user traffic dict {user_id: {up, down, service_active, last_change}}.
     Reads aggregated totals from wpp_metrics.json and distributes across users.
@@ -509,9 +549,69 @@ def get_preset(preset_id):
     raise ValueError("Пресет не найден")
 
 def ctl(*args):
-    r=subprocess.run([MANAGER,*args],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=60)
-    if r.returncode: raise RuntimeError(r.stderr.strip() or "manager failed")
-    return json.loads(r.stdout) if r.stdout.strip() else None
+    """Chimera-adapted ctl() — calls user_lifecycle instead of WPP manager.
+    Supports: add, delete, set-user, rename-user.
+    """
+    if not args:
+        raise RuntimeError("ctl() called with no arguments")
+    action = args[0]
+    try:
+        from chimera.modules import user_lifecycle
+        if action == "add" and len(args) >= 3:
+            # ctl("add", protocol, name)
+            protocol = args[1]
+            name = args[2]
+            # Map WPP protocol names to chimera
+            proto_map = {"vless":"vless","hysteria":"hysteria2","mtproto":"mtproto",
+                         "awg20":"awg","awg31":"awg","web":"vless"}
+            chimera_proto = proto_map.get(protocol, "vless")
+            # Synthesize email from name
+            email = name if "@" in name else f"{name.strip().lower().replace(' ','_')}@xray.local"
+            result = user_lifecycle.add_user(email=email, protocols=[chimera_proto], name=name)
+            if result.get("success"):
+                # Find the created user to return its profile
+                for u in users():
+                    if u.get("name") == name or u.get("username") == email.split("@")[0]:
+                        return u
+                return {"id":"","name":name,"protocol":protocol}
+            raise RuntimeError(result.get("errors",["add failed"])[0])
+        elif action == "delete" and len(args) >= 2:
+            # ctl("delete", uid)
+            uid = args[1]
+            # Find email by id (uuid)
+            target = next((u for u in users() if u.get("id") == uid), None)
+            if not target:
+                raise RuntimeError(f"User {uid} not found")
+            # MTProto users need special handling
+            if uid.startswith("mtproto-"):
+                # Delete from telemt.toml
+                raise RuntimeError("MTProto user deletion — use chimera CLI")
+            result = user_lifecycle.remove_user(email=target.get("username","")+"@xray.local", protocols="all")
+            if not result.get("success"):
+                raise RuntimeError(result.get("errors",["delete failed"])[0])
+            return None
+        elif action == "set-user" and len(args) >= 3:
+            # ctl("set-user", uid, enabled_str)
+            uid = args[1]
+            enabled = args[2] == "1"
+            target = next((u for u in users() if u.get("id") == uid), None)
+            if not target:
+                raise RuntimeError(f"User {uid} not found")
+            if enabled:
+                user_lifecycle.unblock_user(email=target.get("username","")+"@xray.local", protocols="all")
+            else:
+                user_lifecycle.block_user(email=target.get("username","")+"@xray.local", reason="wpp_panel", protocols="all")
+            return None
+        elif action == "rename-user" and len(args) >= 3:
+            # ctl("rename-user", uid, new_name)
+            # Chimera doesn't have rename — would need to delete+recreate
+            raise RuntimeError("Rename not supported — use chimera CLI")
+        else:
+            raise RuntimeError(f"Unknown ctl action: {action}")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"{type(exc).__name__}: {exc}")
 def subscription_registry():
     try:
         with open(DATA,encoding="utf-8") as f:
