@@ -8,9 +8,9 @@ import sys
 import time
 from chimera.modules.wpp_metrics import atomic_json, read_state
 
-ROOT = Path('/var/lib/web-panel-proxy-update')
+ROOT = Path('/var/lib/xray-installer/wpp-update')
 STATUS = ROOT / 'status.json'
-VERSION = Path('/etc/web-proxy-panel/version')
+VERSION = Path('/var/lib/xray-installer/wpp_panel_state.json')  # chimera: version in state
 UNIT = 'web-panel-proxy-web-update.service'
 REPO = 'https://github.com/POLESNIESOVETI12/web-panel-proxy.git'
 UPDATER = '/usr/local/sbin/web-panel-proxy-update'
@@ -41,8 +41,13 @@ def failure_message(log_path):
 
 
 def current_version():
-    try: return VERSION.read_text(encoding='ascii').strip()
-    except OSError: return 'unknown'
+    try:
+        import json as _json
+        data = _json.loads(VERSION.read_text(encoding='utf-8'))
+        v = data.get('front_version', '')
+        return v if v else 'unknown'
+    except Exception:
+        return 'unknown'
 
 
 def version_tuple(value):
