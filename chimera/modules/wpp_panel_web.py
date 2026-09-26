@@ -1062,7 +1062,50 @@ class Handler(BaseHTTPRequestHandler):
         if path==PANEL_PATH+"/node-action":
             try:
                 operation=form.get("operation","")
-                if operation=="add":
+                if operation=="add-cascade":
+                    # Chimera cascade node add — writes to state.json chain_nodes + xray restart
+                    host=form.get("host","").strip()
+                    port=form.get("port","443").strip()
+                    proto=form.get("proto","reality").strip() or "reality"
+                    uuid_val=form.get("uuid","").strip()
+                    pubkey=form.get("pubkey","").strip()
+                    shortid=form.get("shortid","").strip()
+                    sni=form.get("sni","").strip() or host
+                    fp=form.get("fp","").strip() or "chrome"
+                    if not host:
+                        raise node_api.NodeError("Host обязателен")
+                    # Read state.json
+                    try:
+                        with open("/var/lib/xray-installer/state.json","r") as sf:
+                            state=json.load(sf)
+                    except Exception:
+                        state={}
+                    chain=state.get("chain_nodes",[])
+                    # Check for duplicate
+                    if any(n.get("host")==host for n in chain):
+                        raise node_api.NodeError(f"Нода {host} уже существует")
+                    new_node={"host":host,"port":int(port) if str(port).isdigit() else 443,
+                              "proto":proto}
+                    if uuid_val: new_node["uuid"]=uuid_val
+                    if pubkey: new_node["pubkey"]=pubkey
+                    if shortid: new_node["shortid"]=shortid
+                    if sni: new_node["sni"]=sni
+                    if fp: new_node["fp"]=fp
+                    chain.append(new_node)
+                    state["chain_nodes"]=chain
+                    # Write back
+                    tmp="/var/lib/xray-installer/state.json.tmp"
+                    with open(tmp,"w") as sf: json.dump(state,sf,indent=2,ensure_ascii=False)
+                    os.chmod(tmp,0o600); os.replace(tmp,"/var/lib/xray-installer/state.json")
+                    # Restart xray to apply
+                    subprocess.run(["systemctl","restart","xray"],capture_output=True,timeout=30)
+                    # Refresh nodes.json from state
+                    try:
+                        from chimera.modules.wpp_cascade_bridge import refresh_nodes_file
+                        refresh_nodes_file()
+                    except Exception:
+                        pass
+                elif operation=="add":
                     bundled=node_api.parse_connection_token(form.get("connection_token",""))
                     candidate=bundled["url"]
                     if urlparse(candidate).hostname==DOMAIN:
@@ -1072,10 +1115,29 @@ class Handler(BaseHTTPRequestHandler):
                     nodes=node_api.load_nodes(NODES_FILE); uid=form.get("id","")
                     selected=next((n for n in nodes if n.get("id")==uid),None)
                     if selected is None: raise node_api.NodeError("Нода не найдена.")
-                    # Revoke remotely before forgetting the only credential that
-                    # can remove controller-created profiles from this node.
-                    node_api.purge_profiles(selected)
-                    node_api.save_nodes(NODES_FILE,[n for n in nodes if n.get("id")!=uid])
+                    if selected.get("_cascade"):
+                        # Cascade node — delete from state.json chain_nodes + xray restart
+                        host=selected.get("url","").replace("https://","").split("/")[0].split(":")[0]
+                        try:
+                            with open("/var/lib/xray-installer/state.json","r") as sf:
+                                state=json.load(sf)
+                        except Exception:
+                            state={}
+                        chain=state.get("chain_nodes",[])
+                        state["chain_nodes"]=[n for n in chain if n.get("host")!=host]
+                        tmp="/var/lib/xray-installer/state.json.tmp"
+                        with open(tmp,"w") as sf: json.dump(state,sf,indent=2,ensure_ascii=False)
+                        os.chmod(tmp,0o600); os.replace(tmp,"/var/lib/xray-installer/state.json")
+                        subprocess.run(["systemctl","restart","xray"],capture_output=True,timeout=30)
+                        try:
+                            from chimera.modules.wpp_cascade_bridge import refresh_nodes_file
+                            refresh_nodes_file()
+                        except Exception:
+                            pass
+                    else:
+                        # WPP federation node — delete normally
+                        node_api.purge_profiles(selected)
+                        node_api.save_nodes(NODES_FILE,[n for n in nodes if n.get("id")!=uid])
                 elif operation=="location":
                     node_api.save_location(LOCATION_FILE,form)
                 else: raise node_api.NodeError("Неизвестная операция с нодой.")
