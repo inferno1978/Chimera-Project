@@ -1013,6 +1013,116 @@ def _log_openflux_error(msg: str) -> None:
 
 
 
+# ─── WPP DATA ADAPTERS — transform chimera data → WPP format ────────────────
+def _wpp_profiles_from_chimera() -> list[dict]:
+    """chimera /etc/xray/users.json → WPP profiles for users_ui()."""
+    profiles = []
+    for u in _chimera_users():
+        uid = str(u.get("uuid") or "")
+        if not uid: continue
+        email = str(u.get("email") or "")
+        name = str(u.get("name") or email or uid[:8])
+        created_at = 0
+        created_raw = u.get("created") or u.get("created_at") or ""
+        if created_raw:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+                created_at = int(dt.timestamp())
+            except Exception: pass
+        profiles.append({
+            "id": uid, "name": name, "protocol": "vless",
+            "enabled": not u.get("disabled") and not u.get("blocked"),
+            "secret": uid, "backend_port": 443,
+            "username": email.split("@")[0] if email else "",
+            "subscription_id": None, "created_at": created_at,
+            "device_secrets": None,
+        })
+    return profiles
+
+def _wpp_traffic_dict() -> dict:
+    """traffic dict в WPP формате {user_id: {up, down, service_active, last_change}}."""
+    traffic = {}
+    try:
+        from chimera.modules.wpp_metrics import read_state
+        latest = read_state().get("latest", {})
+        total_up = int(latest.get("up", 0) or 0)
+        total_down = int(latest.get("down", 0) or 0)
+        fresh = bool(latest.get("traffic_fresh", False))
+        now = int(latest.get("time", 0))
+        users = _chimera_users()
+        n = len(users) or 1
+        for u in users:
+            uid = str(u.get("uuid") or "")
+            if not uid: continue
+            traffic[uid] = {"up": total_up // n, "down": total_down // n,
+                "service_active": fresh and not u.get("disabled") and not u.get("blocked"),
+                "last_change": now}
+    except Exception: pass
+    return traffic
+
+def _wpp_proxy_link_func():
+    """proxy_link function для users_ui()."""
+    def _link(protocol, secret, port, name="", username=""):
+        try:
+            state = _chimera_state()
+            domain = state.get("domain") or "<server>"
+            return f"vless://{secret}@{domain}:{port}?type=tcp&security=reality#{name}"
+        except Exception: return ""
+    return _link
+
+def _wpp_nodes_from_chimera() -> list[dict]:
+    """chimera chain_nodes → WPP nodes format."""
+    state = _chimera_state()
+    nodes = []
+    for cn in state.get("chain_nodes", []) or []:
+        host = cn.get("host") or ""
+        port = cn.get("port") or 443
+        nodes.append({"id": host, "url": f"https://{host}:{port}",
+            "name": host, "enabled": True, "country_code": "UN",
+            "city": "", "weight": 1, "status": "active"})
+    return nodes
+
+def _wpp_local_location() -> dict:
+    state = _chimera_state()
+    return {"country_code": "UN", "city": ""}
+
+def _wpp_openflux_state() -> dict:
+    """chimera openflux.json → WPP openflux_ui state format."""
+    try:
+        of_file = Path("/var/lib/xray-installer/openflux.json")
+        if not of_file.exists():
+            return {"configured": False, "active": False, "enabled": False,
+                    "ios_compatible": False, "key": "", "url": ""}
+        of_data = json.loads(of_file.read_text())
+        import subprocess
+        r = subprocess.run(["systemctl", "is-active", "--quiet", "openflux"],
+                           capture_output=True, timeout=5)
+        active = (r.returncode == 0)
+        return {"configured": bool(of_data.get("installed_at") or of_data.get("doc_url")),
+            "active": active, "enabled": active, "ios_compatible": False,
+            "key": of_data.get("transport_key", ""), "url": of_data.get("doc_url", "")}
+    except Exception:
+        return {"configured": False, "active": False, "enabled": False,
+                "ios_compatible": False, "key": "", "url": ""}
+
+def _wpp_presets_with_html() -> list[dict]:
+    """presets в формате для editor_ui(): [{id, name, description, html, custom}]."""
+    presets = []
+    for pid, p in _BUILTIN_PRESETS.items():
+        presets.append({"id": pid, "name": p["name"], "description": p["description"],
+                        "html": p["html"], "custom": False})
+    try:
+        if _STUB_PRESETS_FILE.exists():
+            data = json.loads(_STUB_PRESETS_FILE.read_text())
+            if isinstance(data, list):
+                for p in data:
+                    presets.append({"id": p.get("id",""), "name": p.get("name",""),
+                        "description": p.get("description",""), "html": p.get("html",""),
+                        "custom": True})
+    except Exception: pass
+    return presets
+
 class _WppHandler(BaseHTTPRequestHandler):
     """
     Главный HTTP handler. Реализует:
@@ -1988,154 +2098,41 @@ background:#2563eb;color:#fff;font:inherit;font-weight:600;cursor:pointer}}
         return body_html
 
     def _users_page(self) -> str:
-        """Список пользователей Chimera (VLESS source of truth).
-        Multi-protocol — каждый юзер может иметь vless + awg + mtproto.
-        Bidirectional sync через chimera.modules.user_lifecycle — изменения
-        из chimera CLI видны здесь сразу, и наоборот."""
+        """Клиенты — использует wpp_ui.users_ui() (ИДЕНТИЧНО оригинальному WPP).
+        Карточки клиентов с avatar, QR кнопками, switch toggle, devices list,
+        filter/search/sort toolbar, create-account dialog."""
         prefix = _panel_path()
-        csrf = self.csrf()
-        users = _chimera_users()
-        traffic = _chimera_traffic()
-
-        rows_html = []
-        for u in users:
-            uid = str(u.get("uuid") or "")
-            email = _esc(u.get("email", "") or "")
-            name = _esc(u.get("name", "") or email)
-            created = _esc(str(u.get("created", ""))[:19].replace("T", " "))
-            # Multi-protocol: disabled/blocked fields управляют enabled
-            disabled = bool(u.get("disabled"))
-            blocked = bool(u.get("blocked"))
-            enabled = not (disabled or blocked)
-            if blocked:
-                state_html = "🚫 Blocked"
-            elif disabled:
-                state_html = "🔴 Disabled"
-            else:
-                state_html = "🟢 Active"
-
-            # Multi-protocol badge — показываем какие протоколы есть.
-            # (Здесь упрощённо: всегда VLESS canonical, AWG/MTProto отображаем
-            # если есть соответствующие storage через owner_email/username.)
-            protocols_badges = []
-            protocols_badges.append('<span class="pill">VLESS</span>')
-            try:
-                from chimera.modules import awg_state
-                if awg_state.awgs_state_find_peer_by_owner(u.get("email", "")):
-                    protocols_badges.append('<span class="pill">AWG</span>')
-            except Exception:
-                pass
-            try:
-                from chimera.modules import mtproto
-                username = (u.get("email") or "").split("@")[0]
-                mt_users = mtproto._load_users()
-                if mt_users and username in mt_users:
-                    protocols_badges.append('<span class="pill">MTProto</span>')
-            except Exception:
-                pass
-            proto_html = " ".join(protocols_badges)
-
-            tr = traffic.get(u.get("email", ""), {})
-            up = _size(tr.get("up", 0))
-            down = _size(tr.get("down", 0))
-            rows_html.append(
-                f"<tr><td>{state_html}</td><td><b>{name}</b><br>"
-                f"<small style='color:#9ab;font-size:11px'>{email}</small></td>"
-                f"<td>{proto_html}</td>"
-                f"<td>↑ {up}</td><td>↓ {down}</td>"
-                f"<td><small style='color:#9ab;font-size:11px'>{created}</small></td>"
-                f"<td><form method='post' action='{prefix}/delete-user' "
-                f"style='display:inline' "
-                f"onsubmit='return confirm(\"Удалить {name}? Все протоколы будут сняты.\")'>"
-                f"<input type='hidden' name='csrf' value='{csrf}'>"
-                f"<input type='hidden' name='id' value='{_esc(uid)}'>"
-                f"<button type='submit' style='background:#dc2626'>"
-                f"{_icon('delete')} Удалить</button></form></td></tr>"
-            )
-
-        rows = "\n".join(rows_html) if rows_html else (
-            "<tr><td colspan='7' style='text-align:center;color:#9ab'>"
-            "Пользователей нет — создайте первого ↓</td></tr>"
-        )
-
-        # Body content (простая таблица пользователей с multi-protocol badges)
-        body = f"""
-<div class="page-head"><div><h1>Подключения</h1><p>Пользователи Chimera и их протоколы (VLESS/AWG/MTProto)</p></div>
-<form class="inline-form" method="post" action="{prefix}/create-account">
-<input type="hidden" name="csrf" value="{csrf}">
-<input type="text" name="name" placeholder="Имя или email" required maxlength="80" autocomplete="off">
-<select name="protocol">
-<option value="vless">VLESS REALITY (+AWG+MTProto)</option>
-<option value="mtproto">MTProto (+VLESS)</option>
-<option value="awg20">AmneziaWG (+VLESS)</option>
-<option value="awg31">AmneziaWG 3.1 (+VLESS)</option>
-</select>
-<button type="submit" class="primary">{_icon('add')} Создать</button>
-</form></div>
-<table class="data-table">
-<thead><tr><th>Статус</th><th>Имя / Email</th><th>Протоколы</th>
-<th>↑ Входящий</th><th>↓ Исходящий</th><th>Создан</th><th>Действия</th></tr></thead>
-<tbody>
-{rows}
-</tbody></table>
-"""
-
         state = _chimera_state()
         domain = state.get("domain", "—")
+        csrf = self.csrf()
+        profiles = _wpp_profiles_from_chimera()
+        traffic = _wpp_traffic_dict()
+        proxy_link = _wpp_proxy_link_func()
         try:
             from chimera.modules import wpp_ui
-            return wpp_ui.page_layout("Подключения", body, prefix, "users", domain)
+            body = wpp_ui.users_ui([], profiles, traffic, prefix, domain, csrf, proxy_link)
+            return wpp_ui.page_layout("Клиенты", body, prefix, "users", domain)
         except Exception as exc:
-            self.log_message("page_layout fallback (users): %s: %s", type(exc).__name__, exc)
-            # Fallback inline
-            return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<title>WPP — Подключения</title>
-<style>body{{margin:0;background:#060910;color:#fff;font:15px system-ui}}
-.wrap{{padding:24px;max-width:1280px;margin:0 auto}}
-table{{width:100%;border-collapse:collapse;font-size:14px}}
-th,td{{padding:10px 12px;text-align:left;border-bottom:1px solid #1c2b40}}
-th{{color:#9ab;font-size:12px;text-transform:uppercase}}
-button{{padding:6px 10px;border:0;border-radius:6px;color:#fff;cursor:pointer}}
-.pill{{display:inline-block;padding:2px 8px;margin-right:4px;border-radius:10px;
-background:#1c2b40;color:#56decb;font-size:11px}}
-</style></head><body><div class="wrap">{body}</div></body></html>"""
+            self.log_message("users_ui fallback: %s: %s", type(exc).__name__, exc)
+            return f"<!doctype html><html><body><h1>Клиенты</h1><p>Ошибка: {_esc(str(exc))}</p></body></html>"
 
     def _nodes_page(self) -> str:
-        """Страница нод каскада (read-only на первом этапе)."""
+        """Ноды каскада — использует wpp_ui.nodes_ui() (ИДЕНТИЧНО оригинальному WPP).
+        Форма добавления нод с country flag, connection token, список нод с actions."""
         prefix = _panel_path()
+        csrf = self.csrf()
         state = _chimera_state()
-        nodes = state.get("chain_nodes", []) or []
-        if not nodes:
-            body_content = ('<div style="padding:48px;text-align:center;color:#9ab">'
-                    'Ноды каскада не настроены. Используйте раздел '
-                    '"Установка и Система → Каскад нод" в chimera CLI.</div>')
-        else:
-            rows = []
-            for n in nodes:
-                host = _esc(n.get("host", ""))
-                port = _esc(str(n.get("port", "")))
-                role = _esc(n.get("role", ""))
-                rows.append(f"<tr><td>{host}</td><td>{port}</td>"
-                            f"<td>{role}</td></tr>")
-            body_content = (f'<table class="data-table"><thead><tr><th>Host</th><th>Port</th>'
-                    f'<th>Role</th></tr></thead><tbody>'
-                    + "\n".join(rows) + '</tbody></table>')
-
-        body = f"""
-<div class="page-head"><div><h1>Ноды каскада</h1><p>Удалённые серверы в chain — для multi-node подписок</p></div></div>
-{body_content}
-"""
         domain = state.get("domain", "—")
+        nodes = _wpp_nodes_from_chimera()
+        local = _wpp_local_location()
+        connection_token = ""
         try:
             from chimera.modules import wpp_ui
+            body = wpp_ui.nodes_ui(nodes, local, connection_token, prefix, csrf)
             return wpp_ui.page_layout("Ноды", body, prefix, "nodes", domain)
         except Exception as exc:
-            self.log_message("page_layout fallback (nodes): %s: %s", type(exc).__name__, exc)
-            return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<title>WPP — Ноды</title><style>body{{margin:0;background:#060910;color:#fff;font:15px system-ui}}
-.wrap{{padding:24px;max-width:1280px;margin:0 auto}}table{{width:100%;border-collapse:collapse}}
-th,td{{padding:10px 12px;text-align:left;border-bottom:1px solid #1c2b40}}</style></head>
-<body><div class="wrap">{body}</div></body></html>"""
+            self.log_message("nodes_ui fallback: %s: %s", type(exc).__name__, exc)
+            return f"<!doctype html><html><body><h1>Ноды</h1><p>Ошибка: {_esc(str(exc))}</p></body></html>"
 
     def _settings_page(self) -> str:
         """Настройки — смена пароля + инфо о сервере + авто-обновление toggle.
@@ -2200,158 +2197,20 @@ th,td{{padding:10px 12px;text-align:left;border-bottom:1px solid #1c2b40}}</styl
             return f"<!doctype html><html><body><div class='wrap'>{body}</div></body></html>"
 
     def _openflux_page(self) -> str:
-        """OpenFlux management page — multi-profile list + create form + legacy single-profile status."""
+        """OpenFlux — использует wpp_ui.openflux_ui() (ИДЕНТИЧНО оригинальному WPP).
+        Карточка настройки с doc_url input, iOS toggle, key reveal/copy."""
         prefix = _panel_path()
         csrf = self.csrf()
-
-        # Multi-profile list
-        try:
-            from chimera.modules.openflux_profiles import profile_states
-            profiles = profile_states()
-        except Exception as exc:
-            profiles = []
-            _log_openflux_error(str(exc))
-
-        # Single-profile state (legacy)
-        legacy = _chimera_openflux_state()
-        legacy_installed = legacy.get("installed", False)
-
-        # Build profiles list HTML
-        if profiles:
-            profile_rows = []
-            for p in profiles:
-                name = _esc(p.get("name", ""))
-                transport = _esc(p.get("transport", ""))
-                enabled = p.get("enabled", False)
-                doc_masked = _esc(p.get("doc_url_masked", ""))
-                created = _esc(p.get("created_at", ""))[:19].replace("T", " ")
-                last_rot = _esc(p.get("last_rotation", ""))[:19].replace("T", " ")
-
-                state_html = "🟢 Активен" if enabled else "🔴 Остановлен"
-
-                # Action buttons
-                if enabled:
-                    toggle_btn = (f'<form method="post" action="{prefix}/openflux/profiles/disable" style="display:inline">'
-                                  f'<input type="hidden" name="csrf" value="{csrf}">'
-                                  f'<input type="hidden" name="name" value="{name}">'
-                                  f'<button type="submit" style="background:#dc2626">Остановить</button></form>')
-                else:
-                    toggle_btn = (f'<form method="post" action="{prefix}/openflux/profiles/enable" style="display:inline">'
-                                  f'<input type="hidden" name="csrf" value="{csrf}">'
-                                  f'<input type="hidden" name="name" value="{name}">'
-                                  f'<button type="submit">Запустить</button></form>')
-                rotate_btn = (f'<form method="post" action="{prefix}/openflux/profiles/rotate" style="display:inline">'
-                              f'<input type="hidden" name="csrf" value="{csrf}">'
-                              f'<input type="hidden" name="name" value="{name}">'
-                              f'<button type="submit" style="background:#7c3aed">Rotate</button></form>')
-                delete_btn = (f'<form method="post" action="{prefix}/openflux/profiles/delete" style="display:inline"'
-                              f' onsubmit="return confirm(\'Удалить профиль {name}?\')"'
-                              f'><input type="hidden" name="csrf" value="{csrf}">'
-                              f'<input type="hidden" name="name" value="{name}">'
-                              f'<input type="hidden" name="confirm" value="1">'
-                              f'<button type="submit" style="background:#b91c1c">Удалить</button></form>')
-
-                profile_rows.append(f"""
-<tr>
-<td style="padding:10px 8px;border-bottom:1px solid #1c2b40"><b>{name}</b></td>
-<td style="padding:10px 8px;border-bottom:1px solid #1c2b40">{transport}</td>
-<td style="padding:10px 8px;border-bottom:1px solid #1c2b40">{state_html}</td>
-<td style="padding:10px 8px;border-bottom:1px solid #1c2b40;max-width:200px;word-break:break-all"><code style="font-size:11px">{doc_masked}</code></td>
-<td style="padding:10px 8px;border-bottom:1px solid #1c2b40;font-size:11px;color:#9ab">{created}</td>
-<td style="padding:10px 8px;border-bottom:1px solid #1c2b40;font-size:11px;color:#9ab">{last_rot}</td>
-<td style="padding:10px 8px;border-bottom:1px solid #1c2b40;white-space:nowrap">{toggle_btn} {rotate_btn} {delete_btn}</td>
-</tr>""")
-            profiles_table = f"""
-<table style="width:100%;border-collapse:collapse;font-size:13px">
-<thead><tr style="color:#9ab;font-size:11px;text-transform:uppercase">
-<th style="text-align:left;padding:8px">Имя</th>
-<th style="text-align:left;padding:8px">Транспорт</th>
-<th style="text-align:left;padding:8px">Статус</th>
-<th style="text-align:left;padding:8px">Doc URL</th>
-<th style="text-align:left;padding:8px">Создан</th>
-<th style="text-align:left;padding:8px">Последний rotate</th>
-<th style="text-align:left;padding:8px">Действия</th>
-</tr></thead>
-<tbody>{''.join(profile_rows)}</tbody>
-</table>"""
-        else:
-            profiles_table = ('<div style="padding:32px;text-align:center;color:#9ab">'
-                              'Профилей нет. Создайте первый ниже.</div>')
-
-        # Create form
-        create_form = f"""
-<form method="post" action="{prefix}/openflux/profiles/create" style="display:grid;grid-template-columns:1fr 1fr 2fr auto;gap:10px;align-items:end">
-<input type="hidden" name="csrf" value="{csrf}">
-<div><label style="display:block;margin:0 0 4px;color:#9ab;font-size:12px">Имя (1-32, [a-z0-9-])</label>
-<input type="text" name="name" required pattern="[a-z0-9][a-z0-9-]*" maxlength="32" placeholder="ios-prof" style="width:100%;padding:8px;border:1px solid #1c2b40;border-radius:8px;background:#0a121d;color:#fff;font:inherit"></div>
-<div><label style="display:block;margin:0 0 4px;color:#9ab;font-size:12px">Транспорт</label>
-<select name="transport" style="width:100%;padding:8px;border:1px solid #1c2b40;border-radius:8px;background:#0a121d;color:#fff;font:inherit">
-<option value="yandex">Yandex (default)</option>
-<option value="vyandex">vyandex</option>
-<option value="cupsonline">cupsonline</option>
-<option value="oneme">oneme</option>
-<option value="mailru">mailru</option>
-</select></div>
-<div><label style="display:block;margin:0 0 4px;color:#9ab;font-size:12px">Doc URL (с ?sk=...)</label>
-<input type="url" name="doc_url" required placeholder="https://editor.yandex.ru/..." style="width:100%;padding:8px;border:1px solid #1c2b40;border-radius:8px;background:#0a121d;color:#fff;font:inherit"></div>
-<button type="submit" style="padding:9px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;font:inherit;font-weight:600;cursor:pointer;height:36px">{_icon('add')} Создать</button>
-</form>"""
-
-        # Legacy single-profile section (collapsed if no migration done)
-        if legacy_installed:
-            legacy_state_html = ("🟢 Активен" if legacy.get("enabled") else "🔴 Остановлен")
-            legacy_section = f"""
-<details style="margin-top:18px;padding:14px;border:1px solid #1c2b40;border-radius:8px;background:#0d1520">
-<summary style="cursor:pointer;font-size:13px;color:#9ab">📋 Legacy single-profile (openflux.service)</summary>
-<table style="width:100%;border-collapse:collapse;margin-top:12px">
-<tr><th style="text-align:left;padding:6px 0;color:#9ab">Транспорт</th><td>{_esc(legacy.get('transport',''))}</td></tr>
-<tr><th style="text-align:left;padding:6px 0;color:#9ab">Сервис</th><td>{legacy_state_html}</td></tr>
-<tr><th style="text-align:left;padding:6px 0;color:#9ab">Doc URL</th><td><code style="font-size:11px">{_esc(legacy.get('doc_url_masked',''))}</code></td></tr>
-</table>
-<div style="margin-top:12px">
-<form method="post" action="{prefix}/openflux/enable" style="display:inline">
-<input type="hidden" name="csrf" value="{csrf}">
-<button type="submit">Запустить</button>
-</form>
-<form method="post" action="{prefix}/openflux/disable" style="display:inline">
-<input type="hidden" name="csrf" value="{csrf}">
-<button type="submit" style="background:#dc2626">Остановить</button>
-</form>
-<form method="post" action="{prefix}/openflux/rotate" style="display:inline">
-<input type="hidden" name="csrf" value="{csrf}">
-<button type="submit" style="background:#7c3aed">Rotate key</button>
-</form>
-</div>
-<small style="display:block;margin-top:12px;color:#9ab">
-Single-profile openflux.service — chimera's original. Multi-profile (выше) использует
-systemd template units openflux@&lt;name&gt;.service. Чтобы мигрировать single-profile
-в multi-profile 'default': python3 chimera/modules/openflux_profiles.py migrate
-</small>
-</details>"""
-        else:
-            legacy_section = ""
-
-        body = f"""
-<div class="page-head"><div><h1>OpenFlux (multi-profile)</h1><p>Управление профилями через systemd template units</p></div></div>
-<section class="card">
-<div class="card-title"><h2>Профили OpenFlux ({len(profiles)})</h2></div>
-{profiles_table}
-</section>
-<section class="card">
-<div class="card-title"><h2>Создать новый профиль</h2></div>
-<small class="note">Каждый профиль — отдельный systemd unit openflux@&lt;name&gt;.service с собственными env/key файлами.</small>
-{create_form}
-</section>
-{legacy_section}
-"""
         state = _chimera_state()
         domain = state.get("domain", "—")
+        of_state = _wpp_openflux_state()
         try:
             from chimera.modules import wpp_ui
-            return wpp_ui.page_layout("OpenFlux", body, prefix, "settings", domain)
+            body = wpp_ui.openflux_ui(of_state, prefix, csrf)
+            return wpp_ui.page_layout("OpenFlux", body, prefix, "openflux", domain)
         except Exception as exc:
-            self.log_message("page_layout fallback (openflux): %s: %s", type(exc).__name__, exc)
-            return f"<!doctype html><html><body><div class='wrap'>{body}</div></body></html>"
+            self.log_message("openflux_ui fallback: %s: %s", type(exc).__name__, exc)
+            return f"<!doctype html><html><body><h1>OpenFlux</h1><p>Ошибка: {_esc(str(exc))}</p></body></html>"
 
     def _components_page(self) -> str:
         """Component installer — список установленных/доступных протоколов."""
@@ -2434,95 +2293,22 @@ systemd template units openflux@&lt;name&gt;.service. Чтобы мигриро�
             return f"<!doctype html><html><body><div class='wrap'>{body}</div></body></html>"
 
     def _landing_page(self) -> str:
-        """Landing page editor — HTML editor + presets + draft."""
+        """Лендинг — использует wpp_ui.editor_ui() (ИДЕНТИЧНО оригинальному WPP).
+        Полноценный editor с preview, presets, draft, custom presets."""
         prefix = _panel_path()
         csrf = self.csrf()
-        live_html = _stub_get_live()
-        draft_html = _stub_get_draft()
-        has_draft = bool(draft_html)
-        # Если есть draft — показываем его в редакторе, иначе live
-        editor_content = _esc(draft_html or live_html)
-        presets_list = _stub_list_presets()
-
-        # Preset select options
-        preset_options = []
-        for p in presets_list:
-            label = f"{_esc(p['name'])}" + (f" ({p['bytes']} байт)" if p.get("bytes") else "")
-            preset_options.append(f'<option value="{_esc(p["id"])}">{label}</option>')
-        preset_options_html = "\n".join(preset_options)
-
-        # Custom presets delete buttons
-        custom_presets = [p for p in presets_list if p.get("custom")]
-        custom_html = ""
-        if custom_presets:
-            custom_items = []
-            for p in custom_presets:
-                custom_items.append(
-                    f'<li>{_esc(p["name"])} — {_esc(p.get("description",""))} '
-                    f'({p.get("bytes", 0)} байт) '
-                    f'<form method="post" action="{prefix}/stub/delete-preset" style="display:inline">'
-                    f'<input type="hidden" name="csrf" value="{csrf}">'
-                    f'<input type="hidden" name="preset" value="{_esc(p["id"])}">'
-                    f'<button type="submit" style="background:#dc2626">Удалить</button></form></li>'
-                )
-            custom_html = (f'<div class="card"><h2>Свои пресеты ({len(custom_presets)}/20)</h2>'
-                          f'<ul style="list-style:none;padding:0">'
-                          + "\n".join(custom_items) + '</ul></div>')
-
-        draft_indicator = ('<p style="color:#fbbf24">📝 Есть несохранённый draft</p>'
-                           if has_draft else '')
-
-        body = f"""
-<div class="page-head"><div><h1>Лендинг / HTML editor</h1><p>Управление заглушкой / лендингом на /var/www/panel-stub/index.html</p></div></div>
-<section class="card">
-<div class="card-title"><h2>HTML редактор лендинга</h2></div>
-{draft_indicator}
-<small class="note">Лимит: 256 KiB. Публикуется в /var/www/panel-stub/index.html</small>
-<form method="post" action="{prefix}/stub/publish">
-<input type="hidden" name="csrf" value="{csrf}">
-<textarea name="html" placeholder="<!doctype html>..." style="width:100%;min-height:300px;font-family:ui-monospace,monospace;font-size:13px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text)">{editor_content}</textarea>
-<button type="submit" class="primary">Опубликовать</button>
-</form>
-</section>
-<section class="card">
-<div class="card-title"><h2>Draft</h2></div>
-<form method="post" action="{prefix}/stub/save-draft" class="inline-form">
-<input type="hidden" name="csrf" value="{csrf}">
-<button type="submit" class="warn">Сохранить текущий textarea как draft</button>
-</form>
-<form method="post" action="{prefix}/stub/discard-draft" class="inline-form">
-<input type="hidden" name="csrf" value="{csrf}">
-<button type="submit" class="danger">Удалить draft</button>
-</form>
-</section>
-<section class="card">
-<div class="card-title"><h2>Готовые пресеты</h2></div>
-<form method="post" action="{prefix}/stub/apply-preset" class="inline-form">
-<input type="hidden" name="csrf" value="{csrf}">
-<select name="preset">{preset_options_html}</select>
-<button type="submit">Применить</button>
-</form>
-</section>
-<section class="card">
-<div class="card-title"><h2>Сохранить как свой preset</h2></div>
-<form method="post" action="{prefix}/stub/save-preset">
-<input type="hidden" name="csrf" value="{csrf}">
-<input type="text" name="name" placeholder="Имя (1-80)" maxlength="80" required>
-<input type="text" name="description" placeholder="Описание (опц.)" maxlength="180">
-<textarea name="html" placeholder="<!doctype html>..." style="min-height:100px;width:100%;font-family:ui-monospace,monospace;font-size:13px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text)"></textarea>
-<button type="submit" class="primary">Сохранить preset</button>
-</form>
-</section>
-{custom_html}
-"""
         state = _chimera_state()
         domain = state.get("domain", "—")
+        source = _stub_get_draft() or _stub_get_live()
+        presets = _wpp_presets_with_html()
+        has_draft = bool(_stub_get_draft())
         try:
             from chimera.modules import wpp_ui
-            return wpp_ui.page_layout("Лендинг", body, prefix, "settings", domain)
+            body = wpp_ui.editor_ui(source, prefix, csrf, presets, has_draft)
+            return wpp_ui.page_layout("Лендинг", body, prefix, "landing", domain)
         except Exception as exc:
-            self.log_message("page_layout fallback (landing): %s: %s", type(exc).__name__, exc)
-            return f"<!doctype html><html><body><div class='wrap'>{body}</div></body></html>"
+            self.log_message("editor_ui fallback: %s: %s", type(exc).__name__, exc)
+            return f"<!doctype html><html><body><h1>Лендинг</h1><p>Ошибка: {_esc(str(exc))}</p></body></html>"
 
     def _updates_page(self) -> str:
         """Страница управления обновлениями — использует wpp_ui.updates_ui.
