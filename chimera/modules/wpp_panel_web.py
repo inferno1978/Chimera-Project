@@ -47,6 +47,15 @@ PORT=8090
 DATA="/var/lib/xray-installer/wpp_panel_data.json"
 KEY="/var/lib/xray-installer/wpp_panel_session.key"
 DOMAIN=""
+# Read DOMAIN from chimera state.json (VLESS install domain)
+try:
+    with open("/var/lib/xray-installer/state.json", encoding="utf-8") as _f:
+        _chimera_st = json.load(_f)
+        _dom = (_chimera_st.get("domain") or "").strip()
+        if _dom:
+            DOMAIN = _dom.lower()
+except Exception:
+    pass
 MTPROTO_HOST=""
 PANEL_PATH=os.environ.get("WEBPROXY_PANEL_PATH","/panel")
 PRIMARY=""
