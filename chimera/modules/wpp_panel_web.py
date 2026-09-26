@@ -544,9 +544,12 @@ def mtproto_link(secret,port):
     client_secret=secret if secret.startswith("dd") else "dd"+secret
     return "https://t.me/proxy?server="+MTPROTO_HOST+"&port="+str(int(port))+"&secret="+client_secret
 def xray_path():
-    with open(XRAY_PATH_FILE,encoding="utf-8") as f: value=f.read().strip()
-    if not re.fullmatch(r"/vless-[a-f0-9]{24}",value): raise RuntimeError("Некорректный путь VLESS")
-    return value
+    try:
+        with open(XRAY_PATH_FILE,encoding="utf-8") as f: value=f.read().strip()
+        if not re.fullmatch(r"/vless-[a-f0-9]{24}",value): raise RuntimeError("Некорректный путь VLESS")
+        return value
+    except Exception:
+        return ""
 def proxy_link(protocol,secret,port=443,name="Proxy",username=""):
     if protocol=="mtproto": return mtproto_link(secret,port)
     if protocol=="web": return web_link(secret)
