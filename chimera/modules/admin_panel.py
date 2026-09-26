@@ -1200,21 +1200,21 @@ async function loadB4() {
     : '<span style="color:#f87171">● stopped</span>';
   const preset = data.active_preset || '—';
   const presets = data.presets || [];
-  let presetOptions = presets.map(p => `<option value="${{p.name}}" ${{p.name === preset ? 'selected' : ''}}>${{esc(p.label)}}</option>`).join('');
+  let presetOptions = presets.map(p => `<option value="${p.name}" ${p.name === preset ? 'selected' : ''}>${esc(p.label)}</option>`).join('');
 
   statusEl.innerHTML = `<div style="font-size:0.9rem">
-    ${{svc}} &nbsp;·&nbsp; v${{esc(data.version || '?')}} &nbsp;·&nbsp;
-    Preset: <strong>${{esc(preset)}}</strong> &nbsp;·&nbsp;
-    Queue: ${{data.queue_num}} &nbsp;·&nbsp; Web: <a href="http://127.0.0.1:${{data.web_port}}" target="_blank" style="color:#38bdf8">:${{data.web_port}}</a>
+    ${svc} &nbsp;·&nbsp; v${esc(data.version || '?')} &nbsp;·&nbsp;
+    Preset: <strong>${esc(preset)}</strong> &nbsp;·&nbsp;
+    Queue: ${data.queue_num} &nbsp;·&nbsp; Web: <a href="http://127.0.0.1:${data.web_port}" target="_blank" style="color:#38bdf8">:${data.web_port}</a>
   </div>`;
 
   actionsEl.innerHTML = `
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
-      ${{data.service_active
+      ${data.service_active
         ? '<button class="btn btn-ghost" onclick="disableB4()">🛑 Остановить</button>'
         : '<button class="btn btn-primary" onclick="enableB4()">🚀 Запустить</button>'}}
       <select id="b4-preset-select" style="padding:8px 12px; background:rgba(15,23,42,0.6); border:1px solid var(--border); border-radius:8px; color:var(--text)">
-        ${{presetOptions}}
+        ${presetOptions}
       </select>
       <button class="btn btn-ghost" onclick="switchPresetB4()">🔄 Применить preset</button>
       <button class="btn btn-ghost" onclick="runDiscoveryB4()">🔍 Discovery</button>
@@ -1306,7 +1306,7 @@ async function healthCheckB4() {
     return;
   }
   const targets = res.targets || [];
-  let msg = targets.map(t => `${{t.target}}: ${{t.ok ? '✓' : '✗'}}`).join(' | ');
+  let msg = targets.map(t => `${t.target}: ${t.ok ? '✓' : '✗'}`).join(' | ');
   if (res.all_ok) {
     showToast('✓ YouTube работает! ' + msg, 'success');
   } else {
