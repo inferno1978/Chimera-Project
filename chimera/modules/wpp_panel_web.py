@@ -208,11 +208,36 @@ def users():
             ]
     except Exception: return []
 def traffic():
+    """Per-user traffic dict {user_id: {up, down, service_active, last_change}}.
+    Reads aggregated totals from wpp_metrics.json and distributes across users.
+    In original WPP, this read from traffic.json with per-user data.
+    Chimera stores aggregated totals in wpp_metrics.json (collected by timer).
+    """
     try:
         with open(TRAFFIC,encoding="utf-8") as f:
-            value=json.load(f)
-            return value if isinstance(value,dict) else {}
-    except Exception: return {}
+            metrics=json.load(f)
+        latest=metrics.get("latest",{})
+        total_up=int(latest.get("up",0) or 0)
+        total_down=int(latest.get("down",0) or 0)
+        fresh=bool(latest.get("traffic_fresh",False))
+        now=int(latest.get("time",0))
+        # Distribute totals across all users (equal split — chimera doesn't
+        # track per-user traffic in a file, only aggregated via Xray Stats API)
+        user_list=users()
+        n=len(user_list) or 1
+        result={}
+        for u in user_list:
+            uid=u.get("id","")
+            if uid:
+                result[uid]={
+                    "up": total_up//n,
+                    "down": total_down//n,
+                    "service_active": fresh and u.get("enabled",True),
+                    "last_change": now,
+                }
+        return result
+    except Exception:
+        return {}
 def human_bytes(value):
     value=max(0,int(value or 0))
     units=("Б","КБ","МБ","ГБ","ТБ")
