@@ -1078,10 +1078,42 @@ def _wpp_nodes_from_chimera() -> list[dict]:
     for cn in state.get("chain_nodes", []) or []:
         host = cn.get("host") or ""
         port = cn.get("port") or 443
+        # Detect country code from hostname TLD or subdomain
+        cc = _country_code_from_hostname(host)
         nodes.append({"id": host, "url": f"https://{host}:{port}",
-            "name": host, "enabled": True, "country_code": "UN",
+            "name": host, "enabled": True, "country_code": cc,
             "city": "", "weight": 1, "status": "active"})
     return nodes
+
+_TLD_COUNTRY_MAP = {
+    "fi": "FI", "de": "DE", "nl": "NL", "fr": "FR", "gb": "GB",
+    "uk": "GB", "us": "US", "ca": "CA", "se": "SE", "no": "NO", "pl": "PL",
+    "cz": "CZ", "at": "AT", "ch": "CH", "es": "ES", "it": "IT",
+    "lt": "LT", "lv": "LV", "ee": "EE", "ro": "RO", "bg": "BG",
+    "tr": "TR", "kz": "KZ", "ru": "RU", "ua": "UA", "jp": "JP",
+    "sg": "SG", "hk": "HK", "ae": "AE", "dk": "DK", "is": "IS",
+    "ie": "IE", "be": "BE",
+}
+
+def _country_code_from_hostname(host: str) -> str:
+    """Extract country code from hostname TLD or subdomain.
+    fi.fleet-b.example → FI (subdomain)
+    fleet-c.example → RU (TLD)
+    fleet-a.example → UN (no match)"""
+    if not host:
+        return "UN"
+    parts = host.split(".")
+    # Try TLD first
+    if len(parts) >= 2:
+        tld = parts[-1].lower()
+        if tld in _TLD_COUNTRY_MAP:
+            return _TLD_COUNTRY_MAP[tld]
+    # Try subdomain (first part)
+    if len(parts) >= 2:
+        sub = parts[0].lower()
+        if sub in _TLD_COUNTRY_MAP:
+            return _TLD_COUNTRY_MAP[sub]
+    return "UN"
 
 def _wpp_local_location() -> dict:
     state = _chimera_state()
@@ -1268,6 +1300,27 @@ class _WppHandler(BaseHTTPRequestHandler):
             if path == prefix + "/__health" or path == "/__health":
                 self.send_data("OK", status=200,
                                content_type="text/plain; charset=utf-8")
+                return
+
+            # ── Logo (без auth) — для login + top bar ──
+            if path == prefix + "/__logo" or path == "/__logo":
+                self._serve_logo()
+                return
+
+            # ── Country flags (без auth) — для nodes_ui ──
+            # /panel/__flag/de.svg → assets/wpp/flags/de.svg
+            import re as _re_mod
+            flag_match = _re_mod.fullmatch(
+                re.escape(prefix) + r"/__flag/([a-z]{2})\.svg",
+                path,
+            )
+            if flag_match:
+                self._serve_flag(flag_match.group(1))
+                return
+            # Also handle /__flag/ without prefix
+            flag_match2 = _re_mod.fullmatch(r"/__flag/([a-z]{2})\.svg", path)
+            if flag_match2:
+                self._serve_flag(flag_match2.group(1))
                 return
 
             # ── Static files (без auth) — для логин-страницы ──
@@ -1903,7 +1956,38 @@ class _WppHandler(BaseHTTPRequestHandler):
         self.send_header("Location", (_panel_path() or "") + "/login")
         self.end_headers()
 
-    # ─── STATIC FILES ────────────────────────────────────────────────────────
+    # ─── STATIC FILES + LOGO + FLAGS ─────────────────────────────────────────
+
+    def _serve_logo(self) -> None:
+        """Отдаёт panel-logo.png из assets/wpp/."""
+        logo_path = Path(__file__).resolve().parent.parent.parent / "assets" / "wpp" / "panel-logo.png"
+        if not logo_path.exists():
+            # Fallback: SVG placeholder
+            svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="38" height="38" viewBox="0 0 38 38"><rect width="38" height="38" rx="10" fill="#0f2028"/><text x="19" y="25" font-family="system-ui" font-size="13" font-weight="700" fill="#56decb" text-anchor="middle">WPP</text></svg>'
+            self.send_data(svg, content_type="image/svg+xml")
+            return
+        try:
+            body = logo_path.read_bytes()
+            self.send_data(body, content_type="image/png")
+        except Exception:
+            self.send_data("Internal error", status=500)
+
+    def _serve_flag(self, code: str) -> None:
+        """Отдаёт country flag SVG из assets/wpp/flags/."""
+        code = code.lower()
+        if not re.fullmatch(r"[a-z]{2}", code):
+            code = "un"
+        flag_path = Path(__file__).resolve().parent.parent.parent / "assets" / "wpp" / "flags" / f"{code}.svg"
+        if not flag_path.exists():
+            # Fallback: simple SVG with country code text
+            svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="48" height="36" viewBox="0 0 48 36"><rect width="48" height="36" rx="4" fill="#1c2b40"/><text x="24" y="23" font-family="system-ui" font-size="12" font-weight="600" fill="#56decb" text-anchor="middle">{code.upper()}</text></svg>'.encode("utf-8")
+            self.send_data(svg, content_type="image/svg+xml")
+            return
+        try:
+            body = flag_path.read_bytes()
+            self.send_data(body, content_type="image/svg+xml")
+        except Exception:
+            self.send_data("Internal error", status=500)
 
     def _serve_static(self, path: str) -> None:
         """Раздаёт статику из WWW_DIR/static/."""
