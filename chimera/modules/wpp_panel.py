@@ -340,6 +340,36 @@ def _set_admin_password(state: dict, password: str) -> None:
     state["admin_pass_sha256"] = hash_hex
 
 
+def _write_wpp_data_file(admin_user: str, password: str) -> None:
+    """
+    Создаёт/обновляет wpp_panel_data.json — WPP panel data file с admin hash.
+    Использует WPP's scrypt hash_password() из wpp_panel_web.py.
+    """
+    try:
+        from chimera.modules.wpp_panel_web import hash_password
+        wpp_hash = hash_password(password)
+        wpp_data = {"admin": {"user": admin_user, "hash": wpp_hash}, "users": []}
+        wpp_data_file = Path("/var/lib/xray-installer/wpp_panel_data.json")
+        wpp_data_file.parent.mkdir(parents=True, exist_ok=True)
+        wpp_data_file.write_text(json.dumps(wpp_data, indent=2, ensure_ascii=False))
+        wpp_data_file.chmod(0o600)
+    except Exception as exc:
+        import sys as _sys
+        print(f"[WPP-PANEL] _write_wpp_data_file failed: {type(exc).__name__}: {exc}",
+              file=_sys.stderr, flush=True)
+
+
+def _delete_wpp_data_file() -> None:
+    """Удаляет wpp_panel_data.json + wpp_panel_session.key при uninstall."""
+    for f in [Path("/var/lib/xray-installer/wpp_panel_data.json"),
+              Path("/var/lib/xray-installer/wpp_panel_session.key")]:
+        try:
+            if f.exists():
+                f.unlink()
+        except Exception:
+            pass
+
+
 # ─── АПСТРИМ ВЕРСИЯ ─────────────────────────────────────────────────────────
 
 def _version_key(v: str) -> tuple[int, ...]:
@@ -509,6 +539,11 @@ def _install() -> tuple[bool, str]:
     })
     _set_admin_password(state, admin_pass)
 
+    # ── 5b. Создаём WPP data file (wpp_panel_data.json) ──
+    # Оригинальный WPP panel.py читает admin hash из этого файла (scrypt).
+    # Без него login не работает (check_password возвращает False на пустом hash).
+    _write_wpp_data_file(admin_user, admin_pass)
+
     # ── 6. Пишем state.json ──
     _save_state(state)
 
@@ -594,6 +629,9 @@ def _uninstall() -> tuple[bool, str]:
                 shutil.rmtree(d, ignore_errors=True)
         except Exception:
             pass
+
+    # 6b. Удаляем WPP data files (admin hash + session key)
+    _delete_wpp_data_file()
 
     # 7. State
     state["installed"] = False
@@ -759,8 +797,14 @@ def _change_password() -> tuple[bool, str]:
     if not state.get("installed"):
         return False, "Не установлена"
     new_pass = _gen_admin_password()
+    admin_user = state.get("admin_user", "admin")
     _set_admin_password(state, new_pass)
+    # Обновляем WPP data file (scrypt hash) — без этого WPP panel login
+    # не примет новый пароль (читает из wpp_panel_data.json, не из state)
+    _write_wpp_data_file(admin_user, new_pass)
     _save_state(state)
+    # Перезапускаем сервис чтобы он перечитал wpp_panel_data.json
+    _restart_service()
 
     # Rotate session keys (аннулируем активные сессии — паттерн panel.py:1180).
     # В wpp_panel_web.py SESSION_KEY будет читаться из state — после save
