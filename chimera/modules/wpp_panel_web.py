@@ -176,7 +176,10 @@ def primary():
     except Exception: return ""
 def users():
     try:
-        with open(USERS,encoding="utf-8") as f: return json.load(f).get("users",[])
+        with open(USERS,encoding="utf-8") as f:
+            data=json.load(f)
+            # Handle both chimera (list) and WPP (dict with "users" key) formats
+            return data if isinstance(data,list) else data.get("users",[])
     except Exception: return []
 def traffic():
     try:
@@ -460,9 +463,10 @@ def ctl(*args):
     return json.loads(r.stdout) if r.stdout.strip() else None
 def subscription_registry():
     try:
-        with open(USERS,encoding="utf-8") as f:
-            return json.load(f).get("subscriptions",[])
-    except FileNotFoundError:
+        with open(DATA,encoding="utf-8") as f:
+            data=json.load(f)
+            return data.get("subscriptions",[]) if isinstance(data,dict) else []
+    except (FileNotFoundError, Exception):
         return []
 def ctl_subscription(request):
     # Tokens and hardware identifiers never appear in process arguments.
