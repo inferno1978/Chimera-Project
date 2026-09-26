@@ -548,6 +548,7 @@ def purge_remote_profiles(subscription,device_id=None):
     devices=[d for d in subscription.get("devices",[]) if device_id is None or d.get("id")==device_id]
     for node in node_api.load_nodes(NODES_FILE):
         if not node.get("enabled",True): continue
+        if node.get("_cascade"): continue  # skip chimera cascade nodes (no HTTP API)
         for device in devices:
             try: node_api.delete_profile(node,federation_id(subscription.get("id",""),device.get("id","")))
             except node_api.NodeError as exc:
@@ -766,6 +767,12 @@ class Handler(BaseHTTPRequestHandler):
             body=users_ui(subscription_registry(),profiles,traffic(),PANEL_PATH,DOMAIN,self.csrf(),proxy_link,openflux.profile_states())
             self.send_html(layout("Клиенты",body,"users")); return
         if path==PANEL_PATH+"/nodes":
+            # Refresh nodes.json from chimera's cascade before rendering
+            try:
+                from chimera.modules.wpp_cascade_bridge import refresh_nodes_file
+                refresh_nodes_file()
+            except Exception as exc:
+                print("cascade bridge refresh failed:",exc,file=sys.stderr,flush=True)
             body=nodes_ui([node_api.public_node(n) for n in node_api.load_nodes(NODES_FILE)],
                           node_api.load_location(LOCATION_FILE),node_api.make_connection_token(DOMAIN,API_KEY),PANEL_PATH,self.csrf())
             self.send_html(layout("Ноды",body,"nodes")); return
@@ -1250,6 +1257,7 @@ class Handler(BaseHTTPRequestHandler):
                 wanted=[u["protocol"] for u in result["users"] if u["protocol"] in ("vless","hysteria")]
                 for node in node_api.load_nodes(NODES_FILE):
                     if not node.get("enabled",True): continue
+                    if node.get("_cascade"): continue  # skip chimera cascade nodes (no HTTP API)
                     try:
                         remote=node_api.sync_profile(node,remote_id,node_api.location_prefix(node),wanted)
                         lines.extend(p["link"] for p in remote.get("profiles",[]) if isinstance(p,dict) and isinstance(p.get("link"),str))
