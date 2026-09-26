@@ -2567,7 +2567,12 @@ def install_web_service(port: int = None, admin_user: str = None,
             print("[VLESS Web] " + warn_msg)
 
     # systemd unit — start_server() читает host из cfg
-    main_py = Path(sys.argv[0]).resolve() if sys.argv[0] else Path("/opt/chimera/main.py")
+    # FIX: использовать __file__ вместо sys.argv[0] для определения project_root.
+    # sys.argv[0] может быть /tmp/script.py при вызове install_web_service()
+    # из скрипта — тогда project_root=/tmp и PYTHONPATH=/tmp → ModuleNotFoundError.
+    # __file__ всегда указывает на rest_api.py внутри chimera/modules/ —
+    # parent.parent = chimera project root (/opt/chimera).
+    main_py = Path(__file__).resolve().parent.parent.parent / "main.py"
     project_root = main_py.parent
 
     unit = f"""[Unit]
