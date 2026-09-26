@@ -12,21 +12,21 @@ from pathlib import Path
 
 from chimera.modules.wpp_metrics import atomic_json, read_state
 
-ROOT = Path("/var/lib/web-panel-proxy-components")
+ROOT = Path("/var/lib/xray-installer/wpp-components")
 STATUS = ROOT / "status.json"
 UNIT = "web-panel-proxy-component-update.service"
 SPECS = {
     "xray": {
         "repo": "https://github.com/XTLS/Xray-core.git",
         "asset": "https://github.com/XTLS/Xray-core/releases/download/{tag}/Xray-linux-64.zip",
-        "binary": Path("/opt/web-panel-proxy/xray/xray"),
-        "service": "web-panel-proxy-xray.service",
+        "binary": Path("/usr/local/bin/xray"),
+        "service": "xray.service",
     },
     "openflux": {
         "repo": "https://github.com/damnurmum/OpenFlux-Android.git",
         "asset": "https://github.com/damnurmum/OpenFlux-Android/releases/download/{tag}/openflux-linux-amd64",
-        "binary": Path("/opt/web-panel-proxy/openflux/openflux"),
-        "service": "web-panel-proxy-openflux.service",
+        "binary": Path("/opt/openflux/universal-bypass-tool"),
+        "service": "openflux.service",
     },
 }
 
@@ -115,9 +115,9 @@ def _download(url, destination):
 
 def _active_openflux_units():
     result = _run(["systemctl", "list-units", "--type=service", "--state=active", "--no-legend",
-                   "web-panel-proxy-openflux*.service"])
+                   "openflux*.service"])
     return [line.split()[0] for line in result.stdout.splitlines()
-            if line.split() and re.fullmatch(r"web-panel-proxy-openflux(?:-[a-f0-9]{16})?\.service", line.split()[0])]
+            if line.split() and re.fullmatch(r"openflux(?:@[a-z0-9-]+)?\.service", line.split()[0])]
 
 
 def _install(component, tag, directory):
@@ -138,7 +138,7 @@ def _install(component, tag, directory):
     if _run(["readelf", "-h", str(candidate)], timeout=10).returncode:
         raise RuntimeError("Загруженный файл не является исполняемым Linux-бинарником.")
     if component == "xray":
-        test = _run([str(candidate), "run", "-test", "-config", "/etc/web-panel-proxy-xray/config.json"], timeout=20)
+        test = _run([str(candidate), "run", "-test", "-config", "/usr/local/etc/xray/config.json"], timeout=20)
         if test.returncode:
             raise RuntimeError("Выбранная версия Xray не принимает текущую конфигурацию.")
         active = [spec["service"]] if _run(["systemctl", "is-active", "--quiet", spec["service"]]).returncode == 0 else []
@@ -168,7 +168,7 @@ def _install(component, tag, directory):
 
 def run():
     import fcntl
-    lock_path = Path("/run/lock/web-panel-proxy.lock")
+    lock_path = Path("/run/lock/wpp-component-update.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock = lock_path.open("a")
     try:

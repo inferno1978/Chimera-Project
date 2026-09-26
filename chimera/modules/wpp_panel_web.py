@@ -9,6 +9,7 @@ Bootstrap for direct execution / systemd ExecStart:
 from __future__ import annotations
 import sys as _sys
 from pathlib import Path as _Path
+from pathlib import Path
 _ROOT = _Path(__file__).resolve().parent.parent.parent
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
@@ -66,8 +67,8 @@ XRAY_PATH_FILE=""
 HYSTERIA_PORT=8443
 MANAGER=""
 QR="/usr/bin/qrencode"
-LOGO=""
-FLAGS=""
+LOGO=str(Path(__file__).resolve().parent.parent.parent/"assets"/"wpp"/"panel-logo.png")
+FLAGS=str(Path(__file__).resolve().parent.parent.parent/"assets"/"wpp"/"flags")
 SITE_INDEX="/var/www/panel-stub/index.html"
 SITE_BACKUP="/var/lib/xray-installer/wpp_panel_site_backup.html"
 SITE_SOURCE="/var/lib/xray-installer/wpp_panel_site_source.html"
