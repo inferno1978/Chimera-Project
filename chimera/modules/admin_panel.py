@@ -486,22 +486,51 @@ function esc(s) {
 }
 
 function authHeader() {
-  // Используем кэшированные креды из URL (Basic Auth уже в заголовке)
+  // Явно добавляем Authorization header — credentials:'same-origin'
+  // НЕ отправляет Basic Auth в некоторых браузерах (Firefox, Chrome в ряде случаев).
+  // Извлекаем креды из URL (http://user:pass@host) или используем кэш.
+  try {
+    // Если в URL есть user:pass@ — используем их
+    if (document.location.username) {
+      return {'Authorization': 'Basic ' + btoa(document.location.username + ':' + document.location.password)};
+    }
+  } catch(e) {}
+  // Fallback: browser кэширует Basic Auth — credentials:'include' в fetch
+  // отправит их. Но если не работает — пользователю нужно использовать
+  // URL с кредами: http://admin:PASSWORD@host:port/admin/
   return {};
 }
 
 async function api(path, method = 'GET', body = null) {
   const opts = {
     method,
-    headers: { 'Content-Type': 'application/json' },
-    // credentials: same-origin — чтобы браузер передавал Basic Auth креды
-    // в JS-запросах (fetch по умолчанию не всегда передаёт их для same-origin).
-    credentials: 'same-origin'
+    headers: Object.assign({'Content-Type': 'application/json'}, authHeader()),
+    credentials: 'include'
   };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(API + path, opts);
-  if (res.status === 401) { alert('Требуется авторизация'); location.reload(); return null; }
-  return res.json();
+  try {
+    const res = await fetch(API + path, opts);
+    if (res.status === 401) {
+      // Basic Auth не передался автоматически — перезагружаем с кредами в URL
+      const loc = document.location;
+      if (!loc.username) {
+        const user = prompt('Введите логин:');
+        const pass = prompt('Введите пароль:');
+        if (user && pass) {
+          loc.href = loc.protocol + '//' + user + ':' + encodeURIComponent(pass) + '@' + loc.host + loc.pathname;
+          return null;
+        }
+      }
+      alert('Требуется авторизация');
+      location.reload();
+      return null;
+    }
+    if (!res.ok) { console.error('API error:', path, res.status); return null; }
+    return res.json();
+  } catch(e) {
+    console.error('fetch failed:', path, e);
+    return null;
+  }
 }
 
 function showToast(msg, type = 'success') {
