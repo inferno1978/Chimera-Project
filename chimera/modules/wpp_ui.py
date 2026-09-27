@@ -1002,7 +1002,7 @@ c.style.display='flex';c.style.flexWrap='wrap';c.style.justifyContent='center';c
 c.innerHTML=d.links.map((item,i)=>{{
 const qr='/api/portal/qr?data='+encodeURIComponent(item.link);
 return '<div style="flex:0 1 280px;min-width:240px;text-align:center;align-self:flex-start;display:flex;flex-direction:column;align-items:center">'+
-'<div style="font-size:12px;color:var(--muted);margin-bottom:6px">'+esc(item.label)+' ('+esc(item.protocol)+')</div>'+
+'<div style="font-size:12px;color:var(--muted);margin-bottom:6px;min-height:18px;display:flex;align-items:center;justify-content:center">'+esc(item.label)+' ('+esc(item.protocol)+')</div>'+
 '<div class="link-box" id="link-'+i+'">'+esc(item.link)+'</div>'+
 '<div class="qr-img"><img src="'+qr+'" alt="QR" loading="lazy"></div>'+
 '<button class="btn ghost sm" onclick="copyLink('+i+')">📋 Копировать</button></div>';
