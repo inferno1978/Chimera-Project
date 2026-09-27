@@ -848,8 +848,8 @@ cursor:pointer;text-decoration:none;transition:opacity .15s}}
 .btn.sm{{padding:5px 10px;font-size:11px}}
 .link-box{{padding:10px 12px;border:1px solid var(--line);border-radius:8px;
 background:var(--input);font:11px/1.5 ui-monospace,monospace;word-break:break-all;
-margin:8px 0;cursor:pointer;transition:border .15s;height:48px;overflow:hidden;display:flex;align-items:center;justify-content:center;padding:6px 8px}}
-.link-box:hover{{border-color:var(--accent)}}
+margin:8px 0;cursor:pointer;transition:border .15s;height:48px;overflow-y:auto;display:flex;align-items:center;justify-content:center;padding:6px 8px}}
+.link-box:hover{{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--input))}}
 .qr-img{{display:grid;place-items:center;margin:12px 0}}
 .qr-img img{{border-radius:8px;max-width:220px}}
 .dl-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}}
@@ -1003,7 +1003,7 @@ c.innerHTML=d.links.map((item,i)=>{{
 const qr='/api/portal/qr?data='+encodeURIComponent(item.link);
 return '<div style="flex:0 1 280px;min-width:240px;text-align:center;align-self:flex-start;display:flex;flex-direction:column;align-items:center">'+
 '<div style="font-size:12px;color:var(--muted);margin-bottom:6px;min-height:18px;display:flex;align-items:center;justify-content:center">'+esc(item.label)+' ('+esc(item.protocol)+')</div>'+
-'<div class="link-box" id="link-'+i+'">'+esc(item.link)+'</div>'+
+'<div class="link-box" id="link-'+i+'" title="Нажмите чтобы скопировать" onclick="copyLink('+i+')">'+esc(item.link)+'</div>'+
 '<div class="qr-img"><img src="'+qr+'" alt="QR" loading="lazy"></div>'+
 '<button class="btn ghost sm" onclick="copyLink('+i+')">📋 Копировать</button></div>';
 }}).join('');
