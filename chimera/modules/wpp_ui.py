@@ -1077,7 +1077,7 @@ rows+='<div class="portal-tile" style="display:flex;align-items:center;gap:10px;
 '<div style="font:600 14px ui-monospace,monospace;color:var(--accent);min-width:0;flex:1;overflow-wrap:anywhere">'+esc(ip.ip)+'</div>'+
 pinChip+
 '<span style="font:10px ui-monospace,monospace;color:var(--muted)">'+esc(ip.added_at||'')+'</span>'+
-'<button class="btn ghost sm" onclick="pinIP(\\''+esc(ip.ip)+'\\')">'+(ip.pinned?'Открепить':'Закрепить')+'</button>'+
+'<button class="btn ghost sm" onclick="pinIP(\\''+esc(ip.ip)+'\\','+ip.pinned+')">'+(ip.pinned?'Открепить':'Закрепить')+'</button>'+
 '<button class="btn danger sm" onclick="removeIP(\\''+esc(ip.ip)+'\\')">🗑 Удалить</button>'+
 '</div>';
 });
