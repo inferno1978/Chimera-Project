@@ -923,7 +923,7 @@ PORTAL_TABS_CSS = """/* === shared portal primitives (all tabs) === */
 .portal-stat.red b{color:var(--red)}
 .portal-stat.amber b{color:var(--yellow)}
 .portal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
-.portal-tile{padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);transition:border .15s,transform .12s;animation:pFade .4s ease both}
+.portal-stat-val{overflow-wrap:anywhere;word-break:break-word;min-width:0}.portal-tile{padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);transition:border .15s,transform .12s;animation:pFade .4s ease both}
 .portal-tile:hover{border-color:var(--accent)}
 .portal-tile-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
 .portal-tile-title{font-weight:600;font-size:14px;flex:1;min-width:0;overflow-wrap:anywhere}
@@ -1099,8 +1099,7 @@ async function replaceAllIPs(){if(!confirm('Заменить все IP на те
 const r=await fetch('/api/portal/ips/replace-all',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:'auto'})});
 const d=await r.json().catch(()=>({}));
 if(r.ok){showToast('IP заменены');loadIPs();}else showToast(d.error||'Ошибка','error');}
-async function pinIP(ip){const r=await fetch('/api/portal/ips/pin',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:ip})});
-if(r.ok){loadIPs();}else{await fetch('/api/portal/ips/unpin',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:ip})});loadIPs();}}
+async function pinIP(ip,pinned){if(pinned){const r=await fetch('/api/portal/ips/unpin',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:ip})});if(r.ok){showToast('IP откреплен');loadIPs();}else{const d=await r.json().catch(()=>({}));showToast(d.error||'Ошибка','error');}}else{const r=await fetch('/api/portal/ips/pin',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:ip})});if(r.ok){showToast('IP закреплён');loadIPs();}else{const d=await r.json().catch(()=>({}));showToast(d.error||'Ошибка','error');}}}
 
 /* === 5. Пароль === */
 function pwStrength(v){

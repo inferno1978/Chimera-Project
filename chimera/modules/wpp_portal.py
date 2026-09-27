@@ -849,3 +849,31 @@ def handle_post(handler, path: str) -> None:
 
     # 404 fallback
     _send_json(handler, {"error": "Not found"}, 404)
+
+def handle_delete(handler, path):
+    """Dispatch DELETE routes for /api/portal/*."""
+    if path == "/api/portal/ips":
+        user = _require_user(handler)
+        if user is None:
+            return
+        from urllib.parse import parse_qs, unquote
+        parsed = urlparse(handler.path)
+        qs = parse_qs(parsed.query)
+        ip_to_delete = ""
+        if "ip" in qs and qs["ip"]:
+            ip_to_delete = unquote(qs["ip"][0]).strip()
+        if not ip_to_delete:
+            _send_json(handler, {"error": "ip query parameter required"}, 400)
+            return
+        email = user.get("email", "")
+        try:
+            from chimera.modules.user_ip_whitelist import remove_ip_from_user
+            ok, msg = remove_ip_from_user(email, ip_to_delete)
+            if ok:
+                _send_json(handler, {"status": "deleted", "message": msg})
+            else:
+                _send_json(handler, {"error": msg}, 400)
+        except Exception as e:
+            _send_json(handler, {"error": str(e)}, 500)
+        return
+
