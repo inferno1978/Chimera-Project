@@ -969,6 +969,38 @@ PORTAL_TABS_CSS = """/* === shared portal primitives (all tabs) === */
 @media(max-width:600px){.portal-grid{grid-template-columns:1fr}.portal-dl-grid{grid-template-columns:1fr}.portal-stats{grid-template-columns:1fr 1fr}}
 """
 
+# Plain triple-quoted string (single braces) referenced via {CONFIGS_CSS}
+# placeholder inside the portal_page f-string, same trick as TRAFFIC_CSS.
+CONFIGS_CSS = """/* === configs tab: server configs + client app cards === */
+.cfg-section-head{display:flex;align-items:center;gap:8px;margin:18px 0 12px;font:600 14px inherit;color:var(--text)}
+.cfg-sec-ico{font-size:18px;line-height:1}
+.cfg-sec-sub{font-size:11px;color:var(--muted);font-weight:400;margin-left:auto;text-transform:none;letter-spacing:0}
+.cfg-section-head:first-child{margin-top:0}
+.cfg-server-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.cfg-server-card{display:flex;align-items:center;gap:12px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);text-decoration:none;color:var(--text);transition:border .15s,transform .12s;animation:pFade .4s ease both}
+.cfg-server-card:hover{border-color:var(--accent);transform:translateY(-1px)}
+.cfg-server-ico{font-size:26px;flex:0 0 auto}
+.cfg-server-main{flex:1;min-width:0}
+.cfg-server-name{font-weight:600;font-size:13px}
+.cfg-server-desc{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4}
+.cfg-server-card .cfg-format-badge{margin-top:6px}
+.cfg-client-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.cfg-client-card{display:flex;flex-direction:column;gap:10px;padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--surface);transition:border .15s,transform .12s,box-shadow .2s;animation:pFade .4s ease both;position:relative;overflow:hidden}
+.cfg-client-card:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:var(--shadow)}
+.cfg-client-card::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 100% 0,var(--tint),transparent 55%);pointer-events:none;opacity:.7}
+.cfg-client-head{display:flex;align-items:center;gap:10px;position:relative}
+.cfg-client-ico{font-size:28px;flex:0 0 auto;line-height:1}
+.cfg-client-name{font:700 15px inherit;color:var(--text);letter-spacing:-.01em;line-height:1.2;overflow-wrap:anywhere}
+.cfg-client-desc{font-size:11px;color:var(--muted);line-height:1.5;position:relative}
+.cfg-client-meta{display:flex;flex-wrap:wrap;gap:5px;position:relative}
+.cfg-platform-badge{display:inline-flex;align-items:center;gap:3px;padding:3px 7px;border-radius:5px;font:600 9px ui-monospace,monospace;background:var(--input);color:var(--muted);border:1px solid var(--line);white-space:nowrap}
+.cfg-format-badge{display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border-radius:5px;font:600 9px ui-monospace,monospace;background:var(--tint);color:var(--accent);border:1px solid rgba(86,222,203,.3);white-space:nowrap}
+.cfg-client-dl{display:inline-flex;align-items:center;justify-content:center;gap:6px;margin-top:auto;padding:9px 14px;border-radius:8px;background:var(--accent);color:var(--on-accent);font:600 12px inherit;text-decoration:none;transition:opacity .15s,transform .12s;position:relative}
+.cfg-client-dl:hover{opacity:.9;transform:translateY(-1px)}
+@media(max-width:900px){.cfg-client-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:600px){.cfg-client-grid{grid-template-columns:1fr}.cfg-server-grid{grid-template-columns:1fr}}
+"""
+
 PORTAL_TABS_JS = """/* === Portal tabs: shared helpers === */
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function pBadge(on,yes,no){return '<span class="portal-chip '+(on?'on':'off')+'">'+(on?(yes||'да'):(no||'нет'))+'</span>';}
@@ -1384,6 +1416,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 @media(max-width:600px){{.grid2{{grid-template-columns:1fr}}.dl-grid{{grid-template-columns:1fr}}}}
 {PORTAL_TABS_CSS}
 {TRAFFIC_CSS}
+{CONFIGS_CSS}
 </style></head><body>
 <div class="container">
 <div class="sticky-top">
@@ -1420,38 +1453,138 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 </div>
 
 <div class="tab-panel" id="panel-configs">
-<div class="card"><div class="card-title">📥 Скачать конфиги</div>
+<div class="card"><div class="card-title">📥 Конфиги</div>
 <div class="portal-hero"><div class="portal-hero-top"><div>
-<div class="portal-hero-label">Конфигурации</div>
-<div class="portal-hero-title">📥 Скачать конфиги</div>
-<div class="portal-hero-sub">Выберите формат для вашего клиента</div>
-</div><span class="portal-proto-badge">4 формата</span></div></div>
-<div class="portal-dl-grid">
-<a class="portal-dl" href="/api/portal/clash" download>
-<span class="portal-dl-ico">🌀</span>
-<div class="portal-dl-main"><div class="portal-dl-name">Clash Meta</div>
-<div class="portal-dl-desc">YAML для Mihomo / Clash Verge / FlClash</div></div></a>
-<a class="portal-dl" href="/api/portal/singbox" download>
-<span class="portal-dl-ico">🟢</span>
-<div class="portal-dl-main"><div class="portal-dl-name">Sing-box</div>
-<div class="portal-dl-desc">JSON для sing-box / SFA</div></div></a>
-<a class="portal-dl" href="/api/portal/hiddify" download>
-<span class="portal-dl-ico">📦</span>
-<div class="portal-dl-main"><div class="portal-dl-name">Hiddify</div>
-<div class="portal-dl-desc">JSON для Hiddify Next</div></div></a>
-<a class="portal-dl" href="/api/portal/vless-link" download>
-<span class="portal-dl-ico">🔗</span>
-<div class="portal-dl-main"><div class="portal-dl-name">VLESS-ссылка</div>
-<div class="portal-dl-desc">vless://… для v2rayN / NekoBox / Karing</div></div></a>
+<div class="portal-hero-label">Конфигурации и клиенты</div>
+<div class="portal-hero-title">📥 Конфиги и клиенты</div>
+<div class="portal-hero-sub">Скачайте готовый конфиг с сервера и подходящий клиент</div>
+</div><span class="portal-proto-badge">4 + 10</span></div></div>
+
+<div class="cfg-section-head"><span class="cfg-sec-ico">📦</span> Скачать конфиги <span class="cfg-sec-sub">с сервера</span></div>
+<div class="cfg-server-grid">
+<a class="cfg-server-card" href="/api/portal/clash" download>
+<span class="cfg-server-ico">🌀</span>
+<div class="cfg-server-main"><div class="cfg-server-name">Clash Meta</div>
+<div class="cfg-server-desc">YAML для Mihomo / Clash Verge / FlClash</div>
+<span class="cfg-format-badge">Clash YAML</span></div></a>
+<a class="cfg-server-card" href="/api/portal/singbox" download>
+<span class="cfg-server-ico">🟢</span>
+<div class="cfg-server-main"><div class="cfg-server-name">Sing-box</div>
+<div class="cfg-server-desc">JSON для sing-box / SFA</div>
+<span class="cfg-format-badge">Sing-box JSON</span></div></a>
+<a class="cfg-server-card" href="/api/portal/hiddify" download>
+<span class="cfg-server-ico">📦</span>
+<div class="cfg-server-main"><div class="cfg-server-name">Hiddify</div>
+<div class="cfg-server-desc">JSON для Hiddify Next</div>
+<span class="cfg-format-badge">Hiddify JSON</span></div></a>
+<a class="cfg-server-card" href="/api/portal/vless-link" download>
+<span class="cfg-server-ico">🔗</span>
+<div class="cfg-server-main"><div class="cfg-server-name">VLESS-ссылка</div>
+<div class="cfg-server-desc">vless://… для v2rayN / NekoBox / Karing</div>
+<span class="cfg-format-badge">VLESS</span></div></a>
 </div>
+
+<div class="cfg-section-head"><span class="cfg-sec-ico">📱</span> Клиентские приложения <span class="cfg-sec-sub">последние версии с GitHub / App Store</span></div>
+<div class="cfg-client-grid">
+
+<div class="cfg-client-card">
+<div class="cfg-client-head"><span class="cfg-client-ico">🌀</span>
+<div class="cfg-client-name">Clash Meta / Mihomo</div></div>
+<div class="cfg-client-desc">Ядро Clash на базе mihomo. GUI-оболочки: Clash Verge, FlClash.</div>
+<div class="cfg-client-meta"><span class="cfg-format-badge">Clash YAML</span>
+<span class="cfg-platform-badge">🖥 Win</span><span class="cfg-platform-badge">🍎 macOS</span><span class="cfg-platform-badge">🐧 Linux</span><span class="cfg-platform-badge">📱 Android</span></div>
+<a class="cfg-client-dl" href="https://github.com/MetaCubeX/mihomo/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
+</div>
+
+<div class="cfg-client-card">
+<div class="cfg-client-head"><span class="cfg-client-ico">🟢</span>
+<div class="cfg-client-name">Sing-box</div></div>
+<div class="cfg-client-desc">Универсальное ядро: VLESS / Reality / Trojan / Hysteria.</div>
+<div class="cfg-client-meta"><span class="cfg-format-badge">Sing-box JSON</span>
+<span class="cfg-platform-badge">🖥 Win</span><span class="cfg-platform-badge">🍎 macOS</span><span class="cfg-platform-badge">🐧 Linux</span><span class="cfg-platform-badge">📱 Android</span><span class="cfg-platform-badge">🍎 iOS</span></div>
+<a class="cfg-client-dl" href="https://github.com/SagerNet/sing-box/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
+</div>
+
+<div class="cfg-client-card">
+<div class="cfg-client-head"><span class="cfg-client-ico">📦</span>
+<div class="cfg-client-name">Hiddify</div></div>
+<div class="cfg-client-desc">Кроссплатформенный клиент с авто-настройкой и QR.</div>
+<div class="cfg-client-meta"><span class="cfg-format-badge">Hiddify JSON / QR</span>
+<span class="cfg-platform-badge">🖥 Win</span><span class="cfg-platform-badge">🍎 macOS</span><span class="cfg-platform-badge">🐧 Linux</span><span class="cfg-platform-badge">📱 Android</span><span class="cfg-platform-badge">🍎 iOS</span></div>
+<a class="cfg-client-dl" href="https://github.com/hiddify/hiddify-app/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
+</div>
+
+<div class="cfg-client-card">
+<div class="cfg-client-head"><span class="cfg-client-ico">🖥️</span>
+<div class="cfg-client-name">v2rayN</div></div>
+<div class="cfg-client-desc">Популярный клиент для Windows на ядре Xray.</div>
+<div class="cfg-client-meta"><span class="cfg-format-badge">QR / VLESS</span>
+<span class="cfg-platform-badge">🖥 Win</span></div>
+<a class="cfg-client-dl" href="https://github.com/2dust/v2rayN/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
+</div>
+
+<div class="cfg-client-card">
+<div class="cfg-client-head"><span class="cfg-client-ico">📱</span>
+<div class="cfg-client-name">v2rayNG</div></div>
+<div class="cfg-client-desc">Android-клиент на ядре Xray, импорт по QR/ссылке.</div>
+<div class="cfg-client-meta"><span class="cfg-format-badge">QR / VLESS</span>
+<span class="cfg-platform-badge">📱 Android</span></div>
+<a class="cfg-client-dl" href="https://github.com/2dust/v2rayNG/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
+</div>
+
+<div class="cfg-client-card">
+<div class="cfg-client-head"><span class="cfg-client-ico">🦊</span>
+<div class="cfg-client-name">Karing</div></div>
+<div class="cfg-client-desc">Кроссплатформенный клиент с поддержкой всех форматов.</div>
+<div class="cfg-client-meta"><span class="cfg-format-badge">QR / VLESS</span>
+<span class="cfg-platform-badge">🖥 Win</span><span class="cfg-platform-badge">🍎 macOS</span><span class="cfg-platform-badge">🐧 Linux</span><span class="cfg-platform-badge">📱 Android</span><span class="cfg-platform-badge">🍎 iOS</span></div>
+<a class="cfg-client-dl" href="https://github.com/KaringNet/karing/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
+</div>
+
+<div class="cfg-client-card">
+<div class="cfg-client-head"><span class="cfg-client-ico">🐱</span>
+<div class="cfg-client-name">NekoBox</div></div>
+<div class="cfg-client-desc">Android-клиент на ядре sing-box, импорт по QR.</div>
+<div class="cfg-client-meta"><span class="cfg-format-badge">QR / VLESS</span>
+<span class="cfg-platform-badge">📱 Android</span></div>
+<a class="cfg-client-dl" href="https://github.com/MatsuriDayo/NekoBoxForAndroid/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
+</div>
+
+<div class="cfg-client-card">
+<div class="cfg-client-head"><span class="cfg-client-ico">🌉</span>
+<div class="cfg-client-name">Streisand</div></div>
+<div class="cfg-client-desc">iOS-клиент с поддержкой VLESS/Reality, скан QR.</div>
+<div class="cfg-client-meta"><span class="cfg-format-badge">QR-код</span>
+<span class="cfg-platform-badge">🍎 iOS</span></div>
+<a class="cfg-client-dl" href="https://apps.apple.com/app/streisand/id1504799924" target="_blank" rel="noopener">🛍 App Store</a>
+</div>
+
+<div class="cfg-client-card">
+<div class="cfg-client-head"><span class="cfg-client-ico">🚀</span>
+<div class="cfg-client-name">Shadowrocket</div></div>
+<div class="cfg-client-desc">iOS-клиент, скан QR-кода или вставка ссылки.</div>
+<div class="cfg-client-meta"><span class="cfg-format-badge">QR-код</span>
+<span class="cfg-platform-badge">🍎 iOS</span></div>
+<a class="cfg-client-dl" href="https://apps.apple.com/app/shadowrocket/id932747747" target="_blank" rel="noopener">🛍 App Store</a>
+</div>
+
+<div class="cfg-client-card">
+<div class="cfg-client-head"><span class="cfg-client-ico">🛡️</span>
+<div class="cfg-client-name">AmneziaWG</div></div>
+<div class="cfg-client-desc">WireGuard-совместимый туннель с защитой от DPI-детекции.</div>
+<div class="cfg-client-meta"><span class="cfg-format-badge">AWG-конфиг</span>
+<span class="cfg-platform-badge">🖥 Win</span><span class="cfg-platform-badge">🍎 macOS</span><span class="cfg-platform-badge">🐧 Linux</span><span class="cfg-platform-badge">📱 Android</span><span class="cfg-platform-badge">🍎 iOS</span></div>
+<a class="cfg-client-dl" href="https://github.com/amneziavpn/amnezia-vpn/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
+</div>
+
+</div>
+
 <div class="portal-info" style="margin-top:14px">
-<b>📱 Подсказка по клиентам:</b><br>
-• <b>Clash Meta / Mihomo</b> — Clash-конфиг (YAML)<br>
-• <b>Sing-box</b> — Sing-box JSON<br>
-• <b>Hiddify</b> — Hiddify JSON или QR<br>
-• <b>v2rayN / v2rayNG / Karing / NekoBox</b> — QR или VLESS-ссылка<br>
-• <b>Streisand / Shadowrocket</b> (iOS) — QR-код<br>
-• <b>AmneziaWG</b> — если есть AWG-пир, конфиг во вкладке «AmneziaWG»
+<b>ℹ️ Как пользоваться:</b><br>
+1. Скачайте конфиг с сервера (раздел «Скачать конфиги») в формате вашего клиента.<br>
+2. Установите клиентское приложение (раздел «Клиентские приложения»).<br>
+3. Импортируйте конфиг в клиент: вставьте VLESS-ссылку, откройте JSON/YAML файл или отсканируйте QR-код из вкладки «🔗 Подключение».<br>
+<b>AmneziaWG</b> — конфиг берётся во вкладке «🛡 AmneziaWG» (если у вас есть AWG-пир).
 </div></div>
 </div>
 
