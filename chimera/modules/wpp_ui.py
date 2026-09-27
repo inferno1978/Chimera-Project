@@ -786,6 +786,122 @@ border-radius:10px;background:rgba(248,113,113,.08);color:var(--red);font-size:1
 </body></html>'''
 
 
+TRAFFIC_CSS = '''/* traffic tab */
+.tf-hero{background:linear-gradient(135deg,var(--raised),var(--surface));border:1px solid var(--line);border-radius:var(--radius);padding:22px;margin-bottom:16px;position:relative;overflow:hidden}
+.tf-hero::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 100% 0,var(--tint),transparent 55%);pointer-events:none}
+.tf-hero-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;position:relative}
+.tf-hero-ico{font-size:24px;opacity:.85;line-height:1}
+.tf-hero-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.tf-hero-num{font:700 32px/1.15 ui-monospace,monospace;color:var(--text);margin:6px 0 2px;letter-spacing:-.02em}
+.tf-hero-sub{font-size:12px;color:var(--muted)}
+.tf-split{display:flex;gap:14px;margin-top:16px;position:relative}
+.tf-split-col{flex:1;min-width:0}
+.tf-split-row{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-bottom:6px}
+.tf-split-row b{color:var(--text);font:600 12px ui-monospace,monospace}
+.tf-split-track{height:7px;border-radius:4px;background:var(--input);overflow:hidden}
+.tf-split-fill{height:100%;border-radius:4px;transform-origin:left center;animation:tfGrowX .6s ease both}
+.tf-split-fill.up{background:var(--accent)}
+.tf-split-fill.down{background:var(--green)}
+.tf-daily{margin-bottom:16px}
+.tf-chart{display:flex;align-items:flex-end;gap:5px;height:130px;padding:6px 2px 4px;overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.tf-bar-col{flex:1 1 0;min-width:20px;max-width:40px;display:flex;flex-direction:column;align-items:center;gap:5px;height:100%;justify-content:flex-end}
+.tf-bar{width:100%;max-width:34px;border-radius:5px 5px 0 0;background:linear-gradient(180deg,var(--green),color-mix(in srgb,var(--green) 30%,var(--input)));min-height:3px;transform-origin:bottom;animation:tfGrowY .7s cubic-bezier(.2,.8,.2,1) both;transition:filter .15s}
+.tf-bar.zero{background:var(--input);opacity:.55}
+.tf-bar:hover{filter:brightness(1.25)}
+.tf-bar-date{font:9px ui-monospace,monospace;color:var(--muted);white-space:nowrap}
+.tf-empty{padding:28px 12px;text-align:center;color:var(--muted);font-size:12px;line-height:1.7}
+.tf-empty .ico{font-size:24px;opacity:.6;margin-bottom:10px;display:block}
+.tf-stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:10px}
+.tf-stat{padding:13px;border:1px solid var(--line);border-radius:10px;background:var(--input)}
+.tf-stat span{display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+.tf-stat b{display:block;font:600 15px ui-monospace,monospace;color:var(--text);margin-top:6px;overflow-wrap:anywhere}
+.tf-stat.accent b{color:var(--accent)}
+.tf-stat.green b{color:var(--green)}
+.tf-ttl-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)}
+.tf-ttl-row:last-child{border:0}
+.tf-ttl-row .label{color:var(--muted);font-size:12px}
+.tf-ttl-row .val{font-weight:500}
+.tf-progress{height:8px;border-radius:4px;background:var(--input);overflow:hidden;margin:12px 0 4px}
+.tf-progress-fill{height:100%;border-radius:4px;transform-origin:left center;animation:tfGrowX .6s ease both}
+.tf-progress-fill.on{background:linear-gradient(90deg,var(--green),var(--accent))}
+.tf-progress-fill.off{background:var(--red)}
+.tf-progress-meta{display:flex;justify-content:space-between;font:10px ui-monospace,monospace;color:var(--muted)}
+@keyframes tfGrowY{from{transform:scaleY(0);opacity:0}to{transform:scaleY(1);opacity:1}}
+@keyframes tfGrowX{from{transform:scaleX(0)}to{transform:scaleX(1)}}'''
+
+LOAD_TRAFFIC_JS = '''async function loadTraffic(){
+const d=await api('/api/portal/traffic');if(!d)return;
+const c=document.getElementById('traffic-container');
+function fmt(b){b=b||0;const u=['ГБ','МБ','КБ','Б'];const f=[1024*1024*1024,1024*1024,1024,1];
+for(let i=0;i<f.length;i++){if(b>=f[i]||i===f.length-1)return (b/f[i]).toFixed(i===3?0:(i<2?2:1))+' '+u[i];}return '0 Б';}
+function fmtShort(b){b=b||0;if(b>=1024*1024*1024)return (b/1024/1024/1024).toFixed(2)+' ГБ';
+if(b>=1024*1024)return (b/1024/1024).toFixed(1)+' МБ';if(b>=1024)return Math.round(b/1024)+' КБ';return b+' Б';}
+const total=d.total_bytes||0,up=d.upload_bytes||0,down=d.download_bytes||0;
+const maxSplit=Math.max(up,down,1);
+const upPct=up/maxSplit*100,downPct=down/maxSplit*100;
+let h='<div class="tf-hero"><div class="tf-hero-top"><div>'+
+'<div class="tf-hero-label">Всего трафика</div>'+
+'<div class="tf-hero-num">'+fmt(total)+'</div>'+
+'<div class="tf-hero-sub">'+(d.total_gb?d.total_gb+' ГБ':'—')+'</div></div>'+
+'<div class="tf-hero-ico">📊</div></div>'+
+'<div class="tf-split">'+
+'<div class="tf-split-col"><div class="tf-split-row"><span>↑ Отправлено</span><b>'+fmtShort(up)+'</b></div>'+
+'<div class="tf-split-track"><div class="tf-split-fill up" style="width:'+upPct+'%"></div></div></div>'+
+'<div class="tf-split-col"><div class="tf-split-row"><span>↓ Получено</span><b>'+fmtShort(down)+'</b></div>'+
+'<div class="tf-split-track"><div class="tf-split-fill down" style="width:'+downPct+'%"></div></div></div>'+
+'</div></div>';
+h+='<div class="card tf-daily"><div class="card-title">📈 Трафик по дням</div>';
+const daily=(d.daily||[]).slice(0,14);
+if(daily.length){
+let maxB=Math.max.apply(null,daily.map(function(x){return x.bytes||0;}));
+if(!maxB||maxB<1){maxB=1;}
+h+='<div class="tf-chart">';
+daily.slice().reverse().forEach(function(r,i){
+const v=r.bytes||0;const pct=Math.max(2.5,v/maxB*100);
+const dt=r.date?r.date.slice(5):'';
+h+='<div class="tf-bar-col" title="'+esc(r.date)+': '+fmtShort(v)+'">'+
+'<div class="tf-bar'+(v?'':' zero')+'" style="height:'+pct+'%;animation-delay:'+(i*0.04)+'s"></div>'+
+'<div class="tf-bar-date">'+esc(dt)+'</div></div>';
+});
+h+='</div>';
+}else{
+h+='<div class="tf-empty"><span class="ico">📅</span>История трафика собирается.<br>Возвращайтесь завтра — здесь появится график по дням.</div>';
+}
+h+='</div>';
+h+='<div class="card"><div class="card-title">📋 Статистика</div><div class="tf-stats">'+
+'<div class="tf-stat accent"><span>Дней активно</span><b>'+(d.days_active||0)+'</b></div>'+
+'<div class="tf-stat"><span>Среднее/день</span><b>'+fmtShort(d.avg_per_day_bytes||0)+'</b></div>'+
+'<div class="tf-stat green"><span>↓ Получено</span><b>'+fmtShort(down)+'</b></div>'+
+'<div class="tf-stat"><span>↑ Отправлено</span><b>'+fmtShort(up)+'</b></div>'+
+(d.reset_date?'<div class="tf-stat"><span>Сброс xray</span><b style="font-size:12px">'+esc(d.reset_date)+'</b></div>':'')+
+(d.limit_gb?'<div class="tf-stat accent"><span>Лимит</span><b>'+d.limit_gb+' ГБ</b></div>':'')+
+'</div></div>';
+c.innerHTML=h;
+const tc=document.getElementById('ttl-card');
+if(d.has_ttl){
+tc.style.display='';
+let th='';
+const now=Date.now();
+let expMs=NaN;if(d.expires_at){expMs=new Date(d.expires_at).getTime();}
+const totalDays=d.days||0;const totalMs=totalDays*86400000;
+let remainDays=NaN,pct=0,elapsedDays=0;
+if(!isNaN(expMs)){
+remainDays=Math.ceil((expMs-now)/86400000);
+elapsedDays=totalMs?Math.max(0,(totalMs-(expMs-now))/86400000):0;
+pct=totalMs?Math.min(100,Math.max(0,elapsedDays/totalDays*100)):0;
+}
+const expired=d.expired||(!isNaN(expMs)&&expMs<=now);
+th+='<div class="tf-ttl-row"><span class="label">Срок действия</span><span class="val">'+esc(d.expires_str||d.expires_at||'—')+'</span></div>';
+th+='<div class="tf-ttl-row"><span class="label">Статус</span>'+(expired?'<span class="badge off">истёк</span>':'<span class="badge on">активен</span>')+'</div>';
+if(!isNaN(remainDays)){th+='<div class="tf-ttl-row"><span class="label">Осталось дней</span><span class="val">'+(expired?0:Math.max(0,remainDays))+'</span></div>';}
+if(totalMs>0){th+='<div class="tf-progress"><div class="tf-progress-fill '+(expired?'off':'on')+'" style="width:'+(expired?100:pct).toFixed(1)+'%"></div></div>';
+th+='<div class="tf-progress-meta"><span>прошло '+elapsedDays.toFixed(0)+' д</span><span>из '+totalDays+' д</span></div>';}
+document.getElementById('ttl-container').innerHTML=th;
+}else{
+tc.style.display='none';
+}
+}'''
+
 def portal_page(user, path):
     """Main User Portal page with 10 tabs — WPP-styled."""
     email = esc(user.get("email", "user"))
@@ -874,6 +990,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 .sat-login{{color:var(--muted);font:11px ui-monospace,monospace}}
 .actions{{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}}
 @media(max-width:600px){{.grid2{{grid-template-columns:1fr}}.dl-grid{{grid-template-columns:1fr}}}}
+{TRAFFIC_CSS}
 </style></head><body>
 <div class="container">
 <div class="sticky-top">
@@ -1029,26 +1146,7 @@ c.innerHTML='<div class="link-box" id="sub-url-box">'+esc(d.urls.base64)+'</div>
 }}
 function copySub(){{const el=document.getElementById('sub-url-box');navigator.clipboard.writeText(el.textContent).then(()=>showToast('URL подписки скопирован!')).catch(()=>showToast('Ошибка','error'));}}
 
-async function loadTraffic(){{
-const d=await api('/api/portal/traffic');if(!d)return;
-const c=document.getElementById('traffic-container');
-const gb=d.total_gb||0,bytes=d.total_bytes||0;
-if(d.limit_gb&&d.limit_gb>0){{
-const pct=Math.min(100,(gb/d.limit_gb)*100);
-c.innerHTML='<div class="row"><span class="label">Использовано</span><span class="val">'+gb+' ГБ / '+d.limit_gb+' ГБ</span></div>'+
-'<div class="bar-track"><div class="bar-fill" style="width:'+pct+'%"></div></div>'+
-'<div class="row"><span class="label">Всего байт</span><span class="val">'+bytes+'</span></div>';
-}}else{{
-c.innerHTML='<div class="row"><span class="label">Использовано</span><span class="val">'+gb+' ГБ</span></div>'+
-'<div class="row"><span class="label">Всего байт</span><span class="val">'+bytes+'</span></div>';
-}}
-const tc=document.getElementById('ttl-card');
-if(d.has_ttl){{tc.style.display='';document.getElementById('ttl-container').innerHTML=
-'<div class="row"><span class="label">Срок действия</span><span class="val">'+esc(d.expires_str||d.expires_at||'')+'</span></div>'+
-'<div class="row"><span class="label">Статус</span>'+(d.expired?'<span class="badge off">истёк</span>':'<span class="badge on">активен</span>')+'</div>'+
-'<div class="row"><span class="label">Дней</span><span class="val">'+(d.days||0)+'</span></div>';}}
-}}
-
+{LOAD_TRAFFIC_JS}
 async function loadHealth(){{
 const d=await api('/api/portal/health');if(!d)return;
 const g=document.getElementById('sys-grid');
