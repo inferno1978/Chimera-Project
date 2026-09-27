@@ -1,4 +1,11 @@
 # Changelog
+---
+
+## FEAT(wpp): WPP FAQ + changelog entry
+
+Added docs/faq/WPP_FAQ.md with full WPP documentation (8 sections, 28-row comparison table). All IPs/UUIDs/passwords/tokens sanitized.
+
+Updated CHANGELOG.md with WPP unification entry (2031 lines of code, 3 commits: 016119f, fdaf436, 561a034).
 
 ---
 
