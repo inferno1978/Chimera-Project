@@ -923,7 +923,7 @@ PORTAL_TABS_CSS = """/* === shared portal primitives (all tabs) === */
 .portal-stat.red b{color:var(--red)}
 .portal-stat.amber b{color:var(--yellow)}
 .portal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
-.portal-stat-val{overflow-wrap:anywhere;word-break:break-word;min-width:0}.portal-tile{padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);transition:border .15s,transform .12s;animation:pFade .4s ease both}
+.portal-stat-val{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;max-width:200px}.portal-tile{padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);transition:border .15s,transform .12s;animation:pFade .4s ease both}
 .portal-tile:hover{border-color:var(--accent)}
 .portal-tile-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
 .portal-tile-title{font-weight:600;font-size:14px;flex:1;min-width:0;overflow-wrap:anywhere}
