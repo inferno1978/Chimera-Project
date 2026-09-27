@@ -1,4 +1,162 @@
 # Changelog
+## FEAT(wpp): объединение Admin Panel + User Portal в WPP, fingerprint dropdown, VLESS URL auto-fill, Admin gap UI — 27 сентября 2026
+
+**Кейс:** в chimera существовало два независимых веб-сервиса:
+
+1. `vless-web.service` (port 8443, `rest_api.py`) — обслуживал Admin Panel
+   (`/admin/`), User Portal (`/portal/`), REST API (`/api/*`).
+2. `wpp-web.service` (port 9744→9745, `wpp_panel_web.py`) — обслуживал
+   WPP Admin Panel (`/panel/*`).
+
+Два сервиса = два порта, два процесса, две точки отказа, две конфигурации
+nginx. Пользователь/admin заходили на разные URL. При этом WPP уже имел
+богаче функционал (dashboard, nodes, OpenFlux, components, landing editor),
+а rest_api.py — отдельные функции (health, rotate, backup, GeoIP, b4,
+satellite, user portal с 10 табами), которых не было в WPP.
+
+**Решение:** перенести ВСЁ из rest_api.py в WPP — User Portal, Admin API
+gaps, UI элементы. Объединить в один сервис, один порт, одну конфигурацию.
+
+### Реализация — 4 коммита, ~2311 строк
+
+#### Коммит `016119f` — fingerprint dropdown + VLESS URL auto-fill
+
+В форме "Добавить chimera cascade ноду" (раздел Nodes):
+
+- **Fingerprint:** заменён `<input type="text" value="chrome">` на
+  `<select>` с 11 опциями (chrome, firefox, safari, ios, android, edge,
+  360, qq, random, randomized, none). Список — зеркало `XRAY_FP_LIST` из
+  `chimera/modules/fingerprint_manager.py`. Опции random/randomized
+  помечены как ⚠️ несовместимые с REALITY (с обоснованием в комментарии).
+
+- **VLESS URL auto-fill:** над формой добавлено поле "Вставьте VLESS URL".
+  Inline JS-парсер `parseVlessUrl()` разбирает ссылку формата
+  `vless://uuid@host:port?security=reality&pbk=...&sni=...&fp=chrome&sid=...`
+  и автоматически заполняет все поля формы (host, port, proto, uuid,
+  pubkey, shortid, sni, fp). Форма остаётся — можно подправить любое поле.
+
+  Файлы: `chimera/modules/wpp_ui.py` (+25 строк).
+
+#### Коммит `fdaf436` — User Portal + Admin extras (полный порт)
+
+**Новые файлы:**
+
+- `chimera/modules/wpp_portal.py` (690 строк) — User Portal:
+  - Per-user auth: HMAC-signed cookie `psid` (изолирован от admin-сессии
+    префиксом `portal:`). Login через `/portal/login` (email +
+    portal_password из `/etc/xray/users.json`).
+  - Авто-логин: `/portal/{uuid}` — ищет юзера по UUID, ставит cookie,
+    redirect на `/portal/home`.
+  - 10 табов: Подключение, Подписка, Конфиги, Трафик, IP, Пароль,
+    Сателлиты, YouTube DPI, Сервер, AmneziaWG.
+  - 20+ API endpoints: links, traffic, health, clash, singbox, hiddify,
+    vless-link, sub-info, sub-clash, sub-singbox, sat-info, sat-suggest,
+    b4-info, ips, ips/pin, ips/unpin, ips/replace-all, password,
+    sat-bind, sat-unbind, qr.
+  - Все helper-функции импортируются из `rest_api.py` (single source of
+    truth — не дублируем логику): `_generate_vless_links`,
+    `_get_user_traffic`, `_get_ttl_info`, `_get_health`,
+    `_generate_clash_config`, `_generate_singbox_config`,
+    `_generate_hiddify_config`, `_generate_vless_link`, `_get_users`,
+    `_save_users`.
+
+- `chimera/modules/wpp_admin_extras.py` (487 строк) — Admin API gaps:
+  - GET: `/api/health` (SSL days, CPU, uptime, connections, RAM, disk),
+    `/api/backup/list`, `/api/geoip/rules`, `/api/users/{email}/traffic`,
+    `/api/awg/*` (delegated).
+  - POST: `/api/rotate/uuid`, `/api/rotate/reality`, `/api/backup`,
+    `/api/geoip/rules`, `/api/users/{email}/toggle|rename|password`,
+    `/api/sat/bind|unbind`, `/api/b4/install|uninstall|enable|disable|
+    preset|discovery`, `/api/awg/*` (delegated).
+  - DELETE: `/api/geoip/rules`, `/api/awg/*`.
+
+**Модифицированные файлы:**
+
+- `chimera/modules/wpp_ui.py` (+390 строк):
+  - `portal_login_page(path, csrf, error)` — WPP-styled login form.
+  - `portal_page(user, path)` — full 10-tab portal page, fetches all
+    `/api/portal/*` endpoints, QR via `/api/portal/qr`. Compatible with
+    WPP's restrictive CSP.
+
+- `chimera/modules/wpp_panel_web.py` (+25 строк):
+  - Import `wpp_portal` + `wpp_admin_extras`.
+  - `do_GET`: delegates `/portal*` + `/api/portal/*` → wpp_portal;
+    `/api/health|backup|geoip|rotate|b4|sat|awg|users` → wpp_admin_extras.
+  - `do_POST`: same delegation pattern.
+  - `do_DELETE`: new method for `/api/geoip/rules` + `/api/awg/*`.
+
+**Auth архитектура:**
+```
+Admin session:    cookie "sid"  (HMAC-signed, Path=/, HttpOnly, SameSite=Lax, Max-Age=86400)
+Portal session:   cookie "psid" (HMAC-signed с префиксом "portal:", Path=/, HttpOnly, SameSite=Lax, Max-Age=86400)
+```
+Куки изолированы — admin-сессия не даёт доступ к user-функциям, и наоборот.
+
+#### Коммит `561a034` — Admin gap UI (frontend для wpp_admin_extras API)
+
+**Модифицированные файлы:**
+
+- `chimera/modules/wpp_ui.py` (+425 строк):
+  - `admin_block()` — shared CSS + toast + JS (определяет `wppShowToast()`
+    и `wppApi(method, url, body)` — fetch helper с `credentials: same-origin`).
+  - `admin_user_actions(source, path, csrf)` — per-user card в детальном
+    профиле: 🔄 UUID rotate, 🔨 Ban/Unban, 🔑 password form (мин. 8),
+    ✏️ rename form (3-32). Только для VLESS-юзеров (с email).
+  - `admin_health_widget(path)` — auto-fetches `GET /api/health` каждые
+    30с. Показывает: xray/nginx/dnscrypt (green/red badges), SSL дней,
+    CPU, uptime, RAM, disk, connections, domain.
+  - `admin_backup_card(path, csrf)` — список бэкапов + кнопка "Создать".
+  - `admin_geoip_card(path, csrf)` — текущие правила + форма добавления
+    (коды стран + block/allow) + "Удалить все".
+  - `admin_b4_card(path, csrf)` — Install/Enable/Disable/Discovery кнопки.
+  - `admin_tools_section(path, csrf)` — wrapper для всех 4 карточек в
+    Settings странице.
+
+- `chimera/modules/wpp_panel_web.py` (+14 строк):
+  - Import `admin_tools_section`.
+  - В `users()` добавлено `"email"` в VLESS profile dict (нужно для
+    admin_user_actions).
+  - **Critical fix:** `session_cookie()` — `Path={PANEL_PATH}` → `Path=/`
+    (иначе sid cookie не отправлялся на `/api/*` → все admin_extras
+    fetch'и возвращали 401).
+  - Settings page body: добавлен `{admin_tools_section(...)}`.
+
+- `chimera/modules/wpp_admin_extras.py` (+12 строк):
+  - `GET /api/backup/list`: исправлен backup_dir (был
+    `/var/lib/xray-installer/backups`, стал `/var/backups/xray` =
+    `core.BACKUP_DIR`). Добавлены `size_bytes` + `mtime` поля.
+
+### Что НЕ изменилось
+
+- WPP Admin Panel (Dashboard, Users, Nodes, Settings, Updates, Subscriptions,
+  OpenFlux) — без изменений.
+- Двусторонняя синхронизация cascade-нод (add/delete → state.json → xray
+  restart) — не трогали.
+- Node API federation — не трогали.
+- Landing page editor — не трогали.
+- Component installer — не трогали.
+- `rest_api.py` остаётся в chimera source как библиотека (helper-функции
+  импортируются `wpp_portal.py`).
+
+### Что удалено
+
+- `vless-web.service` (systemd unit) — удалён на server 1.
+- `/etc/systemd/system/vless-web.service` — удалён.
+- `/var/lib/xray-installer/web_config.json` (admin creds для rest_api) —
+  удалён.
+- `/var/lib/xray-installer/nginx_front_portal.json` (User Portal nginx
+  front) — удалён.
+
+### Документация
+
+- `docs/faq/WPP_FAQ.md` — новый FAQ (8 разделов, 28-строчная сравнительная
+  таблица, Q&A секция). Все IP/UUID/пароли/токены вычищены.
+- `CHANGELOG.md` — данный entry.
+
+### Деплой
+
+Только на server 1 (`<server-ip>`, домен `cdn2.example`).
+`wpp-web.service` перезапущен, все endpoints протестированы.
 ---
 
 ## FEAT(wpp): WPP FAQ + changelog entry
