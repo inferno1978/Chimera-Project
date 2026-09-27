@@ -42,6 +42,7 @@ from chimera.modules import wpp_components as components
 from chimera.modules import wpp_nodes as node_api
 from chimera.modules import wpp_openflux as openflux
 from chimera.modules import wpp_awg as awg
+from chimera.modules import wpp_portal, wpp_admin_extras
 
 HOST="127.0.0.1"
 PORT=8090
@@ -781,6 +782,12 @@ class Handler(BaseHTTPRequestHandler):
         return value
     def do_GET(self):
         path=urlparse(self.path).path
+        if path.startswith("/portal") or path.startswith("/api/portal/"):
+            wpp_portal.handle_get(self, path, parse_qs(urlparse(self.path).query))
+            return
+        if path in ("/api/health","/api/backup/list","/api/geoip/rules") or path.startswith("/api/rotate/") or path.startswith("/api/b4/") or path.startswith("/api/sat/") or path.startswith("/api/awg/") or path.startswith("/api/users/"):
+            wpp_admin_extras.handle_get(self, path, parse_qs(urlparse(self.path).query))
+            return
         if path.startswith(node_api.API_PREFIX+"/"):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
@@ -955,6 +962,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path=urlparse(self.path).path
+        if path.startswith("/portal") or path.startswith("/api/portal/"):
+            wpp_portal.handle_post(self, path)
+            return
+        if path in ("/api/rotate/uuid","/api/rotate/reality","/api/backup","/api/geoip/rules") or path.startswith("/api/b4/") or path.startswith("/api/sat/") or path.startswith("/api/awg/") or path.startswith("/api/users/"):
+            wpp_admin_extras.handle_post(self, path)
+            return
 
         if path.startswith(node_api.API_PREFIX+"/"):
             if not self.api_auth(): return
@@ -1390,6 +1403,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self.send_html("Not found",404)
+
+
+    def do_DELETE(self):
+        path=urlparse(self.path).path
+        if path=="/api/geoip/rules" or path.startswith("/api/awg/"):
+            wpp_admin_extras.handle_delete(self, path)
+            return
+        self.send_json({"error":"Not found"},404)
 
     def serve_subscription(self,token):
         if not re.fullmatch(r"[a-f0-9]{64}",token):
