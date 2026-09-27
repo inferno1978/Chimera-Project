@@ -1413,7 +1413,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path=urlparse(self.path).path
-        if path=="/api/geoip/rules" or path.startswith("/api/awg/"):
+        if path.startswith("/api/portal/"):
+            wpp_portal.handle_delete(self, path)
+        elif path=="/api/geoip/rules" or path.startswith("/api/awg/"):
             wpp_admin_extras.handle_delete(self, path)
             return
         self.send_json({"error":"Not found"},404)
