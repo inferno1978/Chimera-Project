@@ -14,7 +14,7 @@ chimera/modules/autoban.py
   • _autoban_get_chain_ips()       — IP нод каскада для автоматического whitelist
   • _fw_ban/_fw_unban (private)    — блокировка/разблокировка через ufw/iptables
   • _autoban_run_once()            — CLI entry point для --autoban
-  • _autoban_install_cron(t, w)    — установка cron-задачи (5 мин)
+  • _autoban_install_cron(t, w)    — установка cron-задачи (1 мин)
   • do_manage_autoban()            — интерактивное меню управления
 
 Точки входа из _core.py:
@@ -918,7 +918,7 @@ def _autoban_run_once() -> int:
 
 
 def _autoban_install_cron(threshold: int, window: int) -> None:
-    """Устанавливает cron каждые 5 минут."""
+    """Устанавливает cron каждые 1 минуту."""
     core = _core_module()
     success = core.success
 
@@ -1226,10 +1226,10 @@ BAN_STATE.chmod(0o600)
     sh.write_text("\n".join(lines) + "\n")
     sh.chmod(0o750)
     _XRAY_BAN_CRON.write_text(
-        f"*/5 * * * * root {sh} >> /var/log/xray-autoban.log 2>&1\n"
+        f"* * * * * root {sh} >> /var/log/xray-autoban.log 2>&1\n"
     )
     _XRAY_BAN_CRON.chmod(0o644)
-    success(f"AutoBan cron установлен (каждые 5 мин, порог: {threshold} ошибок за {window} мин)")
+    success(f"AutoBan cron установлен (каждые 1 мин, порог: {threshold} ошибок за {window} мин)")
 
 
 
@@ -1371,7 +1371,7 @@ def do_manage_autoban() -> None:
 
         print()
         _box_top(f"Авто-бан IP (TLS handshake ошибки)")
-        _box_row(f"  Cron (5 мин):  {''+GREEN+'ВКЛЮЧЁН'+NC if cron_active else ''+YELLOW+'ОТКЛЮЧЁН'+NC}")
+        _box_row(f"  Cron (1 мин):  {''+GREEN+'ВКЛЮЧЁН'+NC if cron_active else ''+YELLOW+'ОТКЛЮЧЁН'+NC}")
         _box_row(f"  Порог:         {CYAN}{cfg.get('threshold', _BAN_THRESHOLD_DEFAULT)}{NC} ошибок "
               f"за {CYAN}{cfg.get('window_min', _BAN_WINDOW_MINUTES)}{NC} мин")
         _box_row(f"  Забанено IP:   {RED if banned else DIM}{len(banned)}{NC}")
