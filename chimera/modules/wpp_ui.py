@@ -915,7 +915,7 @@ PORTAL_TABS_CSS = """/* === shared portal primitives (all tabs) === */
 .portal-hero-title{font:700 22px/1.2 inherit;color:var(--text);margin:6px 0 2px;letter-spacing:-.02em;overflow-wrap:anywhere}
 .portal-hero-sub{font-size:12px;color:var(--muted);line-height:1.5}
 .portal-stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:10px;margin-top:14px}
-.portal-stat{padding:13px;border:1px solid var(--line);border-radius:10px;background:var(--input)}
+.portal-stat{padding:13px;border:1px solid var(--line);border-radius:10px;background:var(--input)}.portal-stat b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;display:block}.portal-stat{min-width:0}
 .portal-stat span{display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
 .portal-stat b{display:block;font:600 15px ui-monospace,monospace;color:var(--text);margin-top:6px;overflow-wrap:anywhere}
 .portal-stat.accent b{color:var(--accent)}
@@ -923,7 +923,7 @@ PORTAL_TABS_CSS = """/* === shared portal primitives (all tabs) === */
 .portal-stat.red b{color:var(--red)}
 .portal-stat.amber b{color:var(--yellow)}
 .portal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
-.portal-stat-val{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;max-width:200px}.portal-tile{padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);transition:border .15s,transform .12s;animation:pFade .4s ease both}
+.portal-tile{padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);transition:border .15s,transform .12s;animation:pFade .4s ease both}
 .portal-tile:hover{border-color:var(--accent)}
 .portal-tile-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
 .portal-tile-title{font-weight:600;font-size:14px;flex:1;min-width:0;overflow-wrap:anywhere}
