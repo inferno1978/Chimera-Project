@@ -590,7 +590,7 @@ handle_* функции с fake_msg.
 
 ### Деплой (на 3 серверах)
 
-- **Server 1** (45.151.182.204, primary):
+- **Server 1** (<server1-ip>, primary):
   * `chimera/modules/tg_bot.py` обновлён → `/usr/local/bin/xray-tg-bot.py`
     регенерирован через `_install_bot_service(bot_cfg)`
   * `chimera/modules/tg_client_bot.py` обновлён →
@@ -598,12 +598,12 @@ handle_* функции с fake_msg.
     `install_client_bot_service(cfg)`
   * `xray-tg-bot`: active (admin-бот с cascade_peers=2)
   * `xray-tg-client`: active
-- **Server 2** (138.124.255.238):
+- **Server 2** (<server2-ip>):
   * `tg_client_bot.py` обновлён → `/usr/local/bin/xray-tg-client-bot.py`
   * `xray-tg-client`: active
   * (admin-бот остановлен — cascade_peers режим, забирает только один
     long-poller с одним токеном)
-- **Server 3** (91.224.87.154):
+- **Server 3** (<server3-ip>):
   * `tg_client_bot.py` обновлён → `/usr/local/bin/xray-tg-client-bot.py`
   * `xray-tg-client`: active
   * (admin-бот остановлен — cascade_peers режим)
@@ -631,8 +631,8 @@ TEST — после прошлой "автобан-катастрофы" я на
 
 ## FEAT(aghome): AGH_FALLBACK_DNS → зашифрованные DoH URLs вместо plaintext Quad9 — 24 сентября 2026
 
-**Кейс:** во время DNS-аудита на 3 боевых серверах (45.151.182.204,
-138.124.255.238, 91.224.87.154) обнаружено: AdGuardHome при падении
+**Кейс:** во время DNS-аудита на 3 боевых серверах (<server1-ip>,
+<server2-ip>, <server3-ip>) обнаружено: AdGuardHome при падении
 dnscrypt-proxy уходил в plaintext-режим — `fallback_dns: ['9.9.9.9:53',
 '149.112.112.112:53']` (или `['94.140.14.14:53', '149.112.112.112:53']`
 на серверах 2/3). В штатной работе dnscrypt живёт 99.9% времени, но в
@@ -806,7 +806,7 @@ REALITY-сканеров:
 
 ```
 [Info] transport/internet/tcp: REALITY: processed invalid connection
-  from 18.218.118.203:50938: failed to read client hello
+  from <ip>:50938: failed to read client hello
 [Info] transport/internet/tcp: REALITY: failed to dial dest:
   dial unix /dev/shm/<pid>.socket: connect: no such file or directory
 ```
@@ -987,7 +987,7 @@ whitelist выяснилось, что меню [5] умеет удалять т
 на него же (симметрия UX, квирка-условие диапазона выпилена);
 `_whitelist_add_many()` — добавление списком через запятую/пробел с
 валидацией точных IP (IPv4/IPv6; CIDR отклоняется явно — whitelist
-сравнивает точные строки, `47.57.232.0/24` молча не работает
+сравнивает точные строки, `<ip>/24` молча не работает
 никогда); `all` при удалении — с подтверждением.
 
 **Тесты:** +`TestWhitelistBatchOperations` (17 шт): парсер
@@ -1000,7 +1000,7 @@ source-маркеры меню. Сьют autoban: 62 passed.
 ## FIX(autoban): cron персистил авто-резолвы в пользовательский whitelist — свалка из ~80 IP парковки REG.RU — 21 сентября 2026
 
 **Кейс (vds13195):** в «Пользовательском whitelist» меню `[5]`
-обнаружилось ~80 IP из 194.67.71.0/24, которые владелец не вносил.
+обнаружилось ~80 IP из <ip>/24, которые владелец не вносил.
 Атрибуция (ip-api + живой HTTP-проб): AS197695 REG.RU,
 `data-page-type="parking-crew"` — парковочный кластер регистратора
 (ParkingCrew). DNS `ns1/ns2.reg.ru` (домены каскада на NS регистратора)
@@ -1065,7 +1065,7 @@ ruleset (1-3 с) → 199 вызовов ≈ 5 минут.
    /etc/ufw/user.rules ОДНОЙ правкой + ОДИН `ufw reload` (все строки
    каждого IP, включая дубли от старых багов; чужие deny и allow не
    трогаются; точное сравнение `-s <ip>` — не подстрокой, иначе
-   1.2.3.4 совпал бы с 1.2.3.40). Верификация: в живой цепочке
+   <ip> совпал бы с <ip>). Верификация: в живой цепочке
    (`iptables -S ufw-user-input`) не должно остаться целевых IP,
    иначе откат из бэкапа + CLI-фолбэк. Один IP — CLI delete
    (1-2 вызова). ufw нет → iptables по-IP (kernel-only, быстро).
@@ -1093,7 +1093,7 @@ banned; legacy-миграция работает и ставит флаг.
 Тесты: +14 (TestFwUnbanBatch: удаление только целевых строк с
 дублями + чужие/allow не тронуты + 3 вызова; 0 при отсутствии;
 откат при reload/верификации; нет ложного срабатывания по префиксу
-1.2.3.40; оркестратор multi→файл, single→CLI, no-ufw→iptables,
+<ip>; оркестратор multi→файл, single→CLI, no-ufw→iptables,
 нет файла→CLI-фолбэк; регрессия меню [3] — батч. TestHistoryClear-
 Resurrection: legacy-миграция работает + флаг; очищенная история не
 воскресает; без флага воскресала; [C] ставит флаг и чистит отчёт).
@@ -1158,7 +1158,7 @@ firewall/security-сьюты 91, DNS-сьюты 100, asn_cache 16 — passed.
 
 **Кейс 1 (AS25369, vds14808):** пользователь забанил AS25369 через
 IP-Бан [IB], но записи с этой ASN продолжали появляться в истории
-автобана. Живая проверка RIPE Stat: показанный в истории 103.171.1.29
+автобана. Живая проверка RIPE Stat: показанный в истории <ip>
 вообще из AS63737 (VIETSERVER, Вьетнам) — т.е. часть новых записей
 просто из ДРУГИХ ASN. Но и записи AS25369 продолжали появляться —
 потому что бан не резал трафик.
@@ -1213,7 +1213,7 @@ IP-Бан [IB], но записи с этой ASN продолжали появ�
    старых записей — lookup на лету. Старые записи отчёта остаются
    с прочерками (статический лог).
 
-**Живая верификация:** lookup_asn(103.171.1.29) → AS63737 VIETSERVER
+**Живая верификация:** lookup_asn(<ip>) → AS63737 VIETSERVER
 SERVICES TECHNOLOGY COMPANY LIMITED (сверено с RIPE Stat), кеш
 работает (второй вызов без сети, 1 мс).
 
@@ -1564,7 +1564,7 @@ port_registry (установка/активация: проверка заня�
   openflux-bridge, --socks5 bind:port) — локальный SOCKS5 для цепочек
   Xray/mihomo на сервере (VPS-гибрид, узел «🛟 Гарантия»). Bind по
   умолчанию 127.0.0.1:1080 — дефолт апстрима ':1080' (все интерфейсы,
-  SOCKS5 без аутентификации) запрещён явным указанием bind; 0.0.0.0 —
+  SOCKS5 без аутентификации) запрещён явным указанием bind; <ip> —
   опция с честным предупреждением.
 - Порт-цикл: активация = port_is_free (реестр + ss-слушатели + чужие
   UFW-правила; конфликт → юзеру список, кто занял, выбор другого
@@ -1585,7 +1585,7 @@ port_registry (установка/активация: проверка заня�
 дефолт-байнда ':1080', mihomo-фрагменты, бандл, state-roundtrip,
 реестр транспортов, спеки/зеркала/_ref_slug, ls-remote, _fetch_sources
 пин/main/fallback, _ensure_go → GO_TOOLCHAIN_SPEC, порт-цикл с
-патченным port_registry — занят/свободен/loopback-vs-0.0.0.0/закрытие,
+патченным port_registry — занят/свободен/loopback-vs-<ip>/закрытие,
 деактивация/удаление закрывают порт, CLI-валидация, экстрактор _core);
 смоук scripts/smoke_v89_openflux_ports.py — НАСТОЯЩИЙ port_registry в
 tmpdir (регистрация → чужой конфликт → разрегистрация) + рамки целы.
@@ -2022,7 +2022,7 @@ pure Python + системные бинари; на сервере kernel-wg п�
   диагностика (4) теперь показывает ноду выхода + живую MTProto-пробу;
   пункт 8 главного меню — экспорт клиентских конфигов в
   /root/warp-client-configs/ (600): `warp-client-wg.conf` (нативный
-  wg-quick: v4+v6 Address, DNS, MTU, AllowedIPs 0.0.0.0/0(+::/0),
+  wg-quick: v4+v6 Address, DNS, MTU, AllowedIPs <ip>/0(+::/0),
   keepalive; Table=off не переносится — серверная опция),
   `warp-mihomo-proxy.yaml` (фрагмент proxies: peers-формата warpscout:
   type wireguard, private-key, ip, peers[server/port/public-key/
@@ -2984,7 +2984,7 @@ triple-web`; фронт не переустанавливается (меняе�
   systemd IPAccounting caddy-naive (CONNECT-туннели access.log не пишет).
 - **GET /api/settings/hy2**: installed (юнит/конфиг/state-секция) + active
   (systemctl) + port (последнее число `listen:`-строки config.yaml —
-  `0.0.0.0:443` больше не парсится как «0»; фолбэк firewall.udp_ports → 443)
+  `<ip>:443` больше не парсится как «0»; фолбэк firewall.udp_ports → 443)
   + stack + hy2UserCount=0. Мутации из UI (install/hy2-port/enroll) — честный
   501 с указанием пути в TUI. Добавлен и честный
   `GET /api/panel/webbasepath/generate`.
@@ -3327,10 +3327,10 @@ sync) — чекбокс в UI = индикатор транспорта.
 
 **Кейс:** роутер (дом): почти все приложения телефона
 медленно/не работают; ozon.ru, dzen.ru недоступны. VPS
-chimeravpn: собственный DoH-резолвер в retry-loop (новые
+<домен3>: собственный DoH-резолвер в retry-loop (новые
 TLS-соединения к 1.1.1.1:443 каждые 200-400 мс). VPS
-chimeraprodcdn: 100/100 исходящих коннектов сервера
-(Telegram-DC 149.154.x, total-shadows.online, DoH) под
+<домен2>: 100/100 исходящих коннектов сервера
+(Telegram-DC 149.154.x, <exit-de>, DoH) под
 heavy-профилем.
 
 **Диагноз:** `XHamster-Heavy-v1` собран 06.09 по рецепту
@@ -3347,7 +3347,7 @@ appsflyer) и исходящему самих VPS. Верификация сбо
 dport_filter.
 
 **Старая «улика эскалации» — ретракция:** наблюдение 06.09 из
-OWN_DOH_FAQ §8 («fi.total-shadows.online 40/40 через Heavy»,
+OWN_DOH_FAQ §8 («<exit-fi> 40/40 через Heavy»,
 «Telegram-DC по IP-хинту», «десинки протоколу не вредят»)
 было работой этой же мины, а не эскалации. После снятия
 dport_filter все SNI-less матчи исчезли в ноль на обеих VPS —
@@ -3366,7 +3366,7 @@ dport_filter все SNI-less матчи исчезли в ноль на обеи
   port-only перехват.
 
 **Проверка:** роутер 48/100 → 0/100 (окно лога 03:18),
-chimeravpn 35/100 → 0/100, prodcdn 100/100 → 0/100;
+<домен3> 35/100 → 0/100, prodcdn 100/100 → 0/100;
 `b4_test_domain_now api.github.com` — OK в обе моды на обеих
 VPS (исходящий TLS серверов работает с поднятым B4);
 эскалационные цепочки Fat→Heavy целы на всех инстансах;
@@ -3467,12 +3467,12 @@ iptables уже живут, но TUI считает hopping отключённы
 
 ---
 
-## FEAT(b4/vps): Heavy-схема с эскалацией на chimeravpn (вторая нода) — всем сетам, DNS не тронут — 6 сентября 2026 (ночь)
+## FEAT(b4/vps): Heavy-схема с эскалацией на <домен3> (вторая нода) — всем сетам, DNS не тронут — 6 сентября 2026 (ночь)
 
-**Кейс:** юзер принёс MCP-эндпоинт второй VPS chimeravpn
+**Кейс:** юзер принёс MCP-эндпоинт второй VPS <домен3>
 (`https://<домен>:9743/api/mcp`, b4 v1.81.0, паритет
 инструментов) и попросил «сделать то же самое», что на
-chimeraprodcdn и роутере. DNS «мои пока не прописываем».
+<домен2> и роутере. DNS «мои пока не прописываем».
 
 **Что сделано (MCP):**
 - **Инвентаризация:** 5 сетов; пара Youtube-Fat/Heavy
@@ -3505,15 +3505,15 @@ chimeraprodcdn и роутере. DNS «мои пока не прописыва�
   vps_vpn_live_test.py, vps_vpn_artifacts.py, vps_inventory.py
   (мульти-эндпоинт), mcp_b4.py (эндпоинты router|prodcdn|vpn).
 
-**Итог:** обе VPS-ноды (chimeraprodcdn и chimeravpn) прошли
+**Итог:** обе VPS-ноды (<домен2> и <домен3>) прошли
 этап 1 — Heavy-схема с эскалацией всем сетам, DNS не тронут.
 Этап 2 (co-located DoH + кросс-VPS резерв) — по команде юзера.
 
 ---
 
-## FEAT(b4/vps): Heavy-схема с эскалацией на chimeraprodcdn — всем сетам, DNS не тронут — 6 сентября 2026 (поздний вечер)
+## FEAT(b4/vps): Heavy-схема с эскалацией на <домен2> — всем сетам, DNS не тронут — 6 сентября 2026 (поздний вечер)
 
-**Кейс:** юзер принёс MCP-эндпоинт VPS chimeraprodcdn (b4 v1.81.0,
+**Кейс:** юзер принёс MCP-эндпоинт VPS <домен2> (b4 v1.81.0,
 19 инструментов, паритет с роутером) и попросил выстроить ту же
 схему Heavy с эскалацией, что на роутере, — для всех сетов.
 DNS «пока не прописываем».
@@ -3541,7 +3541,7 @@ DNS «пока не прописываем».
   xhamster.com 34.5 — Fat; два последних добавлены в
   наблюдение). Главная улика: эскалация сработала в проде
   через ~минуту после сборки — CDN-стриминг
-  fi.total-shadows.online пошёл через XHamster-Heavy-v1 и
+  <exit-fi> пошёл через XHamster-Heavy-v1 и
   держится (40/40 свежих коннектов). Наблюдение задокументировано:
   SNI-less коннекты к Telegram-DC (MTProto-апстрим, 149.154.x)
   атрибутируются Heavy по IP-хинту — TTL-фейки протоколу не
@@ -3636,8 +3636,8 @@ Cloudflare `1.1.1.1` — единая точка отказа, притом РК
 - **Инцидент канала (полтора часа):** TCP timeout на 7000
   при живом роутере. Слоя причины: (1) SSH-правило INPUT
   умерло при пересборке firewall (ASUS/Merlin, без ребута —
-  WAN-флап); (2) egress песочницы уехал 47.57.0.0/16 →
-  8.212.0.0/16. Лечение: `/jffs/scripts/firewall-start`
+  WAN-флап); (2) egress песочницы уехал <ip>/16 →
+  <ip>/16. Лечение: `/jffs/scripts/firewall-start`
   (append-блок, персистентно) + обе подсети. check-host
   подтвердил недоступность порта со всего мира.
 - **Артефакты/доки:** dns-блоки NNM-Fat-v1.json и
@@ -3901,8 +3901,8 @@ DNS на ядре v1.19.30: A-записи → фейки `198.18.0.x` (пул `
   `nameserver-policy` на `rule-set:` (+ новый провайдер `cn-domains`);
   `private.txt` → `private.mrs` (Loyalsoldier-вариант давал
   "invalid Ipcidr" warnings). Проверено живым `mihomo -t` v1.19.30.
-- **DNS-схема эталона**: `listen 127.0.0.1:1053` (было `0.0.0.0`);
-  Яндекс DoH первым в `proxy-server-nameserver` + `77.88.8.8` первым в
+- **DNS-схема эталона**: `listen 127.0.0.1:1053` (было `<ip>`);
+  Яндекс DoH первым в `proxy-server-nameserver` + `<ip>` первым в
   `default-nameserver` (холодный старт из РФ); `nameserver` — личные
   AGH (`_AGH_DOH`, 1-й эшелон, единственная точка правки), `fallback` —
   Quad9 + AdGuard public + CF/Google (эшелоны v6), `fallback-filter`
@@ -4651,7 +4651,7 @@ smoke_test_modules 43/43.
 ## FIX(dnscrypt_advanced+dnscrypt_setup+xray_install): гео-резистентность DNS: добивка [RA]/[T]/xhttp (отрава bootstrap/fallback, мёртвая фаза-1, resolv.conf без гарантии отката, dnscry.pt-moscow в голове пула) — 1 сентября 2026
 
 **Контекст:** ТСПУ глушит DoH/DoT Google/Cloudflare и отравляет plain
-UDP:53 (1.1.1.1/8.8.8.8 DNAT→НСДИ 195.208.5.1, NXDomain-spoof). 
+UDP:53 (1.1.1.1/8.8.8.8 DNAT→НСДИ <ip>, NXDomain-spoof). 
 вычистил шаблон [R] и главный генератор Xray, IPv6; но живые
 Entry-ноды в РФ при повторном заходе в TUI рисковали вернуть отраву
 в уже вычищенный конфиг — «мины» оставались в трёх местах.
@@ -4659,7 +4659,7 @@ Entry-ноды в РФ при повторном заходе в TUI риско�
 **Что исправлено:**
 
 1. `dnscrypt_advanced._SECURITY_PARAMS` (пресет [RA]):
-   `bootstrap/fallback = 9.9.9.9:53 + 77.88.8.8:53` (было
+   `bootstrap/fallback = 9.9.9.9:53 + <ip>:53` (было
    `9.9.9.9/8.8.8.8/1.1.1.1` — переприменение пресета возвращало
    отравленные резолверы в конфиг; этот модуль не тронул).
 2. `dnscrypt_advanced._safe_apply_preset` — фаза-1 пресета:
@@ -4672,14 +4672,14 @@ Entry-ноды в РФ при повторном заходе в TUI риско�
    netprobe/latency-ranking держит ~15-20с окно, когда :5300 ещё не
    отвечает — одиночный dig ложно проваливал фазу (живой кейс).
 3. `dnscrypt_advanced._safe_apply_preset` — временный resolv.conf:
-   `9.9.9.9 + 77.88.8.8` вместо `8.8.8.8 + 1.1.1.1` (отрава), и всё
+   `9.9.9.9 + <ip>` вместо `8.8.8.8 + 1.1.1.1` (отрава), и всё
    тело применения обёрнуто в try/finally — восстановление
    гарантировано при любом исходе, включая Ctrl+C/обрыв SSH посреди
    фазы (раньше система оставалась на отравленных резолверах — и это
    противоречило докстрингу «НЕ трогает resolv.conf»; теперь докстринг
    честный). Откат фазы-2 тоже возвращает quad9-базу, а не CF/GG.
 4. `dnscrypt_setup.apply_dnscrypt_tuning` [T]: `fallback_resolvers =
-   9.9.9.9:53 + 77.88.8.8:53` (было `1.1.1.1/8.8.8.8` — последняя
+   9.9.9.9:53 + <ip>:53` (было `1.1.1.1/8.8.8.8` — последняя
    оставшаяся отрава в setup-модуле: тюнинг ре-отравлял вычищенный
    руками toml).
 5. `xray_install.generate_xray_config_xhttp`: живой Quad9-fallback
@@ -4823,7 +4823,7 @@ VS Code, Cursor, LM Studio, CLI-ассистенты) к b4 на роутере/
 
 ## FIX(dpi_bypass+youtube_b4): живой geosite-путь для b4 вместо хардкода /usr/share/xray (500 в Web UI при Update геосайта) — 30 августа 2026
 
-**Контекст:** на <домен> (91.224.87.154) Update Geosite/GeoIP в
+**Контекст:** на <домен> (<server3-ip>) Update Geosite/GeoIP в
 Web UI b4 (Settings → Geodat Settings) падал с ошибкой 500:
 
     Error: 500: failed to create directory /usr/share/xray:
@@ -4877,11 +4877,11 @@ docs/faq/DPI_BYPASS_FAQ.md.
 ## FIX(scripts): enable-b4-mcp-nginx.sh бэкапы вне sites-enabled («conflicting server name») — 30 августа 2026
 
 **Контекст:** первый запуск скрипта на <домен>
-(91.224.87.154) прошёл успешно (MCP-локация вставлена, nginx -t OK,
+(<server3-ip>) прошёл успешно (MCP-локация вставлена, nginx -t OK,
 MCP-клиенты заработали без Host-хаков), но на каждый nginx -t/reload
 вылезал warning:
 
-    [warn] conflicting server name "<домен>" on 0.0.0.0:9743, ignored
+    [warn] conflicting server name "<домен>" on <ip>:9743, ignored
 
 **Корень:** скрипт клал бэкап конфига рядом с сайтом —
 `/etc/nginx/sites-enabled/chimera-b4-nginx.<ts>.preMCP.bak`. Debian-nginx
@@ -4920,7 +4920,7 @@ sites-enabled, чистка ДО раннего exit, skip .bak при поис�
 
 **Контекст:** b4 >= 1.80 поднял MCP-сервер (`/api/mcp`, Model Context
 Protocol — управление b4 из AI-клиентов). Инцидент на <домен>
-(91.224.87.154, порт 9743): MCP-клиент с корректным токеном получал
+(<server3-ip>, порт 9743): MCP-клиент с корректным токеном получал
 403 Forbidden.
 
 **Корень №1 (403):** MCP go-sdk (StreamableHTTPHandler) включает
@@ -5098,13 +5098,13 @@ python-блоков live-скрипта: 7/7 (идемпотентность, ц
 
 ## SECURITY/DEFAULT(tfo_settings): TCP Fast Open ВЫКЛЮЧЕН по умолчанию во всём проекте + центральный модуль управления — 29 августа 2026
 
-**Проблема (инцидент 28.08.2026, продакшн):** на vds13216 (138.124.255.112,
+**Проблема (инцидент 28.08.2026, продакшн):** на vds13216 (<ip>,
 Режим B, каскад → xyloss.online:9443, VLESS+REALITY) внезапно умер весь
 foreign-трафик. RU-direct продолжал работать. Симптомы:
 
 ```
 proxy/vless/encoding: failed to read response version >
-  read tcp 138.124.255.112:...->31.77.170.20:9443: read: connection timed out
+  read tcp <ip>:...-><ip>:9443: read: connection timed out
 common/mux: unexpected EOF
 ```
 
@@ -5273,7 +5273,7 @@ _max_version_tag × 7, сбор-со-всех-зеркал, env-форма, по
   (для того и каскад) → весь трафик И DNS (detour remote-dns через selector)
   уходят в i/o timeout. Группы Streaming/Telegram/AI — тоже дефолтили на
   прямой exit.
-- **local-dns = AliDNS `223.5.5.5`** (Китай) — резолв доменов нод из РФ
+- **local-dns = AliDNS `<ip>`** (Китай) — резолв доменов нод из РФ
   стабильно таймаутит (`context deadline exceeded`).
 
 **ИСПРАВЛЕНИЯ (subscription_multinode.py):**
@@ -5288,7 +5288,7 @@ _max_version_tag × 7, сбор-со-всех-зеркал, env-форма, по
   `geoip-telegram`/`geoip-private` → MetaCubeX/meta-rules-dat@sing.
 - **Selector default = ENTRY-каскад**; entry добавлен в группы
   Streaming/Telegram/AI (и их urltest) как дефолт.
-- local-dns → **Yandex `77.88.8.8`** (живой из РФ).
+- local-dns → **Yandex `<ip>`** (живой из РФ).
 - Guard-правило: `domain_suffix` доменов нод → local-dns СТРОГО до правила
   fakeip (защита от петли резолва в любой версии sing-box).
 - `strict_route: false` (Windows: WFP-правила strict_route рвут собственные
@@ -5424,13 +5424,13 @@ geosite_category_check) — 184 passed.
    (Блокировка входящих из РФ, IP внесён в whitelist «D»-кнопкой)
    соединение полностью перестаёт проходить; в логах клиента (mihomo):
    ERROR[0016] dns: exchange failed for mtalk.google.com. IN A:
-   dial tcp 132.243.230.231:443: i/o timeout
+   dial tcp <ip>:443: i/o timeout
 ```
 
 **КОРНЕВАЯ ПРИЧИНА №1 — whitelist получал IP САМОГО СЕРВЕРА (ingress_geoip.py):**
 Кнопка «D — Определить мой текущий IP автоматически» в меню whitelist (5 → G → 4)
 запрашивала `api.ipify.org` С САМОГО СЕРВЕРА → возвращался внешний IP СЕРВЕРА
-(в инциденте — 132.243.230.231), а не IP администратора. Администратор из РФ
+(в инциденте — <ip>), а не IP администратора. Администратор из РФ
 добавлял в whitelist бесполезный адрес → после включения блокировки его
 реальные пакеты на порт Xray DROPались ipset xray_ru_block (весь RIPE-список РФ)
 → клиент не мог даже установить туннель → `dial tcp <server>:443: i/o timeout`
@@ -5474,7 +5474,7 @@ geosite_category_check) — 184 passed.
    • `server_names` += `quad9-dnscrypt-ip4/ip6-nofilter-pri` — DNSCrypt-протокол
      Quad9 (порт 8443, БЕЗ SNI) переживает DPI РФ и не отравляет ответы;
      `lb_estimator` сам выбирает живой сервер (за рубежом — cloudflare/google);
-   • `bootstrap/fallback_resolvers = ['9.9.9.9:53', '77.88.8.8:53']` —
+   • `bootstrap/fallback_resolvers = ['9.9.9.9:53', '<ip>:53']` —
      достижимы и из РФ, и из-за рубежа;
    • `netprobe_address = '9.9.9.9:53'`.
    Имена резолверов сверены со свежим списком
@@ -5506,7 +5506,7 @@ geosite_category_check) — 184 passed.
 
 **Тесты:** `tests/test_admin_whitelist_geo_dns.py` — 14 кейсов
 (SSH-детекция IPv4/IPv6/приоритет ENV, авто-whitelist в `_ingress_enable`,
-отсечение IP сервера, quad9/9.9.9.9/77.88.8.8 в TOML, AGH fallback,
+отсечение IP сервера, quad9/9.9.9.9/<ip> в TOML, AGH fallback,
 Quad9-fallback в xray_install ×2 и chain_nodes ×4).
 
 ---
@@ -5752,7 +5752,7 @@ test_ios_patch5 (url_base-паттерн), test_telemt_panel (герметичн
 DNS-цепочка Xray → AGH:53 → DNSCrypt:5300 жива, входящие из РФ (5→G)
 выключены и не мешают. Корень «работают только ру-ресурсы» —
 КЛИЕНТСКИЙ: sing-box/NyameBox логи `dns: exchange failed … dial tcp
-91.224.87.154:443: i/o timeout` — это дозвон КЛИЕНТА до сожжённого
+<server3-ip>:443: i/o timeout` — это дозвон КЛИЕНТА до сожжённого
 entry-IP (прерывистый РКН/хостер-дроп на пути РФ→IP:443). Когда дозвон
 жив — access.log показывает исправный сплит (Telegram→chain-exit-N,
 РФ→direct). закрывает три серверных дефекта, найденных при аудите
@@ -5837,7 +5837,7 @@ _remove обе спеки ×1; autostart ×3 (сигнатура, источни
 
 ## FIX(ssl_certbot+resources): защита LE-сертификата от затирания + устойчивая DNS-проверка + идемпотентный certbot — 28 августа 2026
 
-**Инцидент (bright-lynx, 91.224.87.154, установка DNSCrypt без AGH):
+**Инцидент (bright-lynx, <server3-ip>, установка DNSCrypt без AGH):
 каскад из трёх багов убил валидный LE-сертификат и оставил сервер без
 nginx/xray.**
 
@@ -5857,7 +5857,7 @@ atexit-обработчик остановил nginx/xray.
 Вместо одного `dig +short` через системный резолвер:
 локальный `dig @127.0.0.1` (2 попытки с паузой 2с — DNSCrypt
 поднимается не мгновенно) → `getaddrinfo` (работает даже без dig) →
-внешние `1.1.1.1 / 8.8.8.8 / 77.88.8.8` напрямую (полностью обходят
+внешние `1.1.1.1 / 8.8.8.8 / <ip>` напрямую (полностью обходят
 локальный DNSCrypt; LE валидирует так же — из интернета). WARN только
 если домен не резолвится НИГДЕ — тогда certbot действительно упадёт.
 Если локальный мёртв, но внешний подтвердил → тихий INFO «DNS
@@ -5975,7 +5975,7 @@ do_full_install) и сверяет с ЖИВЫМ состоянием стека
 
 ## FIX+FEAT(_core+aghome_setup): порядок установки AGH→Xray + гарантия «запросы Xray идут через AGH» — 28 августа 2026
 
-**Инцидент (переустановка 176.123.162.42, Режим B): финализация AGH
+**Инцидент (переустановка <ip>, Режим B): финализация AGH
 пыталась перегенерировать конфиг Xray ДО его установки —
 `[WARN] AGH: state.json не найден — конфиг Xray не перегенерирован`.
 При этом оставалась неопределённость DNS-пути: пойдут ли запросы Xray
@@ -6060,7 +6060,7 @@ DNS-сервер фактического config.json:
 
 ## FIX(aghome_setup+aghome_mirrors+core+network_setup+xray_install+download_manager): чистая переустановка БЕЗ предупреждений — ложный «DNS мёртв» на живом DNS провайдера — 28 августа 2026
 
-**Инцидент (176.123.162.42, нода без IPv6): при переустановке Chimera
+**Инцидент (<ip>, нода без IPv6): при переустановке Chimera
 лог содержал каскад ложных [WARN] при полностью рабочей системе —
 `AGH: системный DNS на 127.0.0.1:53 не отвечает` → «восстановление»
 САМО ломало рабочий DNS → все 6 зеркал AdGuardHome «падали» →
@@ -6122,7 +6122,7 @@ resolv.conf на 127.0.0.1 — dnscrypt после рестарта ещё бу�
 
 - **`_core.py`**: удалён ранний чек «Порт 443/tcp может быть
   недоступен снаружи» — выполнялся ДО запуска xray (порт ещё не
-  слушался) и стучался в IP hostname (на Ubuntu это 127.0.1.1) →
+  слушался) и стучался в IP hostname (на Ubuntu это <ip>) →
   warn на чистой установке ВСЕГДА; реальная проверка осталась в
   финальной «Проверке сетевой доступности»;
 - **`network_setup.py`**: INPUT DROP-файрволл — 4×[WARN] → 1 info +
@@ -6195,7 +6195,7 @@ DNS обязан откатываться к состоянию ЧИСТОЙ с�
   (как на чистой системе) → публичный DNS;
 - **живая проба `getent hosts ya.ru`** после восстановления;
   при провале — автоматический fallback на публичный DNS
-  (77.88.8.8 + 1.1.1.1) и повторная проба;
+  (<ip> + 1.1.1.1) и повторная проба;
 - при успехе удаляет бэкапы `.chimera.bak` (чистая система); при провале
   пробы — сохраняет их и честно сообщает ok=False + команды оживления.
 
@@ -6875,8 +6875,8 @@ close+unregister при удалении/отключении. Закрытые 
    удаление при выключенном оставлял stale-записи. Теперь реестр
    безусловен, UFW-правило — по активности UFW.
 8. **rest_api.py** — Web Panel :8443 регистрировался только в режиме
-   0.0.0.0; loopback-режим был невидим (webdav_tunnel дефолтит на тот же
-   8443!). Теперь register всегда, UFW — только при 0.0.0.0.
+   <ip>; loopback-режим был невидим (webdav_tunnel дефолтит на тот же
+   8443!). Теперь register всегда, UFW — только при <ip>.
 9. **telemt_panel.py** — loopback-бэкенд :8080 теперь в реестре
    (SERVICE_TELEMT_PANEL_WEB, паттерн b4_web/csqtt_web).
 10. **port_registry.py** — SERVICE_B4_NGINX приведён к фактическому
@@ -6916,22 +6916,22 @@ portHTTPS)`). Наша `build_http_section()` для TLS-режимов став
 неверна архитектурно.
 
 **Фикс:** TLS-режимы (https_le/https_self) биндят `http.address` на
-`0.0.0.0:3000`. Безопасность не страдает: публичный доступ к plain
+`<ip>:3000`. Безопасность не страдает: публичный доступ к plain
 :3000 закрывает UFW (`_register_aghome_ports`: web_public_plain=False →
 `ufw_close_quiet`), снаружи — только TLS :30443 (Web UI + DoH
 мультиплексированы, LE-сертификат домена). Loopback-режим не изменился.
-Побочный плюс: bind 0.0.0.0 переживает смену публичного IP (не нужен
+Побочный плюс: bind <ip> переживает смену публичного IP (не нужен
 self-heal на bind_hosts).
 
 **Применение на живом сервере:** `git pull` → повторная финализация
 `finalize_aghome_config()` (идемпотентна: LE-сертификат уже в
 /etc/letsencrypt — просто копируется, redirect уже снят, UFW-правила
-идемпотентны) → проверка `ss -lntup | grep 30443` (должен стать 0.0.0.0)
+идемпотентны) → проверка `ss -lntup | grep 30443` (должен стать <ip>)
 + браузер `https://<домен>:30443`.
 
 **Тесты:** +1 regression (`test_http_section_tls_bind_follows_`:
-все публичные режимы → 0.0.0.0, loopback → 127.0.0.1); обновлены
-`test_http_section_modes` и finalize-ассерты https_self → 0.0.0.0.
+все публичные режимы → <ip>, loopback → 127.0.0.1); обновлены
+`test_http_section_modes` и finalize-ассерты https_self → <ip>.
 Всего 123 passed.
 
 ---
@@ -7963,13 +7963,13 @@ refused» при попытке зайти через `https://domain:45443`.
 
 Старый формат (в Chimera до этого коммита):
 ```
-csqtt://config?name=CSQTT-1.2.3.4&peer=1.2.3.4:46000&pass=mypass
+csqtt://config?name=CSQTT-<ip>&peer=<ip>:46000&pass=mypass
 ```
 
 Новый формат v2 (требует Android-клиент, см. upstream
 `app/src/main/java/com/csqtt/client/ui/utils/UiUtils.kt`):
 ```
-csqtt://connect?v=2&host=1.2.3.4&peer=46000&password=mypass
+csqtt://connect?v=2&host=<ip>&peer=46000&password=mypass
 ```
 
 Различия:
@@ -8007,7 +8007,7 @@ csqtt://connect?v=2&host=1.2.3.4&peer=46000&password=mypass
 ### Тесты
 
 - 4 unit-теста пройдены:
-  - Базовая ссылка: `csqtt://connect?v=2&host=1.2.3.4&peer=46000&password=mySecretPass`
+  - Базовая ссылка: `csqtt://connect?v=2&host=<ip>&peer=46000&password=mySecretPass`
   - С VK-хешами: добавляется `&hashes=hash1,hash2`
   - Пустые хеши: параметр не добавляется (важно — upstream возвращает null)
   - Спецсимволы в пароле: URL-encoded (`p@ss w0rd!` → `p%40ss%20w0rd%21`)
@@ -8033,9 +8033,9 @@ VLESS-юзеров, а столбец «Удал. адрес» был пусты
 ```
 === Активные соединения Xray ===
 Локал. адрес         Удал. адрес     Процесс
-31.77.138.58:443                     users:(("xray",pid=418805,fd=63))
-31.77.138.58:443                     users:(("xray",pid=418805,fd=68))
-[::ffff:176.99.162.153]:55164        users:(("xray",pid=418805,fd=67))
+<ip>:443                     users:(("xray",pid=418805,fd=63))
+<ip>:443                     users:(("xray",pid=418805,fd=68))
+[::ffff:<ip>]:55164        users:(("xray",pid=418805,fd=67))
 ...
 Всего: 12 соединений
 ```
@@ -8081,8 +8081,8 @@ pat = re.compile(
 
 - `(?:\d+\s+){1,2}` — 1 или 2 числовых столбца (Recv-Q, опционально
   Send-Q). Работает и на старых, и на новых версиях ss.
-- `\[[^\]]+\]:\d+|[^\s:]+:\d+` — матчит как IPv4 (`1.2.3.4:443`),
-  так и IPv6 (`[::ffff:1.2.3.4]:55164`).
+- `\[[^\]]+\]:\d+|[^\s:]+:\d+` — матчит как IPv4 (`<ip>:443`),
+  так и IPv6 (`[::ffff:<ip>]:55164`).
 
 Также добавлен флаг `-H` (без заголовка) в `ss -tnpH` — чтобы
 первая строка не пыталась парситься как соединение.
@@ -8106,9 +8106,9 @@ Connection Audit — «Сводка по юзерам»). Эта функция 
 ```
 === Активные соединения Xray ===
 Локал. адрес                   Удал. адрес                   VLESS юзер
-31.77.138.58:443               46.138.31.230:2125            alice@example.com
-31.77.138.58:443               [::ffff:176.99.162.153]:55164 bob@example.com
-31.77.138.58:443               [::ffff:94.243.40.5]:11130    (не сопоставлен)
+<ip>:443               <ip>:2125            alice@example.com
+<ip>:443               [::ffff:<ip>]:55164 bob@example.com
+<ip>:443               [::ffff:<ip>]:11130    (не сопоставлен)
 ...
 Всего: 12 соединений (показано 12)
 Без email: 3 (нет в access.log или loglevel < info)
@@ -8152,11 +8152,11 @@ systemctl status csqtt:
 
 journalctl -u csqtt:
   [INFO]  CSQTT Server 2.0.0
-  [INFO]  RTP AEAD: 0.0.0.0:46000     ← data-plane на 46000
-  [INFO]  Web: 0.0.0.0:46002          ← Web Panel на 46002
+  [INFO]  RTP AEAD: <ip>:46000     ← data-plane на 46000
+  [INFO]  Web: <ip>:46002          ← Web Panel на 46002
 
 ss -tlnp | grep csqtt:
-  LISTEN 0.0.0.0:46002                ← реально слушает 46002
+  LISTEN <ip>:46002                ← реально слушает 46002
   LISTEN 127.0.0.1:46003
   LISTEN 127.0.0.1:46004
 
@@ -8753,7 +8753,7 @@ csqtt-server  (:40000/udp data-plane)
     │  TUN: csqtt1  (10.66.67.0/24)
     │  NAT (MASQUERADE) → Интернет
     ▼
-Web Panel: :40500 (HTTPS, axum + rustls, 0.0.0.0)
+Web Panel: :40500 (HTTPS, axum + rustls, <ip>)
     │  проксируется через nginx front на выбранном порту (default 46443)
     ▼
 Внешний доступ: https://<domain>:<nginx_port>  (TLS, self-signed или LE)
@@ -8795,7 +8795,7 @@ CSQTT binary игнорирует CLI-флаги `--listen`/`--web-port` и ис
 запрашиваются у пользователя при установке:
 
 - **40000/udp** — data-plane (входящий RTP/TURN трафик от клиентов).
-- **40500/tcp** — Web Panel (HTTPS, слушает на `0.0.0.0`).
+- **40500/tcp** — Web Panel (HTTPS, слушает на `<ip>`).
 - **46443/tcp** (default) — nginx front для Web Panel, пользователь
   может выбрать любой порт при установке (например, 41000).
 
@@ -8992,8 +8992,8 @@ csqtt` + подсказки для live-режима и просмотра 100 �
 в логах b4 осталась "дрисня" от не-YouTube IPv6-трафика:
 
 ```
-TCP [2a12:bec4:1280:50::2]:59550 → [2a12:bec4:1c90:16::2]:443 total-shadows.online
-TCP [2a12:bec4:1280:50::2]:5290  → [2a12:bec4:1460:443::2]:443 totalshadows.online
+TCP [2a12:bec4:1280:50::2]:59550 → [2a12:bec4:1c90:16::2]:443 <exit-de>
+TCP [2a12:bec4:1280:50::2]:5290  → [2a12:bec4:1460:443::2]:443 <exit-de>
 ```
 
 Это exit-ноды по IPv6. b4 их перехватывал, проверял — не YouTube,
@@ -9094,8 +9094,8 @@ Chimera ставила **свои собственные** iptables-правил
 
 1. **Логи b4 забиты** записями о не-YouTube трафике:
    ```
-   TCP 176.123.162.42:41062 → 31.77.168.49:443 totalshadows.online
-   TCP 176.123.162.42:5242  → 132.243.221.181:443 total-shadows.ru
+   TCP <ip>:41062 → <exit-node-ip>:443 <exit-de>
+   TCP <ip>:5242  → <admin-ip2>:443 <exit-ru>
    ```
    Это трафик к exit-нодам (Leaseweb, Hetzner) — b4 его перехватывал, но
    не применял стратегию (не YouTube), только логировал.
@@ -9874,7 +9874,7 @@ AWG-режим и xHTTP-режим НЕ затронуты (там другая 
 
 **Симптом**: при установке поверх (новый домен вместо старого) в
 `/etc/nginx/sites-enabled/` оставались два vhost-а с одинаковым `listen 443` →
-nginx падал с `duplicate listen options for 0.0.0.0:443`, либо один из vhost-ов
+nginx падал с `duplicate listen options for <ip>:443`, либо один из vhost-ов
 тихо игнорировался.
 
 **Фикс**: создан helper `_cleanup_stale_chimera_vhosts(new_domain)` в
@@ -10374,7 +10374,7 @@ verify.py 10/10 (332 проверки).
 
 ## FEAT(subscription): nginx front (TLS) — прямой доступ к подписке по домену/IP — 16 августа 2026
 
-**Раньше подписка (subscription.py) слушала на 0.0.0.0:8443 с собственным TLS-стеком
+**Раньше подписка (subscription.py) слушала на <ip>:8443 с собственным TLS-стеком
 на Python (переиспользовала LE-сертификат от PARAM_DOMAIN). Это работало, но:
   - Не было выбора между «прямой доступ по домену» / «по IP» / «только loopback + nginx front»
   - Не было интеграции с port_registry для порта nginx front
@@ -10393,13 +10393,13 @@ nginx front подписки. Регистрируется через `panel_ngi
 **2. Функции управления nginx front в `subscription.py`:**
   - `_sub_nginx_status()` — чтение состояния из `_SUB_NGINX_STATE_FILE`
   - `_sub_nginx_install(port, use_self_signed, domain)` — установка через `panel_nginx_front`
-  - `_sub_nginx_remove()` — удаление + возврат backend на 0.0.0.0
+  - `_sub_nginx_remove()` — удаление + возврат backend на <ip>
   - `_sub_nginx_get_url(token)` — генерация URL с учётом nginx front
   - `_sub_backend_bind_loopback()` — переключение backend на 127.0.0.1 через `SUB_LISTEN_HOST` env
-  - `_sub_backend_bind_public()` — возврат backend на 0.0.0.0 (обратная совместимость)
+  - `_sub_backend_bind_public()` — возврат backend на <ip> (обратная совместимость)
 
 **3. `serve()` читает `SUB_LISTEN_HOST` из окружения** — переключение
-0.0.0.0 ↔ 127.0.0.1 без правки кода. Unit-файл прокидывает `Environment=SUB_LISTEN_HOST=127.0.0.1`
+<ip> ↔ 127.0.0.1 без правки кода. Unit-файл прокидывает `Environment=SUB_LISTEN_HOST=127.0.0.1`
 при включении nginx front.
 
 **4. Пункт меню «7. nginx front (TLS)»** в `do_subscription_menu()`:
@@ -10418,17 +10418,17 @@ nginx front подписки. Регистрируется через `panel_ngi
 
 | Состояние | Backend | nginx front | URL | UFW |
 |---|---|---|---|---|
-| nginx front OFF (дефолт) | 0.0.0.0:8443 (свой TLS) | нет | `https://<домен>:8443/sub/<token>` | 8443/tcp открыт |
-| nginx front ON, LE | 127.0.0.1:8443 (loopback) | 0.0.0.0:9444 (LE TLS) | `https://<домен>:9444/sub/<token>` | 9444/tcp открыт, 8443 закрыт |
-| nginx front ON, self-signed | 127.0.0.1:8443 (loopback) | 0.0.0.0:9444 (self-signed) | `https://<IP>:9444/sub/<token>` | 9444/tcp открыт, 8443 закрыт |
+| nginx front OFF (дефолт) | <ip>:8443 (свой TLS) | нет | `https://<домен>:8443/sub/<token>` | 8443/tcp открыт |
+| nginx front ON, LE | 127.0.0.1:8443 (loopback) | <ip>:9444 (LE TLS) | `https://<домен>:9444/sub/<token>` | 9444/tcp открыт, 8443 закрыт |
+| nginx front ON, self-signed | 127.0.0.1:8443 (loopback) | <ip>:9444 (self-signed) | `https://<IP>:9444/sub/<token>` | 9444/tcp открыт, 8443 закрыт |
 
 ### Обратная совместимость
 
 - **По умолчанию ничего не меняется.** Если nginx front не включён — подписка
-  работает как раньше (0.0.0.0:8443, свой TLS).
+  работает как раньше (<ip>:8443, свой TLS).
 - **Старые URL продолжают работать** до тех пор, пока администратор явно не
   включит nginx front.
-- **При выключении nginx front** backend автоматически возвращается на 0.0.0.0
+- **При выключении nginx front** backend автоматически возвращается на <ip>
   и старые URL снова работают.
 
 ### TUI путь
@@ -10455,7 +10455,7 @@ nginx front подписки. Регистрируется через `panel_ngi
   - `SERVICE_SUBSCRIPTION_NGINX` существует в port_registry
   - Константы (`DEFAULT_SUB_NGINX_PORT`, `_SUB_NGINX_STATE_FILE`, `_SUB_NGINX_SITE_NAME`)
   - `_sub_nginx_status()` — чтение состояния (вкл/выкл/битый JSON)
-  - `serve()` читает `SUB_LISTEN_HOST` (0.0.0.0 по умолчанию, 127.0.0.1 если задано)
+  - `serve()` читает `SUB_LISTEN_HOST` (<ip> по умолчанию, 127.0.0.1 если задано)
   - `_sub_nginx_get_url()` — URL генерация с учётом nginx front
   - `_sub_nginx_install()` — вызов `panel_nginx_front_install` с правильными параметрами
   - `_sub_backend_bind_loopback()` — добавление `SUB_LISTEN_HOST` в unit-файл (идемпотентно)
@@ -10715,7 +10715,7 @@ ISP-проблема, reboot без ipv6-маршрута). В итоге:
 ## FIX(telemt): port conflict check — Telemt default 8443 конфликтует с rest_api — 15 августа 2026
 
 **Andycar сообщил: Telemt service запускается, но падает в restart-loop
-с "Failed to bind: address already in use addr=0.0.0.0:8443 pid=731
+с "Failed to bind: address already in use addr=<ip>:8443 pid=731
 process=python3" + "No listeners. Exiting".**
 
 ### Причина
@@ -10821,7 +10821,7 @@ end-to-end тестами.
 ## FIX(autoban): само-бан сервера + файл отчёта не создавался при миграции — 13 августа 2026
 
 **Пользователь сообщил о двух багах: (1) autoban забанил IP сервера
-(185.50.202.160) — сервер забанил сам себя; (2) пункт [6] «История
+(<ip>) — сервер забанил сам себя; (2) пункт [6] «История
 банов» показывает записи, но «Полный лог: /var/log/xray-ban-report.txt
 [не создан (появится после первого бана)]» — несостыковка.**
 
@@ -11981,7 +11981,7 @@ olcrtc://wbstream?vp8channel<vp8-batch=64&vp8-fps=30>@ROOM_ID#KEY$wb-vps
 
 **systemd:** `olcrtc-manager.service`
 (Environment=OLCRTC_PATH=/usr/local/bin/olcrtc,
-EnvironmentFile=panel.env, ExecStart=olcrtc-manager -addr 0.0.0.0 -config config.json)
+EnvironmentFile=panel.env, ExecStart=olcrtc-manager -addr <ip> -config config.json)
 
 **UFW:** порт 8888 через `port_registry` (SERVICE_OLCRTC_MANAGER).
 Открытие при установке, закрытие при удалении.
@@ -12070,7 +12070,7 @@ olcRTC **скрыт из главного меню**. Доступ — ввод 
 
 `_client_ip()` доверяет `X-Forwarded-For`, ТОЛЬКО если TCP-соединение
 пришло с loopback (значит — от локального nginx-фронта). Если `direct_ip`
-НЕ loopback (запрос пришёл напрямую, rest_api на `0.0.0.0`) — XFF
+НЕ loopback (запрос пришёл напрямую, rest_api на `<ip>`) — XFF
 игнорируется полностью (защита от подделки).
 
 ```python
@@ -12089,7 +12089,7 @@ def _client_ip(self) -> str:
 
 1. **nginx-фронт** (host=127.0.0.1) → `client_address[0]` = 127.0.0.1 →
    XFF доверяется → реальный IP клиента из первого элемента цепочки.
-2. **Прямой доступ** (host=0.0.0.0) → `client_address[0]` = внешний IP →
+2. **Прямой доступ** (host=<ip>) → `client_address[0]` = внешний IP →
    XFF **игнорируется** → `client_address[0]` возвращается напрямую
    (защита от подделки заголовка).
 
@@ -12146,8 +12146,8 @@ def _client_ip(self) -> str:
 ### Решение
 
 **1. Расширенный формат хранения (detailed)**
-Старый формат: `["5.167.98.20", ...]` (просто строки)
-Новый формат: `[{"ip": "5.167.98.20", "added_at": "2026-08-08T...", "pinned": false}, ...]`
+Старый формат: `["<router-ip>", ...]` (просто строки)
+Новый формат: `[{"ip": "<router-ip>", "added_at": "2026-08-08T...", "pinned": false}, ...]`
 
 Migration: lazy — при чтении старый формат конвертируется in-memory, при
 следующем save записывается в detailed формате. `_normalize_user_ips()` остаётся
@@ -12192,8 +12192,8 @@ IP не удаляются при age-based cleanup и FIFO. Пользоват�
 
 - `GET /api/portal/ips` — теперь возвращает `ips: [{ip, added_at, pinned}, ...]`
 - `POST /api/portal/ips/replace-all` — Body: `{"ip": "auto", "keep_pinned": true}`
-- `POST /api/portal/ips/pin` — Body: `{"ip": "5.167.98.20"}`
-- `POST /api/portal/ips/unpin` — Body: `{"ip": "5.167.98.20"}`
+- `POST /api/portal/ips/pin` — Body: `{"ip": "<router-ip>"}`
+- `POST /api/portal/ips/unpin` — Body: `{"ip": "<router-ip>"}`
 
 ### User Portal обновления (user_portal.py)
 
@@ -12669,7 +12669,7 @@ clients_wl перед DROP. `_ingress_remove()` — снимает правил�
       "uuid": "abc-123",
       "email": "alice@example.com",
       "name": "alice",
-      "allowed_ips": ["5.167.98.20", "5.167.99.0/24", "2a03:1ac0::/64"]
+      "allowed_ips": ["<router-ip>", "<ip>/24", "2a03:1ac0::/64"]
     }
   ]
 }
@@ -12681,12 +12681,12 @@ clients_wl перед DROP. `_ingress_remove()` — снимает правил�
 ### Валидация IP/CIDR
 
 `_validate_ip_or_cidr()`:
-- Разрешает: глобальные IPv4 (1.0.0.0/8 — 223.0.0.0/8), глобальные IPv6 (2000::/3)
+- Разрешает: глобальные IPv4 (<ip>/8 — <ip>/8), глобальные IPv6 (2000::/3)
 - Запрещает: loopback (127.x, ::1), private (10.x, 192.168.x, fc00::/7),
   link-local (169.254.x, fe80::/10), multicast (224.x, ff00::/8),
-  unspecified (0.0.0.0, ::), reserved
+  unspecified (<ip>, ::), reserved
 - Нормализует: `2a03:1ac0:0000:0000:0000:0000:0000:0001` → `2a03:1ac0::1`
-- Поддерживает как одиночные IP, так и CIDR (5.167.98.0/24)
+- Поддерживает как одиночные IP, так и CIDR (<ip>/24)
 
 ### Интеграция
 
@@ -13353,7 +13353,7 @@ UUID) попадали в `config.json` → Xray падал с `User X already e
 
 ### Почему это работает
 
-Проблема: systemd-resolved получает DHCP DNS от провайдера (77.88.8.8) и
+Проблема: systemd-resolved получает DHCP DNS от провайдера (<ip>) и
 отправляет запросы на все Global DNS параллельно — DNS Leak Test видит Yandex.
 
 Решение: **ПОЛНОСТЬЮ обойти systemd-resolved** для системного DNS:
@@ -13514,12 +13514,12 @@ wildcard/MAC, что старый парсер не понимал.**
 
 ### Сценарий пользователя
 
-1. Пользователь применил v3 фикс → per-link OK, но Global DNS 77.88.8.8.
+1. Пользователь применил v3 фикс → per-link OK, но Global DNS <ip>.
 2. DNS Leak Test показывает Yandex LLC.
 3. Открывает TUI-экран → видит:
    ```
    ~ PER-LINK OK, НО Global DNS содержит внешние IP
-     от DHCP: 77.88.8.8, 77.88.8.1
+     от DHCP: <ip>, <ip>
    ...
    ✓ Фикс применён: systemd-resolved drop-in (2026-08-01 17:39:00)
    ```
@@ -13530,7 +13530,7 @@ wildcard/MAC, что старый парсер не понимал.**
 ### Тесты
 
 - `test_force_reapplies_even_when_fix_not_needed` — НОВЫЙ регрессионный
-  тест: simулирует состояние после v3 фикса (per-link OK, Global 77.88.8.8),
+  тест: simулирует состояние после v3 фикса (per-link OK, Global <ip>),
   проверяет что без `force` фикс отказывает, а с `force=True` — переприменяется
   с `disable_dhcp_dns_on_all_links`.
 
@@ -13552,9 +13552,9 @@ wildcard/MAC, что старый парсер не понимал.**
 **После v3 фикса (per-link override + drop-in) DNS Leak Test всё ещё
 показывал Yandex LLC, хотя diagnose говорил "УТЕЧКИ НЕТ". Причина:
 systemd-resolved отправляет запросы на ВСЕ Global DNS параллельно
-(parallel queries), включая 77.88.8.8 от DHCP. Per-link override + drop-in
+(parallel queries), включая <ip> от DHCP. Per-link override + drop-in
 не убирают Global DNS от DHCP — они только добавляют 127.0.0.1. Чтобы
-реально убрать 77.88.8.8, нужно отключить получение DNS от DHCP на уровне
+реально убрать <ip>, нужно отключить получение DNS от DHCP на уровне
 network manager.**
 
 ### Корень проблемы
@@ -13562,7 +13562,7 @@ network manager.**
 Моя теория из v3 ("Global DNS не используется из-за Domains=~.") была
 неверной на практике. systemd-resolved 256+ отправляет запросы на все
 Global DNS параллельно — это особенность реализации для отказоустойчивости.
-Даже если drop-in с `Domains=~.` перехватывает запросы, 77.88.8.8 от DHCP
+Даже если drop-in с `Domains=~.` перехватывает запросы, <ip> от DHCP
 всё равно получает запросы — DNS Leak Test видит Yandex LLC.
 
 ### Решение
@@ -13616,7 +13616,7 @@ yaml-файлов руками.
   OK, но Global DNS содержит внешние IP от DHCP:
   ```
   ~ PER-LINK OK, НО Global DNS содержит внешние IP
-    от DHCP: 77.88.8.8, 77.88.8.1
+    от DHCP: <ip>, <ip>
     systemd-resolved отправляет запросы на все Global
     DNS параллельно — DNS Leak Test видит Yandex.
   ────────────────────────────────────────────────
@@ -13772,14 +13772,14 @@ Cloudflare/Google — это работает даже если серверны
 
 И в диагностике:
 ```
-Global:  77.88.8.8     ← от DHCP
-Global:  77.88.8.1     ← от DHCP
+Global:  <ip>     ← от DHCP
+Global:  <ip>     ← от DHCP
 Global:  127.0.0.1     ← из drop-in
 Global:  127.0.0.1     ← из drop-in (дважды)
 Link ens3: 127.0.0.1   ← per-link override OK
 ```
 
-Diagnose показывал "УТЕЧКА" из-за 77.88.8.8 в Global DNS.
+Diagnose показывал "УТЕЧКА" из-за <ip> в Global DNS.
 
 ### Корень проблемы (3 момента)
 
@@ -13789,10 +13789,10 @@ Diagnose показывал "УТЕЧКА" из-за 77.88.8.8 в Global DNS.
 `resolvectl default-route false` — `false` интерпретируется как имя интерфейса.
 Global-команды с одним аргументом-IP-или-BOOL не работают.
 
-**2. Global DNS содержит 77.88.8.8 от DHCP — но это НЕ утечка.**
+**2. Global DNS содержит <ip> от DHCP — но это НЕ утечка.**
 Drop-in `/etc/systemd/resolved.conf.d/chimera-dns.conf` с `DNS=127.0.0.1`
 и `Domains=~.` перехватывает все запросы на 127.0.0.1. Global DNS
-77.88.8.8 (от DHCP через systemd-networkd/NetworkManager) присутствует в
+<ip> (от DHCP через systemd-networkd/NetworkManager) присутствует в
 списке, но не используется — потому что per-link DNS ens3=127.0.0.1 с
 `default-route=false` означает, что ens3 не используется для default-route
 запросов.
@@ -13831,7 +13831,7 @@ Link ens3 default-route: false ✓
   Все link'и направлены на 127.0.0.1,
   default-route=false для каждого.
 
-Инфо: Global DNS содержит 77.88.8.8, 77.88.8.1.
+Инфо: Global DNS содержит <ip>, <ip>.
 Это не утечка — drop-in с Domains=~. перехватывает
 все запросы на 127.0.0.1. Global не используется.
 ```
@@ -13849,7 +13849,7 @@ per-link override для каждого link'а + flush-caches.
   НЕ вызываются вообще (раньше проверялось обратное).
 - `test_per_link_overridden_no_leak_despite_global_external_dns` — НОВЫЙ
   регрессионный тест: simулирует состояние после фикса (Global содержит
-  77.88.8.8, но per-link ens3=127.0.0.1 + default-route=false) →
+  <ip>, но per-link ens3=127.0.0.1 + default-route=false) →
   `per_link_overridden=True`, `fix_needed=False`, `leak_reasons=[]`.
 
 21/21 тестов проходят. 75/75 в DNS-свите.
@@ -13879,7 +13879,7 @@ per-link override для каждого link'а + flush-caches.
 «применялся» (создавался drop-in, restart, flush-caches), но `resolvectl`
 возвращал `Unknown command verb 'dns-global'` и `did you mean
 'default-route'?`. Плюс — drop-in перебивал только Global DNS, а per-link
-DNS от DHCP (ens3: 77.88.8.8 на Yandex VPS) имеет приоритет и не
+DNS от DHCP (ens3: <ip> на Yandex VPS) имеет приоритет и не
 заменялся. После ребута настройки терялись.**
 
 ### Корень проблемы
@@ -13898,7 +13898,7 @@ Drop-in `/etc/systemd/resolved.conf.d/chimera-dns.conf` с `DNS=127.0.0.1`
 задаёт только Global DNS. Если у link'а (ens3) есть per-link DNS от DHCP
 (через netplan/NetworkManager) — systemd-resolved использует per-link.
 Global не применяется. Поэтому даже после фикса `resolvectl dns` показывал
-`Link ens3: 77.88.8.8 77.88.8.1`.
+`Link ens3: <ip> <ip>`.
 
 **3. Нет persist после ребута.**
 Настройки через `resolvectl dns LINK 127.0.0.1` применяются только до
@@ -14073,7 +14073,7 @@ TUI-экран в стиле `do_manage_dns_redirect()` (единый патте
 ## FEAT(dns): авто-фикс /etc/resolv.conf при DNS-leak (resolv_conf_fix.py) — 1 августа 2026
 
 **DNS Leak Test показывал утечку к провайдерским DNS (Yandex LLC:
-5.45.240.203, 37.140.169.116), но рекомендации в боксе были статичным
+<ip>, <ip>), но рекомендации в боксе были статичным
 текстом — "Проверьте /etc/resolv.conf — должен указывать на 127.0.0.1".
 Пользователь должен был лезть в файл руками. На Ubuntu 24.04 это
 особенно проблемно: `/etc/resolv.conf` — симлинк на
@@ -15376,7 +15376,7 @@ Telemt Panel (`chimera/modules/telemt_panel.py`) — это **отдельный
 **Корневая причина** (подтверждено на реальном выводе `iptables -L INPUT -v -n`): флаг `-n` (numeric) делает числовым не только IP-адреса, но и ПОЛЕ ПРОТОКОЛА — вместо текстового `"tcp"` в этой колонке стоит `"6"` (номер протокола IPPROTO_TCP). Реальный вывод:
 
 ```
-119 15936 TELEMT_STATS_IN  6  --  *  *  0.0.0.0/0  0.0.0.0/0  tcp dpt:5000
+119 15936 TELEMT_STATS_IN  6  --  *  *  <ip>/0  <ip>/0  tcp dpt:5000
 ```
 
 Код в `_ipt_jump_exists()` ждал буквально строку `"tcp"` в `parts[3]`, а получал `"6"` — никогда не совпадает на выводе с флагом `-n`, строка с реальным правилом пропускалась, функция всегда возвращала False для правил, которые реально существуют и работают.
@@ -16001,11 +16001,11 @@ except Exception as _ne:
 
 2. **Шаг 11 переписан** — вместо `socket.create_connection` + try/except используется тот же `_diag_tcp_probe()`, что в шаге 5. Вывод:
    ```
-   [1/5] → blackshadows.online:443    167ms  (IPv4 185.50.202.160)
-   [2/5] → total-shadows.online:443   timeout  (IPv6 2a12:bec4:1460:443::2: Network is unreachable)
-     → На сервере нет IPv6, а total-shadows.online резолвится только в AAAA —
+   [1/5] → blackshadows.online:443    167ms  (IPv4 <ip>)
+   [2/5] → <exit-de>:443   timeout  (IPv6 2a12:bec4:1460:443::2: Network is unreachable)
+     → На сервере нет IPv6, а <exit-de> резолвится только в AAAA —
        клиент может подключаться через свой IPv6/другой резолвер
-   [3/5] → totalshadows.online:443     41ms  (IPv4 150.241.124.157)
+   [3/5] → <exit-de>:443     41ms  (IPv4 <ip>)
    ```
 
 3. **Раздельные подсказки для разных кейсов**:
@@ -16062,9 +16062,9 @@ alive = r.stdout.strip() == "ok"
 2. **Явный timeout 10 секунд** на каждую попытку `socket.connect()` через `s.settimeout(10)`.
 
 3. **Детальный вывод** — вместо «НЕДОСТУПНА (timeout или rejected)» теперь показывает, что именно упало:
-   - `Exit-нода [chain-exit-2] total-shadows.online:443 — TCP достижима (IPv4 132.243.212.119)` — успешный кейс
-   - `Exit-нода [chain-exit-2] totalshadows.online:443 — НЕДОСТУПНА (IPv6 2a12:bec4:1460:443::2: Network is unreachable)` — IPv6-only домен на IPv4-only сервере
-   - `Exit-нода [...] dualstack.com:443 — НЕДОСТУПНА (IPv6 2a12::1: Network is unreachable; IPv4 1.2.3.4: timed out)` — обе семьи упали, видно обе ошибки
+   - `Exit-нода [chain-exit-2] <exit-de>:443 — TCP достижима (IPv4 <admin-ip1>)` — успешный кейс
+   - `Exit-нода [chain-exit-2] <exit-de>:443 — НЕДОСТУПНА (IPv6 2a12:bec4:1460:443::2: Network is unreachable)` — IPv6-only домен на IPv4-only сервере
+   - `Exit-нода [...] dualstack.com:443 — НЕДОСТУПНА (IPv6 2a12::1: Network is unreachable; IPv4 <ip>: timed out)` — обе семьи упали, видно обе ошибки
 
 4. **Подсказка для типичного кейса** — если в detail есть IPv6, но нет IPv4 (т.е. домен только AAAA, а на сервере нет IPv6), выводится дополнительная строка:
    > `↳ На этом сервере нет публичного IPv6, а домен ноды резолвится только в AAAA. Клиент может подключаться, если у него есть IPv6 или используется другой резолвер.`
@@ -16082,7 +16082,7 @@ alive = r.stdout.strip() == "ok"
 1. `test_dns_fail_returns_false_with_detail` — DNS не резолвит → `False`, detail содержит «DNS fail»
 2. `test_dns_empty_returns_false` — `getaddrinfo` вернул пустой список → `False`, detail = «DNS empty»
 3. `test_ipv4_only_success` — IPv4-only домен, коннект успешен → `True`, detail содержит «IPv4» и адрес
-4. `test_ipv6_only_unreachable_on_ipv4_only_server` — кейс `totalshadows.online`: только AAAA, `OSError("Network is unreachable")` → `False`, detail содержит «IPv6» и «unreachable»
+4. `test_ipv6_only_unreachable_on_ipv4_only_server` — кейс `<exit-de>`: только AAAA, `OSError("Network is unreachable")` → `False`, detail содержит «IPv6» и «unreachable»
 5. `test_dualstack_ipv6_fails_ipv4_succeeds` — dual-stack домен, IPv6 падает, IPv4 отвечает → `True`, detail содержит «IPv4» (ключевой кейс — раньше bash давал `False`, теперь `True`)
 6. `test_dualstack_both_fail` — обе семьи упали → `False`, detail содержит обе ошибки (IPv6 + IPv4 + «unreachable» + «timeout»)
 7. `test_timeout_10_seconds_passed_to_socket` — проверка что `timeout=10` доходит до `s.settimeout(10)`
@@ -16450,7 +16450,7 @@ AWG_H1, AWG_H2, AWG_H3, AWG_H4 = _prompt_h1_h4_unique(_rec, _ask_int, warn, info
 
 Возвращает `qwdtt://config?` ссылку для юзера (по `owner_email`):
 ```
-qwdtt://config?name=qWDTT-1.2.3.4&peer=1.2.3.4:56000&hashes=ABC123&workers=16&port=9000&pass=secret_pwd
+qwdtt://config?name=qWDTT-<ip>&peer=<ip>:56000&hashes=ABC123&workers=16&port=9000&pass=secret_pwd
 ```
 
 Логика:
@@ -16476,7 +16476,7 @@ vpn://<base64-encoded JSON config>
 
 Возвращает `hysteria2://` ссылку (shared, одинакова для всех юзеров):
 ```
-hysteria2://password@1.2.3.4:443?insecure=1&sni=example.com#Hysteria2
+hysteria2://password@<ip>:443?insecure=1&sni=example.com#Hysteria2
 ```
 
 Логика:
@@ -16796,7 +16796,7 @@ if _vless_users:
 
 #### 1. NaiveProxy (`chimera/modules/naiveproxy.py`)
 
-- **Pre-flight port conflict check** — `socket.bind(("0.0.0.0", port))` до install. Если занят — показываем кто держит (через `ss -ltnp`) и предлагаем ввести альтернативу. Цикл повторяется пока не введут свободный порт или отменят.
+- **Pre-flight port conflict check** — `socket.bind(("<ip>", port))` до install. Если занят — показываем кто держит (через `ss -ltnp`) и предлагаем ввести альтернативу. Цикл повторяется пока не введут свободный порт или отменят.
 - **Auto-stop nginx расширено** — раньше только для port 80 (ACME). Теперь также для выбранного порта Caddy (если nginx на нём). Логика: `if _nginx_active and (port_80_taken or chosen_port_taken): stop nginx; restore after install`.
 - **Запрос первого username** — `proto_ask("Логин первого пользователя [admin]: ", default="admin")` с валидацией `^[A-Za-z0-9_\-]+$` (для Caddyfile `basic_auth`).
 - **Убран misleading warning** — «Если на порту 443 уже работает nginx — остановите его сначала» заменён на «Если выбранный порт занят — установщик предложит альтернативу. Если порт 80 занят — nginx будет автоматически остановлен и возвращён.»
@@ -16809,9 +16809,9 @@ if _vless_users:
 
 #### 3. sing-box VLESS-WS-CDN default (`chimera/modules/singbox_menu.py`)
 
-- **Добавлен `_prompt_alt_port(DEFAULT_PORT_VLESS_WS_CDN, "0.0.0.0", "tcp")`** — если 8080 занят, предлагаем альтернативу.
+- **Добавлен `_prompt_alt_port(DEFAULT_PORT_VLESS_WS_CDN, "<ip>", "tcp")`** — если 8080 занят, предлагаем альтернативу.
 - `singbox_enable_vless_ws_cdn(cdn_provider="cloudflare", host=host, listen_port=listen_port)` — передаём выбранный порт.
-- `singbox_ufw_ensure_open(listen_port, "tcp", "vless_ws_cdn", listen="0.0.0.0")` — UFW для выбранного порта.
+- `singbox_ufw_ensure_open(listen_port, "tcp", "vless_ws_cdn", listen="<ip>")` — UFW для выбранного порта.
 
 #### 4. TrustTunnel (`chimera/modules/trusttunnel.py`)
 
@@ -16840,7 +16840,7 @@ if _vless_users:
 | Файл | Что изменилось |
 |---|---|
 | `chimera/modules/naiveproxy.py` | Pre-flight port conflict check, auto-stop nginx для выбранного порта, запрос первого username, убран misleading warning |
-| `chimera/modules/singbox_menu.py` | TUIC default: `_prompt_alt_port` для UDP/::; VLESS-WS-CDN default: `_prompt_alt_port` для TCP/0.0.0.0 |
+| `chimera/modules/singbox_menu.py` | TUIC default: `_prompt_alt_port` для UDP/::; VLESS-WS-CDN default: `_prompt_alt_port` для TCP/<ip> |
 | `chimera/modules/trusttunnel.py` | LE cert graceful fallback (перехват SystemExit → self-signed), запрос admin_email + UUID |
 | `chimera/modules/mieru.py` | Запрос первого username через `proto_ask` |
 | `tests/test_proto_port_username_v424.py` | **НОВЫЙ** — 10 regression-тестов |
@@ -17144,7 +17144,7 @@ alice@blackshadows.ru
 
 #### Проблема
 
-При остановке, переустановке или удалении сервиса веб-панели ufw-порт оставался открытым — файрволл продолжал пропускать трафик на мёртвый сервис. При переключении с `0.0.0.0` на `127.0.0.1` старое ufw-правило не удалялось. При смене порта — старый порт оставался открыт.
+При остановке, переустановке или удалении сервиса веб-панели ufw-порт оставался открытым — файрволл продолжал пропускать трафик на мёртвый сервис. При переключении с `<ip>` на `127.0.0.1` старое ufw-правило не удалялось. При смене порта — старый порт оставался открыт.
 
 #### Новая функция `_ufw_web_panel_close(port)`
 
@@ -17157,20 +17157,20 @@ alice@blackshadows.ru
 #### Изменения в `install_web_service()`
 
 - Читает **старый** конфиг до перезаписи (old_host, old_port)
-- При переключении с `0.0.0.0` на `127.0.0.1` → закрывает старый ufw-порт
-- При смене порта на `0.0.0.0` → закрывает старый, открывает новый
+- При переключении с `<ip>` на `127.0.0.1` → закрывает старый ufw-порт
+- При смене порта на `<ip>` → закрывает старый, открывает новый
 
 #### Изменения в `uninstall_web_service()`
 
 - Читает конфиг до остановки сервиса
-- Если `host == "0.0.0.0"` → вызывает `_ufw_web_panel_close(port)`
+- Если `host == "<ip>"` → вызывает `_ufw_web_panel_close(port)`
 - Затем останавливает/удаляет systemd unit как раньше
 
 #### Изменения в `do_manage_web_panel()`
 
 | Пункт | Что изменилось |
 |---|---|
-| **1 (Остановить)** | Если exposed (`0.0.0.0`) — закрывает ufw-порт перед `systemctl stop` |
+| **1 (Остановить)** | Если exposed (`<ip>`) — закрывает ufw-порт перед `systemctl stop` |
 | **1 (Запустить)** | Если exposed — вызывает `install_web_service(expose=True)` вместо голого `systemctl start` (чтобы переоткрыть ufw) |
 | **5 (Закрыть доступ)** | `install_web_service(expose=False)` автоматически закрывает старый ufw-порт |
 | **6 (НОВЫЙ — Удалить полностью)** | Подтверждение y/N → `uninstall_web_service()` (закрывает ufw + удаляет systemd unit + web_config.json). state.json и VLESS-юзеры НЕ трогаются. |
@@ -18468,7 +18468,7 @@ CDN edge server list, plain text, один IPv4 на строку БЕЗ /32 с�
 из `fetch_cdn_nets()`.
 
 IPv6: `https://bunnycdn.com/api/system/edgeserverlist/IPv6` — JSON array,
-но `listen = "0.0.0.0"` (IPv4 only) → IPv6 трафик не дойдёт до этого
+но `listen = "<ip>"` (IPv4 only) → IPv6 трафик не дойдёт до этого
 инбаунда. IPv6 явно игнорируется с комментарием.
 
 Перепроверены СВЕЖИМ web search (2026-07-12):
@@ -18613,9 +18613,9 @@ reference/network-ports):
 origin обязан его терминировать, а он не может). Теперь явно: "origin слушает
 НЕ по TLS. CDN обязан ходить к origin по HTTP (Flexible), а не HTTPS."
 
-### 🐛 Баг 2: 0.0.0.0:8443 без ограничения по IP CDN — origin достижим напрямую
+### 🐛 Баг 2: <ip>:8443 без ограничения по IP CDN — origin достижим напрямую
 
-**Симптом:** listen_port vless_ws_cdn открыт на 0.0.0.0 — origin достижим
+**Симптом:** listen_port vless_ws_cdn открыт на <ip> — origin достижим
 напрямую по IP:port, минуя CDN. Это ломает заявленную защиту ("заблокировать
 CDN = заблокировать всё"): цензор может просканировать IP-адреса и найти
 открытый VLESS-WS-порт напрямую.
@@ -19219,7 +19219,7 @@ no attribute 'get'`.
 Из лога установки v4.20.8 (диагностика наконец показала root cause):
 ```
 [ERR] ss -tlnH (порт 8444 / nginx):
-[ERR]   LISTEN 0  511  127.0.0.1:8444  0.0.0.0:*    ← nginx СЛУШАЕТ 8444!
+[ERR]   LISTEN 0  511  127.0.0.1:8444  <ip>:*    ← nginx СЛУШАЕТ 8444!
 [ERR] nginx -t: returncode=0                          ← конфиг валидный
 [ERR] systemctl is-active nginx: active               ← nginx активен
 ```
@@ -19235,13 +19235,13 @@ tls = ctx.wrap_socket(raw, server_hostname=mask_host)  # mask_host = "127.0.0.1"
 ```nginx
 server {
     listen 127.0.0.1:8444 ssl http2;
-    server_name tg.total-shadows.online;   # ← SNI=127.0.0.1 НЕ матчит!
+    server_name tg.<exit-de>;   # ← SNI=127.0.0.1 НЕ матчит!
 }
 ```
 
 nginx не находит matching `server_name` для SNI=`127.0.0.1` → отдаёт default_server (который с `ssl_reject_handshake on`) → TLS-handshake падает → `_check_mask_backend_ready` возвращает False.
 
-**SNI должен быть ДОМЕН** (`tg.total-shadows.online`), а не IP (`127.0.0.1`).
+**SNI должен быть ДОМЕН** (`tg.<exit-de>`), а не IP (`127.0.0.1`).
 
 ### 🔧 Фикс
 
@@ -19256,7 +19256,7 @@ nginx не находит matching `server_name` для SNI=`127.0.0.1` → от
 _check_mask_backend_ready("127.0.0.1", mask_port, timeout=3.0, sni_hostname=domain)
 ```
 
-Теперь SNI = `tg.total-shadows.online` → nginx находит matching `server_name` → отдаёт real LE cert → TLS-handshake проходит → guard возвращает True → own-site активируется.
+Теперь SNI = `tg.<exit-de>` → nginx находит matching `server_name` → отдаёт real LE cert → TLS-handshake проходит → guard возвращает True → own-site активируется.
 
 ### 🧪 Регрессионные тесты (188 тестов, +1 новый)
 
@@ -19304,7 +19304,7 @@ $ python3 -m pytest tests/test_mtproto.py tests/test_ssl_certbot.py tests/test_n
 
 Из лога:
 ```
-[INFO] Поднятие nginx-сайта tg.total-shadows.online на порту 8444...
+[INFO] Поднятие nginx-сайта tg.<exit-de> на порту 8444...
 [INFO] Проверяю, что nginx слушает 127.0.0.1:8444 (3 попытки)...
 [WARN] Попытка 1/3: nginx ещё не готов...
 ```
@@ -19358,7 +19358,7 @@ $ python3 -m pytest tests/test_mtproto.py tests/test_ssl_certbot.py tests/test_n
 
 При установке Telemt own-site с нуля — own-site режим фейлился, Telemt отходил в donor-режим. Из лога:
 ```
-[INFO] Поднятие nginx-сайта tg.total-shadows.online на порту 8444...
+[INFO] Поднятие nginx-сайта tg.<exit-de> на порту 8444...
 [INFO] Проверяю, что nginx слушает 127.0.0.1:8444...
 [ERR] nginx НЕ слушает 127.0.0.1:8444 после setup_nginx_final.
 [ERR] Откат к donor-режиму + cleanup orphaned-файлов.
@@ -20286,7 +20286,7 @@ ASN cache, standalone screens, fail2ban, SSH hardening, resources, MTU tuning, G
 **Новый модуль `rest_api.py`** — единый HTTP-сервер (ThreadingHTTPServer) для REST API, Admin Panel и User Portal. Запускается как отдельный systemd-сервис `vless-web.service`.
 
 **Архитектура безопасности:**
-- **Bind 127.0.0.1 по умолчанию** — панель доступна только через SSH-туннель (`ssh -L 8443:127.0.0.1:8443 user@server`). Внешний доступ (0.0.0.0) включается явно через пункт меню 5 в `do_manage_web_panel()`, с предупреждением о HTTP без TLS.
+- **Bind 127.0.0.1 по умолчанию** — панель доступна только через SSH-туннель (`ssh -L 8443:127.0.0.1:8443 user@server`). Внешний доступ (<ip>) включается явно через пункт меню 5 в `do_manage_web_panel()`, с предупреждением о HTTP без TLS.
 - **Basic Auth с `secrets.compare_digest`** — constant-time сравнение, защита от timing-атак.
 - **Portal password генерируется отдельно от UUID** — `secrets.token_urlsafe(12)` при создании юзера. UUID больше не используется как fallback-пароль (uuid — публичная часть vless:// ссылки, не может быть паролем).
 - **Rate-limiting** — in-memory sliding window (10 попыток / 60 сек → 429 с `Retry-After: 30`), общий для admin и portal auth.
@@ -20344,7 +20344,7 @@ ASN cache, standalone screens, fail2ban, SSH hardening, resources, MTU tuning, G
   - Пункт 2: Изменить порт.
   - Пункт 3: Изменить admin-пароль (мин 8 символов).
   - Пункт 4: Переустановить (сброс конфига).
-  - Пункт 5: Открыть/закрыть доступ снаружи (0.0.0.0 ↔ 127.0.0.1, с предупреждением о HTTP без TLS).
+  - Пункт 5: Открыть/закрыть доступ снаружи (<ip> ↔ 127.0.0.1, с предупреждением о HTTP без TLS).
 - `install_web_service()` — создаёт `web_config.json` (admin_user/admin_pass/host/port), systemd-unit `vless-web.service`, запускает сервис. При expose=True — открывает порт в ufw + warning о HTTP.
 - `uninstall_web_service()` — останавливает и удаляет сервис.
 
@@ -20369,7 +20369,7 @@ ASN cache, standalone screens, fail2ban, SSH hardening, resources, MTU tuning, G
 **Web Panel:**
 - UUID-as-password fallback **полностью убран** — uuid это публичная часть vless:// ссылки (в QR-коде клиента), любой кто видел ссылку не должен уметь залогиниться в портал.
 - Single-threaded HTTPServer + `timeout=None` → **ThreadingHTTPServer + timeout=30с** — защита от DoS через slowloris.
-- HTTP без TLS на 0.0.0.0 + auto `ufw allow` → **bind 127.0.0.1 по умолчанию**, ufw НЕ открывается. Внешний доступ — через явный toggle с warning.
+- HTTP без TLS на <ip> + auto `ufw allow` → **bind 127.0.0.1 по умолчанию**, ufw НЕ открывается. Внешний доступ — через явный toggle с warning.
 - `Access-Control-Allow-Origin: *` → **убран полностью**, панель same-origin.
 - Min password length: 6 → **8** (в `/api/portal/password`, `do_manage_web_panel` пункт 3, JS user_portal).
 - `_read_body()` без лимита → **MAX_BODY_BYTES = 1MB**, 413 Payload Too Large.
@@ -20770,7 +20770,7 @@ Xray-core 26.x имеет задокументированные неиспра�
 **`chimera/modules/hysteria2_exit_mgr.py`**:
 - `_ensure_h2_cert()`: добавлен параметр `ip=`, сертификат генерируется с `-addext 'subjectAltName=IP:{ip}'` и `-addext 'basicConstraints=CA:FALSE'`; добавлен fallback через extfile для OpenSSL < 1.1.1; добавлена финальная проверка наличия SAN
 - `h2_exit_install()`: локальный IP определяется до вызова `_ensure_h2_cert()` и передаётся в него
-- `h2_exit_remote_install()`: определяет наличие IPv6 на удалённой ноде и выбирает `listen: "0.0.0.0:PORT"` или `listen: "[::]:PORT"` соответственно; команда генерации сертификата получила `-addext 'subjectAltName=IP:{host}'`
+- `h2_exit_remote_install()`: определяет наличие IPv6 на удалённой ноде и выбирает `listen: "<ip>:PORT"` или `listen: "[::]:PORT"` соответственно; команда генерации сертификата получила `-addext 'subjectAltName=IP:{host}'`
 
 **`chimera/_core.py`**:
 - Добавлена функция `_h2_reapply_transport_if_active()` — вызывается после любой регенерации `config.json`, автоматически восстанавливает H2-транспорт если он был активен
@@ -21134,7 +21134,7 @@ _run(["ip", "route", "add", ssh_cidr, "via", orig_gw, "dev", orig_if], capture=T
 интерфейса — что и означает `onlink` в собственном default-маршруте сервера,
 например `default via 10.0.0.1 dev ens3 onlink`) эта команда **гарантированно
 проваливается** с `Error: Nexthop has invalid gateway.`. Код это не проверял —
-выполнение продолжалось, широкие маршруты `0.0.0.0/1` + `128.0.0.0/1` всё равно
+выполнение продолжалось, широкие маршруты `<ip>/1` + `<ip>/1` всё равно
 добавлялись, перенаправляя весь трафик сервера в туннель **без единого
 защитного маршрута для SSH**.
 
@@ -22412,7 +22412,7 @@ ClientHello по нескольким сегментам — поля ALPN и si
 
 | Формат | Пример | Описание |
 |---|---|---|
-| Одиночный IP | `1.2.3.4`, `::1` | IPv4 или IPv6 |
+| Одиночный IP | `<ip>`, `::1` | IPv4 или IPv6 |
 | Подсеть CIDR | `10.0.0.0/24`, `2001:db8::/32` | IPv4 и IPv6 |
 | Диапазон IPv4 | `10.0.0.1-10.0.0.255` | суммируется в список CIDR |
 | ASN | `AS209334`, `12345` | все префиксы через RIPE Stat API |
@@ -23153,7 +23153,7 @@ sudo python3 main.py --h2-quality-report [--tg]
 sudo python3 main.py --h2-logs
 sudo python3 main.py --h2-cluster status|restart|logs|update
 sudo python3 main.py --h2-smoke
-sudo python3 main.py --h2-weights 1.2.3.4:1.5,5.6.7.8:0.5
+sudo python3 main.py --h2-weights <ip>:1.5,<ip>:0.5
 sudo python3 main.py --h2-autoupdate        # из cron
 sudo python3 main.py --h2-watchdog-run      # из cron
 sudo python3 main.py --h2-cert-monitor      # из cron
@@ -23260,7 +23260,7 @@ ufw отсутствует → iptables -I INPUT -s IP -j DROP
 1,3,5    — разбанить несколько через запятую
 2-6      — разбанить диапазон номеров
 all      — разбанить всех сразу
-1.2.3.4  — разбанить по IP напрямую (как раньше)
+<ip>  — разбанить по IP напрямую (как раньше)
 ```
 
 Список теперь показывает не просто IP, но и количество ошибок и время бана —

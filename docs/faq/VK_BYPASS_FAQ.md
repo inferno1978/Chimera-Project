@@ -593,7 +593,7 @@ csqtt-server  (:46000/udp data-plane)
     │  TUN: csqtt1  (10.66.67.0/24)
     │  NAT (MASQUERADE) → INTERNET
     ▼
-Web Panel: :46002 (HTTPS, axum + rustls, 0.0.0.0)
+Web Panel: :46002 (HTTPS, axum + rustls, <ip>)
     │  nginx front: :46443 (TLS, опционально)
     ▼
 → открытый интернет

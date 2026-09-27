@@ -93,11 +93,11 @@ Primary-бот имеет опциональное поле `cascade_peers` в `
 ```
 📊 Статус каскада (24.09.2026 11:09)
 
-• Server 1 (inferno1978) (inferno1978) — 45.151.182.204
+• Server 1 (inferno1978) (inferno1978) — <server1-ip>
    🟢 Xray=active | REALITY:443 | М=B | Апт: up 6 days, 11 hours, 22 minutes
-• Server 2 (vds13195) (vds13195) — 138.124.255.238
+• Server 2 (vds13195) (vds13195) — <server2-ip>
    🟢 Xray=active | REALITY:9443 | М=B | Апт: up 3 days, 1 hour, 37 minutes
-• Server 3 (bright-lynx) (bright-lynx) — 91.224.87.154
+• Server 3 (bright-lynx) (bright-lynx) — <server3-ip>
    🟢 Xray=active | REALITY:443 | М=B | Апт: up 3 weeks, 4 days, 13 hours, 37 minutes
 ```
 
@@ -119,7 +119,7 @@ Primary-бот имеет опциональное поле `cascade_peers` в `
 1. Открыть в Telegram @BotFather
 2. /newbot
    - Имя: "Chimeravpnproject bot"
-   - Username: chimeravpnproject_bot
+   - Username: <домен3>project_bot
    - Получить ADMIN_TOKEN (вида 8866274071:AA...)
 3. /newbot (снова)
    - Имя: "ChimeraVPN Client bot"
@@ -146,7 +146,7 @@ curl -sS "https://api.telegram.org/bot${ADMIN_TOKEN}/getUpdates" | python3 -m js
 
 Подключись к primary-серверу по SSH и запусти chimera:
 ```bash
-ssh root@45.151.182.204
+ssh root@<server1-ip>
 cd /opt/chimera && python3 -m chimera
 ```
 
@@ -166,10 +166,10 @@ cd /opt/chimera && python3 -m chimera
   "allowed_users": [5003383973],
   "invite_tokens": {},
   "local_name": "Server 1 (inferno1978)",
-  "local_ip": "45.151.182.204",
+  "local_ip": "<server1-ip>",
   "cascade_peers": [
-    {"host": "138.124.255.238", "user": "root", "port": 22, "name": "Server 2 (vds13195)", "sudo": false},
-    {"host": "91.224.87.154", "user": "inferno1978", "port": 22, "name": "Server 3 (bright-lynx)", "sudo": true}
+    {"host": "<server2-ip>", "user": "root", "port": 22, "name": "Server 2 (vds13195)", "sudo": false},
+    {"host": "<server3-ip>", "user": "inferno1978", "port": 22, "name": "Server 3 (bright-lynx)", "sudo": true}
   ]
 }
 ```
@@ -191,8 +191,8 @@ _install_bot_service(_bot_load())
 ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
 
 # Добавить public key на каждый peer
-ssh-copy-id root@138.124.255.238
-ssh-copy-id inferno1978@91.224.87.154
+ssh-copy-id root@<server2-ip>
+ssh-copy-id inferno1978@<server3-ip>
 
 # ИЛИ вручную: cat /root/.ssh/id_ed25519.pub → добавить в peer's
 # /root/.ssh/authorized_keys (или /home/inferno1978/.ssh/authorized_keys)
@@ -208,7 +208,7 @@ ssh-copy-id inferno1978@91.224.87.154
 {
   "token": "8866274071:AA...",
   "chat_id": "5003383973",
-  "server_ip": "45.151.182.204",
+  "server_ip": "<server1-ip>",
   "events": {
     "xray_down": true, "xray_up": true, "cert_expire": true,
     "traffic_limit": true, "health_report": true,
@@ -363,7 +363,7 @@ Cron-скрипт `/usr/local/bin/xray-tg-monitor.sh` запускается к�
 
 Пример:
 ```
-🛡️ [vds13195 | 138.124.255.238] IP 8.8.8.8 забанен автоматически
+🛡️ [vds13195 | <server2-ip>] IP 8.8.8.8 забанен автоматически
 24.09.2026 11:15
 ```
 
@@ -430,14 +430,14 @@ handle_* функцию (config/status/protocols/guide/help).
 ```json
 "cascade_peers": [
   {
-    "host": "138.124.255.238",
+    "host": "<server2-ip>",
     "user": "root",
     "port": 22,
     "name": "Server 2 (vds13195)",
     "sudo": false
   },
   {
-    "host": "91.224.87.154",
+    "host": "<server3-ip>",
     "user": "inferno1978",
     "port": 22,
     "name": "Server 3 (bright-lynx)",
@@ -465,8 +465,8 @@ ls -la /root/.ssh/id_ed25519.pub
 # - Для non-root peer: добавить в /home/<user>/.ssh/authorized_keys
 
 # Тест passwordless SSH:
-ssh root@138.124.255.238 'hostname'   # должно вывести vds13195 без пароля
-ssh inferno1978@91.224.87.154 'id'    # должно показать uid=1000
+ssh root@<server2-ip> 'hostname'   # должно вывести vds13195 без пароля
+ssh inferno1978@<server3-ip> 'id'    # должно показать uid=1000
 ```
 
 ### Remote status script
@@ -492,17 +492,17 @@ Bot-скрипт primary-сервера вызывает:
 ```
 📊 Статус каскада (24.09.2026 11:09)
 
-• Server 1 (inferno1978) (inferno1978) — 45.151.182.204
+• Server 1 (inferno1978) (inferno1978) — <server1-ip>
    🟢 Xray=active | REALITY:443 | М=B | Апт: up 6 days, 11 hours, 22 minutes
-• Server 2 (vds13195) (vds13195) — 138.124.255.238
+• Server 2 (vds13195) (vds13195) — <server2-ip>
    🟢 Xray=active | REALITY:9443 | М=B | Апт: up 3 days, 1 hour, 37 minutes
-• Server 3 (bright-lynx) (bright-lynx) — 91.224.87.154
+• Server 3 (bright-lynx) (bright-lynx) — <server3-ip>
    🟢 Xray=active | REALITY:443 | М=B | Апт: up 3 weeks, 4 days, 13 hours, 37 minutes
 ```
 
 Если peer недоступен — вместо статуса:
 ```
-• Server 2 (vds13195) (138.124.255.238): ❌ SSH exit=255: Connection timed out
+• Server 2 (vds13195) (<server2-ip>): ❌ SSH exit=255: Connection timed out
 ```
 
 ### Команда /status_local
@@ -740,7 +740,7 @@ ls -la /tmp/xray-tg-down.stamp 2>/dev/null  # должен быть пустым
 **В: Уведомления приходят без IP в заголовке (только hostname)**
 О: В `telegram.json` не задано поле `server_ip`. Добавь:
 ```json
-{"server_ip": "45.151.182.204"}
+{"server_ip": "<server1-ip>"}
 ```
 И регенерируй bash-скрипт:
 ```bash
@@ -923,12 +923,12 @@ systemctl restart xray-tg-client
 
 **Бан-лист:**
 ```
-/ban 1.2.3.4     — забанить
-/unban 1.2.3.4   — разбанить
+/ban <ip>     — забанить
+/unban <ip>   — разбанить
 /banlist         — список
 /whitelist       — whitelist
-/wl_add 1.2.3.4  — в whitelist
-/wl_del 1.2.3.4  — из whitelist
+/wl_add <ip>  — в whitelist
+/wl_del <ip>  — из whitelist
 ```
 
 **Управление сервисами:**

@@ -641,21 +641,21 @@ DNS-сервер (например, AdGuard Home на этом же или со�
 `client_dns`), переустановка предлагает их дефолтами; CLI-режим
 гибрида принимает `--client-dns` / `--client-server-addr`.
 
-Получившийся для гибрида JSON (домен + AGH на chimeravpn.online):
+Получившийся для гибрида JSON (домен + AGH на <домен3>):
 
 ```json
 {
   "log": {"level": "info"},
   "dns": {
     "servers": [
-      {"tag": "custom-dns", "address": "chimeravpn.online",
+      {"tag": "custom-dns", "address": "<домен3>",
        "detour": "mieru-u1", "address_resolver": "local"},
       {"tag": "local", "address": "1.1.1.1", "detour": "direct"}
     ],
-    "rules": [{"domain": ["chimeraprodcdn.online"], "server": "local"}]
+    "rules": [{"domain": ["<домен2>"], "server": "local"}]
   },
   "outbounds": [
-    {"type": "mieru", "tag": "mieru-u1", "server": "chimeraprodcdn.online",
+    {"type": "mieru", "tag": "mieru-u1", "server": "<домен2>",
      "server_port": 443, "transport": "TCP", "domain_resolver": "local", "...": "..."},
     {"type": "direct", "tag": "direct"}
   ],

@@ -195,7 +195,7 @@ YouTube не показывает рекламу пользователям из
 ```
 Клиент (без изменений)
     ↓ VLESS Reality (ТСПУ не видит — TLS-handshake замаскирован)
-Entry VPS (chimeravpn.online)
+Entry VPS (<домен3>)
     ↓ Xray inbound (port 443)
     ↓ Xray routing: geosite:youtube → outbound:direct
     ↓ freedom outbound открывает TCP к youtube.com:443
@@ -545,7 +545,7 @@ Chimera умеет ставить nginx с TLS перед Web UI b4 — анал
 
 **Режим 1: Let's Encrypt (домен, доверенный сертификат)**
 
-Если при установке VLESS вы указали домен (например, `chimeravpn.online`),
+Если при установке VLESS вы указали домен (например, `<домен3>`),
 Chimera переиспользует уже выпущенный LE-сертификат для nginx front b4.
 Новый сертификат не выпускается — используется существующий.
 
@@ -554,7 +554,7 @@ Chimera переиспользует уже выпущенный LE-сертиф
 → порт 9743 (default) → 1 (Let's Encrypt) → ваш домен
 ```
 
-После: `https://chimeravpn.online:9743` — Web UI с доверенным LE-сертификатом.
+После: `https://<домен3>:9743` — Web UI с доверенным LE-сертификатом.
 Браузер не ругается. Доступ напрямую, без SSH-туннеля.
 
 **Важно:** Chimera автоматически подгружает домен из `state.json`
