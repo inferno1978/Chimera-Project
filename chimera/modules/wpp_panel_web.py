@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from collections import defaultdict, deque
 from chimera.modules.wpp_subscriptions import PREFIX as SUB_PREFIX
 from chimera.modules.wpp_panel_extras import preview_document
-from chimera.modules.wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui
+from chimera.modules.wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui, admin_tools_section
 from chimera.modules import wpp_metrics as server_metrics
 from chimera.modules import wpp_update as web_updates
 from chimera.modules import wpp_components as components
@@ -205,6 +205,7 @@ def users():
                     "secret":          str(u.get("uuid") or ""),
                     "backend_port":    443,
                     "username":        str(u.get("email","")).split("@")[0],
+                    "email":           str(u.get("email","")),
                     "subscription_id": None,
                     "created_at":      0,
                     "device_secrets":  None,
@@ -759,8 +760,12 @@ class Handler(BaseHTTPRequestHandler):
         # Caddy supplies this header for public requests.  Keeping Secure for
         # HTTPS prevents accidental exposure, while loopback diagnostics still
         # receive a usable cookie.
+        # Path is broadened from PANEL_PATH ("/panel") to "/" so the sid cookie
+        # is also sent to the admin gap API endpoints at /api/* (wpp_admin_extras).
+        # The cookie value is HMAC-signed server-side, HttpOnly, SameSite=Lax,
+        # so broadening the path carries no extra client-side risk.
         secure="; Secure" if self.headers.get("X-Forwarded-Proto","").lower()=="https" else ""
-        return f"sid={value}; Path={PANEL_PATH}; Max-Age={max_age}; HttpOnly{secure}; SameSite=Lax"
+        return f"sid={value}; Path=/; Max-Age={max_age}; HttpOnly{secure}; SameSite=Lax"
     def csrf(self):
         c=cookies.SimpleCookie(self.headers.get("Cookie","")); v=c.get("sid")
         if not v: return ""
@@ -953,9 +958,10 @@ class Handler(BaseHTTPRequestHandler):
                 else: site_html=read_site_html()
             except Exception: site_html="<!-- Не удалось прочитать исходник -->"
             editor=editor_ui(site_html,PANEL_PATH,self.csrf(),all_presets(),has_draft)
-            body=f'''<div class="page-head"><div><span class="eyebrow">WPP / STUDIO</span><h1>Настройки</h1><p>Оформление сайта и доступ к панели</p></div></div>
+            body=f'''<div class="page-head"><div><span class="eyebrow">WPP / STUDIO</span><h1>Настройки</h1><p>Оформление сайта, доступ к панели и инструменты администратора</p></div></div>
 {editor}
-<div class=card><h2>Пароль администратора</h2><form method=post action="{PANEL_PATH}/password"><input type=hidden name=csrf value="{token}"><label for="adminNewPassword">Новый пароль</label><input id="adminNewPassword" type=password name=a minlength=3 required autocomplete=new-password><div class="actions" style="margin-top:16px"><button class="btn primary">Сохранить пароль</button><small>Минимум 3 символа · смена пароля завершит все сессии панели</small></div></form></div>'''
+<div class=card><h2>Пароль администратора</h2><form method=post action="{PANEL_PATH}/password"><input type=hidden name=csrf value="{token}"><label for="adminNewPassword">Новый пароль</label><input id="adminNewPassword" type=password name=a minlength=3 required autocomplete=new-password><div class="actions" style="margin-top:16px"><button class="btn primary">Сохранить пароль</button><small>Минимум 3 символа · смена пароля завершит все сессии панели</small></div></form></div>
+{admin_tools_section(PANEL_PATH, self.csrf())}'''
             self.send_html(layout("Настройки",body,"settings")); return
 
         self.redirect("/")
