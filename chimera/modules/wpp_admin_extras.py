@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -111,11 +112,26 @@ def handle_get(handler, path: str, query: dict) -> None:
         if not _require_admin(handler):
             return
         backups = []
-        backup_dir = Path("/var/lib/xray-installer/backups")
+        # Match the directory used by backup_rollback.create_backup() (core.BACKUP_DIR).
+        # The previous "/var/lib/xray-installer/backups" never matched — create_backup
+        # writes to /var/backups/xray/config_<timestamp>.
+        backup_dir = Path("/var/backups/xray")
         if backup_dir.exists():
             for d in sorted(backup_dir.iterdir(), reverse=True):
                 if d.is_dir() and d.name.startswith("config_"):
-                    backups.append({"name": d.name, "path": str(d)})
+                    # Size on disk + mtime for the UI (best-effort).
+                    try:
+                        stat = d.stat()
+                        size_bytes = stat.st_size
+                        mtime_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+                    except Exception:
+                        size_bytes, mtime_iso = 0, ""
+                    backups.append({
+                        "name": d.name,
+                        "path": str(d),
+                        "size_bytes": size_bytes,
+                        "mtime": mtime_iso,
+                    })
         _send_json(handler, {"backups": backups, "count": len(backups)})
         return
 

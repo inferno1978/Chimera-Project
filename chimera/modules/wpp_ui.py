@@ -403,7 +403,7 @@ def users_ui(subs, profiles, traffic, path, domain, csrf, proxy_link, openflux_p
         if not sub and not primary:
             rename=f'<form method="post" action="{esc(path)}/client-action" data-client-action>{hidden(csrf,id=uid,kind=kind,operation="rename")}<label for="rename-{sid}">Имя клиента</label><input id="rename-{sid}" name="name" value="{name}" required maxlength="80"><button style="margin:12px 0" class="primary">Сохранить имя</button><p data-form-status role="status"></p></form>'
             detail=detail.replace('<details open>','<details open>'+rename,1)
-        dialogs.append(f'<dialog class="client-detail" id="client-{sid}"><div class="dialog-head"><h2>Профиль клиента</h2><button data-close-dialog aria-label="Закрыть профиль">×</button></div>{detail}</dialog>')
+        dialogs.append(f'<dialog class="client-detail" id="client-{sid}"><div class="dialog-head"><h2>Профиль клиента</h2><button data-close-dialog aria-label="Закрыть профиль">×</button></div>{detail}{admin_user_actions(r["source"], path, csrf)}</dialog>')
     flux_profiles=openflux_profiles or []
     for profile in flux_profiles:
         pid=str(profile.get('id','')); sid=esc('openflux-'+pid); name=esc(profile.get('name','OpenFlux'))
@@ -427,7 +427,7 @@ def users_ui(subs, profiles, traffic, path, domain, csrf, proxy_link, openflux_p
     creation=f'''<dialog id="createAccount" class="create-dialog"><div class="dialog-head"><div><h2>Новый доступ</h2><small>Выберите, что получит клиент</small></div><button type="button" data-close-dialog aria-label="Закрыть">×</button></div><form id="createClientForm" method="post" action="{esc(path)}/create-account">{hidden(csrf)}<input type="hidden" id="accountKind" name="kind" value="subscription"><div class="access-kind-grid"><label class="choice-card"><input type="radio" name="access_mode" value="subscription" checked><span><strong>Подписка</strong><small>Несколько протоколов в одной ссылке</small><span class="compatible-protocols"><i>VLESS</i><i>Hysteria2</i></span></span></label><label class="choice-card"><input type="radio" name="access_mode" value="direct"><span><strong>Отдельное подключение</strong><small>Один протокол или сервис для конкретного устройства</small><span class="compatible-protocols"><i>VPN</i><i>Telegram</i><i>OpenFlux</i></span></span></label></div><section class="create-step"><label for="accountName">Имя клиента или устройства</label><input id="accountName" name="name" placeholder="Например, Анна или Apple TV" maxlength="80" required autocomplete="off"></section><section class="create-step" id="subscriptionFields"><div class="create-step-title"><i>1</i><span>Протоколы подписки</span></div><div class="protocol-picker"><label class="choice-card"><input type="checkbox" name="vless" value="1" checked><span><strong>VLESS XHTTP</strong><small>Универсальное TLS-подключение</small></span></label><label class="choice-card"><input type="checkbox" name="hysteria" value="1" checked><span><strong>Hysteria2</strong><small>Быстрое подключение через QUIC</small></span></label></div><div class="device-row"><p class="note">Одна ссылка для выбранных протоколов и всех подключённых нод.</p><div><label for="deviceLimit">Устройств · 0 без лимита</label><input id="deviceLimit" name="max_devices" type="number" min="0" max="20" value="2" inputmode="numeric"></div></div></section><section class="create-step" id="directFields" hidden><div class="create-step-title"><i>1</i><span>Выберите одно подключение</span></div><div class="protocol-picker"><label class="choice-card"><input type="radio" name="direct_protocol" value="vless" checked><span><strong>VLESS XHTTP</strong><small>Универсальное TLS-подключение</small></span></label><label class="choice-card"><input type="radio" name="direct_protocol" value="hysteria"><span><strong>Hysteria2</strong><small>Быстрое подключение через QUIC</small></span></label><label class="choice-card"><input type="radio" name="direct_protocol" value="awg20"><span><strong>AWG 2.0</strong><small>Совместимость с прежними клиентами</small></span></label><label class="choice-card"><input type="radio" name="direct_protocol" value="awg31"><span><strong>AWG 3.1</strong><small>Новая маскировка и собственные параметры</small></span></label></div><div class="quick-access-title">Сервисы</div><div class="quick-access-grid"><button type="button" class="quick-access" data-quick-protocol="mtproto"><span class="quick-radio" aria-hidden="true"></span><span><b>MTProto</b><small>Прямое подключение для Telegram</small></span></button><button type="button" class="quick-access" data-quick-protocol="web"><span class="quick-radio" aria-hidden="true"></span><span><b>Web Proxy</b><small>Ссылка Telegram через HTTPS</small></span></button><button type="button" class="quick-access" data-open-openflux><span class="quick-radio" aria-hidden="true"></span><span><b>OpenFlux</b><small>Отдельный профиль для iOS или Android</small></span></button></div><p class="quick-access-note">Выберите VPN-протокол или один отдельный сервис.</p></section><section class="create-step quick-fields" id="quickFields" hidden><b id="quickTitle"></b><p id="quickDescription"></p></section><div class="create-summary"><span>Будет создано</span><b id="createSummary">Подписка · VLESS XHTTP + Hysteria2 · 2 устройства</b></div><div class="actions create-actions"><button type="button" data-close-dialog>Отмена</button><button class="primary" id="createClientSubmit">Создать доступ</button></div></form></dialog>'''
     creation=creation.replace('<input type="hidden" id="accountKind"', '<div id="createError" class="create-error" role="alert" hidden></div><input type="hidden" id="accountKind"',1)
     confirmation='''<dialog id="accessConfirm"><div class="dialog-head"><h2>Изменить доступ?</h2></div><p data-access-message></p><form method="dialog"><div class="actions"><button value="cancel">Отмена</button><button class="primary" value="apply">Подтвердить</button></div></form></dialog>'''
-    return '<div class="clients-layout"><div class="clients-content">'+content+'</div><div class="connection-slot">'+qr_dialog()+'</div></div>'+openflux_create_dialog(path,csrf)+''.join(dialogs)+creation+confirmation+CLIENTS_JS.replace('@@PATH@@',json.dumps(path)).replace('@@CSRF@@',json.dumps(csrf))
+    return '<div class="clients-layout"><div class="clients-content">'+content+'</div><div class="connection-slot">'+qr_dialog()+'</div></div>'+openflux_create_dialog(path,csrf)+''.join(dialogs)+creation+confirmation+CLIENTS_JS.replace('@@PATH@@',json.dumps(path)).replace('@@CSRF@@',json.dumps(csrf))+admin_block()
 
 
 NODE_COUNTRIES = [
@@ -1134,3 +1134,424 @@ document.getElementById('awg-container').innerHTML='<div class="row"><span class
 loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();
 </script>
 </body></html>'''
+
+
+# ─── Appended: Admin gap UI (per-user actions + settings widgets) ───
+"""
+wpp_ui_additions.py
+──────────────────────────────────────────────────────────────────────────────
+Admin gap UI — per-user action buttons + Settings-page widgets that expose
+the wpp_admin_extras.py API endpoints in the WPP Web Panel browser UI.
+
+Functions:
+  admin_user_actions(source, path, csrf)   — per-user card (UUID, pass, ban, rename)
+  admin_block()                            — page-level toast + CSS + script
+  admin_health_widget(path)                — Health card markup
+  admin_health_script()                    — Health JS (auto-refresh 30s)
+  admin_backup_card(path, csrf)            — Backup card markup
+  admin_backup_script()                    — Backup JS
+  admin_geoip_card(path, csrf)             — GeoIP card markup
+  admin_geoip_script()                     — GeoIP JS
+  admin_b4_card(path, csrf)                — b4 card markup
+  admin_b4_script()                        — b4 JS
+  admin_tools_section(path, csrf)          — Combined Settings-page section
+──────────────────────────────────────────────────────────────────────────────
+This file is meant to be appended verbatim to chimera/modules/wpp_ui.py.
+It depends on esc(), icon(), and re (already imported by wpp_ui.py).
+"""
+
+
+# ─── Shared CSS for admin widgets ────────────────────────────────────────────
+
+ADMIN_CSS = '''<style>
+.wpp-toast{position:fixed;bottom:24px;right:24px;z-index:200;padding:13px 18px;border-radius:11px;background:var(--accent);color:var(--on-accent);font:600 13px/1.4 inherit;opacity:0;transition:opacity .25s;pointer-events:none;max-width:420px;box-shadow:var(--shadow)}
+.wpp-toast.show{opacity:1}
+.wpp-toast.error{background:var(--red)}
+.wpp-toast.warn{background:var(--amber)}
+.admin-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:18px;margin-top:14px}
+.admin-card{display:flex;flex-direction:column;gap:12px}
+.admin-actions{margin:14px 0;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--input)}
+.admin-actions>summary{cursor:pointer;font-weight:600;color:var(--accent);list-style:revert}
+.admin-actions-row{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.admin-form{display:flex;flex-direction:column;gap:6px;margin:12px 0}
+.admin-form>label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.admin-form-row{display:grid;grid-template-columns:1fr auto;gap:8px}
+.admin-form-row input,.admin-form-row select{padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:13px inherit;min-width:0}
+.admin-form-row input:focus,.admin-form-row select:focus{border-color:var(--accent)}
+.admin-status{margin:8px 0 0;color:var(--muted);font-size:11px;min-height:14px}
+.admin-health-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+.admin-health-item{padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--input)}
+.admin-health-item span{display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+.admin-health-item b{font:500 13px ui-monospace,monospace;word-break:break-word}
+.admin-badge{display:inline-block;padding:3px 9px;border-radius:6px;font:600 11px ui-monospace,monospace;background:var(--raised);color:var(--text)}
+.admin-badge.on{background:rgba(139,219,170,.18);color:var(--green)}
+.admin-badge.off{background:rgba(255,153,147,.18);color:var(--red)}
+.admin-backup-list,.admin-geoip-list{display:flex;flex-direction:column;gap:8px;max-height:280px;overflow:auto}
+.admin-backup-item,.admin-geoip-item{padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--input)}
+.admin-backup-item small,.admin-geoip-item span{display:block;color:var(--muted);font:11px ui-monospace,monospace;word-break:break-all}
+.admin-b4-actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}
+@media(max-width:640px){.admin-grid{grid-template-columns:1fr}.admin-form-row{grid-template-columns:1fr}}
+</style>'''
+
+
+ADMIN_TOAST_MARKUP = '<div id="wppToast" class="wpp-toast" role="status" aria-live="polite"></div>'
+
+
+# ─── Page-level toast + fetch helper (idempotent) ────────────────────────────
+
+ADMIN_TOAST_SCRIPT = '''<script>(function(){
+if(window.__wppAdminToast){return;} window.__wppAdminToast=true;
+const toast=document.getElementById('wppToast');
+function showToast(msg,type){
+  type=type||'success';
+  if(!toast){alert(msg);return;}
+  toast.textContent=msg;
+  toast.className='wpp-toast show '+(type==='error'?'error':type==='warn'?'warn':'');
+  clearTimeout(toast._t);
+  toast._t=setTimeout(function(){toast.className='wpp-toast';},3200);
+}
+window.wppShowToast=showToast;
+window.wppApi=async function(method,url,body){
+  const opt={method:method,credentials:'same-origin',headers:{'Content-Type':'application/json'}};
+  if(body!==undefined){opt.body=JSON.stringify(body);}
+  let r;
+  try{r=await fetch(url,opt);}
+  catch(e){throw new Error('Сеть недоступна: '+e.message);}
+  let d={};
+  try{d=await r.json();}catch(e){}
+  if(!r.ok){throw new Error(d.error||d.message||('HTTP '+r.status));}
+  return d;
+};
+async function adminUuid(b){
+  if(!confirm('Сменить UUID пользователя '+b.dataset.email+'? Прежний UUID сразу перестанет работать.')){return;}
+  b.disabled=true;
+  try{
+    const d=await wppApi('POST','/api/rotate/uuid',{email:b.dataset.email});
+    showToast('UUID изменён: '+String(d.new_uuid||'').slice(0,8)+'…');
+  }catch(err){showToast(err.message,'error');}
+  finally{b.disabled=false;}
+}
+async function adminToggle(b){
+  if(!confirm('Переключить бан/разбан для '+b.dataset.email+'?')){return;}
+  b.disabled=true;
+  try{
+    const d=await wppApi('POST','/api/users/'+encodeURIComponent(b.dataset.email)+'/toggle',{});
+    showToast('Статус: '+String(d.status||'ok'));
+  }catch(err){showToast(err.message,'error');}
+  finally{b.disabled=false;}
+}
+document.addEventListener('click',function(e){
+  const b1=e.target.closest('[data-admin-uuid]');if(b1){adminUuid(b1);return;}
+  const b2=e.target.closest('[data-admin-toggle]');if(b2){adminToggle(b2);return;}
+});
+document.addEventListener('submit',async function(e){
+  const f=e.target.closest('form[data-admin-form]');if(!f){return;}
+  e.preventDefault();
+  const kind=f.dataset.adminForm;
+  const email=f.dataset.email;
+  const input=f.querySelector('input');
+  const btn=f.querySelector('button[type=submit]');
+  if(btn){btn.disabled=true;}
+  try{
+    if(kind==='password'){
+      const v=input.value.trim();
+      if(v.length<8){showToast('Минимум 8 символов','error');return;}
+      await wppApi('POST','/api/users/'+encodeURIComponent(email)+'/password',{new_password:v});
+      showToast('Пароль установлен');
+      input.value='';
+    }else if(kind==='rename'){
+      const v=input.value.trim();
+      if(v.length<3||v.length>32){showToast('Имя 3-32 символа','error');return;}
+      const d=await wppApi('POST','/api/users/'+encodeURIComponent(email)+'/rename',{new_name:v});
+      showToast('Переименован в '+String(d.new_name||v));
+    }
+  }catch(err){showToast(err.message,'error');}
+  finally{if(btn){btn.disabled=false;}}
+});
+})();</script>'''
+
+
+def admin_block():
+    """Page-level admin CSS + toast + script. Include once per page.
+
+    Used by users_ui() and admin_tools_section() in the settings page.
+    The script is idempotent (guards via window.__wppAdminToast).
+    """
+    return ADMIN_CSS + ADMIN_TOAST_MARKUP + ADMIN_TOAST_SCRIPT
+
+
+# ─── Per-user admin actions card (in users_ui detail dialog) ─────────────────
+
+def admin_user_actions(source, path, csrf):
+    """Per-user admin action card for the users detail dialog.
+
+    Renders UUID rotate, password set, ban/unban toggle, rename form.
+    Only renders when the user record carries an `email` field (VLESS users
+    from /etc/xray/users.json — email field added by wpp_panel_web.users()).
+    """
+    src = source or {}
+    email = str(src.get('email', '') or '').strip()
+    if not email:
+        return ''
+    name = str(src.get('name', '') or email.split('@', 1)[0])
+    e_email = esc(email)
+    e_name = esc(name)
+    return f'''<details class="admin-actions" open>
+<summary>🔐 Администратор · {e_email}</summary>
+<p class="muted">Действия ниже меняют учётные данные пользователя и синхронизируют их с Xray. Подключения клиента могут кратковременно прерваться.</p>
+<div class="admin-actions-row">
+<button type="button" class="btn ghost sm" data-admin-uuid data-email="{e_email}">🔄 Сменить UUID</button>
+<button type="button" class="btn ghost sm" data-admin-toggle data-email="{e_email}">🔨 Ban / Unban</button>
+</div>
+<form class="admin-form" data-admin-form="password" data-email="{e_email}">
+<label>🔑 Портальный пароль (мин. 8 символов)</label>
+<div class="admin-form-row"><input type="password" minlength="8" required placeholder="новый пароль" autocomplete="new-password"><button type="submit" class="btn sm">Задать</button></div>
+</form>
+<form class="admin-form" data-admin-form="rename" data-email="{e_email}">
+<label>✏️ Имя клиента (3-32 симв.)</label>
+<div class="admin-form-row"><input value="{e_name}" maxlength="32" minlength="3" required><button type="submit" class="btn sm">Переименовать</button></div>
+</form>
+<p class="admin-status" role="status"></p>
+</details>'''
+
+
+# ─── Health widget (settings page) ───────────────────────────────────────────
+
+def admin_health_widget(path):
+    """Auto-refreshing system health card."""
+    return '''<section class="card admin-card">
+<div class="card-title"><h2>📊 Здоровье сервера</h2><span class="pill">обновление 30 с</span></div>
+<p class="muted" id="adminHealthNote">Загрузка статуса…</p>
+<div class="admin-health-grid" id="adminHealthGrid"></div>
+</section>'''
+
+
+ADMIN_HEALTH_SCRIPT = '''<script>(function(){
+if(window.__wppAdminHealth){return;} window.__wppAdminHealth=true;
+const grid=document.getElementById('adminHealthGrid');
+const note=document.getElementById('adminHealthNote');
+if(!grid){return;}
+function badge(text,ok){return '<span class="admin-badge '+(ok?'on':'off')+'">'+text+'</span>';}
+function fmt(v,unit){unit=unit||'';return (v===undefined||v===null)?'—':String(v)+unit;}
+async function load(){
+  try{
+    const d=await wppApi('GET','/api/health');
+    const xrayOk=String(d.xray||'').toLowerCase()==='active';
+    const nginxOk=String(d.nginx||'').toLowerCase()==='active';
+    const dnscryptOk=String(d.dnscrypt||'').toLowerCase()==='active';
+    const sslOk=Number(d.ssl_days_left||0)>0;
+    const items=[
+      ['Xray', badge(d.xray||'inactive', xrayOk)],
+      ['Nginx', badge(d.nginx||'inactive', nginxOk)],
+      ['DNSCrypt', badge(d.dnscrypt||'inactive', dnscryptOk)],
+      ['SSL дней', badge(fmt(d.ssl_days_left), sslOk)],
+      ['CPU ядер', fmt(d.cpu_cores)],
+      ['Uptime (ч)', fmt(d.uptime_hours)],
+      ['RAM', fmt(d.ram_used_mb,' МБ')+' / '+fmt(d.ram_total_mb,' МБ')+' ('+fmt(d.ram_pct,' %')+')'],
+      ['Disk', fmt(d.disk_used)+' / '+fmt(d.disk_total)+' ('+fmt(d.disk_pct,' %')+')'],
+      ['Соединений Xray', fmt(d.xray_connections)],
+      ['Домен', fmt(d.domain)]
+    ];
+    grid.innerHTML=items.map(function(it){return '<div class="admin-health-item"><span>'+it[0]+'</span><b>'+it[1]+'</b></div>';}).join('');
+    if(note){note.textContent='Обновлено: '+(d.timestamp||'');}
+  }catch(err){
+    if(note){note.textContent='Ошибка: '+err.message;}
+    grid.innerHTML='';
+  }
+}
+load();
+setInterval(load,30000);
+})();</script>'''
+
+
+# ─── Backup card (settings page) ─────────────────────────────────────────────
+
+def admin_backup_card(path, csrf):
+    """Backup creation + list card."""
+    return f'''<section class="card admin-card">
+<div class="card-title"><h2>🗄️ Бэкапы конфигурации</h2><span class="pill">/var/lib/xray-installer/backups</span></div>
+<div class="actions"><button type="button" class="btn primary" id="adminBackupCreate">Создать бэкап</button><button type="button" class="btn ghost" id="adminBackupRefresh">{icon('refresh')} Обновить</button></div>
+<p class="muted" id="adminBackupNote" role="status">Загрузка списка…</p>
+<div class="admin-backup-list" id="adminBackupList"></div>
+</section>'''
+
+
+ADMIN_BACKUP_SCRIPT = '''<script>(function(){
+if(window.__wppAdminBackup){return;} window.__wppAdminBackup=true;
+const list=document.getElementById('adminBackupList');
+const note=document.getElementById('adminBackupNote');
+const createBtn=document.getElementById('adminBackupCreate');
+const refreshBtn=document.getElementById('adminBackupRefresh');
+function esc2(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function humanSize(b){
+  b=Number(b||0);
+  if(b<1024){return b+' Б';}
+  const units=['КБ','МБ','ГБ','ТБ'];
+  let i=-1;
+  while(b>=1024 && i<units.length-1){b/=1024;i++;}
+  return b.toFixed(1)+' '+units[i];
+}
+async function load(){
+  if(list){list.innerHTML='<div class="loading"><div class="spinner"></div></div>';}
+  try{
+    const d=await wppApi('GET','/api/backup/list');
+    const items=d.backups||[];
+    if(!items.length){if(list){list.innerHTML='<p class="muted">Бэкапов нет</p>';}if(note){note.textContent='Бэкапов нет';}return;}
+    if(list){list.innerHTML=items.map(function(b){
+      const size=humanSize(b.size_bytes);
+      const mtime=b.mtime?(' · '+esc2(b.mtime)):'';
+      return '<div class="admin-backup-item"><div><b>'+esc2(b.name)+'</b><small>'+esc2(b.path||'')+' · '+size+mtime+'</small></div></div>';
+    }).join('');}
+    if(note){note.textContent='Всего: '+String(d.count||items.length);}
+  }catch(err){if(note){note.textContent='Ошибка: '+err.message;}}
+}
+if(createBtn){createBtn.addEventListener('click',async function(){
+  if(!confirm('Создать новый бэкап сейчас?')){return;}
+  createBtn.disabled=true;createBtn.textContent='Создание…';
+  try{await wppApi('POST','/api/backup',{});wppShowToast('Бэкап создан');load();}
+  catch(err){wppShowToast(err.message,'error');}
+  finally{createBtn.disabled=false;createBtn.textContent='Создать бэкап';}
+});}
+if(refreshBtn){refreshBtn.addEventListener('click',load);}
+load();
+})();</script>'''
+
+
+# ─── GeoIP rules card (settings page) ───────────────────────────────────────
+
+def admin_geoip_card(path, csrf):
+    """GeoIP rules card — country allow/block list."""
+    return f'''<section class="card admin-card">
+<div class="card-title"><h2>🌐 GeoIP правила</h2><span class="pill">Xray routing.rules</span></div>
+<p class="muted">Управление блокировкой/allowlist по странам (коды стран, напр. RU, CN). Allowlist пропускает только указанные страны и блокирует всё остальное — убедитесь, что ваш IP входит в разрешённые страны, иначе потеряете доступ.</p>
+<div class="actions"><button type="button" class="btn ghost" id="adminGeoipRefresh">{icon('refresh')} Обновить</button><button type="button" class="btn danger" id="adminGeoipClear">Удалить все правила</button></div>
+<p class="muted" id="adminGeoipNote" role="status">Загрузка…</p>
+<div class="admin-geoip-list" id="adminGeoipList"></div>
+<form class="admin-form" id="adminGeoipForm">
+<label>Коды стран через запятую (RU,CN,US)</label>
+<div class="admin-form-row">
+<input name="codes" placeholder="RU,CN,US" required pattern="[A-Za-z,\\s]+" title="Коды стран (2 буквы) через запятую">
+<select name="mode"><option value="block">Блокировать</option><option value="allow">Allowlist (только эти)</option></select>
+<button type="submit" class="btn primary">Применить</button>
+</div>
+</form>
+</section>'''
+
+
+ADMIN_GEOIP_SCRIPT = '''<script>(function(){
+if(window.__wppAdminGeoip){return;} window.__wppAdminGeoip=true;
+const list=document.getElementById('adminGeoipList');
+const note=document.getElementById('adminGeoipNote');
+const refreshBtn=document.getElementById('adminGeoipRefresh');
+const clearBtn=document.getElementById('adminGeoipClear');
+const form=document.getElementById('adminGeoipForm');
+function esc2(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+async function load(){
+  if(list){list.innerHTML='<div class="loading"><div class="spinner"></div></div>';}
+  try{
+    const d=await wppApi('GET','/api/geoip/rules');
+    const items=d.rules||[];
+    if(!items.length){if(list){list.innerHTML='<p class="muted">Правил нет</p>';}if(note){note.textContent='Активных блокировок нет';}return;}
+    if(list){list.innerHTML=items.map(function(r){
+      const codes=(r.geoip||[]).map(esc2).join(', ');
+      const tag=r.outboundTag||'block';
+      return '<div class="admin-geoip-item"><b>'+esc2(tag)+'</b><span>'+codes+'</span></div>';
+    }).join('');}
+    if(note){note.textContent='Всего правил: '+String(d.count||items.length);}
+  }catch(err){if(note){note.textContent='Ошибка: '+err.message;}}
+}
+if(refreshBtn){refreshBtn.addEventListener('click',load);}
+if(clearBtn){clearBtn.addEventListener('click',async function(){
+  if(!confirm('Удалить ВСЕ GeoIP правила и перезапустить Xray?')){return;}
+  clearBtn.disabled=true;
+  try{await wppApi('DELETE','/api/geoip/rules',undefined);wppShowToast('Правила удалены');load();}
+  catch(err){wppShowToast(err.message,'error');}
+  finally{clearBtn.disabled=false;}
+});}
+if(form){form.addEventListener('submit',async function(e){
+  e.preventDefault();
+  const fd=new FormData(form);
+  const raw=(fd.get('codes')||'').toString();
+  const codes=raw.split(/[\\s,]+/).map(function(s){return s.trim().toUpperCase();}).filter(function(s){return /^[A-Z]{2}$/.test(s);});
+  const mode=fd.get('mode')||'block';
+  if(!codes.length){wppShowToast('Введите хотя бы один код страны (2 буквы)','error');return;}
+  const btn=form.querySelector('button[type=submit]');if(btn){btn.disabled=true;}
+  try{
+    await wppApi('POST','/api/geoip/rules',{codes:codes,mode:mode});
+    wppShowToast('Применено: '+codes.join(', ')+(mode==='allow'?' (allowlist)':' (block)'));
+    form.reset();
+    load();
+  }catch(err){wppShowToast(err.message,'error');}
+  finally{if(btn){btn.disabled=false;}}
+});}
+load();
+})();</script>'''
+
+
+# ─── b4 management card (settings page) ─────────────────────────────────────
+
+def admin_b4_card(path, csrf):
+    """b4 management card."""
+    return f'''<section class="card admin-card">
+<div class="card-title"><h2>📡 b4 (DPI / MTProto bridge)</h2><span class="pill">admin</span></div>
+<p class="muted">Управление сервисом b4. Действия запускают shell-команды и могут занять до минуты.</p>
+<div class="admin-b4-actions">
+<button type="button" class="btn primary" data-b4-action="install">Установить</button>
+<button type="button" class="btn ghost" data-b4-action="enable">Включить</button>
+<button type="button" class="btn ghost" data-b4-action="disable">Выключить</button>
+<button type="button" class="btn ghost" data-b4-action="discovery">🔍 Discovery</button>
+</div>
+<p class="admin-status" id="adminB4Status" role="status">Готово к работе.</p>
+</section>'''
+
+
+ADMIN_B4_SCRIPT = '''<script>(function(){
+if(window.__wppAdminB4){return;} window.__wppAdminB4=true;
+const status=document.getElementById('adminB4Status');
+document.querySelectorAll('[data-b4-action]').forEach(function(btn){
+  btn.addEventListener('click',async function(){
+    const action=btn.dataset.b4Action;
+    if(!confirm('Запустить b4: '+action+'?')){return;}
+    btn.disabled=true;
+    if(status){status.textContent='Выполняется: '+action+'…';}
+    try{
+      const d=await wppApi('POST','/api/b4/'+action,{});
+      const msg=action==='discovery'
+        ? 'Discovery: '+(d.status||JSON.stringify(d).slice(0,80))
+        : ('Результат: '+(d.status||'ok'));
+      wppShowToast(msg);
+      if(status){status.textContent=msg;}
+    }catch(err){wppShowToast(err.message,'error');if(status){status.textContent='Ошибка: '+err.message;}}
+    finally{btn.disabled=false;}
+  });
+});
+})();</script>'''
+
+
+# ─── Combined Settings-page section ──────────────────────────────────────────
+
+def admin_tools_section(path, csrf):
+    """Combined admin tools section for the Settings page.
+
+    Renders: Health widget, Backup card, GeoIP card, b4 card — plus shared
+    toast markup, CSS, and a single script block initializing all four.
+    """
+    parts = [
+        '<section class="card admin-tools-card">',
+        '<div class="card-title"><span class="eyebrow">WPP / ADMIN GAP</span><h2>Инструменты администратора</h2><p>API-эндпоинты из wpp_admin_extras.py — резервные копии, GeoIP, b4, здоровье сервера и управление пользователями.</p></div>',
+        '<div class="admin-grid">',
+        admin_health_widget(path),
+        admin_backup_card(path, csrf),
+        admin_geoip_card(path, csrf),
+        admin_b4_card(path, csrf),
+        '</div>',
+        '</section>',
+        ADMIN_CSS,
+        ADMIN_TOAST_MARKUP,
+        ADMIN_TOAST_SCRIPT,
+        ADMIN_HEALTH_SCRIPT,
+        ADMIN_BACKUP_SCRIPT,
+        ADMIN_GEOIP_SCRIPT,
+        ADMIN_B4_SCRIPT,
+    ]
+    return ''.join(parts)
