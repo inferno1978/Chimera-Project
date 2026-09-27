@@ -125,7 +125,7 @@ JSON сета: `vendor/b4/set-artifacts/GitHub-Fat-v1.json` в этом репо
 |---|---|---|
 | `sni_domains` | 19 суффиксов | `github.com` (плюс api/gist/codeload/ssh — суффикс-матч), `githubusercontent.com` (raw/objects/avatars/release-assets), `githubassets.com`, `github.io`, `github.dev`, `ghcr.io`, `npmjs.com`, … |
 | `geosite_categories` | `github` (64 записи) | S3-бакеты релиз-ассетов `github-production-release-asset-*.s3.amazonaws.com`, 20 Azure-блобов артефактов Actions, `npm` registry, Copilot-эндпоинты |
-| `ip` | 87 CIDR | Официальные диапазоны из `api.github.com/meta`: web+api+git+pages+copilot, IPv4 (`198.51.100.8/20`, `198.51.100.9/22`, `198.51.100.10/22`, …) и IPv6 (`2a0a:a440::/29`, `2606:50c0::/32`) — ловит соединения **без SNI** |
+| `ip` | 87 CIDR | Официальные диапазоны из `api.github.com/meta`: web+api+git+pages+copilot, IPv4 (`<ip>/20`, `<ip>/22`, `<ip>/22`, …) и IPv6 (`2a0a:a440::/29`, `2606:50c0::/32`) — ловит соединения **без SNI** |
 
 **Почему именно такие настройки:**
 
