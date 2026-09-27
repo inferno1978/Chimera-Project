@@ -902,6 +902,399 @@ tc.style.display='none';
 }
 }'''
 
+
+# ─── Portal tabs redesign (matches Traffic tab visual language) ────────
+# Plain triple-quoted strings (single braces) referenced via {NAME}
+# placeholders inside the portal_page f-string, same trick as TRAFFIC_CSS.
+PORTAL_TABS_CSS = """/* === shared portal primitives (all tabs) === */
+.portal-hero{background:linear-gradient(135deg,var(--raised),var(--surface));border:1px solid var(--line);border-radius:var(--radius);padding:22px;margin-bottom:16px;position:relative;overflow:hidden;animation:pFade .4s ease both}
+.portal-hero::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 100% 0,var(--tint),transparent 55%);pointer-events:none}
+.portal-hero-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;position:relative;flex-wrap:wrap}
+.portal-hero-ico{font-size:24px;opacity:.85;line-height:1}
+.portal-hero-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.portal-hero-title{font:700 22px/1.2 inherit;color:var(--text);margin:6px 0 2px;letter-spacing:-.02em;overflow-wrap:anywhere}
+.portal-hero-sub{font-size:12px;color:var(--muted);line-height:1.5}
+.portal-stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:10px;margin-top:14px}
+.portal-stat{padding:13px;border:1px solid var(--line);border-radius:10px;background:var(--input)}
+.portal-stat span{display:block;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+.portal-stat b{display:block;font:600 15px ui-monospace,monospace;color:var(--text);margin-top:6px;overflow-wrap:anywhere}
+.portal-stat.accent b{color:var(--accent)}
+.portal-stat.green b{color:var(--green)}
+.portal-stat.red b{color:var(--red)}
+.portal-stat.amber b{color:var(--yellow)}
+.portal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.portal-tile{padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);transition:border .15s,transform .12s;animation:pFade .4s ease both}
+.portal-tile:hover{border-color:var(--accent)}
+.portal-tile-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.portal-tile-title{font-weight:600;font-size:14px;flex:1;min-width:0;overflow-wrap:anywhere}
+.portal-empty{padding:28px 12px;text-align:center;color:var(--muted);font-size:12px;line-height:1.7}
+.portal-empty .ico{font-size:24px;opacity:.6;margin-bottom:10px;display:block}
+.portal-code-box{padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--input);font:11px/1.5 ui-monospace,monospace;word-break:break-all;margin:8px 0;cursor:pointer;transition:border .15s,background .15s;max-height:140px;overflow:auto}
+.portal-code-box:hover{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--input))}
+.portal-qr-frame{display:grid;place-items:center;padding:14px;margin:10px 0;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:0 8px 28px #00000040}
+.portal-qr-frame img{border-radius:8px;max-width:220px;display:block}
+.portal-btn-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
+.portal-dl-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.portal-dl{display:flex;align-items:center;gap:12px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);text-decoration:none;color:var(--text);transition:border .15s,transform .12s}
+.portal-dl:hover{border-color:var(--accent);transform:translateY(-1px)}
+.portal-dl-ico{font-size:24px;flex:0 0 auto}
+.portal-dl-main{flex:1;min-width:0}
+.portal-dl-name{font-weight:600;font-size:13px}
+.portal-dl-desc{font-size:11px;color:var(--muted);margin-top:2px}
+.portal-info{padding:14px;border:1px solid var(--line);border-radius:10px;background:var(--input);font-size:12px;color:var(--muted);line-height:1.7}
+.portal-info b{color:var(--accent)}
+.portal-danger{padding:14px;border:1px solid rgba(248,113,113,.3);border-radius:10px;background:rgba(248,113,113,.05);font-size:12px;color:var(--muted);line-height:1.7;margin-top:12px}
+.portal-danger b{color:var(--red)}
+.portal-progress{height:8px;border-radius:4px;background:var(--input);overflow:hidden;margin:8px 0 4px}
+.portal-progress-fill{height:100%;border-radius:4px;transform-origin:left center;animation:pGrowX .5s ease both;transition:width .25s}
+.portal-progress-fill.on{background:linear-gradient(90deg,var(--green),var(--accent))}
+.portal-progress-fill.off{background:var(--red)}
+.portal-progress-fill.amber{background:var(--yellow)}
+.portal-meta{display:flex;justify-content:space-between;font:10px ui-monospace,monospace;color:var(--muted)}
+.portal-proto-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:8px;background:var(--tint);color:var(--accent);font:600 11px ui-monospace,monospace;border:1px solid var(--line);overflow-wrap:anywhere}
+.portal-chip{display:inline-block;padding:3px 8px;border-radius:6px;font:600 10px ui-monospace,monospace;background:var(--input);color:var(--muted);border:1px solid var(--line)}
+.portal-chip.on{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.25)}
+.portal-chip.off{background:rgba(248,113,113,.12);color:var(--red);border-color:rgba(248,113,113,.25)}
+.portal-chip.accent{background:var(--tint);color:var(--accent);border-color:rgba(77,158,255,.25)}
+.portal-tile-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)}
+.portal-tile-row:last-child{border:0}
+.portal-tile-row .label{color:var(--muted);font-size:12px}
+.portal-tile-row .val{font-weight:500;font:500 12px ui-monospace,monospace;overflow-wrap:anywhere}
+.portal-form{display:flex;gap:8px;flex-wrap:wrap}
+.portal-form .input{flex:1;min-width:200px}
+.portal-cpy-ok{display:inline-flex;align-items:center;gap:4px;color:var(--green);font:600 11px ui-monospace,monospace;opacity:0;transition:opacity .25s}
+.portal-cpy-ok.show{opacity:1}
+@keyframes pFade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pGrowX{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@media(max-width:600px){.portal-grid{grid-template-columns:1fr}.portal-dl-grid{grid-template-columns:1fr}.portal-stats{grid-template-columns:1fr 1fr}}
+"""
+
+PORTAL_TABS_JS = """/* === Portal tabs: shared helpers === */
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function pBadge(on,yes,no){return '<span class="portal-chip '+(on?'on':'off')+'">'+(on?(yes||'да'):(no||'нет'))+'</span>';}
+function pStat(label,val,cls){return '<div class="portal-stat '+(cls||'')+'"><span>'+esc(label)+'</span><b>'+esc(val==null||val===''?'—':String(val))+'</b></div>';}
+
+/* === 1. Подключение === */
+async function loadLinks(){
+const d=await api('/api/portal/links');if(!d||!d.links)return;
+const c=document.getElementById('links-container');
+const links=d.links||[];
+const proto=links[0]&&links[0].protocol?links[0].protocol:'VLESS';
+const plLabel=links.length===1?'ссылка':(links.length<5?'ссылки':'ссылок');
+let h='<div class="portal-hero"><div class="portal-hero-top"><div>'+
+'<div class="portal-hero-label">Подключение</div>'+
+'<div class="portal-hero-title">🔗 '+links.length+' '+plLabel+'</div>'+
+'<div class="portal-hero-sub">Скопируйте ссылку или отсканируйте QR-код</div></div>'+
+'<span class="portal-proto-badge">'+esc(proto)+'</span></div></div>';
+h+='<div class="portal-grid">';
+links.forEach(function(item,i){
+const qr='/api/portal/qr?data='+encodeURIComponent(item.link);
+h+='<div class="portal-tile" style="display:flex;flex-direction:column">'+
+'<div class="portal-tile-head"><span class="portal-chip accent">'+esc(item.protocol||'LINK')+'</span>'+
+'<div class="portal-tile-title">'+esc(item.label||'Подключение')+'</div></div>'+
+'<div class="portal-qr-frame"><img src="'+qr+'" alt="QR" loading="lazy"></div>'+
+'<div class="portal-code-box" id="link-'+i+'" title="Нажмите чтобы скопировать" onclick="copyLink('+i+')">'+esc(item.link)+'</div>'+
+'<div class="portal-btn-row"><button class="btn ghost sm" onclick="copyLink('+i+')">📋 Копировать</button>'+
+'<span class="portal-cpy-ok" id="cpy-'+i+'">✓ скопировано</span></div>'+
+'</div>';
+});
+h+='</div>';
+c.innerHTML=h;
+}
+function copyLink(i){const el=document.getElementById('link-'+i);if(!el)return;
+navigator.clipboard.writeText(el.textContent).then(function(){showToast('Ссылка скопирована');
+const ok=document.getElementById('cpy-'+i);if(ok){ok.classList.add('show');setTimeout(function(){ok.classList.remove('show');},1800);}
+}).catch(function(){showToast('Ошибка копирования','error');});}
+
+/* === 2. Подписка === */
+async function loadSubscription(){
+let d;try{d=await api('/api/portal/sub-info');}catch(e){return;}
+if(!d||!d.service_enabled||!d.urls||!d.urls.base64)return;
+const card=document.getElementById('sub-card'),c=document.getElementById('sub-container');
+card.style.display='';document.getElementById('tab-subscription').style.display='';
+const qr='/api/portal/qr?data='+encodeURIComponent(d.urls.base64);
+const nodes=(d.multinode&&d.multinode.enabled&&d.multinode.nodes)||[];
+let h='<div class="portal-hero"><div class="portal-hero-top"><div>'+
+'<div class="portal-hero-label">Подписка</div>'+
+'<div class="portal-hero-title">📚 Моя подписка</div>'+
+'<div class="portal-hero-sub">Универсальный URL для клиентов с автодополнением нод</div></div>'+
+(nodes.length?'<span class="portal-proto-badge">🌐 '+nodes.length+' нод</span>':'')+
+'</div></div>';
+h+='<div class="portal-tile">'+
+'<div class="portal-tile-head"><span class="portal-chip accent">URL</span><div class="portal-tile-title">Ссылка на подписку</div></div>'+
+'<div class="portal-code-box" id="sub-url-box" title="Нажмите чтобы скопировать" onclick="copySub()">'+esc(d.urls.base64)+'</div>'+
+'<div class="portal-btn-row"><button class="btn sm" onclick="copySub()">📋 Копировать URL</button></div>'+
+'</div>';
+h+='<div class="portal-grid" style="grid-template-columns:1fr 1fr">'+
+'<div class="portal-tile" style="text-align:center">'+
+'<div class="portal-tile-head"><span class="portal-chip accent">YAML</span><div class="portal-tile-title">mihomo / Clash Meta</div></div>'+
+'<a class="btn ghost" href="/api/portal/sub-clash" download style="width:100%;justify-content:center">⬇ Скачать YAML</a>'+
+'</div>'+
+'<div class="portal-tile" style="text-align:center">'+
+'<div class="portal-tile-head"><span class="portal-chip accent">JSON</span><div class="portal-tile-title">sing-box</div></div>'+
+'<a class="btn ghost" href="/api/portal/sub-singbox" download style="width:100%;justify-content:center">⬇ Скачать JSON</a>'+
+'</div></div>';
+h+='<div class="portal-grid" style="grid-template-columns:1fr"><div class="portal-tile" style="text-align:center">'+
+'<div class="portal-qr-frame"><img src="'+qr+'" alt="QR" loading="lazy"></div>'+
+'<div class="portal-hero-sub">Отсканируйте QR в приложении клиента</div>'+
+'</div></div>';
+if(nodes.length){
+h+='<div class="portal-tile"><div class="portal-tile-head"><span class="portal-chip accent">MULTI</span><div class="portal-tile-title">Ноды подписки</div></div>';
+nodes.forEach(function(n){
+const kind=String(n.kind||'node').toLowerCase();
+const kindChip=kind==='cascade'?'<span class="portal-chip on">каскад</span>':(kind==='federation'?'<span class="portal-chip accent">федерация</span>':'<span class="portal-chip">'+esc(n.kind||'')+'</span>');
+h+='<div class="portal-tile-row"><span class="val">🌐 '+esc(n.name||'—')+'</span>'+kindChip+'</div>';
+});
+h+='</div>';
+}
+c.innerHTML=h;
+}
+function copySub(){const el=document.getElementById('sub-url-box');if(!el)return;
+navigator.clipboard.writeText(el.textContent).then(function(){showToast('URL подписки скопирован');}).catch(function(){showToast('Ошибка копирования','error');});}
+
+/* === 4. IP-адреса === */
+async function loadIPs(){
+const d=await api('/api/portal/ips');if(!d)return;
+const detected=d.detected_ip||'';
+const det=document.getElementById('ips-detected');
+let hh='<div class="portal-hero"><div class="portal-hero-top"><div>'+
+'<div class="portal-hero-label">IP-адреса</div>'+
+'<div class="portal-hero-title">🛂 Мои IP-адреса</div>'+
+'<div class="portal-hero-sub">Управление whitelist для защиты от блокировок по IP</div></div>'+
+(detected?'<span class="portal-proto-badge">📡 '+esc(detected)+'</span>':'<span class="portal-chip">IP не определён</span>')+
+'</div></div>';
+det.innerHTML=hh;
+const c=document.getElementById('ips-list');
+const ips=d.ips||[];
+if(!ips.length){
+c.innerHTML='<div class="portal-empty"><span class="ico">📭</span>IP-адресов нет.<br>Добавьте свой IP ниже.</div>';
+return;
+}
+let rows='';
+ips.forEach(function(ip){
+const pinChip=ip.pinned?'<span class="portal-chip on">📌 закреплён</span>':'<span class="portal-chip">не закреплён</span>';
+rows+='<div class="portal-tile" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+'<div style="font:600 14px ui-monospace,monospace;color:var(--accent);min-width:0;flex:1;overflow-wrap:anywhere">'+esc(ip.ip)+'</div>'+
+pinChip+
+'<span style="font:10px ui-monospace,monospace;color:var(--muted)">'+esc(ip.added_at||'')+'</span>'+
+'<button class="btn ghost sm" onclick="pinIP(\\''+esc(ip.ip)+'\\')">'+(ip.pinned?'Открепить':'Закрепить')+'</button>'+
+'<button class="btn danger sm" onclick="removeIP(\\''+esc(ip.ip)+'\\')">🗑 Удалить</button>'+
+'</div>';
+});
+c.innerHTML='<div class="portal-grid" style="grid-template-columns:1fr">'+rows+'</div>';
+}
+async function addIP(){const v=document.getElementById('new-ip').value.trim();if(!v){showToast('Введите IP','error');return;}
+const r=await fetch('/api/portal/ips',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:v})});
+const d=await r.json().catch(()=>({}));
+if(r.ok){showToast('IP добавлен');loadIPs();document.getElementById('new-ip').value='';}
+else showToast(d.error||'Ошибка','error');}
+async function addAutoIP(){const r=await fetch('/api/portal/ips',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:'auto'})});
+const d=await r.json().catch(()=>({}));
+if(r.ok){showToast('IP добавлен');loadIPs();}else showToast(d.error||'Ошибка','error');}
+async function removeIP(ip){if(!confirm('Удалить IP '+ip+'?'))return;
+const r=await fetch('/api/portal/ips?ip='+encodeURIComponent(ip),{method:'DELETE',credentials:'same-origin'});
+const d=await r.json().catch(()=>({}));
+if(r.ok){showToast('IP удалён');loadIPs();}else showToast(d.error||'Ошибка','error');}
+async function replaceAllIPs(){if(!confirm('Заменить все IP на текущий?'))return;
+const r=await fetch('/api/portal/ips/replace-all',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:'auto'})});
+const d=await r.json().catch(()=>({}));
+if(r.ok){showToast('IP заменены');loadIPs();}else showToast(d.error||'Ошибка','error');}
+async function pinIP(ip){const r=await fetch('/api/portal/ips/pin',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:ip})});
+if(r.ok){loadIPs();}else{await fetch('/api/portal/ips/unpin',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:ip})});loadIPs();}}
+
+/* === 5. Пароль === */
+function pwStrength(v){
+const fill=document.getElementById('pw-fill'),lbl=document.getElementById('pw-label');
+if(!fill||!lbl)return;
+let cls='off',w=0,t='—';
+if(v.length===0){cls='off';w=0;t='—';}
+else if(v.length<8){cls='off';w=25;t='слишком короткий';}
+else if(v.length<12){cls='amber';w=50;t='средний';}
+else if(v.length<16){cls='on';w=75;t='хороший';}
+else{cls='on';w=100;t='сильный';}
+fill.className='portal-progress-fill '+cls;
+fill.style.width=w+'%';
+lbl.textContent=t;
+}
+async function changePassword(){
+const v=document.getElementById('new-pass').value.trim();
+if(v.length<8){showToast('Минимум 8 символов','error');return;}
+const btn=document.getElementById('pw-submit');
+const old=btn?btn.innerHTML:'';
+if(btn){btn.disabled=true;btn.innerHTML='Сохранение…';}
+const r=await fetch('/portal/password',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:v})});
+const d=await r.json().catch(()=>({}));
+if(btn){btn.disabled=false;btn.innerHTML=old;}
+if(r.ok){showToast('Пароль изменён');document.getElementById('new-pass').value='';pwStrength('');}
+else showToast(d.error||'Ошибка','error');}
+
+/* === 6. Сателлиты === */
+async function loadSatellites(){
+let d;try{d=await api('/api/portal/sat-info');}catch(e){return;}
+if(!d||!d.satellites||!d.satellites.length)return;
+document.getElementById('tab-satellites').style.display='';
+document.getElementById('sat-card').style.display='';
+const c=document.getElementById('sat-container');
+const sats=d.satellites||[];
+let h='<div class="portal-hero"><div class="portal-hero-top"><div>'+
+'<div class="portal-hero-label">Сателлиты</div>'+
+'<div class="portal-hero-title">🛰 Сателлитные протоколы</div>'+
+'<div class="portal-hero-sub">Привязанные доп. протоколы (Mieru / NaiveProxy / Telemt / TrustTunnel)</div></div>'+
+'<span class="portal-proto-badge">'+sats.length+' привяз.</span></div></div>';
+h+='<div class="portal-grid" style="grid-template-columns:1fr">';
+sats.forEach(function(s){
+const activeChip=s.active?'<span class="portal-chip on">● активен</span>':'<span class="portal-chip off">○ не активен</span>';
+h+='<div class="portal-tile" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+'<div style="font-size:22px">🛰</div>'+
+'<div style="flex:1;min-width:0">'+
+'<div style="font-weight:600;font-size:13px">'+esc(s.label||s.satellite)+'</div>'+
+'<div style="color:var(--muted);font:11px ui-monospace,monospace">'+esc(s.login||'')+'</div></div>'+
+activeChip+
+'<button class="btn ghost sm" onclick="unbindSat(\\''+esc(s.satellite)+'\\')">Отвязать</button>'+
+'</div>';
+});
+h+='</div>';
+h+='<div class="portal-tile"><div class="portal-tile-head"><span class="portal-chip accent">AUTO</span><div class="portal-tile-title">Авто-привязка</div></div>'+
+'<div class="portal-hero-sub">Сканирует все сателлиты и предлагает привязки по имени/UUID</div>'+
+'<div class="portal-btn-row"><button class="btn ghost" onclick="suggestSat()">🔍 Найти привязки</button></div>'+
+'<div id="sat-suggest"></div></div>';
+c.innerHTML=h;
+}
+async function suggestSat(){const r=await fetch('/api/portal/sat-suggest',{credentials:'same-origin'});const d=await r.json().catch(()=>({}));
+if(!d||!d.suggestions||!d.suggestions.length){showToast('Предложений нет');return;}
+let h='<div style="margin-top:10px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Найдено: '+d.suggestions.length+'</div>';
+h+='<div class="portal-grid" style="grid-template-columns:1fr">';
+d.suggestions.forEach(function(s){
+h+='<div class="portal-tile" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+'<div style="font-size:22px">🛰</div>'+
+'<div style="flex:1;min-width:0">'+
+'<div style="font-weight:600;font-size:13px">'+esc(s.label||s.satellite)+'</div>'+
+'<div style="color:var(--muted);font:11px ui-monospace,monospace">'+esc(s.login||'')+'</div></div>'+
+'<button class="btn sm" onclick="bindSat(\\''+esc(s.satellite)+'\\',\\''+esc(s.login)+'\\')">Привязать</button>'+
+'</div>';
+});
+h+='</div>';
+document.getElementById('sat-suggest').innerHTML=h;
+}
+async function bindSat(sat,login){const r=await fetch('/api/portal/sat-bind',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({satellite:sat,login:login})});
+if(r.ok){showToast('Привязано');loadSatellites();}else{const d=await r.json().catch(()=>({}));showToast(d.error||'Ошибка','error');}}
+async function unbindSat(sat){if(!confirm('Отвязать '+sat+'?'))return;
+const r=await fetch('/api/portal/sat-unbind',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({satellite:sat})});
+if(r.ok){showToast('Отвязано');loadSatellites();}else showToast('Ошибка','error');}
+
+/* === 7. YouTube DPI (b4) === */
+async function loadB4(){
+let d;try{d=await api('/api/portal/b4-info');}catch(e){return;}
+if(!d){return;}
+document.getElementById('tab-b4').style.display='';
+document.getElementById('b4-card').style.display='';
+const c=document.getElementById('b4-container');
+const installed=!!d.installed,active=!!d.active;
+const statusChip=(!installed)?'<span class="portal-chip off">не установлен</span>':(active?'<span class="portal-chip on">● активен</span>':'<span class="portal-chip off">○ выключен</span>');
+let h='<div class="portal-hero"><div class="portal-hero-top"><div>'+
+'<div class="portal-hero-label">YouTube DPI Bypass</div>'+
+'<div class="portal-hero-title">📺 B4 DPI Bypass</div>'+
+'<div class="portal-hero-sub">Обход блокировок YouTube через модификацию DPI-трафика</div></div>'+
+statusChip+'</div></div>';
+h+='<div class="portal-stats">'+
+pStat('Установлено',installed?'да':'нет',installed?'green':'red')+
+pStat('Активно',active?'да':'нет',active?'green':'red')+
+pStat('Preset',d.preset_label||d.preset||'—','accent')+
+(d.active_set_name?pStat('Активный сет',d.active_set_name,''):'')+
+'</div>';
+if(!installed){
+h+='<div class="portal-info" style="margin-top:14px"><b>ℹ️ B4 не установлен.</b><br>Свяжитесь с администратором, чтобы включить обход YouTube DPI.</div>';
+}else if(!active){
+h+='<div class="portal-info" style="margin-top:14px"><b>⚠ B4 установлен, но не активен.</b><br>Обход DPI в данный момент выключен.</div>';
+}else{
+h+='<div class="portal-info" style="margin-top:14px"><b>✓ B4 активен.</b><br>YouTube-трафик модифицируется для обхода DPI-блокировок. Используйте HTTP-прокси b4 в вашем клиенте.</div>';
+}
+c.innerHTML=h;
+}
+
+/* === 8. Сервер === */
+async function loadHealth(){
+const d=await api('/api/portal/health');if(!d)return;
+const g=document.getElementById('sys-grid');
+const xrayTxt=String(d.xray||'').toLowerCase();
+const xrayOn=xrayTxt==='active'||xrayTxt==='running'||xrayTxt==='ok'||xrayTxt==='true';
+const sslDays=d.ssl_days_left;
+const sslOk=typeof sslDays==='number'&&sslDays>=0;
+let h='<div class="portal-hero"><div class="portal-hero-top"><div>'+
+'<div class="portal-hero-label">Сервер</div>'+
+'<div class="portal-hero-title">🖥 '+esc(d.domain||'сервер')+'</div>'+
+'<div class="portal-hero-sub">'+esc(d.protocol_mode||'reality')+' • порт '+esc(d.server_port||443)+'</div></div>'+
+(xrayOn?'<span class="portal-chip on">● онлайн</span>':'<span class="portal-chip off">○ офлайн</span>')+
+'</div></div>';
+h+='<div class="portal-stats">'+
+pStat('Xray',d.xray||'—',xrayOn?'green':'red')+
+pStat('Протокол',d.protocol_mode||'—','accent')+
+pStat('SSL дней',sslOk?sslDays:'N/A',(sslOk&&sslDays<14)?'amber':(sslOk?'green':'red'))+
+pStat('Порт',d.server_port||'—','')+
+pStat('Uptime (ч)',d.uptime_hours||'—','')+
+'</div>';
+if(d.timestamp){
+h+='<div class="portal-tile" style="margin-top:14px"><div class="portal-tile-row"><span class="label">Время последней проверки</span><span class="val">'+esc(d.timestamp)+'</span></div></div>';
+}
+g.innerHTML=h;
+}
+
+/* === 9. AmneziaWG === */
+async function loadAWG(){
+let peer=null;
+try{
+const r=await fetch('/api/awg/my-peer',{credentials:'same-origin'});
+if(r.ok){const d=await r.json();peer=d&&d.peer?d.peer:null;}
+}catch(e){return;}
+if(!peer){return;}  // hide tab when no AWG peer configured
+document.getElementById('tab-awg').style.display='';
+document.getElementById('awg-card').style.display='';
+const c=document.getElementById('awg-container');
+const statusTxt=String(peer.status||'').toLowerCase();
+const active=statusTxt==='active'||statusTxt==='running'||peer.handshake_ago&&peer.handshake_ago!=='0';
+const handshake=peer.handshake_ago||'—';
+const endpoint=peer.endpoint||peer.server_endpoint||peer.server_addr||'';
+const port=peer.server_port||peer.port||'';
+const clientIP=peer.client_address||peer.allowed_ip||peer.address||'';
+let h='<div class="portal-hero"><div class="portal-hero-top"><div>'+
+'<div class="portal-hero-label">AmneziaWG</div>'+
+'<div class="portal-hero-title">🛡 AmneziaWG</div>'+
+'<div class="portal-hero-sub">WireGuard-совместимый туннель с защитой от DPI-детекции</div></div>'+
+(active?'<span class="portal-chip on">● активен</span>':'<span class="portal-chip">настроен</span>')+
+'</div></div>';
+h+='<div class="portal-stats">'+
+pStat('Имя пира',peer.name||'—','accent')+
+(endpoint?pStat('Endpoint',endpoint,''):'')+
+(port?pStat('Порт',port,''):'')+
+(clientIP?pStat('Client IP',clientIP,''):'')+
+pStat('Handshake',handshake,'')+
+(peer.rx_bytes!=null?pStat('Принято',fmtAWG(peer.rx_bytes),'green'):'')+
+(peer.tx_bytes!=null?pStat('Отправлено',fmtAWG(peer.tx_bytes),'accent'):'')+
+'</div>';
+h+='<div class="portal-grid" style="grid-template-columns:1fr 1fr;align-items:start">'+
+'<div class="portal-tile" style="text-align:center">'+
+'<div class="portal-tile-head"><span class="portal-chip accent">QR</span><div class="portal-tile-title">QR-код</div></div>'+
+'<div class="portal-qr-frame"><img src="/api/awg/my-peer/qr" alt="QR" loading="lazy"></div>'+
+'</div>'+
+'<div class="portal-tile">'+
+'<div class="portal-tile-head"><span class="portal-chip accent">.CONF</span><div class="portal-tile-title">Файл конфигурации</div></div>'+
+'<div class="portal-code-box" id="awg-conf-box" style="min-height:60px">Загрузка…</div>'+
+'<div class="portal-btn-row">'+
+'<button class="btn sm" onclick="copyAWG()">📋 Копировать</button>'+
+'<a class="btn ghost" href="/api/awg/my-peer/config" download>⬇ Скачать .conf</a>'+
+'</div></div></div>';
+c.innerHTML=h;
+// async fetch conf text
+fetch('/api/awg/my-peer/config',{credentials:'same-origin'}).then(function(r){return r.ok?r.text():'';}).then(function(t){
+const box=document.getElementById('awg-conf-box');
+if(box){box.textContent=t||'Конфиг недоступен';}
+}).catch(function(){const box=document.getElementById('awg-conf-box');if(box){box.textContent='Конфиг недоступен';}});
+}
+function fmtAWG(b){b=b||0;if(b>=1024*1024*1024)return (b/1024/1024/1024).toFixed(2)+' ГБ';if(b>=1024*1024)return (b/1024/1024).toFixed(1)+' МБ';if(b>=1024)return Math.round(b/1024)+' КБ';return b+' Б';}
+function copyAWG(){const el=document.getElementById('awg-conf-box');if(!el)return;
+navigator.clipboard.writeText(el.textContent).then(function(){showToast('Конфиг скопирован');}).catch(function(){showToast('Ошибка копирования','error');});}
+"""
+
 def portal_page(user, path):
     """Main User Portal page with 10 tabs — WPP-styled."""
     email = esc(user.get("email", "user"))
@@ -990,6 +1383,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 .sat-login{{color:var(--muted);font:11px ui-monospace,monospace}}
 .actions{{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}}
 @media(max-width:600px){{.grid2{{grid-template-columns:1fr}}.dl-grid{{grid-template-columns:1fr}}}}
+{PORTAL_TABS_CSS}
 {TRAFFIC_CSS}
 </style></head><body>
 <div class="container">
@@ -1028,17 +1422,34 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 
 <div class="tab-panel" id="panel-configs">
 <div class="card"><div class="card-title">📥 Скачать конфиги</div>
-<div class="dl-grid">
-<a class="btn ghost" href="/api/portal/clash" download>Clash Meta</a>
-<a class="btn ghost" href="/api/portal/singbox" download>Sing-box</a>
-<a class="btn ghost" href="/api/portal/hiddify" download>Hiddify</a>
-<a class="btn ghost" href="/api/portal/vless-link" download>VLESS-ссылка</a>
+<div class="portal-hero"><div class="portal-hero-top"><div>
+<div class="portal-hero-label">Конфигурации</div>
+<div class="portal-hero-title">📥 Скачать конфиги</div>
+<div class="portal-hero-sub">Выберите формат для вашего клиента</div>
+</div><span class="portal-proto-badge">4 формата</span></div></div>
+<div class="portal-dl-grid">
+<a class="portal-dl" href="/api/portal/clash" download>
+<span class="portal-dl-ico">🌀</span>
+<div class="portal-dl-main"><div class="portal-dl-name">Clash Meta</div>
+<div class="portal-dl-desc">YAML для Mihomo / Clash Verge / FlClash</div></div></a>
+<a class="portal-dl" href="/api/portal/singbox" download>
+<span class="portal-dl-ico">🟢</span>
+<div class="portal-dl-main"><div class="portal-dl-name">Sing-box</div>
+<div class="portal-dl-desc">JSON для sing-box / SFA</div></div></a>
+<a class="portal-dl" href="/api/portal/hiddify" download>
+<span class="portal-dl-ico">📦</span>
+<div class="portal-dl-main"><div class="portal-dl-name">Hiddify</div>
+<div class="portal-dl-desc">JSON для Hiddify Next</div></div></a>
+<a class="portal-dl" href="/api/portal/vless-link" download>
+<span class="portal-dl-ico">🔗</span>
+<div class="portal-dl-main"><div class="portal-dl-name">VLESS-ссылка</div>
+<div class="portal-dl-desc">vless://… для v2rayN / NekoBox / Karing</div></div></a>
 </div>
-<div class="info-box" style="margin-top:14px">
+<div class="portal-info" style="margin-top:14px">
 <b>📱 Подсказка по клиентам:</b><br>
-• <b>Clash Meta / Mihomo</b> — скачайте Clash-конфиг<br>
-• <b>Sing-box</b> — скачайте Sing-box JSON<br>
-• <b>Hiddify</b> — скачайте Hiddify JSON или QR<br>
+• <b>Clash Meta / Mihomo</b> — Clash-конфиг (YAML)<br>
+• <b>Sing-box</b> — Sing-box JSON<br>
+• <b>Hiddify</b> — Hiddify JSON или QR<br>
 • <b>v2rayN / v2rayNG / Karing / NekoBox</b> — QR или VLESS-ссылка<br>
 • <b>Streisand / Shadowrocket</b> (iOS) — QR-код<br>
 • <b>AmneziaWG</b> — если есть AWG-пир, конфиг во вкладке «AmneziaWG»
@@ -1054,17 +1465,22 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 
 <div class="tab-panel" id="panel-ips">
 <div class="card"><div class="card-title">🛂 Мои IP-адреса</div>
-<div id="ips-detected" class="info-box" style="margin-bottom:12px">Определяем ваш текущий IP...</div>
+<div id="ips-detected"></div>
 <div id="ips-list" style="margin-bottom:12px"></div>
-<div class="actions">
-<input class="input" id="new-ip" placeholder="IP или CIDR (5.167.98.20 или /24)" style="flex:1;min-width:200px">
+<div class="portal-tile">
+<div class="portal-tile-head"><span class="portal-chip accent">+</span><div class="portal-tile-title">Добавить IP</div></div>
+<div class="portal-form">
+<input class="input" id="new-ip" placeholder="IP или CIDR (например 1.2.3.4 или /24)">
 <button class="btn" onclick="addIP()">Добавить</button>
-<button class="btn ghost" onclick="addAutoIP()">Текущий IP</button>
+<button class="btn ghost" onclick="addAutoIP()">📱 Текущий</button>
 </div>
-<div class="actions">
-<button class="btn ghost sm" onclick="replaceAllIPs()">🔄 Заменить все на текущий</button>
 </div>
-<div class="info-box" style="margin-top:12px">
+<div class="portal-danger">
+<b>⚠ Опасная зона — Заменить все IP на текущий</b><br>
+Эта операция удалит все ваши IP (кроме закреплённых) и добавит текущий.
+<div class="portal-btn-row"><button class="btn danger sm" onclick="replaceAllIPs()">🔄 Заменить все</button></div>
+</div>
+<div class="portal-info" style="margin-top:12px">
 <b>ℹ️ Для чего это нужно:</b><br>
 Если включена блокировка входящих из РФ — клиенты с российскими IP не смогут подключиться.
 Добавьте свой IP сюда, и вы получите доступ. IP берётся из TCP-подключения — его нельзя подделать.<br><br>
@@ -1075,8 +1491,27 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 
 <div class="tab-panel" id="panel-password">
 <div class="card"><div class="card-title">🔒 Смена пароля портала</div>
-<input class="input" id="new-pass" type="password" placeholder="Новый пароль (мин. 8 символов)" style="margin-bottom:12px">
-<button class="btn" onclick="changePassword()">Сменить пароль</button>
+<div class="portal-hero"><div class="portal-hero-top"><div>
+<div class="portal-hero-label">Безопасность</div>
+<div class="portal-hero-title">🔒 Смена пароля</div>
+<div class="portal-hero-sub">Минимум 8 символов. Не используйте пароль от VPN.</div>
+</div><span class="portal-proto-badge">🔒</span></div></div>
+<div class="portal-tile">
+<label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Новый пароль</label>
+<input class="input" id="new-pass" type="password" placeholder="Введите новый пароль" oninput="pwStrength(this.value)" style="width:100%">
+<div class="portal-progress" id="pw-bar"><div class="portal-progress-fill off" id="pw-fill" style="width:0%"></div></div>
+<div class="portal-meta"><span id="pw-label">—</span><span>мин. 8 символов</span></div>
+</div>
+<div class="portal-btn-row">
+<button class="btn" id="pw-submit" onclick="changePassword()">Сменить пароль</button>
+</div>
+<div class="portal-info" style="margin-top:12px">
+<b>🛡 Советы по безопасности:</b><br>
+• Используйте уникальный пароль (не от почты/соцсетей)<br>
+• Длина 12+ символов — оптимально<br>
+• Буквы разного регистра + цифры + спецсимволы<br>
+• Пароль хранится в виде bcrypt-хэша и не передаётся на сервер VPN
+</div>
 </div>
 </div>
 
@@ -1112,122 +1547,9 @@ history.replaceState(null,'','#'+t);
 function showToast(m,t='success'){{const e=document.getElementById('toast');e.textContent=m;e.className='toast show '+t;setTimeout(()=>e.className='toast',3000);}}
 async function api(p){{const r=await fetch(p,{{credentials:'same-origin'}});if(r.status===401){{location.href='/portal/';return null;}}if(!r.ok&&r.status!==400)return null;return r.json().catch(()=>null);}}
 
-async function loadLinks(){{
-const d=await api('/api/portal/links');if(!d||!d.links)return;
-const c=document.getElementById('links-container');
-c.style.display='flex';c.style.flexWrap='wrap';c.style.justifyContent='center';c.style.gap='16px';c.style.alignItems='flex-start';
-c.innerHTML=d.links.map((item,i)=>{{
-const qr='/api/portal/qr?data='+encodeURIComponent(item.link);
-return '<div style="flex:0 1 280px;min-width:240px;text-align:center;align-self:flex-start;display:flex;flex-direction:column;align-items:center">'+
-'<div style="font-size:12px;color:var(--muted);margin-bottom:6px;min-height:18px;display:flex;align-items:center;justify-content:center">'+esc(item.label)+' ('+esc(item.protocol)+')</div>'+
-'<div class="link-box" id="link-'+i+'" title="Нажмите чтобы скопировать" onclick="copyLink('+i+')">'+esc(item.link)+'</div>'+
-'<div class="qr-img"><img src="'+qr+'" alt="QR" loading="lazy"></div>'+
-'<button class="btn ghost sm" onclick="copyLink('+i+')">📋 Копировать</button></div>';
-}}).join('');
-}}
-function esc(s){{return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
-function copyLink(i){{const el=document.getElementById('link-'+i);navigator.clipboard.writeText(el.textContent).then(()=>showToast('Ссылка скопирована!')).catch(()=>showToast('Ошибка','error'));}}
-
-async function loadSubscription(){{
-let d;try{{d=await api('/api/portal/sub-info');}}catch(e){{return;}}
-if(!d||!d.service_enabled||!d.urls||!d.urls.base64)return;
-const card=document.getElementById('sub-card'),c=document.getElementById('sub-container');
-card.style.display='';document.getElementById('tab-subscription').style.display='';
-const qr='/api/portal/qr?data='+encodeURIComponent(d.urls.base64);
-const nodes=(d.multinode&&d.multinode.nodes)||[];
-let nr='';
-if(d.multinode&&d.multinode.enabled&&nodes.length){{nr='<div class="info-box" style="margin-top:12px"><b>🌐 Нод: '+nodes.length+'</b><br>'+nodes.map(n=>esc(n.name)+' ('+esc(n.kind)+')').join('<br>')+'</div>';}}
-c.innerHTML='<div class="link-box" id="sub-url-box">'+esc(d.urls.base64)+'</div>'+
-'<div class="qr-img"><img src="'+qr+'" alt="QR" loading="lazy"></div>'+
-'<div class="actions">'+
-'<button class="btn" onclick="copySub()">📋 Копировать URL</button>'+
-'<a class="btn ghost" href="/api/portal/sub-clash" download>mihomo YAML</a>'+
-'<a class="btn ghost" href="/api/portal/sub-singbox" download>sing-box JSON</a></div>'+nr;
-}}
-function copySub(){{const el=document.getElementById('sub-url-box');navigator.clipboard.writeText(el.textContent).then(()=>showToast('URL подписки скопирован!')).catch(()=>showToast('Ошибка','error'));}}
+{PORTAL_TABS_JS}
 
 {LOAD_TRAFFIC_JS}
-async function loadHealth(){{
-const d=await api('/api/portal/health');if(!d)return;
-const g=document.getElementById('sys-grid');
-const items=[
-['Домен',d.domain],['Порт',d.server_port],['Протокол',d.protocol_mode],
-['Xray',d.xray],['SSL дней',d.ssl_days_left>=0?d.ssl_days_left:'N/A'],
-['Uptime (ч)',d.uptime_hours],['Время',d.timestamp]
-];
-g.innerHTML=items.map(([k,v])=>'<div class="row"><span class="label">'+esc(k)+'</span><span class="val">'+esc(String(v))+'</span></div>').join('');
-}}
-
-async function loadIPs(){{
-const d=await api('/api/portal/ips');if(!d)return;
-const det=document.getElementById('ips-detected');
-if(d.detected_ip){{det.innerHTML='<b>Ваш текущий IP:</b> '+esc(d.detected_ip);}}
-else{{det.innerHTML='Ваш IP не определён (localhost/SSH tunnel).';}}
-const c=document.getElementById('ips-list');
-if(!d.ips||!d.ips.length){{c.innerHTML='<div class="info-box">IP-адресов нет. Добавьте свой IP ниже.</div>';return;}}
-c.innerHTML=d.ips.map(ip=>'<div class="row"><span class="val">'+esc(ip.ip)+(ip.pinned?' 📌':'')+'</span>'+
-'<span class="label">'+esc(ip.added_at||'')+'</span>'+
-'<span><button class="btn ghost sm" onclick="pinIP(\\''+esc(ip.ip)+'\\')">'+(ip.pinned?'Открепить':'Закрепить')+'</button></span></div>').join('');
-}}
-async function addIP(){{const v=document.getElementById('new-ip').value.trim();if(!v)return;
-const r=await fetch('/api/portal/ips',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ip:v}})}});
-const d=await r.json().catch(()=>({{}}));
-if(r.ok){{showToast('IP добавлен');loadIPs();document.getElementById('new-ip').value='';}}
-else showToast(d.error||'Ошибка','error');}}
-async function addAutoIP(){{const r=await fetch('/api/portal/ips',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ip:'auto'}})}});
-const d=await r.json().catch(()=>({{}}));
-if(r.ok){{showToast('IP добавлен');loadIPs();}}else showToast(d.error||'Ошибка','error');}}
-async function replaceAllIPs(){{if(!confirm('Заменить все IP на текущий?'))return;
-const r=await fetch('/api/portal/ips/replace-all',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ip:'auto'}})}});
-const d=await r.json().catch(()=>({{}}));
-if(r.ok){{showToast('IP заменены');loadIPs();}}else showToast(d.error||'Ошибка','error');}}
-async function pinIP(ip){{const r=await fetch('/api/portal/ips/pin',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ip:ip}})}});
-if(r.ok)loadIPs();else{{await fetch('/api/portal/ips/unpin',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ip:ip}})}});loadIPs();}}}}
-
-async function changePassword(){{const v=document.getElementById('new-pass').value.trim();if(v.length<8){{showToast('Минимум 8 символов','error');return;}}
-const r=await fetch('/portal/password',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{new_password:v}})}});
-const d=await r.json().catch(()=>({{}}));
-if(r.ok){{showToast('Пароль изменён');document.getElementById('new-pass').value='';}}else showToast(d.error||'Ошибка','error');}}
-
-async function loadSatellites(){{
-let d;try{{d=await api('/api/portal/sat-info');}}catch(e){{return;}}
-if(!d||!d.satellites||!d.satellites.length)return;
-document.getElementById('tab-satellites').style.display='';
-document.getElementById('sat-card').style.display='';
-const c=document.getElementById('sat-container');
-c.innerHTML=d.satellites.map(s=>'<div class="sat-item"><div><div class="sat-name">'+esc(s.satellite)+'</div><div class="sat-login">'+esc(s.login)+'</div></div>'+
-'<button class="btn ghost sm" onclick="unbindSat(\\''+esc(s.satellite)+'\\')">Отвязать</button></div>').join('')+
-'<div class="actions"><button class="btn ghost" onclick="suggestSat()">🔍 Авто-привязка</button></div>'+
-'<div id="sat-suggest"></div>';
-}}
-async function suggestSat(){{const r=await fetch('/api/portal/sat-suggest',{{credentials:'same-origin'}});const d=await r.json().catch(()=>({{}}));
-if(!d||!d.suggestions||!d.suggestions.length){{showToast('Предложений нет');return;}}
-document.getElementById('sat-suggest').innerHTML=d.suggestions.map(s=>
-'<div class="sat-item"><div><div class="sat-name">'+esc(s.satellite)+'</div><div class="sat-login">'+esc(s.login)+'</div></div>'+
-'<button class="btn sm" onclick="bindSat(\\''+esc(s.satellite)+'\\',\\''+esc(s.login)+'\\')">Привязать</button></div>').join('');
-}}
-async function bindSat(sat,login){{const r=await fetch('/api/portal/sat-bind',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{satellite:sat,login:login}})}});
-if(r.ok){{showToast('Привязано');loadSatellites();}}else{{const d=await r.json().catch(()=>({{}}));showToast(d.error||'Ошибка','error');}}}}
-async function unbindSat(sat){{const r=await fetch('/api/portal/sat-unbind',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{satellite:sat}})}});
-if(r.ok){{showToast('Отвязано');loadSatellites();}}else showToast('Ошибка','error');}}
-
-async function loadB4(){{
-let d;try{{d=await api('/api/portal/b4-info');}}catch(e){{return;}}
-if(!d){{return;}}
-document.getElementById('tab-b4').style.display='';
-document.getElementById('b4-card').style.display='';
-const c=document.getElementById('b4-container');
-c.innerHTML='<div class="row"><span class="label">Установлено</span>'+(d.installed?'<span class="badge on">да</span>':'<span class="badge off">нет</span>')+'</div>'+
-'<div class="row"><span class="label">Активно</span>'+(d.active?'<span class="badge on">да</span>':'<span class="badge off">нет</span>')+'</div>'+
-'<div class="row"><span class="label">Preset</span><span class="val">'+esc(d.preset_label||d.preset||'—')+'</span></div>';
-}}
-
-async function loadAWG(){{
-try{{const r=await fetch('/api/awg/portal-info',{{credentials:'same-origin'}});if(r.ok){{
-const d=await r.json();if(d&&d.enabled){{document.getElementById('tab-awg').style.display='';document.getElementById('awg-card').style.display='';
-document.getElementById('awg-container').innerHTML='<div class="row"><span class="label">Статус</span>'+(d.active?'<span class="badge on">активен</span>':'<span class="badge off">выключен</span>')+'</div>'+
-'<div class="actions"><a class="btn ghost" href="/api/awg/config?download=1" download>Скачать конфиг</a></div>';}}}}}}catch(e){{}}
-}}
 
 loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();
 </script>
