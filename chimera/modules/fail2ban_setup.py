@@ -73,6 +73,7 @@ def setup_fail2ban() -> None:
         enabled = true
         port = {SERVER_PORT}
         filter = xray-reality
+        backend = polling
         logpath = /var/log/xray/*.log
         maxretry = 5
         bantime = 3600
@@ -104,7 +105,11 @@ def setup_fail2ban() -> None:
 
     Path("/etc/fail2ban/filter.d/xray-reality.conf").write_text(textwrap.dedent("""\
         [Definition]
-        failregex = ^.*Failed authentication.*$|^.*Invalid user.*$|^.*TLS handshake failed.*$|^.*<HOST>.*blocked.*$
+        failregex = ^.*REALITY: processed invalid connection from <HOST>:
+                ^.*TLS.*handshake.*from <HOST>.*fail
+                ^.*<HOST>.*blocked.*$
+                ^.*authentication.*from <HOST>.*fail
+                ^.*<HOST>.*invalid.*hello
         ignoreregex =
     """))
 
