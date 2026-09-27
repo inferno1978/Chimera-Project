@@ -722,3 +722,415 @@ panelButton.addEventListener('click',async()=>{{const target=panelSelect.value;i
 document.querySelectorAll('[data-component-install]').forEach(button=>button.addEventListener('click',async()=>{{const component=button.dataset.componentInstall,target=document.getElementById(component+'Release').value;if(!confirm('Установить '+component+' '+target+'? При ошибке будет выполнен автоматический откат.'))return;button.disabled=true;try{{componentView(await request('component-install',{{component,target}},componentStatus))}}catch(e){{componentStatus.textContent=e.message;button.disabled=false}}}}));
 loadPanel();loadComponents();setInterval(()=>{{loadPanel();loadComponents()}},5000);
 </script>'''
+
+# ─── Portal UI functions (appended to wpp_ui.py) ────────────────────────────
+
+
+def portal_login_page(path, csrf, error=""):
+    """User Portal login page — WPP-styled, cookie-based auth."""
+    error_html = ""
+    if error:
+        error_html = (
+            f'<div class="portal-error">{esc(error)}</div>'
+        )
+    return f'''<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>User Portal — Вход</title>
+<style>
+:root{{--bg:#0a0e17;--surface:#131825;--raised:#1a2030;--input:#0d1119;
+--accent:#4d9eff;--on-accent:#fff;--text:#e2e8f0;--muted:#6b7689;
+--line:#1e2638;--tint:rgba(77,158,255,.08);--green:#4ade80;
+--yellow:#fbbf24;--red:#f87171;--radius:14px}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{min-height:100vh;display:grid;place-items:center;padding:24px;
+font:15px/1.6 -apple-system,system-ui,sans-serif;background:var(--bg);color:var(--text)}}
+.wrap{{width:min(420px,100%);padding:36px 32px;border:1px solid var(--line);
+border-radius:var(--radius);background:var(--surface)}}
+.logo{{display:grid;place-items:center;width:52px;height:52px;margin:0 auto 24px;
+border-radius:14px;background:var(--accent);color:var(--on-accent);font-size:24px;
+font-weight:700}}
+h1{{text-align:center;font-size:22px;font-weight:600;margin-bottom:6px}}
+.sub{{text-align:center;color:var(--muted);font-size:13px;margin-bottom:28px}}
+label{{display:block;font-size:12px;color:var(--muted);margin:0 0 6px 2px}}
+input{{width:100%;padding:12px 14px;border:1px solid var(--line);border-radius:10px;
+background:var(--input);color:var(--text);font:14px/1.5 inherit;outline:none;transition:border .15s}}
+input:focus{{border-color:var(--accent)}}
+.input-group{{margin-bottom:18px}}
+.btn{{display:block;width:100%;padding:13px;border:0;border-radius:10px;
+background:var(--accent);color:var(--on-accent);font:600 14px inherit;cursor:pointer;transition:opacity .15s}}
+.btn:hover{{opacity:.88}}
+.portal-error{{margin-bottom:18px;padding:11px 14px;border:1px solid var(--red);
+border-radius:10px;background:rgba(248,113,113,.08);color:var(--red);font-size:13px;text-align:center}}
+.foot{{margin-top:22px;text-align:center;font-size:11px;color:var(--muted)}}
+</style></head><body>
+<div class="wrap">
+<div class="logo">VPN</div>
+<h1>User Portal</h1>
+<p class="sub">Управление подключением, трафиком и IP-адресами</p>
+{error_html}
+<form method="post" action="/portal/login" autocomplete="on">
+<div class="input-group">
+<label for="portalLogin">Email или логин</label>
+<input id="portalLogin" name="login" type="text" required autocomplete="username" autofocus>
+</div>
+<div class="input-group">
+<label for="portalPass">Пароль</label>
+<input id="portalPass" name="password" type="password" required autocomplete="current-password">
+</div>
+<button class="btn" type="submit">Войти</button>
+</form>
+<div class="foot">Chimera · WPP Portal</div>
+</div>
+</body></html>'''
+
+
+def portal_page(user, path):
+    """Main User Portal page with 10 tabs — WPP-styled."""
+    email = esc(user.get("email", "user"))
+    name = esc(user.get("name", email))
+    initial = esc((user.get("name") or "U")[0].upper())
+    return f'''<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Portal — {name}</title>
+<style>
+:root{{--bg:#0a0e17;--surface:#131825;--raised:#1a2030;--input:#0d1119;
+--accent:#4d9eff;--on-accent:#fff;--text:#e2e8f0;--muted:#6b7689;
+--line:#1e2638;--tint:rgba(77,158,255,.08);--green:#4ade80;
+--yellow:#fbbf24;--red:#f87171;--radius:14px}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{min-height:100vh;font:14px/1.6 -apple-system,system-ui,sans-serif;
+background:var(--bg);color:var(--text)}}
+.container{{max-width:860px;margin:0 auto;padding:16px 20px 60px}}
+.sticky-top{{position:sticky;top:0;z-index:10;background:var(--bg);padding-bottom:12px}}
+.header{{display:flex;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid var(--line);margin-bottom:12px}}
+.avatar{{display:grid;place-items:center;width:44px;height:44px;flex:0 0 auto;
+border-radius:12px;background:var(--accent);color:var(--on-accent);font:700 18px inherit}}
+.header h1{{font-size:17px;font-weight:600}}
+.header .sub{{font-size:12px;color:var(--muted)}}
+.header .logout{{margin-left:auto;padding:8px 14px;border:1px solid var(--line);
+border-radius:8px;background:var(--surface);color:var(--muted);font:12px inherit;
+text-decoration:none;cursor:pointer;transition:all .15s}}
+.header .logout:hover{{border-color:var(--red);color:var(--red)}}
+.tabs{{display:flex;gap:4px;overflow-x:auto;padding-bottom:8px;scrollbar-width:thin}}
+.tab{{flex:0 0 auto;padding:8px 14px;border:1px solid transparent;border-radius:8px;
+background:transparent;color:var(--muted);font:500 12px inherit;white-space:nowrap;
+cursor:pointer;transition:all .15s}}
+.tab:hover{{color:var(--text)}}
+.tab.active{{background:var(--tint);border-color:var(--accent);color:var(--accent)}}
+.tab-panel{{display:none}}
+.tab-panel.active{{display:block}}
+.card{{padding:20px;border:1px solid var(--line);border-radius:var(--radius);
+background:var(--surface);margin-bottom:16px}}
+.card-title{{font-size:15px;font-weight:600;margin-bottom:14px;padding-bottom:10px;
+border-bottom:1px solid var(--line)}}
+.row{{display:flex;align-items:center;justify-content:space-between;gap:12px;
+padding:10px 0;border-bottom:1px solid var(--line)}}
+.row:last-child{{border:0}}
+.row .label{{color:var(--muted);font-size:12px}}
+.row .val{{font-weight:500}}
+.badge{{display:inline-block;padding:3px 8px;border-radius:6px;font:600 11px inherit;
+background:var(--tint);color:var(--accent)}}
+.badge.on{{background:rgba(74,222,128,.12);color:var(--green)}}
+.badge.off{{background:rgba(248,113,113,.12);color:var(--red)}}
+.input{{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
+background:var(--input);color:var(--text);font:13px inherit;outline:none}}
+.input:focus{{border-color:var(--accent)}}
+.btn{{display:inline-flex;align-items:center;gap:6px;padding:9px 16px;border:0;
+border-radius:8px;background:var(--accent);color:var(--on-accent);font:600 12px inherit;
+cursor:pointer;text-decoration:none;transition:opacity .15s}}
+.btn:hover{{opacity:.88}}
+.btn.ghost{{background:var(--raised);color:var(--text);border:1px solid var(--line)}}
+.btn.danger{{background:var(--red)}}
+.btn.sm{{padding:5px 10px;font-size:11px}}
+.link-box{{padding:10px 12px;border:1px solid var(--line);border-radius:8px;
+background:var(--input);font:11px/1.5 ui-monospace,monospace;word-break:break-all;
+margin:8px 0;cursor:pointer;transition:border .15s}}
+.link-box:hover{{border-color:var(--accent)}}
+.qr-img{{display:grid;place-items:center;margin:12px 0}}
+.qr-img img{{border-radius:8px;max-width:220px}}
+.dl-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}}
+.toast{{position:fixed;bottom:20px;right:20px;z-index:100;padding:12px 18px;
+border-radius:10px;background:var(--accent);color:var(--on-accent);font:600 12px inherit;
+opacity:0;transition:opacity .3s;pointer-events:none;max-width:380px}}
+.toast.show{{opacity:1}}
+.toast.error{{background:var(--red)}}
+.loading{{display:grid;place-items:center;padding:30px;color:var(--muted)}}
+.spinner{{width:18px;height:18px;border:2px solid var(--accent);border-top-color:transparent;
+border-radius:50%;animation:spin .8s linear infinite}}
+@keyframes spin{{to{{transform:rotate(360deg)}}}}
+.bar-track{{height:8px;border-radius:4px;background:var(--input);overflow:hidden;margin:8px 0}}
+.bar-fill{{height:100%;border-radius:4px;background:var(--accent);transition:width .3s}}
+.grid2{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
+.info-box{{padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--input);
+font-size:12px;color:var(--muted);line-height:1.7}}
+.info-box b{{color:var(--accent)}}
+.sat-item{{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}}
+.sat-item:last-child{{border:0}}
+.sat-name{{font-weight:500;font-size:13px}}
+.sat-login{{color:var(--muted);font:11px ui-monospace,monospace}}
+.actions{{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}}
+@media(max-width:600px){{.grid2{{grid-template-columns:1fr}}.dl-grid{{grid-template-columns:1fr}}}}
+</style></head><body>
+<div class="container">
+<div class="sticky-top">
+<div class="header">
+<div class="avatar">{initial}</div>
+<div style="flex:1;min-width:0">
+<h1>{name}</h1>
+<div class="sub">{email}</div>
+</div>
+<a class="logout" href="/portal/logout">Выход</a>
+</div>
+<div class="tabs" id="tabs">
+<button class="tab active" data-tab="connect" onclick="switchTab('connect')">🔗 Подключение</button>
+<button class="tab" data-tab="subscription" id="tab-subscription" style="display:none" onclick="switchTab('subscription')">📚 Подписка</button>
+<button class="tab" data-tab="configs" onclick="switchTab('configs')">📥 Конфиги</button>
+<button class="tab" data-tab="traffic" onclick="switchTab('traffic')">📊 Трафик</button>
+<button class="tab" data-tab="ips" onclick="switchTab('ips')">🛂 IP</button>
+<button class="tab" data-tab="password" onclick="switchTab('password')">🔒 Пароль</button>
+<button class="tab" data-tab="satellites" id="tab-satellites" style="display:none" onclick="switchTab('satellites')">🛰 Сателлиты</button>
+<button class="tab" data-tab="b4" id="tab-b4" style="display:none" onclick="switchTab('b4')">📺 YouTube DPI</button>
+<button class="tab" data-tab="server" onclick="switchTab('server')">🖥 Сервер</button>
+<button class="tab" data-tab="awg" id="tab-awg" style="display:none" onclick="switchTab('awg')">🛡 AmneziaWG</button>
+</div>
+</div>
+
+<div class="tab-panel active" id="panel-connect">
+<div class="card"><div class="card-title">🔗 Подключение</div>
+<div id="links-container"><div class="loading"><div class="spinner"></div></div></div></div>
+</div>
+
+<div class="tab-panel" id="panel-subscription">
+<div class="card" id="sub-card"><div class="card-title">📚 Моя подписка</div>
+<div id="sub-container"><div class="loading"><div class="spinner"></div></div></div></div>
+</div>
+
+<div class="tab-panel" id="panel-configs">
+<div class="card"><div class="card-title">📥 Скачать конфиги</div>
+<div class="dl-grid">
+<a class="btn ghost" href="/api/portal/clash" download>Clash Meta</a>
+<a class="btn ghost" href="/api/portal/singbox" download>Sing-box</a>
+<a class="btn ghost" href="/api/portal/hiddify" download>Hiddify</a>
+<a class="btn ghost" href="/api/portal/vless-link" download>VLESS-ссылка</a>
+</div>
+<div class="info-box" style="margin-top:14px">
+<b>📱 Подсказка по клиентам:</b><br>
+• <b>Clash Meta / Mihomo</b> — скачайте Clash-конфиг<br>
+• <b>Sing-box</b> — скачайте Sing-box JSON<br>
+• <b>Hiddify</b> — скачайте Hiddify JSON или QR<br>
+• <b>v2rayN / v2rayNG / Karing / NekoBox</b> — QR или VLESS-ссылка<br>
+• <b>Streisand / Shadowrocket</b> (iOS) — QR-код<br>
+• <b>AmneziaWG</b> — если есть AWG-пир, конфиг во вкладке «AmneziaWG»
+</div></div>
+</div>
+
+<div class="tab-panel" id="panel-traffic">
+<div class="card"><div class="card-title">📊 Трафик</div>
+<div id="traffic-container"><div class="loading"><div class="spinner"></div></div></div></div>
+<div class="card" id="ttl-card" style="display:none"><div class="card-title">⏰ Срок действия</div>
+<div id="ttl-container"></div></div>
+</div>
+
+<div class="tab-panel" id="panel-ips">
+<div class="card"><div class="card-title">🛂 Мои IP-адреса</div>
+<div id="ips-detected" class="info-box" style="margin-bottom:12px">Определяем ваш текущий IP...</div>
+<div id="ips-list" style="margin-bottom:12px"></div>
+<div class="actions">
+<input class="input" id="new-ip" placeholder="IP или CIDR (5.167.98.20 или /24)" style="flex:1;min-width:200px">
+<button class="btn" onclick="addIP()">Добавить</button>
+<button class="btn ghost" onclick="addAutoIP()">Текущий IP</button>
+</div>
+<div class="actions">
+<button class="btn ghost sm" onclick="replaceAllIPs()">🔄 Заменить все на текущий</button>
+</div>
+<div class="info-box" style="margin-top:12px">
+<b>ℹ️ Для чего это нужно:</b><br>
+Если включена блокировка входящих из РФ — клиенты с российскими IP не смогут подключиться.
+Добавьте свой IP сюда, и вы получите доступ. IP берётся из TCP-подключения — его нельзя подделать.<br><br>
+<b>📌 Закрепление:</b> Закреплённые IP (📌) не удаляются при очистке старых адресов.<br>
+<b>🔄 Заменить все:</b> Удаляет все ваши IP (кроме закреплённых) и добавляет текущий.
+</div></div>
+</div>
+
+<div class="tab-panel" id="panel-password">
+<div class="card"><div class="card-title">🔒 Смена пароля портала</div>
+<input class="input" id="new-pass" type="password" placeholder="Новый пароль (мин. 8 символов)" style="margin-bottom:12px">
+<button class="btn" onclick="changePassword()">Сменить пароль</button>
+</div>
+</div>
+
+<div class="tab-panel" id="panel-satellites">
+<div class="card" id="sat-card" style="display:none"><div class="card-title">🛰 Сателлиты</div>
+<div id="sat-container"><div class="loading"><div class="spinner"></div></div></div></div>
+</div>
+
+<div class="tab-panel" id="panel-b4">
+<div class="card" id="b4-card" style="display:none"><div class="card-title">📺 YouTube DPI Bypass</div>
+<div id="b4-container"><div class="loading"><div class="spinner"></div></div></div></div>
+</div>
+
+<div class="tab-panel" id="panel-server">
+<div class="card"><div class="card-title">🖥 Состояние сервера</div>
+<div class="grid2" id="sys-grid"><div class="loading"><div class="spinner"></div></div></div></div>
+</div>
+
+<div class="tab-panel" id="panel-awg">
+<div class="card" id="awg-card" style="display:none"><div class="card-title">🛡 AmneziaWG</div>
+<div id="awg-container"><div class="loading"><div class="spinner"></div></div></div></div>
+</div>
+
+</div>
+<div class="toast" id="toast"></div>
+<script>
+function switchTab(t){{
+document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===t));
+document.querySelectorAll('.tab-panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+t));
+history.replaceState(null,'','#'+t);
+}}
+(function(){{const h=(location.hash||'#connect').slice(1);if(document.getElementById('panel-'+h))switchTab(h);}})();
+function showToast(m,t='success'){{const e=document.getElementById('toast');e.textContent=m;e.className='toast show '+t;setTimeout(()=>e.className='toast',3000);}}
+async function api(p){{const r=await fetch(p,{{credentials:'same-origin'}});if(r.status===401){{location.href='/portal/';return null;}}if(!r.ok&&r.status!==400)return null;return r.json().catch(()=>null);}}
+
+async function loadLinks(){{
+const d=await api('/api/portal/links');if(!d||!d.links)return;
+const c=document.getElementById('links-container');
+c.style.display='flex';c.style.flexWrap='wrap';c.style.justifyContent='center';c.style.gap='16px';
+c.innerHTML=d.links.map((item,i)=>{{
+const qr='/api/portal/qr?data='+encodeURIComponent(item.link);
+return '<div style="flex:0 1 280px;min-width:240px;text-align:center">'+
+'<div style="font-size:12px;color:var(--muted);margin-bottom:6px">'+esc(item.label)+' ('+esc(item.protocol)+')</div>'+
+'<div class="link-box" id="link-'+i+'">'+esc(item.link)+'</div>'+
+'<div class="qr-img"><img src="'+qr+'" alt="QR" loading="lazy"></div>'+
+'<button class="btn ghost sm" onclick="copyLink('+i+')">📋 Копировать</button></div>';
+}}).join('');
+}}
+function esc(s){{return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
+function copyLink(i){{const el=document.getElementById('link-'+i);navigator.clipboard.writeText(el.textContent).then(()=>showToast('Ссылка скопирована!')).catch(()=>showToast('Ошибка','error'));}}
+
+async function loadSubscription(){{
+let d;try{{d=await api('/api/portal/sub-info');}}catch(e){{return;}}
+if(!d||!d.service_enabled||!d.urls||!d.urls.base64)return;
+const card=document.getElementById('sub-card'),c=document.getElementById('sub-container');
+card.style.display='';document.getElementById('tab-subscription').style.display='';
+const qr='/api/portal/qr?data='+encodeURIComponent(d.urls.base64);
+const nodes=(d.multinode&&d.multinode.nodes)||[];
+let nr='';
+if(d.multinode&&d.multinode.enabled&&nodes.length){{nr='<div class="info-box" style="margin-top:12px"><b>🌐 Нод: '+nodes.length+'</b><br>'+nodes.map(n=>esc(n.name)+' ('+esc(n.kind)+')').join('<br>')+'</div>';}}
+c.innerHTML='<div class="link-box" id="sub-url-box">'+esc(d.urls.base64)+'</div>'+
+'<div class="qr-img"><img src="'+qr+'" alt="QR" loading="lazy"></div>'+
+'<div class="actions">'+
+'<button class="btn" onclick="copySub()">📋 Копировать URL</button>'+
+'<a class="btn ghost" href="/api/portal/sub-clash" download>mihomo YAML</a>'+
+'<a class="btn ghost" href="/api/portal/sub-singbox" download>sing-box JSON</a></div>'+nr;
+}}
+function copySub(){{const el=document.getElementById('sub-url-box');navigator.clipboard.writeText(el.textContent).then(()=>showToast('URL подписки скопирован!')).catch(()=>showToast('Ошибка','error'));}}
+
+async function loadTraffic(){{
+const d=await api('/api/portal/traffic');if(!d)return;
+const c=document.getElementById('traffic-container');
+const gb=d.total_gb||0,bytes=d.total_bytes||0;
+if(d.limit_gb&&d.limit_gb>0){{
+const pct=Math.min(100,(gb/d.limit_gb)*100);
+c.innerHTML='<div class="row"><span class="label">Использовано</span><span class="val">'+gb+' ГБ / '+d.limit_gb+' ГБ</span></div>'+
+'<div class="bar-track"><div class="bar-fill" style="width:'+pct+'%"></div></div>'+
+'<div class="row"><span class="label">Всего байт</span><span class="val">'+bytes+'</span></div>';
+}}else{{
+c.innerHTML='<div class="row"><span class="label">Использовано</span><span class="val">'+gb+' ГБ</span></div>'+
+'<div class="row"><span class="label">Всего байт</span><span class="val">'+bytes+'</span></div>';
+}}
+const tc=document.getElementById('ttl-card');
+if(d.has_ttl){{tc.style.display='';document.getElementById('ttl-container').innerHTML=
+'<div class="row"><span class="label">Срок действия</span><span class="val">'+esc(d.expires_str||d.expires_at||'')+'</span></div>'+
+'<div class="row"><span class="label">Статус</span>'+(d.expired?'<span class="badge off">истёк</span>':'<span class="badge on">активен</span>')+'</div>'+
+'<div class="row"><span class="label">Дней</span><span class="val">'+(d.days||0)+'</span></div>';}}
+}}
+
+async function loadHealth(){{
+const d=await api('/api/portal/health');if(!d)return;
+const g=document.getElementById('sys-grid');
+const items=[
+['Домен',d.domain],['Порт',d.server_port],['Протокол',d.protocol_mode],
+['Xray',d.xray],['SSL дней',d.ssl_days_left>=0?d.ssl_days_left:'N/A'],
+['Uptime (ч)',d.uptime_hours],['Время',d.timestamp]
+];
+g.innerHTML=items.map(([k,v])=>'<div class="row"><span class="label">'+esc(k)+'</span><span class="val">'+esc(String(v))+'</span></div>').join('');
+}}
+
+async function loadIPs(){{
+const d=await api('/api/portal/ips');if(!d)return;
+const det=document.getElementById('ips-detected');
+if(d.detected_ip){{det.innerHTML='<b>Ваш текущий IP:</b> '+esc(d.detected_ip);}}
+else{{det.innerHTML='Ваш IP не определён (localhost/SSH tunnel).';}}
+const c=document.getElementById('ips-list');
+if(!d.ips||!d.ips.length){{c.innerHTML='<div class="info-box">IP-адресов нет. Добавьте свой IP ниже.</div>';return;}}
+c.innerHTML=d.ips.map(ip=>'<div class="row"><span class="val">'+esc(ip.ip)+(ip.pinned?' 📌':'')+'</span>'+
+'<span class="label">'+esc(ip.added_at||'')+'</span>'+
+'<span><button class="btn ghost sm" onclick="pinIP(\\''+esc(ip.ip)+'\\')">'+(ip.pinned?'Открепить':'Закрепить')+'</button></span></div>').join('');
+}}
+async function addIP(){{const v=document.getElementById('new-ip').value.trim();if(!v)return;
+const r=await fetch('/api/portal/ips',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ip:v}})}});
+const d=await r.json().catch(()=>({{}}));
+if(r.ok){{showToast('IP добавлен');loadIPs();document.getElementById('new-ip').value='';}}
+else showToast(d.error||'Ошибка','error');}}
+async function addAutoIP(){{const r=await fetch('/api/portal/ips',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ip:'auto'}})}});
+const d=await r.json().catch(()=>({{}}));
+if(r.ok){{showToast('IP добавлен');loadIPs();}}else showToast(d.error||'Ошибка','error');}}
+async function replaceAllIPs(){{if(!confirm('Заменить все IP на текущий?'))return;
+const r=await fetch('/api/portal/ips/replace-all',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ip:'auto'}})}});
+const d=await r.json().catch(()=>({{}}));
+if(r.ok){{showToast('IP заменены');loadIPs();}}else showToast(d.error||'Ошибка','error');}}
+async function pinIP(ip){{const r=await fetch('/api/portal/ips/pin',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ip:ip}})}});
+if(r.ok)loadIPs();else{{await fetch('/api/portal/ips/unpin',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{ip:ip}})}});loadIPs();}}}}
+
+async function changePassword(){{const v=document.getElementById('new-pass').value.trim();if(v.length<8){{showToast('Минимум 8 символов','error');return;}}
+const r=await fetch('/portal/password',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{new_password:v}})}});
+const d=await r.json().catch(()=>({{}}));
+if(r.ok){{showToast('Пароль изменён');document.getElementById('new-pass').value='';}}else showToast(d.error||'Ошибка','error');}}
+
+async function loadSatellites(){{
+let d;try{{d=await api('/api/portal/sat-info');}}catch(e){{return;}}
+if(!d||!d.satellites||!d.satellites.length)return;
+document.getElementById('tab-satellites').style.display='';
+document.getElementById('sat-card').style.display='';
+const c=document.getElementById('sat-container');
+c.innerHTML=d.satellites.map(s=>'<div class="sat-item"><div><div class="sat-name">'+esc(s.satellite)+'</div><div class="sat-login">'+esc(s.login)+'</div></div>'+
+'<button class="btn ghost sm" onclick="unbindSat(\\''+esc(s.satellite)+'\\')">Отвязать</button></div>').join('')+
+'<div class="actions"><button class="btn ghost" onclick="suggestSat()">🔍 Авто-привязка</button></div>'+
+'<div id="sat-suggest"></div>';
+}}
+async function suggestSat(){{const r=await fetch('/api/portal/sat-suggest',{{credentials:'same-origin'}});const d=await r.json().catch(()=>({{}}));
+if(!d||!d.suggestions||!d.suggestions.length){{showToast('Предложений нет');return;}}
+document.getElementById('sat-suggest').innerHTML=d.suggestions.map(s=>
+'<div class="sat-item"><div><div class="sat-name">'+esc(s.satellite)+'</div><div class="sat-login">'+esc(s.login)+'</div></div>'+
+'<button class="btn sm" onclick="bindSat(\\''+esc(s.satellite)+'\\',\\''+esc(s.login)+'\\')">Привязать</button></div>').join('');
+}}
+async function bindSat(sat,login){{const r=await fetch('/api/portal/sat-bind',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{satellite:sat,login:login}})}});
+if(r.ok){{showToast('Привязано');loadSatellites();}}else{{const d=await r.json().catch(()=>({{}}));showToast(d.error||'Ошибка','error');}}}}
+async function unbindSat(sat){{const r=await fetch('/api/portal/sat-unbind',{{method:'POST',credentials:'same-origin',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{satellite:sat}})}});
+if(r.ok){{showToast('Отвязано');loadSatellites();}}else showToast('Ошибка','error');}}
+
+async function loadB4(){{
+let d;try{{d=await api('/api/portal/b4-info');}}catch(e){{return;}}
+if(!d){{return;}}
+document.getElementById('tab-b4').style.display='';
+document.getElementById('b4-card').style.display='';
+const c=document.getElementById('b4-container');
+c.innerHTML='<div class="row"><span class="label">Установлено</span>'+(d.installed?'<span class="badge on">да</span>':'<span class="badge off">нет</span>')+'</div>'+
+'<div class="row"><span class="label">Активно</span>'+(d.active?'<span class="badge on">да</span>':'<span class="badge off">нет</span>')+'</div>'+
+'<div class="row"><span class="label">Preset</span><span class="val">'+esc(d.preset_label||d.preset||'—')+'</span></div>';
+}}
+
+async function loadAWG(){{
+try{{const r=await fetch('/api/awg/portal-info',{{credentials:'same-origin'}});if(r.ok){{
+const d=await r.json();if(d&&d.enabled){{document.getElementById('tab-awg').style.display='';document.getElementById('awg-card').style.display='';
+document.getElementById('awg-container').innerHTML='<div class="row"><span class="label">Статус</span>'+(d.active?'<span class="badge on">активен</span>':'<span class="badge off">выключен</span>')+'</div>'+
+'<div class="actions"><a class="btn ghost" href="/api/awg/config?download=1" download>Скачать конфиг</a></div>';}}}}}}catch(e){{}}
+}}
+
+loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();
+</script>
+</body></html>'''
