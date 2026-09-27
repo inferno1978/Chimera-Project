@@ -848,7 +848,7 @@ cursor:pointer;text-decoration:none;transition:opacity .15s}}
 .btn.sm{{padding:5px 10px;font-size:11px}}
 .link-box{{padding:10px 12px;border:1px solid var(--line);border-radius:8px;
 background:var(--input);font:11px/1.5 ui-monospace,monospace;word-break:break-all;
-margin:8px 0;cursor:pointer;transition:border .15s}}
+margin:8px 0;cursor:pointer;transition:border .15s;min-height:48px;display:flex;align-items:center;justify-content:center;padding:6px 8px}}
 .link-box:hover{{border-color:var(--accent)}}
 .qr-img{{display:grid;place-items:center;margin:12px 0}}
 .qr-img img{{border-radius:8px;max-width:220px}}
