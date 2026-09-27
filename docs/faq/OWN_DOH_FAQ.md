@@ -13,28 +13,28 @@ DoH-сервера пользователя (подняты на его VPS, п�
 
 | Сет | DoH (роль) | strict | Эскалация |
 |---|---|---|---|
-| Youtube-Fat-v1 | `cdn.example:30443` (основной) | true | → Youtube-Heavy-v1 |
-| Youtube-Heavy-v1 | `panel.example:30443` (резерв) | true | — |
-| YT-Nocookie-In | `cdn-vps` (основной) | true | → YT-Nocookie-Heavy-v1 |
-| YT-Nocookie-Heavy-v1 | `vpn-node` (резерв) | true | — |
-| GitHub-Fat-v1 | `cdn-vps` (основной) | true | → GitHub-Heavy-v1 |
-| GitHub-Heavy-v1 | `vpn-node` (резерв) | true | — |
-| XHamster-Smooth-v5 | `cdn-vps` (основной) | true | → XHamster-Heavy-v1 |
-| XHamster-Heavy-v1 | `vpn-node` (резерв) | true | — |
-| XVideos-v1 | `cdn-vps` (основной) | true | → XVideos-Heavy-v1 |
-| XVideos-Heavy-v1 | `vpn-node` (резерв) | true | — |
-| Meta-Universal-v1 | `cdn-vps` (основной) | true | → Meta-Heavy-v1 |
-| Meta-Heavy-v1 | `vpn-node` (резерв) | true | — |
-| NNM-Fat-v1 | `cdn-vps` (основной) | true | → NNM-Heavy-v1 |
-| NNM-Heavy-v1 | `vpn-node` (резерв) | true | — |
+| Youtube-Fat-v1 | `<домен2>:30443` (основной) | true | → Youtube-Heavy-v1 |
+| Youtube-Heavy-v1 | `<домен3>:30443` (резерв) | true | — |
+| YT-Nocookie-In | `<домен2>` (основной) | true | → YT-Nocookie-Heavy-v1 |
+| YT-Nocookie-Heavy-v1 | `<домен3>` (резерв) | true | — |
+| GitHub-Fat-v1 | `<домен2>` (основной) | true | → GitHub-Heavy-v1 |
+| GitHub-Heavy-v1 | `<домен3>` (резерв) | true | — |
+| XHamster-Smooth-v5 | `<домен2>` (основной) | true | → XHamster-Heavy-v1 |
+| XHamster-Heavy-v1 | `<домен3>` (резерв) | true | — |
+| XVideos-v1 | `<домен2>` (основной) | true | → XVideos-Heavy-v1 |
+| XVideos-Heavy-v1 | `<домен3>` (резерв) | true | — |
+| Meta-Universal-v1 | `<домен2>` (основной) | true | → Meta-Heavy-v1 |
+| Meta-Heavy-v1 | `<домен3>` (резерв) | true | — |
+| NNM-Fat-v1 | `<домен2>` (основной) | true | → NNM-Heavy-v1 |
+| NNM-Heavy-v1 | `<домен3>` (резерв) | true | — |
 
 Все 7 DNS-сетов с парами (первые 3 пары — YouTube/GitHub/NNM —
 были с самого начала, 4 доклеены 6 сентября вечером). Не тронуты
 (DNS-редирект изначально выключен, наружу из них ничего не ходит):
 `Telegram-WS-Bridge`, `YT-Wide-Legacy`, `speedtest`.
 
-Серверы: `cdn.example` (203.0.113.103, серт Let's Encrypt
-до 30.10.2026) — основной; `panel.example` (203.0.113.102, серт
+Серверы: `<домен2>` (<server2-ip>, серт Let's Encrypt
+до 30.10.2026) — основной; `<домен3>` (<server3-ip>, серт
 до 27.11.2026) — резерв. Оба: RFC 8484 (POST с фолбэком на GET),
 TLS 1.3, ~1 с отклик из РФ.
 
@@ -98,7 +98,7 @@ DNS-серверу клиента (plain 53, наружу). При `strict=true`
 ## 5. Проверка после миграции (живые улики)
 
 - `recent_connections contains=dns-doh`: до свапа
-  `dns-doh->1.1.1.1`, после — `dns-doh->cdn.example:30443`
+  `dns-doh->1.1.1.1`, после — `dns-doh-><домен2>:30443`
   (nnmclub.to, github.com, youtube.com; включая запросы самого
   роутера — output-hook перехватывает и dnsmasq-плечо).
 - `recent_connections contains=servfail` — пусто (0 DNS-ошибок).
@@ -116,11 +116,11 @@ DNS-серверу клиента (plain 53, наружу). При `strict=true`
 роутер онлайн, b4 жив (uptime, ps). Причина оказалась двухслойной:
 
 1. **Правило INPUT жило только в runtime.** `iptables -I INPUT
-   -p tcp --dport 7000 -s 47.57.0.0/16` из SSH-сессии не переживает
+   -p tcp --dport 7000 -s <ip>/16` из SSH-сессии не переживает
    пересборку firewall (WAN-флап, рестарт сетевых служб) — на ASUS
    с Merlin ruleset пересобирается без ребута. Диагноз: `iptables -C
    ... && echo ALIVE || echo GONE`.
-2. **Egress песочницы ротируется.** 47.57.0.0/16 → 8.212.0.0/16 за
+2. **Egress песочницы ротируется.** <ip>/16 → <ip>/16 за
    сутки — source-белое правило молча перестало матчить.
 
 Лечение (персистентно, Merlin):
@@ -144,12 +144,12 @@ Bearer, веб-морда — логин/пароль).
 - На двух VPS, где b4 крутится рядом с DoH: прописать по той же
   схеме с приоритетом локального сервера (co-located — суб-мс) и
   кросс-VPS резервом. Этап 1 сделан 06.09 на ОБОИХ инстансах —
-  cdn-vps и vpn-node (Heavy-схема с эскалацией, DNS не
+  <домен2> и <домен3> (Heavy-схема с эскалацией, DNS не
   тронут — см. §8); остался сам этап DNS (по команде юзера).
 
-## 8. VPS-инстансы: Heavy-схема без DNS (этап 1 — cdn-vps и vpn-node)
+## 8. VPS-инстансы: Heavy-схема без DNS (этап 1 — <домен2> и <домен3>)
 
-На VPS `cdn.example` b4 (v1.81.0, доступ через MCP с
+На VPS `<домен2>` b4 (v1.81.0, доступ через MCP с
 Bearer) маршрутит собственный исходящий трафик сетами — и его
 egress тоже под цензурой (baseline до youtube.com с VPS =
 TLS_DROP). 06.09 на нём выстроена та же схема «Fat + Heavy +
@@ -180,15 +180,15 @@ xhamster.com 34.5 (Fat). Артефакты:
 
 **Пост-мортем (08.09): старая «улика эскалации» была миной.**
 Ранее здесь стояла «главная улика»: CDN-стриминг
-`fi.fleet-b.example` через XHamster-Heavy (40/40) якобы
+`<exit-fi>` через XHamster-Heavy (40/40) якобы
 доказывал работу эскалации. Ложь: матчи были глобальным
 перехватом порта. duplicate(XHamster-Smooth) наследовал
 tcp.dport_filter='443', «вычистка targets» удаляла только
 sni/ip/geosite/geoip — порт оставался. Сет с dport_filter и
 ПУСТЫМИ targets в b4 = global port-only (sni.MatchTCPPort),
 ловит ВЕСЬ TCP/443. На prodcdn 100/100 исходящих коннектов
-сервера (Telegram-DC 149.154.x, fleet, DoH) получали
-heavy-десинк; на vpn-node — 35/100 с retry-loop в
+сервера (Telegram-DC 149.154.x, <exit>, DoH) получали
+heavy-десинк; на <домен3> — 35/100 с retry-loop в
 1.1.1.1:443 каждые 200-400 мс (ломающиеся хендшейки).
 Фикс 08.09: dport_filter '' на роутере и обеих VPS (live);
 после него SNI-less матчи исчезли в ноль => «IP-хинтов»
@@ -198,7 +198,7 @@ heavy-десинк; на vpn-node — 35/100 с retry-loop в
 в первую очередь подозрение на port-only перехват, эскалационный
 IP-хинт — последняя гипотеза, не первая.
 
-**vpn-node (вторая нода, 06.09 поздним вечером):** юзер принёс
+**<домен3> (вторая нода, 06.09 поздним вечером):** юзер принёс
 MCP-эндпоинт — сделано «то же самое». Было 5 сетов (пара только у
 YouTube); собраны Meta-Heavy / XHamster-Heavy / YT-Wide-Heavy,
 эскалационные пороги на всех Fat, верификация 53/53, DNS не тронут
@@ -217,5 +217,5 @@ XHamster-Heavy-v1, 21/100 свежих коннектов — эта часть 
 Артефакты: `set-artifacts/vps-vpn/*.json`.
 
 Этап 2 (по команде): прописать DoH по co-located схеме
-(prodcdn-сеты → свой DoH первично + vpn-node-резерв; vpn-сеты →
-свой + cdn-vps-резерв) — на обеих нодах этап 1 завершён.
+(prodcdn-сеты → свой DoH первично + <домен3>-резерв; vpn-сеты →
+свой + <домен2>-резерв) — на обеих нодах этап 1 завершён.

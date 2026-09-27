@@ -452,7 +452,7 @@ Discovery здесь использовался только как диагно
 
 - **MTProto** — клиентский протокол Telegram. **DC** — его дата-центры:
   DC1–5 (IP-префиксы из гео-базы: `149.154.160.0/20`, `91.108.0.0/16`,
-  `95.161.64.0/20` и др.) и DC203 — медиа-DC, делящий слот DC2.
+  `<ip>/20` и др.) и DC203 — медиа-DC, делящий слот DC2.
 - **obfuscated2** — обфускация MTProto-потока: клиент шлёт 64-байтный
   init-пакет, ключ выводится из секрета через HMAC, дальше поток
   шифруется в CTR-режиме. Для цензора это выглядит случайным байтом.
@@ -741,7 +741,7 @@ HTTPS-WebView для TG Desktop 7.1.1+ (`https://t.me/webproxy?server=…`),
 Generate Secret; домен в конце включает fake-TLS):
 
 ```
-tg://proxy?server=192.0.2.10&port=3128&secret=<SECRET-hex>746f726167652e676f6f676c65617069732e636f6d
+tg://proxy?server=<ip>&port=3128&secret=<SECRET-hex>746f726167652e676f6f676c65617069732e636f6d
 ```
 
 Три инстанса прокси — три разные точки входа с независимыми путями:
@@ -1128,7 +1128,7 @@ Enable IPv4 inbound firewall rules = Yes** → Add rule:
 
 | Поле | Значение |
 |---|---|
-| Source IP | IP вашего ИИ (например `198.51.100.50`) — НЕ «Any» |
+| Source IP | IP вашего ИИ (например `<ip>`) — НЕ «Any» |
 | Port Range | `7000` (порт web-сервера b4) |
 | Protocol | TCP |
 
@@ -1136,7 +1136,7 @@ Enable IPv4 inbound firewall rules = Yes** → Add rule:
 
 ```bash
 # на роутере по SSH; /16 — если у песочницы ИИ гуляет IP внутри подсети
-iptables -I INPUT -p tcp --dport 7000 -s 198.51.100.0/24 -j ACCEPT
+iptables -I INPUT -p tcp --dport 7000 -s <ip>/24 -j ACCEPT
 ```
 
 > **Всегда указывайте Source IP.** Правило без `-s` (или «Any» в GUI)
@@ -1155,7 +1155,7 @@ SSH-правило выше — runtime, живёт до перезагрузк�
 ```bash
 cat >> /jffs/scripts/firewall-start <<'EOF'
 # b4 MCP access for AI agent (insert AFTER firewall setup)
-iptables -I INPUT -p tcp --dport 7000 -s 198.51.100.0/24 -j ACCEPT
+iptables -I INPUT -p tcp --dport 7000 -s <ip>/24 -j ACCEPT
 EOF
 chmod +x /jffs/scripts/firewall-start
 ```
@@ -1173,7 +1173,7 @@ uci set firewall.@rule[-1].name='allow-b4-mcp-ai'
 uci set firewall.@rule[-1].src='wan'
 uci set firewall.@rule[-1].dest_port='7000'
 uci set firewall.@rule[-1].proto='tcp'
-uci set firewall.@rule[-1].src_ip='198.51.100.50'
+uci set firewall.@rule[-1].src_ip='<ip>'
 uci set firewall.@rule[-1].target='ACCEPT'
 uci commit firewall && /etc/init.d/firewall restart
 ```
@@ -1729,12 +1729,12 @@ curl -sS -m 10 -X POST "http://192.168.1.1:7000/api/mcp" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"check","version":"1.0"}}}'
 
 ### firewall роутера (Merlin, SSH): открыть порт b4 только для IP ИИ
-iptables -I INPUT -p tcp --dport 7000 -s 198.51.100.0/24 -j ACCEPT
+iptables -I INPUT -p tcp --dport 7000 -s <ip>/24 -j ACCEPT
 # персистенция: /jffs/scripts/firewall-start (+x, JFFS custom scripts = On)
 
 ### OpenWrt
 uci add firewall rule; uci set firewall.@rule[-1].src='wan' \
-  && uci set firewall.@rule[-1].src_ip='198.51.100.50' \
+  && uci set firewall.@rule[-1].src_ip='<ip>' \
   && uci set firewall.@rule[-1].dest_port='7000' \
   && uci set firewall.@rule[-1].proto='tcp' \
   && uci set firewall.@rule[-1].target='ACCEPT' \
