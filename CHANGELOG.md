@@ -155,7 +155,7 @@ Portal session:   cookie "psid" (HMAC-signed с префиксом "portal:", Pa
 
 ### Деплой
 
-Только на server 1 (`<server-ip>`, домен `cdn2.example`).
+Только на server 1 (`<server-ip>`, домен `<домен>`).
 `wpp-web.service` перезапущен, все endpoints протестированы.
 ---
 
@@ -327,7 +327,7 @@ knock_count слишком высокий) — нужно включать ос�
 
 **Дополнительный контекст:** на всех 3 серверах **cascade mode B**
 (`state.json install_mode=B`, `chain_nodes=4`). Это значит primary
-сервер (cdn2.example) держит всех клиентов (UUID, REALITY
+сервер (<домен>) держит всех клиентов (UUID, REALITY
 keys, etc), а server 2/3 — просто **cascade exit-ноды** (relay для
 смены exit-IP через каскад). У server 2/3 **нет своих клиентов** —
 `/config` там вернул бы пустоту.
@@ -2060,7 +2060,7 @@ passed; `compileall chimera/modules` — OK.
 **Кейс:** юзер сменил порт хоста на 9443 (Меню 3 → Домен/Порт,
 state.json `server_port` = 9443). Полная диагностика (Меню 4 → 8,
 шаг 6/14) продолжала выполнять `openssl s_client -connect
-cdn.example:443` — порт захардкожен — и падала с WARN
+<домен>:443` — порт захардкожен — и падала с WARN
 «Не удалось получить сертификат … SNI-домен должен быть доступен с
 сервера», хотя REALITY-эндпоинт жив на новом порту. Шаг 4 (TCP-проба)
 при этом использовал правильный `server_port` — расхождение внутри
@@ -2856,8 +2856,8 @@ rest_api 55 — поллюции нет.
 
 **Эксплуатация:** на живом сервере с аддоном — `git pull` +
 переустановка аддона (пункт меню), при вопросах: Enter = домен
-(cdn.example), DNS = panel.example (или
-`https://panel.example/dns-query`); выданный Karing-JSON
+(<домен>), DNS = <домен> (или
+`https://<домен>/dns-query`); выданный Karing-JSON
 проверить живьём — домен-режим и custom-dns помечены как непроверенные
 на реальном Karing, IP-вариант остаётся откатом одним нажатием.
 
@@ -3356,8 +3356,8 @@ dport_filter все SNI-less матчи исчезли в ноль на обеи
 **Что сделано:**
 - Живой фикс на всех трёх инстансах (MCP `b4_set_config_value`,
   live, без рестарта): `sets[XHamster-Heavy-v1].tcp.dport_filter`
-  `'443' → ''` — роутер 192.168.50.1, panel.example,
-  cdn.example. Откат — `b4_revert_last_change`.
+  `'443' → ''` — роутер 192.168.50.1, <домен>,
+  <домен>. Откат — `b4_revert_last_change`.
 - Артефакты (3 копии: router / vps-vpn / vps-prodcdn):
   `dport_filter=''` + `_meta.port_scope_fix` с описанием.
 - OWN_DOH_FAQ §8: пост-мортем вместо ретрактированных
@@ -3470,7 +3470,7 @@ iptables уже живут, но TUI считает hopping отключённы
 ## FEAT(b4/vps): Heavy-схема с эскалацией на vpn-node (вторая нода) — всем сетам, DNS не тронут — 6 сентября 2026 (ночь)
 
 **Кейс:** юзер принёс MCP-эндпоинт второй VPS vpn-node
-(`https://panel.example:9743/api/mcp`, b4 v1.81.0, паритет
+(`https://<домен>:9743/api/mcp`, b4 v1.81.0, паритет
 инструментов) и попросил «сделать то же самое», что на
 cdn-vps и роутере. DNS «мои пока не прописываем».
 
@@ -3623,13 +3623,13 @@ Cloudflare `1.1.1.1` — единая точка отказа, притом РК
   эскалацию не блокирует (обе ветки `nfq/dns.go:542/558`).
 - **Применено по 10 сетам:** Fat-сеты (YouTube/GitHub/NNM) +
   одиночные (YT-Nocookie/XHamster/XVideos/Meta) →
-  `cdn.example:30443` (основной); Heavy-сеты трёх
+  `<домен>:30443` (основной); Heavy-сеты трёх
   пар (в т.ч. dns.enabled=true у GitHub-Heavy и NNM-Heavy,
-  без него фейловер не сработал бы) → `panel.example:30443`
+  без него фейловер не сработал бы) → `<домен>:30443`
   (резерв). Все — strict. Не тронуты 3 сета без DNS-редиректа.
 - **Верификация:** 10/10 сетов (снимок b4_get_set);
   recent_connections: `dns-doh->1.1.1.1` (до) →
-  `dns-doh->cdn.example:30443` (после), включая
+  `dns-doh-><домен>:30443` (после), включая
   резолв самого роутера (output-hook ловит dnsmasq-плечо);
   servfail = 0; watchdog 6/6 healthy; nnmclub.to через b4 —
   35 КБ/с при baseline TLS_DROP (сет пережил миграцию).
@@ -4349,7 +4349,7 @@ _stale_mirror_guard, tui, smoke — зелёные.
 ## FIX(dpi_bypass+youtube_b4): geosite-пути b4 всегда в /etc/b4 («как это необходимо B4»), авто-лечение из status() — 3 сентября 2026
 
 **Контекст:** третья машина подряд (server.example; ранее
-panel.example и ещё одна) с одной и той же красной ошибкой в
+<домен> и ещё одна) с одной и той же красной ошибкой в
 Web UI b4 (Settings → Geodat):
 
     Error: 500: failed to create directory /usr/share/xray:
@@ -4823,7 +4823,7 @@ VS Code, Cursor, LM Studio, CLI-ассистенты) к b4 на роутере/
 
 ## FIX(dpi_bypass+youtube_b4): живой geosite-путь для b4 вместо хардкода /usr/share/xray (500 в Web UI при Update геосайта) — 30 августа 2026
 
-**Контекст:** на panel.example (203.0.113.102) Update Geosite/GeoIP в
+**Контекст:** на <домен> (203.0.113.102) Update Geosite/GeoIP в
 Web UI b4 (Settings → Geodat Settings) падал с ошибкой 500:
 
     Error: 500: failed to create directory /usr/share/xray:
@@ -4854,7 +4854,7 @@ v1.80.2: строка /usr/share/xray в коде b4 отсутствует).
    переключении пресета / импорте сета переводится на живой путь (файл
    Xray, если появился, иначе /etc/b4/geosite.dat). Произвольные
    пользовательские пути не трогаются.
-3. Инцидент на panel.example закрыт параллельно руками: geosite.dat
+3. Инцидент на <домен> закрыт параллельно руками: geosite.dat
    (Loyalsoldier, 11 MB) и geoip.dat (b4geoip, 18 MB) скачаны в /etc/b4,
    конфиг уже указывает туда; geosite-категории сетов
    (meta/instagram/youtube/google/xhamster) разворачиваются в домены,
@@ -4876,17 +4876,17 @@ docs/faq/DPI_BYPASS_FAQ.md.
 
 ## FIX(scripts): enable-b4-mcp-nginx.sh бэкапы вне sites-enabled («conflicting server name») — 30 августа 2026
 
-**Контекст:** первый запуск скрипта на panel.example
+**Контекст:** первый запуск скрипта на <домен>
 (203.0.113.102) прошёл успешно (MCP-локация вставлена, nginx -t OK,
 MCP-клиенты заработали без Host-хаков), но на каждый nginx -t/reload
 вылезал warning:
 
-    [warn] conflicting server name "panel.example" on 0.0.0.0:9743, ignored
+    [warn] conflicting server name "<домен>" on 0.0.0.0:9743, ignored
 
 **Корень:** скрипт клал бэкап конфига рядом с сайтом —
 `/etc/nginx/sites-enabled/chimera-b4-nginx.<ts>.preMCP.bak`. Debian-nginx
 подключает `sites-enabled/*` ЦЕЛИКОМ (все расширения, включая .bak),
-поэтому бэкап с оригинальным server-блоком (`server_name panel.example`
+поэтому бэкап с оригинальным server-блоком (`server_name <домен>`
 :9743) грузился как дубликат. Для трафика не страшно (легаси-бэкап
 алфавитно позже основного файла → nginx его игнорировал, активен
 пропатченный конфиг), но warning замусоривает каждый nginx -t/reload,
@@ -4919,7 +4919,7 @@ sites-enabled, чистка ДО раннего exit, skip .bak при поис�
 ## FEAT/SECURITY(panel_nginx_front+dpi_bypass+youtube_b4): MCP-прокси b4 через nginx front + REST-авторизация b4 — 30 августа 2026
 
 **Контекст:** b4 >= 1.80 поднял MCP-сервер (`/api/mcp`, Model Context
-Protocol — управление b4 из AI-клиентов). Инцидент на panel.example
+Protocol — управление b4 из AI-клиентов). Инцидент на <домен>
 (203.0.113.102, порт 9743): MCP-клиент с корректным токеном получал
 403 Forbidden.
 
@@ -5841,7 +5841,7 @@ _remove обе спеки ×1; autostart ×3 (сигнатура, источни
 каскад из трёх багов убил валидный LE-сертификат и оставил сервер без
 nginx/xray.**
 
-Хронология: `[WARN] Домен panel.example НЕ резолвится в IP сервера`
+Хронология: `[WARN] Домен <домен> НЕ резолвится в IP сервера`
 (ЛОЖНЫЙ — единственный dig шёл через 127.0.0.1, где DNSCrypt только что
 перезапущен установщиком: кэш холодный, DoH-upstream бутстрапится;
 nslookup через 1.1.1.1 и A-запись через тот же 127.0.0.1 отвечали
@@ -6659,7 +6659,7 @@ hysteria2-семья + download_manager 220 passed. Ноль новых фейл
 
 ## FIX(xray): регенерация конфига сохраняет юзеров — anti-EOF «invalid request user id» — 27 августа 2026
 
-Реальный инцидент (VPS без IPv6, panel.example): после установки
+Реальный инцидент (VPS без IPv6, <домен>): после установки
 AdGuard Home `_regenerate_xray_config()` пересоздала
 `/etc/xray/config.json` с `clients=[PARAM_UUID из state.json]`.
 state.json к этому моменту содержал UUID второго прогона промптов
@@ -8237,7 +8237,7 @@ _DEFAULT_WEB_PORT  = 46002
    ```
    ss -tlnp | grep 46002     ← должно показать csqtt-server
    curl -k https://127.0.0.1:46002    ← должно вернуть HTML Web Panel
-   curl -k https://panel.example:41000    ← должно вернуть HTML через nginx
+   curl -k https://<домен>:41000    ← должно вернуть HTML через nginx
    ```
 
 ### Файлы
