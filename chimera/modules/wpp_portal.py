@@ -39,6 +39,167 @@ from chimera.modules.rest_api import (
 PORTAL_COOKIE = "psid"
 PORTAL_TTL = 86400  # 24 hours
 
+# ============================================================================
+#  TRAFFIC: enhanced statistics (uplink/downlink split + daily history)
+#  Reads xray Stats API directly for upload/download, traffic_history.json
+#  for per-day breakdown, and traffic_limits.json for the user limit.
+# ============================================================================
+
+_TRAFFIC_HISTORY_FILE = "/var/lib/xray-installer/traffic_history.json"
+
+_VALUE_RE = r'"value"\s*:\s*"?(\d+)"?'
+
+
+def _query_user_traffic_split(email):
+    """Return (uplink_bytes, downlink_bytes) via xray Stats API.
+
+    Queries uplink and downlink counters separately so the portal can show
+    a split of sent vs received traffic. Returns (0, 0) on any failure.
+    """
+    import re
+    try:
+        from chimera.modules.traffic_tracking import _core_module
+        core = _core_module()
+        _run = core._run
+        xray_bin = str(core.XRAY_BIN)
+        port = core.XRAY_STATS_API_PORT
+    except Exception:
+        return (0, 0)
+    up = 0
+    down = 0
+    for direction in ("uplink", "downlink"):
+        try:
+            r = _run([
+                xray_bin, "api", "statsquery",
+                "--server=127.0.0.1:%s" % port,
+                "--pattern=user>>>{0}>>>traffic>>>{1}".format(email, direction),
+            ], capture=True, check=False)
+            for line in (r.stdout or "").splitlines():
+                m = re.search(_VALUE_RE, line)
+                if m:
+                    val = int(m.group(1))
+                    if direction == "uplink":
+                        up = val
+                    else:
+                        down = val
+        except Exception:
+            pass
+    return (up, down)
+
+
+def _get_user_daily_traffic(email):
+    """Read traffic_history.json, return per-day traffic for the user.
+
+    Stored values are cumulative daily maxima (xray counters grow from
+    process start), so this computes per-day deltas with restart-clamping:
+    if the counter dropped (xray restart), the new value is treated as
+    the usage for that day.
+
+    Returns a list sorted by date descending (newest first), max 30 entries:
+        [{"date": "2026-09-27", "bytes": 50000000}, ...]
+    """
+    import json
+    from pathlib import Path
+    hist_path = Path(_TRAFFIC_HISTORY_FILE)
+    if not hist_path.exists():
+        return []
+    try:
+        history = json.loads(hist_path.read_text())
+    except Exception:
+        return []
+    if not isinstance(history, dict) or not history:
+        return []
+    key = "{0}_max".format(email)
+    alt_keys = [
+        "awg::{0}_max".format(email),
+        "mtproto::{0}_max".format(email),
+        "mieru::{0}_max".format(email),
+        "naiveproxy::{0}_max".format(email),
+    ]
+    raw = []
+    for date, data in history.items():
+        if not isinstance(data, dict):
+            continue
+        val = data.get(key, 0) or 0
+        for ak in alt_keys:
+            val += data.get(ak, 0) or 0
+        if val > 0:
+            raw.append((date, int(val)))
+    if not raw:
+        return []
+    raw.sort(key=lambda x: x[0])
+    result = []
+    prev = 0
+    for date, val in raw:
+        if val >= prev:
+            delta = val - prev
+        else:
+            delta = val
+        result.append({"date": date, "bytes": int(delta)})
+        prev = val
+    result.reverse()
+    return result[:30]
+
+
+def _get_xray_reset_date():
+    """Return the last xray (re)start timestamp as a short string, or empty."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", "-p", "ActiveEnterTimestamp", "--value", "xray"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        out = (r.stdout or "").strip()
+        if not out or out == "0":
+            return ""
+        try:
+            r2 = subprocess.run(
+                ["date", "-d", out, "+%Y-%m-%d %H:%M"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            if r2.returncode == 0 and r2.stdout.strip():
+                return r2.stdout.strip()
+        except Exception:
+            pass
+        return out
+    except Exception:
+        return ""
+
+
+def _get_user_traffic_enhanced(email):
+    """Enhanced traffic stats: uplink/downlink split + daily history + meta."""
+    up, down = _query_user_traffic_split(email)
+    total = up + down
+    daily = _get_user_daily_traffic(email)
+    days_active = len(daily)
+    avg_per_day = total // (days_active if days_active else 1)
+    limit_gb = 0
+    try:
+        from chimera.modules.traffic_tracking import _limits_load
+        limits = _limits_load() or {}
+        cfg = limits.get(email) or {}
+        if isinstance(cfg, dict):
+            limit_gb = float(cfg.get("limit_gb", 0) or 0)
+    except Exception:
+        pass
+    reset_date = _get_xray_reset_date()
+    return {
+        "email": email,
+        "total_bytes": total,
+        "total_gb": round(total / 1024 ** 3, 2),
+        "upload_bytes": up,
+        "download_bytes": down,
+        "upload_gb": round(up / 1024 ** 3, 2),
+        "download_gb": round(down / 1024 ** 3, 2),
+        "daily": daily,
+        "days_active": days_active,
+        "avg_per_day_bytes": avg_per_day,
+        "limit_gb": limit_gb,
+        "reset_date": reset_date,
+    }
+
+
+
 
 # ============================================================================
 #  SESSION / AUTH
@@ -207,7 +368,7 @@ def handle_get(handler, path: str, query: dict) -> None:
         if user is None:
             return
         email = user.get("email", "")
-        traffic = _get_user_traffic(email)
+        traffic = _get_user_traffic_enhanced(email)
         ttl = _get_ttl_info(email)
         _send_json(handler, {**traffic, **ttl})
         return
