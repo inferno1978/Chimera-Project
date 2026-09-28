@@ -739,15 +739,22 @@ def portal_login_page(path, csrf, error=""):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>User Portal — Вход</title>
 <style>
-:root{{--bg:#0a0e17;--surface:#131825;--raised:#1a2030;--input:#0d1119;
---accent:#4d9eff;--on-accent:#fff;--text:#e2e8f0;--muted:#6b7689;
---line:#1e2638;--tint:rgba(77,158,255,.08);--green:#4ade80;
---yellow:#fbbf24;--red:#f87171;--radius:14px}}
+:root{{--bg:#071116;--surface:#0f2028;--raised:#152b35;--input:#0a1920;
+--line:#24404b;--text:#e9f4f6;--muted:#91aeb8;--accent:#56decb;
+--on-accent:#052820;--tint:#56decb12;--green:#8bdbaa;--red:#ff9993;
+--amber:#f5c989;--yellow:#f5c989;--shadow:0 18px 60px #0003;
+--radius:14px;color-scheme:dark}}
+:root[data-theme=light]{{--bg:#eaf0ed;--surface:#fbfdfb;--raised:#eff5f1;
+--input:#f5f8f5;--text:#142f2b;--muted:#5d7870;--line:#cfddd5;
+--accent:#087c6d;--on-accent:#fff;--tint:#087c6d0c;--green:#27754b;
+--amber:#886124;--yellow:#886124;--red:#b94042;
+--shadow:0 18px 50px #153b2310;--radius:14px;color-scheme:light}}
+<script>try{{var t=localStorage.getItem('wpp-theme');if(t)document.documentElement.dataset.theme=t;}}catch(e){{}}</script>
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{min-height:100vh;display:grid;place-items:center;padding:24px;
 font:15px/1.6 -apple-system,system-ui,sans-serif;background:var(--bg);color:var(--text)}}
 .wrap{{width:min(420px,100%);padding:36px 32px;border:1px solid var(--line);
-border-radius:var(--radius);background:var(--surface)}}
+border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow)}}
 .logo{{display:grid;place-items:center;width:52px;height:52px;margin:0 auto 24px;
 border-radius:14px;background:var(--accent);color:var(--on-accent);font-size:24px;
 font-weight:700}}
@@ -989,9 +996,9 @@ PORTAL_TABS_CSS = """/* === shared portal primitives (all tabs) === */
 .portal-meta{display:flex;justify-content:space-between;font:10px ui-monospace,monospace;color:var(--muted)}
 .portal-proto-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:8px;background:var(--tint);color:var(--accent);font:600 11px ui-monospace,monospace;border:1px solid var(--line);overflow-wrap:anywhere}
 .portal-chip{display:inline-block;padding:3px 8px;border-radius:6px;font:600 10px ui-monospace,monospace;background:var(--input);color:var(--muted);border:1px solid var(--line)}
-.portal-chip.on{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.25)}
-.portal-chip.off{background:rgba(248,113,113,.12);color:var(--red);border-color:rgba(248,113,113,.25)}
-.portal-chip.accent{background:var(--tint);color:var(--accent);border-color:rgba(77,158,255,.25)}
+.portal-chip.on{background:rgba(139,219,170,.14);color:var(--green);border-color:rgba(139,219,170,.3)}
+.portal-chip.off{background:rgba(255,153,147,.14);color:var(--red);border-color:rgba(255,153,147,.3)}
+.portal-chip.accent{background:var(--tint);color:var(--accent);border-color:rgba(86,222,203,.3)}
 .portal-tile-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)}
 .portal-tile-row:last-child{border:0}
 .portal-tile-row .label{color:var(--muted);font-size:12px}
@@ -1449,7 +1456,7 @@ PORTAL_POLISH_CSS = """/* === portal visual polish: transitions, skeletons, ring
 /* 7. Theme toggle button + light theme variable overrides */
 .theme-toggle-btn{flex:0 0 auto;width:40px;height:40px;display:grid;place-items:center;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--text);font-size:18px;cursor:pointer;transition:all .15s;padding:0}
 .theme-toggle-btn:hover{border-color:var(--accent);color:var(--accent)}
-[data-theme="light"]{--bg:#f5f7fa;--surface:#fff;--raised:#f1f5f9;--input:#f1f5f9;--text:#1a1d29;--muted:#64748b;--line:#e2e8f0;--accent:#3b82f6;--on-accent:#fff;--tint:rgba(59,130,246,.08);--green:#16a34a;--yellow:#d97706;--red:#dc2626;--radius:14px}
+[data-theme="light"]{--bg:#eaf0ed;--surface:#fbfdfb;--raised:#eff5f1;--input:#f5f8f5;--text:#142f2b;--muted:#5d7870;--line:#cfddd5;--accent:#087c6d;--on-accent:#fff;--tint:#087c6d0c;--green:#27754b;--amber:#886124;--yellow:#886124;--red:#b94042;--shadow:0 18px 50px #153b2310;--radius:14px;color-scheme:light}
 [data-theme="light"] .portal-qr-frame{background:#fff;box-shadow:0 8px 28px rgba(0,0,0,0.15)}
 
 /* 8. Toast with SVG checkmark (override base .toast to flex) */
@@ -1481,9 +1488,9 @@ PORTAL_POLISH_CSS = """/* === portal visual polish: transitions, skeletons, ring
 .pw-checklist{display:flex;flex-direction:column;gap:6px;margin-top:12px;font:12px ui-monospace,monospace;color:var(--muted)}
 .pw-checklist span{display:flex;align-items:center;gap:6px}
 
-/* 13. Recommended client badge */
-.cfg-client-card.recommended{border-color:var(--accent);box-shadow:0 0 0 2px var(--tint)}
-.cfg-client-card.recommended::after{content:"⭐ Рекомендуется для вашего устройства";position:absolute;top:8px;right:8px;background:var(--accent);color:var(--on-accent);font:600 9px inherit;padding:4px 8px;border-radius:6px;z-index:2;letter-spacing:.02em}
+/* 13. Recommended client badge — short label, padding-top reserves space so badge never overlaps the head/description */
+.cfg-client-card.recommended{border-color:var(--accent);box-shadow:0 0 0 2px var(--tint);padding-top:34px}
+.cfg-client-card.recommended::after{content:"⭐ Рекомендуется";position:absolute;top:8px;right:10px;background:var(--accent);color:var(--on-accent);font:700 9px inherit;padding:3px 9px;border-radius:6px;z-index:3;letter-spacing:.03em;text-transform:uppercase;white-space:nowrap;box-shadow:0 4px 12px #00000040}
 """
 
 PORTAL_POLISH_JS = """/* === Portal visual polish JS === */
@@ -1575,12 +1582,13 @@ def portal_page(user, path):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Portal — {name}</title>
-<script>(function(){{try{{var t=localStorage.getItem('wpp-theme');if(t)document.documentElement.dataset.theme=t;}}catch(e){{}}}})();</script>
+<script>(function(){{try{{var t=localStorage.getItem('wpp-theme');if(t){{document.documentElement.dataset.theme=t;window.addEventListener('DOMContentLoaded',function(){{var b=document.getElementById('theme-toggle-btn');if(b)b.textContent=t==='light'?'🌙':'☀️';}});}}}}catch(e){{}}}})();</script>
 <style>
-:root{{--bg:#0a0e17;--surface:#131825;--raised:#1a2030;--input:#0d1119;
---accent:#4d9eff;--on-accent:#fff;--text:#e2e8f0;--muted:#6b7689;
---line:#1e2638;--tint:rgba(77,158,255,.08);--green:#4ade80;
---yellow:#fbbf24;--red:#f87171;--radius:14px}}
+:root{{--bg:#071116;--surface:#0f2028;--raised:#152b35;--input:#0a1920;
+--line:#24404b;--text:#e9f4f6;--muted:#91aeb8;--accent:#56decb;
+--on-accent:#052820;--tint:#56decb12;--green:#8bdbaa;--red:#ff9993;
+--amber:#f5c989;--yellow:#f5c989;--shadow:0 18px 60px #0003;
+--radius:14px;color-scheme:dark}}
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{min-height:100vh;font:14px/1.6 -apple-system,system-ui,sans-serif;
 background:var(--bg);color:var(--text)}}
@@ -1614,8 +1622,8 @@ padding:10px 0;border-bottom:1px solid var(--line)}}
 .row .val{{font-weight:500}}
 .badge{{display:inline-block;padding:3px 8px;border-radius:6px;font:600 11px inherit;
 background:var(--tint);color:var(--accent)}}
-.badge.on{{background:rgba(74,222,128,.12);color:var(--green)}}
-.badge.off{{background:rgba(248,113,113,.12);color:var(--red)}}
+.badge.on{{background:rgba(139,219,170,.14);color:var(--green)}}
+.badge.off{{background:rgba(255,153,147,.14);color:var(--red)}}
 .input{{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
 background:var(--input);color:var(--text);font:13px inherit;outline:none}}
 .input:focus{{border-color:var(--accent)}}
@@ -1787,10 +1795,10 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <div class="cfg-client-card" data-client="NekoBox" data-platforms="android">
 <div class="cfg-client-head"><span class="cfg-client-ico">🐱</span>
 <div class="cfg-client-name">NekoBox</div></div>
-<div class="cfg-client-desc">Android-клиент на ядре sing-box, импорт по QR.</div>
+<div class="cfg-client-desc">Android-клиент на ядре sing-box, импорт по QR. Мод qr243vbi v5.11.28.3 с extras для РФ-ДПИ.</div>
 <div class="cfg-client-meta"><span class="cfg-format-badge">QR / VLESS</span>
 <span class="cfg-platform-badge">📱 Android</span></div>
-<a class="cfg-client-dl" href="https://github.com/MatsuriDayo/NekoBoxForAndroid/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
+<a class="cfg-client-dl" href="https://github.com/qr243vbi/nekobox/releases/tag/5.11.28.3" target="_blank" rel="noopener">📥 Скачать</a>
 </div>
 
 <div class="cfg-client-card" data-client="Streisand" data-platforms="ios">
