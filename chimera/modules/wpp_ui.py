@@ -479,6 +479,50 @@ def _node_label(val, fallback):
     return val
 
 
+def _node_protocols(node):
+    """Determine protocols label for a node — never returns the stale
+    hardcoded 'VLESS · Hysteria2'. Falls back through:
+    1. node['protocols'] (explicit field set by cascade bridge or remote API)
+    2. parse node['version'] (e.g. 'cascade-reality' → 'VLESS REALITY')
+    3. '—' (no false info)
+    """
+    p = node.get('protocols')
+    if p and isinstance(p, str) and not _is_dash_str(p):
+        return p
+    if isinstance(p, list) and p:
+        # Federation node may store list of protocols — join unique labels
+        labels = []
+        for x in p:
+            if x and not _is_dash_str(x):
+                labels.append(x if isinstance(x, str) else str(x))
+        if labels:
+            return ' · '.join(labels)
+    v = node.get('version', '') or ''
+    if v.startswith('cascade-'):
+        proto = v[len('cascade-'):]
+        mapping = {
+            'reality': 'VLESS REALITY',
+            'xhttp':   'VLESS XHTTP',
+            'tcp':     'VLESS TCP',
+            'ws':      'VLESS WebSocket',
+            'grpc':    'VLESS gRPC',
+        }
+        if proto in mapping:
+            return mapping[proto]
+        return f'VLESS {proto.upper()}' if proto else 'VLESS'
+    if v and not _is_dash_str(v):
+        return v
+    return '—'
+
+
+def _is_dash_str(s):
+    """True if string s is empty or consists only of dash characters."""
+    if not s:
+        return True
+    stripped = s.strip() if isinstance(s, str) else ''
+    return (not stripped) or (set(stripped) <= set('—-−–'))
+
+
 def nodes_ui(nodes, local, connection_token, path, csrf):
     cards=[]
     for node in nodes:
@@ -488,7 +532,7 @@ def nodes_ui(nodes, local, connection_token, path, csrf):
         cards.append(f'''<article class="card node-card">
 <div class="node-card-head"><span class="node-flag">{icon_flag}</span><div class="node-card-name"><h2>{esc(node_city)}</h2><span>{esc(node_country)}</span></div><span class="badge {'on' if node.get('enabled',True) else ''}">{'Подключена' if node.get('enabled',True) else 'Отключена'}</span></div>
 <div class="node-endpoint">{icon('link')}<span>{esc(node.get('url',''))}</span></div>
-<div class="node-card-meta"><div><span>Версия</span><strong>{esc(node.get('version','—'))}</strong></div><div><span>Подключения</span><strong>VLESS · Hysteria2</strong></div></div>
+<div class="node-card-meta"><div><span>Версия</span><strong>{esc(_node_label(node.get('version'), '—'))}</strong></div><div><span>Подключения</span><strong>{esc(_node_protocols(node))}</strong></div></div>
 <form class="node-remove" method="post" action="{esc(path)}/node-action" data-confirm="Удалить ноду из этой панели?"><input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="operation" value="delete"><input type="hidden" name="id" value="{esc(node.get('id',''))}"><button class="danger">Удалить ноду</button></form></article>''')
     local_flag=node_flag_image(local.get('country_code','UN'),path)
     country_options=node_country_select(local)

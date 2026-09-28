@@ -76,6 +76,18 @@ def _stable_id(host: str) -> str:
     return hashlib.sha256(host.encode()).hexdigest()[:16]
 
 
+def _proto_label(proto: str) -> str:
+    """Human-readable protocol label for a cascade node proto value."""
+    p = (proto or '').lower().strip()
+    return {
+        'reality': 'VLESS REALITY',
+        'xhttp':   'VLESS XHTTP',
+        'tcp':     'VLESS TCP',
+        'ws':      'VLESS WebSocket',
+        'grpc':    'VLESS gRPC',
+    }.get(p, f'VLESS {p.upper()}' if p else 'VLESS')
+
+
 def _resolve_ip(host: str) -> str:
     """Resolve hostname to IPv4 via system DNS."""
     try:
@@ -220,6 +232,7 @@ def cascade_to_wpp_nodes(chain_nodes: list[dict], existing_nodes: list[dict] | N
             "name":          geo["city"],
             "enabled":       True,
             "version":       f"cascade-{proto}",
+            "protocols":     _proto_label(proto),
             "geo_time":      int(time.time()),  # cache timestamp
             "_cascade":      True,  # marker — federation calls skip these
         })
