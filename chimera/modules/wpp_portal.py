@@ -199,6 +199,113 @@ def _get_user_traffic_enhanced(email):
     }
 
 
+def _get_user_protocol_traffic(email):
+    """Return traffic split per protocol: VLESS (xray Stats API) + MTProto.
+
+    Reads `rx`/`tx` from mtproto_stats._load_stats() (rx = downlink from
+    client perspective, tx = uplink). Returns 0/0 for mtproto if user has
+    no telemt account or module is unavailable.
+
+    Shape: {"vless": {"up": N, "down": N}, "mtproto": {"up": N, "down": N}}
+    """
+    vless_up, vless_down = _query_user_traffic_split(email)
+    mtp_up = 0
+    mtp_down = 0
+    try:
+        from chimera.modules.mtproto_stats import _load_stats
+        stats = _load_stats() or {}
+        u = (stats.get("users") or {}).get(email, {})
+        mtp_down = int(u.get("rx", 0) or 0)
+        mtp_up = int(u.get("tx", 0) or 0)
+    except Exception:
+        pass
+    return {
+        "vless": {"up": int(vless_up), "down": int(vless_down)},
+        "mtproto": {"up": mtp_up, "down": mtp_down},
+    }
+
+
+def _get_ssl_cert_info(domain):
+    """Return SSL certificate details: issuer, subject, valid_from, valid_to.
+
+    Reads /etc/letsencrypt/live/<domain>/cert.pem via `openssl x509`. Falls
+    back to fullchain.pem. Returns {} on any failure (no cert, openssl
+    missing, malformed output).
+    """
+    if not domain:
+        return {}
+    from pathlib import Path
+    cert = Path("/etc/letsencrypt/live/{0}/cert.pem".format(domain))
+    if not cert.exists():
+        cert = Path("/etc/letsencrypt/live/{0}/fullchain.pem".format(domain))
+    if not cert.exists():
+        return {}
+    try:
+        r = subprocess.run(
+            ["openssl", "x509", "-in", str(cert), "-noout",
+             "-issuer", "-subject", "-startdate", "-enddate"],
+            capture_output=True, text=True, timeout=8, check=False,
+        )
+        info = {}
+        for line in (r.stdout or "").splitlines():
+            if line.startswith("issuer="):
+                info["issuer"] = line.split("=", 1)[1].strip()
+            elif line.startswith("subject="):
+                info["subject"] = line.split("=", 1)[1].strip()
+            elif line.startswith("notBefore="):
+                info["valid_from"] = line.split("=", 1)[1].strip()
+            elif line.startswith("notAfter="):
+                info["valid_to"] = line.split("=", 1)[1].strip()
+        return info
+    except Exception:
+        return {}
+
+
+# In-memory cache for IP geo-lookups (ip-api.com free, 45 req/min).
+_GEO_CACHE: dict = {}
+_GEO_TTL = 86400  # 24 hours
+
+
+def _geo_lookup(ip):
+    """Return cached geo info dict for an IP via ip-api.com (free, no key).
+
+    Shape: {"city": "...", "country": "...", "isp": "..."}.
+    Returns {} for localhost/empty/unresolvable. Cache TTL = 24h to stay
+    well under the 45 req/min free limit (typically only 1 req per IP
+    per day per portal user).
+    """
+    if not ip or ip in ("127.0.0.1", "::1", "localhost", "?"):
+        return {}
+    # Strip CIDR mask if present
+    if "/" in ip:
+        ip = ip.split("/")[0].strip()
+    if not ip:
+        return {}
+    now = time.time()
+    cached = _GEO_CACHE.get(ip)
+    if cached and (now - cached[0]) < _GEO_TTL:
+        return cached[1]
+    try:
+        import urllib.request
+        url = "http://ip-api.com/json/{0}?fields=city,country,isp&lang=ru".format(ip)
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "chimera-portal/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        geo = {
+            "city": str(data.get("city", "") or ""),
+            "country": str(data.get("country", "") or ""),
+            "isp": str(data.get("isp", "") or ""),
+        }
+        _GEO_CACHE[ip] = (now, geo)
+        return geo
+    except Exception:
+        # Cache the negative result briefly so we don't hammer the API
+        _GEO_CACHE[ip] = (now, {})
+        return {}
+
+
 
 
 # ============================================================================
@@ -369,6 +476,11 @@ def handle_get(handler, path: str, query: dict) -> None:
             return
         email = user.get("email", "")
         traffic = _get_user_traffic_enhanced(email)
+        # Protocol split (vless vs mtproto) + monthly forecast for the UI
+        traffic["protocol_traffic"] = _get_user_protocol_traffic(email)
+        avg = traffic.get("avg_per_day_bytes", 0) or 0
+        traffic["monthly_forecast_bytes"] = avg * 30
+        traffic["monthly_forecast_gb"] = round(avg * 30 / 1024 ** 3, 2)
         ttl = _get_ttl_info(email)
         _send_json(handler, {**traffic, **ttl})
         return
@@ -386,6 +498,7 @@ def handle_get(handler, path: str, query: dict) -> None:
             "ssl_days_left": health.get("ssl_days_left", -1),
             "uptime_hours": health.get("uptime_hours", 0),
             "timestamp": health.get("timestamp", ""),
+            "cert_info": _get_ssl_cert_info(health.get("domain", "")),
         }
         _send_json(handler, safe)
         return
@@ -533,6 +646,12 @@ def handle_get(handler, path: str, query: dict) -> None:
             )
             email = user.get("email", "")
             ips_detailed = get_user_ips_detailed(email)
+            # Enrich each IP with cached geo info (ip-api.com free, 24h TTL)
+            for entry in ips_detailed:
+                try:
+                    entry["geo"] = _geo_lookup(entry.get("ip", ""))
+                except Exception:
+                    entry["geo"] = {}
             detected = _client_ip(handler)
             if detected in ("127.0.0.1", "::1", "localhost", "?"):
                 detected = ""
@@ -543,6 +662,15 @@ def handle_get(handler, path: str, query: dict) -> None:
             })
         except Exception as e:
             _send_json(handler, {"error": str(e)}, 500)
+        return
+
+    if path == "/api/portal/password-info":
+        user = _require_user(handler)
+        if user is None:
+            return
+        _send_json(handler, {
+            "password_changed_at": user.get("password_changed_at", ""),
+        })
         return
 
     if path == "/api/portal/qr":
@@ -660,8 +788,12 @@ def handle_post(handler, path: str) -> None:
         for u in users:
             if u.get("email") == email:
                 u["portal_password"] = new_pass
+                u["password_changed_at"] = time.strftime("%Y-%m-%d %H:%M")
                 _save_users(users)
-                _send_json(handler, {"status": "changed"})
+                _send_json(handler, {
+                    "status": "changed",
+                    "password_changed_at": u["password_changed_at"],
+                })
                 return
         _send_json(handler, {"error": "user not found"}, 404)
         return
