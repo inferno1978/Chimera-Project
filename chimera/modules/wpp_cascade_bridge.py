@@ -44,6 +44,32 @@ COUNTRY_NAMES = {
     "EE": "Эстония", "IS": "Исландия", "IE": "Ирландия", "BE": "Бельгия",
 }
 
+# English → Russian city name translation (ipinfo.io / ipapi.co return English).
+# Populated with common European / global DC hub cities.
+CITY_NAME_RU = {
+    "Helsinki": "Хельсинки", "Amsterdam": "Амстердам", "Frankfurt am Main": "Франкфурт",
+    "Frankfurt": "Франкфурт", "Warsaw": "Варшава", "Moscow": "Москва",
+    "Saint Petersburg": "Санкт-Петербург", "London": "Лондон", "Paris": "Париж",
+    "Berlin": "Берлин", "Munich": "Мюнхен", "Prague": "Прага", "Vienna": "Вена",
+    "Stockholm": "Стокгольм", "Oslo": "Осло", "Copenhagen": "Копенгаген",
+    "Riga": "Рига", "Tallinn": "Таллин", "Vilnius": "Вильнюс",
+    "New York": "Нью-Йорк", "Los Angeles": "Лос-Анджелес", "San Francisco": "Сан-Франциско",
+    "Singapore": "Сингапур", "Tokyo": "Токио", "Hong Kong": "Гонконг",
+    "Dubai": "Дубай", "Istanbul": "Стамбул", "Madrid": "Мадрид", "Rome": "Рим",
+    "Zurich": "Цюрих", "Brussels": "Брюссель", "Dublin": "Дублин", "Reykjavik": "Рейкьявик",
+    "Bucharest": "Бухарест", "Sofia": "София", "Budapest": "Будапешт", "Lisbon": "Лиссабон",
+    "Athens": "Афины", "Kyiv": "Киев", "Minsk": "Минск", "Almaty": "Алматы",
+    "Nice": "Ницца", "Marseille": "Марсель", "Hamburg": "Гамбург", "Cologne": "Кёльн",
+    "Essen": "Эссен", "Stuttgart": "Штутгарт", "Düsseldorf": "Дюссельдорф",
+    "Rotterdam": "Роттердам", "The Hague": "Гаага", "Eindhoven": "Эйндховен",
+    "Gothenburg": "Гётеборг", "Malmö": "Мальмё", "Bergen": "Берген", "Trondheim": "Тронхейм",
+    "Antwerp": "Антверпен", "Liège": "Льеж", "Brno": "Брно", "Ostrava": "Острава",
+    "Linz": "Линц", "Graz": "Грац", "Salzburg": "Зальцбург", "Geneva": "Женева",
+    "Basel": "Базель", "Lausanne": "Лозанна", "Bern": "Берн", "Barcelona": "Барселона",
+    "Madrid": "Мадрид", "Seville": "Севилья", "Valencia": "Валенсия", "Milan": "Милан",
+    "Naples": "Неаполь", "Turin": "Турин", "Florence": "Флоренция", "Bologna": "Болонья",
+}
+
 
 def _stable_id(host: str) -> str:
     """Deterministic node ID from hostname."""
@@ -75,36 +101,84 @@ def _geolocate_ip(ip: str) -> dict:
             data = json.loads(resp.read().decode("utf-8"))
         cc = data.get("countryCode", "UN")
         country = data.get("country", "Не указано")
-        city = data.get("city", "") or "—"
+        city = data.get("city", "") or ""  # keep empty — caller decides fallback
         # Use Russian country name from our map if available
         country = COUNTRY_NAMES.get(cc, country)
         return {"country_code": cc, "country_name": country, "city": city}
     except Exception:
-        return {"country_code": "UN", "country_name": "Не указано", "city": "—"}
+        return {"country_code": "UN", "country_name": "Не указано", "city": ""}
+
+
+def _geolocate_ipinfo(ip: str) -> dict:
+    """
+    Fallback geo lookup via ipinfo.io (free 50k req/month).
+    Returns city in English — caller translates via CITY_NAME_RU.
+    """
+    try:
+        url = f"https://ipinfo.io/{ip}/json"
+        req = urllib.request.Request(url, headers={"User-Agent": "chimera-cascade-bridge/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        cc = data.get("country", "UN")
+        city_en = data.get("city", "") or ""
+        # Translate to Russian if we have a mapping
+        city_ru = CITY_NAME_RU.get(city_en, city_en)
+        return {
+            "country_code": cc,
+            "country_name": COUNTRY_NAMES.get(cc, data.get("country", "Не указано")),
+            "city": city_ru,
+        }
+    except Exception:
+        return {}
+
+
+def _is_empty_city(city: str) -> bool:
+    """True if city is missing/None/empty/dash-only."""
+    if not city:
+        return True
+    s = city.strip()
+    return (not s) or (set(s) <= set("—-−–"))
 
 
 def _geolocate_host(host: str, cached: dict | None = None) -> dict:
     """
-    Get geolocation for a hostname. Uses cache if fresh (< GEO_CACHE_TTL).
-    Falls back to TLD detection if IP resolution or API fails.
+    Get geolocation for a hostname. Uses cache if fresh (< GEO_CACHE_TTL)
+    AND has a real city (negative results aren't cached — we retry on next refresh).
+    Falls back to ipinfo.io if ip-api.com returns empty city.
     """
     now = int(time.time())
-    # Check cache
+    # Check cache — only return if BOTH country_code AND a real city are present.
+    # Cached "—" city means previous lookup failed — treat as cache miss and retry.
     if cached and cached.get("geo_time") and now - cached.get("geo_time", 0) < GEO_CACHE_TTL:
-        if cached.get("country_code"):
+        cc = cached.get("country_code", "")
+        city = cached.get("city", "")
+        if cc and not _is_empty_city(city):
             return {
-                "country_code":  cached["country_code"],
+                "country_code":  cc,
                 "country_name":  cached.get("country_name", "Не указано"),
-                "city":          cached.get("city", "—"),
+                "city":          city,
             }
     
     # Resolve hostname to IP
     ip = _resolve_ip(host)
     if not ip:
-        return {"country_code": "UN", "country_name": "Не указано", "city": host}
+        return {"country_code": "UN", "country_name": "Не указано", "city": ""}
     
-    # Geolocate IP
+    # Primary geo lookup — ip-api.com (returns Russian city names via lang=ru)
     geo = _geolocate_ip(ip)
+    
+    # Fallback to ipinfo.io if ip-api.com didn't return a city
+    # (ip-api.com sometimes returns empty city for datacenter IPs due to DB gaps)
+    if _is_empty_city(geo.get("city", "")):
+        geo2 = _geolocate_ipinfo(ip)
+        if not _is_empty_city(geo2.get("city", "")):
+            # Use ipinfo's city (already translated to Russian)
+            geo["city"] = geo2["city"]
+            # If ip-api.com also failed on country, use ipinfo's country
+            if geo.get("country_code") == "UN" and geo2.get("country_code"):
+                geo["country_code"] = geo2["country_code"]
+                geo["country_name"] = geo2.get("country_name", "Не указано")
+    
     return geo
 
 
