@@ -839,11 +839,14 @@ if(b>=1024*1024)return (b/1024/1024).toFixed(1)+' МБ';if(b>=1024)return Math.r
 const total=d.total_bytes||0,up=d.upload_bytes||0,down=d.download_bytes||0;
 const maxSplit=Math.max(up,down,1);
 const upPct=up/maxSplit*100,downPct=down/maxSplit*100;
+const limitBytes=(d.limit_gb||0)*1024*1024*1024;
+const ringPct=limitBytes>0?Math.min(100,Math.max(0,total/limitBytes*100)):0;
+const heroIco=(d.limit_gb&&d.limit_gb>0)?'<div class="progress-ring" style="--pct:'+ringPct.toFixed(0)+'%"><span>'+ringPct.toFixed(0)+'%</span></div>':'<div class="tf-hero-ico">📊</div>';
 let h='<div class="tf-hero"><div class="tf-hero-top"><div>'+
 '<div class="tf-hero-label">Всего трафика</div>'+
 '<div class="tf-hero-num">'+fmt(total)+'</div>'+
 '<div class="tf-hero-sub">'+(d.total_gb?d.total_gb+' ГБ':'—')+'</div></div>'+
-'<div class="tf-hero-ico">📊</div></div>'+
+heroIco+'</div>'+
 '<div class="tf-split">'+
 '<div class="tf-split-col"><div class="tf-split-row"><span>↑ Отправлено</span><b>'+fmtShort(up)+'</b></div>'+
 '<div class="tf-split-track"><div class="tf-split-fill up" style="width:'+upPct+'%"></div></div></div>'+
@@ -1326,6 +1329,106 @@ function copyAWG(){const el=document.getElementById('awg-conf-box');if(!el)retur
 navigator.clipboard.writeText(el.textContent).then(function(){showToast('Конфиг скопирован');}).catch(function(){showToast('Ошибка копирования','error');});}
 """
 
+# ─── Portal visual polish (CSS + JS constants, same plain-string trick) ───────
+# Referenced inside the portal_page f-string via {PORTAL_POLISH_CSS} and
+# {PORTAL_POLISH_JS} placeholders, identical to TRAFFIC_CSS / PORTAL_TABS_CSS.
+PORTAL_POLISH_CSS = """/* === portal visual polish: transitions, skeletons, ring, theme, mobile, ptr === */
+/* 1. Tab transition animation */
+.tab-panel{animation:tabFade 0.3s ease forwards}
+@keyframes tabFade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+/* 2. Skeleton loading */
+.skeleton{background:linear-gradient(90deg,var(--input) 25%,var(--raised) 50%,var(--input) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:8px}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.skeleton-card{height:80px;margin-bottom:12px}
+
+/* 3. QR hover zoom (legacy .qr-img and portal .portal-qr-frame) */
+.qr-img,.portal-qr-frame{position:relative;transition:transform 0.3s}
+.qr-img:hover,.portal-qr-frame:hover{transform:scale(1.15);z-index:10}
+.qr-img img,.portal-qr-frame img{transition:box-shadow 0.3s}
+.qr-img:hover img,.portal-qr-frame:hover img{box-shadow:0 8px 30px rgba(0,0,0,0.5)}
+
+/* 4. Empty state illustrations (override default .portal-empty) */
+.portal-empty{display:grid;justify-items:center;padding:40px 20px;text-align:center;color:var(--muted);font-size:12px;line-height:1.7}
+.portal-empty .ico{font-size:48px;margin-bottom:12px;opacity:0.5;display:block}
+
+/* 5. Progress ring for traffic limit */
+.progress-ring{width:80px;height:80px;border-radius:50%;background:conic-gradient(var(--accent) var(--pct,0%),var(--input) 0);display:grid;place-items:center;margin:0 auto 12px;position:relative}
+.progress-ring::before{content:'';position:absolute;width:64px;height:64px;border-radius:50%;background:var(--surface)}
+.progress-ring span{position:relative;z-index:1;font:600 14px ui-monospace,monospace;color:var(--accent)}
+
+/* 6. Collapsible sections */
+.portal-collapse{cursor:pointer;user-select:none;padding:10px 0;border-bottom:1px solid var(--line);font-weight:600;font-size:13px;color:var(--text)}
+.portal-collapse::after{content:'▼';float:right;transition:transform 0.2s;font-size:10px;color:var(--muted)}
+.portal-collapse.collapsed::after{transform:rotate(-90deg)}
+.portal-collapse-body{transition:max-height 0.3s ease,opacity 0.2s;overflow:hidden;max-height:9999px;opacity:1}
+.portal-collapse.collapsed+.portal-collapse-body{max-height:0;opacity:0}
+
+/* 7. Theme toggle button + light theme variable overrides */
+.theme-toggle-btn{flex:0 0 auto;width:40px;height:40px;display:grid;place-items:center;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--text);font-size:18px;cursor:pointer;transition:all .15s;padding:0}
+.theme-toggle-btn:hover{border-color:var(--accent);color:var(--accent)}
+[data-theme="light"]{--bg:#f5f7fa;--surface:#fff;--raised:#f1f5f9;--input:#f1f5f9;--text:#1a1d29;--muted:#64748b;--line:#e2e8f0;--accent:#3b82f6;--on-accent:#fff;--tint:rgba(59,130,246,.08);--green:#16a34a;--yellow:#d97706;--red:#dc2626;--radius:14px}
+[data-theme="light"] .portal-qr-frame{background:#fff;box-shadow:0 8px 28px rgba(0,0,0,0.15)}
+
+/* 8. Toast with SVG checkmark (override base .toast to flex) */
+.toast{position:fixed;bottom:20px;right:20px;z-index:100;padding:12px 18px;border-radius:10px;background:var(--accent);color:var(--on-accent);font:600 12px inherit;opacity:0;transition:opacity .3s;pointer-events:none;max-width:380px;display:flex;align-items:center;gap:8px}
+.toast.show{opacity:1}
+.toast.error{background:var(--red)}
+.toast-success-icon{display:inline-flex;align-items:center;flex:0 0 auto}
+@keyframes drawCheck{0%{stroke-dashoffset:30}100%{stroke-dashoffset:0}}
+.toast-success-icon svg path{stroke-dasharray:30;animation:drawCheck 0.3s ease forwards}
+
+/* 10. Pull-to-refresh hint */
+.ptr-hint{text-align:center;padding:8px;font-size:11px;color:var(--muted);opacity:0;transition:opacity 0.2s}
+.ptr-hint.visible{opacity:1}
+
+/* 9. Mobile bottom navigation */
+@media(max-width:600px){
+  .sticky-top{position:sticky;top:0;z-index:100}
+  .tabs{position:fixed;bottom:0;left:0;right:0;overflow-x:auto;background:var(--surface);border-top:1px solid var(--line);padding:8px;z-index:100}
+  .tab{flex:0 0 auto;font-size:0.7rem}
+  body{padding-bottom:60px}
+}
+"""
+
+PORTAL_POLISH_JS = """/* === Portal visual polish JS === */
+/* Theme toggle */
+function toggleTheme(){
+  const cur=document.documentElement.dataset.theme||'dark';
+  const nxt=cur==='dark'?'light':'dark';
+  document.documentElement.dataset.theme=nxt;
+  try{localStorage.setItem('wpp-theme',nxt);}catch(e){}
+  const btn=document.getElementById('theme-toggle-btn');
+  if(btn){btn.textContent=nxt==='dark'?'☀️':'🌙';}
+}
+/* Collapsible sections */
+function toggleCollapse(el){el.classList.toggle('collapsed');}
+/* Pull-to-refresh — at scrollY=0, drag down >50px then release to refresh all */
+(function(){
+  let startY=0,pulling=false;
+  const hint=document.getElementById('ptr-hint');
+  if(!hint)return;
+  window.addEventListener('touchstart',function(e){
+    if(window.scrollY<=0){startY=e.touches[0].clientY;pulling=true;}
+    else{pulling=false;hint.classList.remove('visible');}
+  },{passive:true});
+  window.addEventListener('touchmove',function(e){
+    if(!pulling)return;
+    const dy=e.touches[0].clientY-startY;
+    if(dy>50){hint.classList.add('visible');}else{hint.classList.remove('visible');}
+  },{passive:true});
+  window.addEventListener('touchend',function(){
+    if(!pulling)return;
+    pulling=false;
+    if(hint.classList.contains('visible')){
+      hint.classList.remove('visible');
+      loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();
+    }
+  },{passive:true});
+})();
+"""
+
+
 def portal_page(user, path):
     """Main User Portal page with 10 tabs — WPP-styled."""
     email = esc(user.get("email", "user"))
@@ -1336,6 +1439,7 @@ def portal_page(user, path):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Portal — {name}</title>
+<script>(function(){{try{{var t=localStorage.getItem('wpp-theme');if(t)document.documentElement.dataset.theme=t;}}catch(e){{}}}})();</script>
 <style>
 :root{{--bg:#0a0e17;--surface:#131825;--raised:#1a2030;--input:#0d1119;
 --accent:#4d9eff;--on-accent:#fff;--text:#e2e8f0;--muted:#6b7689;
@@ -1417,8 +1521,10 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 {PORTAL_TABS_CSS}
 {TRAFFIC_CSS}
 {CONFIGS_CSS}
+{PORTAL_POLISH_CSS}
 </style></head><body>
 <div class="container">
+<div class="ptr-hint" id="ptr-hint">↓ Потяните вниз, чтобы обновить</div>
 <div class="sticky-top">
 <div class="header">
 <div class="avatar">{initial}</div>
@@ -1426,6 +1532,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <h1>{name}</h1>
 <div class="sub">{email}</div>
 </div>
+<button class="theme-toggle-btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Сменить тему" aria-label="Сменить тему">☀️</button>
 <a class="logout" href="/portal/logout">Выход</a>
 </div>
 <div class="tabs" id="tabs">
@@ -1444,12 +1551,12 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 
 <div class="tab-panel active" id="panel-connect">
 <div class="card"><div class="card-title">🔗 Подключение</div>
-<div id="links-container"><div class="loading"><div class="spinner"></div></div></div></div>
+<div id="links-container"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></div>
 </div>
 
 <div class="tab-panel" id="panel-subscription">
 <div class="card" id="sub-card"><div class="card-title">📚 Моя подписка</div>
-<div id="sub-container"><div class="loading"><div class="spinner"></div></div></div></div>
+<div id="sub-container"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></div>
 </div>
 
 <div class="tab-panel" id="panel-configs">
@@ -1590,7 +1697,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 
 <div class="tab-panel" id="panel-traffic">
 <div class="card"><div class="card-title">📊 Трафик</div>
-<div id="traffic-container"><div class="loading"><div class="spinner"></div></div></div></div>
+<div id="traffic-container"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></div>
 <div class="card" id="ttl-card" style="display:none"><div class="card-title">⏰ Срок действия</div>
 <div id="ttl-container"></div></div>
 </div>
@@ -1598,7 +1705,8 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <div class="tab-panel" id="panel-ips">
 <div class="card"><div class="card-title">🛂 Мои IP-адреса</div>
 <div id="ips-detected"></div>
-<div id="ips-list" style="margin-bottom:12px"></div>
+<div class="portal-collapse" onclick="toggleCollapse(this)">📋 Список IP-адресов</div>
+<div class="portal-collapse-body" id="ips-list" style="margin-bottom:12px"></div>
 <div class="portal-tile">
 <div class="portal-tile-head"><span class="portal-chip accent">+</span><div class="portal-tile-title">Добавить IP</div></div>
 <div class="portal-form">
@@ -1649,22 +1757,22 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 
 <div class="tab-panel" id="panel-satellites">
 <div class="card" id="sat-card" style="display:none"><div class="card-title">🛰 Сателлиты</div>
-<div id="sat-container"><div class="loading"><div class="spinner"></div></div></div></div>
+<div class="portal-collapse" onclick="toggleCollapse(this)">🛰 Список сателлитов</div><div class="portal-collapse-body" id="sat-container"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></div>
 </div>
 
 <div class="tab-panel" id="panel-b4">
 <div class="card" id="b4-card" style="display:none"><div class="card-title">📺 YouTube DPI Bypass</div>
-<div id="b4-container"><div class="loading"><div class="spinner"></div></div></div></div>
+<div id="b4-container"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></div>
 </div>
 
 <div class="tab-panel" id="panel-server">
 <div class="card"><div class="card-title">🖥 Состояние сервера</div>
-<div class="grid2" id="sys-grid"><div class="loading"><div class="spinner"></div></div></div></div>
+<div class="grid2" id="sys-grid"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></div>
 </div>
 
 <div class="tab-panel" id="panel-awg">
 <div class="card" id="awg-card" style="display:none"><div class="card-title">🛡 AmneziaWG</div>
-<div id="awg-container"><div class="loading"><div class="spinner"></div></div></div></div>
+<div id="awg-container"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></div>
 </div>
 
 </div>
@@ -1676,12 +1784,21 @@ document.querySelectorAll('.tab-panel').forEach(p=>p.classList.toggle('active',p
 history.replaceState(null,'','#'+t);
 }}
 (function(){{const h=(location.hash||'#connect').slice(1);if(document.getElementById('panel-'+h))switchTab(h);}})();
-function showToast(m,t='success'){{const e=document.getElementById('toast');e.textContent=m;e.className='toast show '+t;setTimeout(()=>e.className='toast',3000);}}
+function showToast(m,t='success'){{
+  const e=document.getElementById('toast');
+  const ico=t==='success'?'<span class="toast-success-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M3 9.5L7 13.5L15 4.5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>':'';
+  e.innerHTML=ico+'<span>'+esc(String(m==null?'':m))+'</span>';
+  e.className='toast show '+t;
+  clearTimeout(e._t);
+  e._t=setTimeout(()=>e.className='toast',3000);
+}}
 async function api(p){{const r=await fetch(p,{{credentials:'same-origin'}});if(r.status===401){{location.href='/portal/';return null;}}if(!r.ok&&r.status!==400)return null;return r.json().catch(()=>null);}}
 
 {PORTAL_TABS_JS}
 
 {LOAD_TRAFFIC_JS}
+
+{PORTAL_POLISH_JS}
 
 loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();
 </script>
