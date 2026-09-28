@@ -829,9 +829,9 @@ def _dashboard_body_legacy(data, subs, profiles, traffic, path, domain, csrf, pr
     health=''
     if not fresh:
         reason='Измерения VPS ещё не получены.' if not latest else 'Измерения VPS не обновляются.'
-        health='<div class="note warning" role="status">'+reason+' Проверьте сборщик через SSH: <code>systemctl status web-panel-proxy-metrics.service web-panel-proxy-metrics.timer</code>. Журнал: <code>journalctl -u web-panel-proxy-metrics.service -n 30 --no-pager</code>.</div>'
+        health='<div class="note warning" role="status">'+reason+' Проверьте сборщик через SSH: <code>systemctl status wpp-metrics.service wpp-metrics.timer</code>. Журнал: <code>journalctl -u wpp-metrics.service -n 30 --no-pager</code>. Если таймер не установлен — <code>python3 -c "from chimera.modules.wpp_metrics import install_timer; print(install_timer())"</code></div>'
     elif not traffic_fresh:
-        health='<div class="note warning" role="status">Ресурсы VPS измеряются, но нет свежих счётчиков трафика. Проверьте через SSH: <code>systemctl status web-proxy-panel-traffic.service web-proxy-panel-traffic.timer</code>.</div>'
+        health='<div class="note warning" role="status">Ресурсы VPS измеряются, но нет свежих счётчиков трафика. Проверьте через SSH: <code>systemctl status wpp-metrics.service wpp-metrics.timer</code>. Журнал: <code>journalctl -u wpp-metrics.service -n 30 --no-pager</code>.</div>'
     graph=chart(data.get('history',[]),hours)
     if not fresh or not traffic_fresh:
         graph='<div class="chart-empty">'+icon('chart')+'<span>Нет свежих измерений<br>Диагностика сборщика указана выше</span></div>'
