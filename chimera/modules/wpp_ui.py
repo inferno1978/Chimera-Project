@@ -738,18 +738,18 @@ def portal_login_page(path, csrf, error=""):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>User Portal — Вход</title>
+<script>try{{var t=localStorage.getItem('wpp-theme');document.documentElement.dataset.theme=t==='light'?'light':'dark'}}catch(e){{document.documentElement.dataset.theme='dark'}}</script>
 <style>
-:root{{--bg:#071116;--surface:#0f2028;--raised:#152b35;--input:#0a1920;
---line:#24404b;--text:#e9f4f6;--muted:#91aeb8;--accent:#56decb;
---on-accent:#052820;--tint:#56decb12;--green:#8bdbaa;--red:#ff9993;
---amber:#f5c989;--yellow:#f5c989;--shadow:0 18px 60px #0003;
+:root{{--bg:#101318;--surface:#1b1e24;--raised:#22262e;--input:#171a20;
+--line:#303641;--text:#f3f5f8;--muted:#93a0b8;--accent:#3b82f6;
+--on-accent:#fff;--tint:#3b82f619;--green:#41c78d;--red:#f06f75;
+--amber:#dcae43;--yellow:#dcae43;--shadow:0 14px 46px #0006;
 --radius:14px;color-scheme:dark}}
-:root[data-theme=light]{{--bg:#eaf0ed;--surface:#fbfdfb;--raised:#eff5f1;
---input:#f5f8f5;--text:#142f2b;--muted:#5d7870;--line:#cfddd5;
---accent:#087c6d;--on-accent:#fff;--tint:#087c6d0c;--green:#27754b;
---amber:#886124;--yellow:#886124;--red:#b94042;
---shadow:0 18px 50px #153b2310;--radius:14px;color-scheme:light}}
-<script>try{{var t=localStorage.getItem('wpp-theme');if(t)document.documentElement.dataset.theme=t;}}catch(e){{}}</script>
+:root[data-theme=light]{{--bg:#f3f5f8;--surface:#fff;--raised:#eef1f5;
+--input:#f9fafc;--text:#202630;--muted:#667188;--line:#d8dde6;
+--accent:#2563d9;--on-accent:#fff;--tint:#2563d912;--green:#25865b;
+--amber:#916918;--yellow:#916918;--red:#bd464c;
+--shadow:0 8px 30px #17203614;--radius:14px;color-scheme:light}}
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{min-height:100vh;display:grid;place-items:center;padding:24px;
 font:15px/1.6 -apple-system,system-ui,sans-serif;background:var(--bg);color:var(--text)}}
@@ -996,9 +996,9 @@ PORTAL_TABS_CSS = """/* === shared portal primitives (all tabs) === */
 .portal-meta{display:flex;justify-content:space-between;font:10px ui-monospace,monospace;color:var(--muted)}
 .portal-proto-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:8px;background:var(--tint);color:var(--accent);font:600 11px ui-monospace,monospace;border:1px solid var(--line);overflow-wrap:anywhere}
 .portal-chip{display:inline-block;padding:3px 8px;border-radius:6px;font:600 10px ui-monospace,monospace;background:var(--input);color:var(--muted);border:1px solid var(--line)}
-.portal-chip.on{background:rgba(139,219,170,.14);color:var(--green);border-color:rgba(139,219,170,.3)}
-.portal-chip.off{background:rgba(255,153,147,.14);color:var(--red);border-color:rgba(255,153,147,.3)}
-.portal-chip.accent{background:var(--tint);color:var(--accent);border-color:rgba(86,222,203,.3)}
+.portal-chip.on{background:rgba(65,199,141,.14);color:var(--green);border-color:rgba(65,199,141,.3)}
+.portal-chip.off{background:rgba(240,111,117,.14);color:var(--red);border-color:rgba(240,111,117,.3)}
+.portal-chip.accent{background:var(--tint);color:var(--accent);border-color:rgba(59,130,246,.3)}
 .portal-tile-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)}
 .portal-tile-row:last-child{border:0}
 .portal-tile-row .label{color:var(--muted);font-size:12px}
@@ -1037,7 +1037,7 @@ CONFIGS_CSS = """/* === configs tab: server configs + client app cards === */
 .cfg-client-desc{font-size:11px;color:var(--muted);line-height:1.5;position:relative}
 .cfg-client-meta{display:flex;flex-wrap:wrap;gap:5px;position:relative}
 .cfg-platform-badge{display:inline-flex;align-items:center;gap:3px;padding:3px 7px;border-radius:5px;font:600 9px ui-monospace,monospace;background:var(--input);color:var(--muted);border:1px solid var(--line);white-space:nowrap}
-.cfg-format-badge{display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border-radius:5px;font:600 9px ui-monospace,monospace;background:var(--tint);color:var(--accent);border:1px solid rgba(86,222,203,.3);white-space:nowrap}
+.cfg-format-badge{display:inline-flex;align-items:center;gap:3px;padding:3px 8px;border-radius:5px;font:600 9px ui-monospace,monospace;background:var(--tint);color:var(--accent);border:1px solid rgba(59,130,246,.3);white-space:nowrap}
 .cfg-client-dl{display:inline-flex;align-items:center;justify-content:center;gap:6px;margin-top:auto;padding:9px 14px;border-radius:8px;background:var(--accent);color:var(--on-accent);font:600 12px inherit;text-decoration:none;transition:opacity .15s,transform .12s;position:relative}
 .cfg-client-dl:hover{opacity:.9;transform:translateY(-1px)}
 @media(max-width:900px){.cfg-client-grid{grid-template-columns:repeat(2,1fr)}}
@@ -1456,7 +1456,7 @@ PORTAL_POLISH_CSS = """/* === portal visual polish: transitions, skeletons, ring
 /* 7. Theme toggle button + light theme variable overrides */
 .theme-toggle-btn{flex:0 0 auto;width:40px;height:40px;display:grid;place-items:center;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--text);font-size:18px;cursor:pointer;transition:all .15s;padding:0}
 .theme-toggle-btn:hover{border-color:var(--accent);color:var(--accent)}
-[data-theme="light"]{--bg:#eaf0ed;--surface:#fbfdfb;--raised:#eff5f1;--input:#f5f8f5;--text:#142f2b;--muted:#5d7870;--line:#cfddd5;--accent:#087c6d;--on-accent:#fff;--tint:#087c6d0c;--green:#27754b;--amber:#886124;--yellow:#886124;--red:#b94042;--shadow:0 18px 50px #153b2310;--radius:14px;color-scheme:light}
+[data-theme="light"]{--bg:#f3f5f8;--surface:#fff;--raised:#eef1f5;--input:#f9fafc;--text:#202630;--muted:#667188;--line:#d8dde6;--accent:#2563d9;--on-accent:#fff;--tint:#2563d912;--green:#25865b;--amber:#916918;--yellow:#916918;--red:#bd464c;--shadow:0 8px 30px #17203614;--radius:14px;color-scheme:light}
 [data-theme="light"] .portal-qr-frame{background:#fff;box-shadow:0 8px 28px rgba(0,0,0,0.15)}
 
 /* 8. Toast with SVG checkmark (override base .toast to flex) */
@@ -1582,12 +1582,12 @@ def portal_page(user, path):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Portal — {name}</title>
-<script>(function(){{try{{var t=localStorage.getItem('wpp-theme');if(t){{document.documentElement.dataset.theme=t;window.addEventListener('DOMContentLoaded',function(){{var b=document.getElementById('theme-toggle-btn');if(b)b.textContent=t==='light'?'🌙':'☀️';}});}}}}catch(e){{}}}})();</script>
+<script>(function(){{try{{var t=localStorage.getItem('wpp-theme');var theme=t==='light'?'light':'dark';document.documentElement.dataset.theme=theme;window.addEventListener('DOMContentLoaded',function(){{var b=document.getElementById('theme-toggle-btn');if(b)b.textContent=theme==='light'?'🌙':'☀️';}});}}catch(e){{document.documentElement.dataset.theme='dark';}}}})();</script>
 <style>
-:root{{--bg:#071116;--surface:#0f2028;--raised:#152b35;--input:#0a1920;
---line:#24404b;--text:#e9f4f6;--muted:#91aeb8;--accent:#56decb;
---on-accent:#052820;--tint:#56decb12;--green:#8bdbaa;--red:#ff9993;
---amber:#f5c989;--yellow:#f5c989;--shadow:0 18px 60px #0003;
+:root{{--bg:#101318;--surface:#1b1e24;--raised:#22262e;--input:#171a20;
+--line:#303641;--text:#f3f5f8;--muted:#93a0b8;--accent:#3b82f6;
+--on-accent:#fff;--tint:#3b82f619;--green:#41c78d;--red:#f06f75;
+--amber:#dcae43;--yellow:#dcae43;--shadow:0 14px 46px #0006;
 --radius:14px;color-scheme:dark}}
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{min-height:100vh;font:14px/1.6 -apple-system,system-ui,sans-serif;
@@ -1622,8 +1622,8 @@ padding:10px 0;border-bottom:1px solid var(--line)}}
 .row .val{{font-weight:500}}
 .badge{{display:inline-block;padding:3px 8px;border-radius:6px;font:600 11px inherit;
 background:var(--tint);color:var(--accent)}}
-.badge.on{{background:rgba(139,219,170,.14);color:var(--green)}}
-.badge.off{{background:rgba(255,153,147,.14);color:var(--red)}}
+.badge.on{{background:rgba(65,199,141,.14);color:var(--green)}}
+.badge.off{{background:rgba(240,111,117,.14);color:var(--red)}}
 .input{{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
 background:var(--input);color:var(--text);font:13px inherit;outline:none}}
 .input:focus{{border-color:var(--accent)}}
