@@ -2,19 +2,25 @@
 """
 chimera/modules/wpp_mirrors.py
 ────────────────────────────────────────────────────────────────────────────────
-Mirror ladder для скачивания тарбола WPP-фронтенда из GitHub.
+Mirror ladder для скачивания тарбола WPP-фронтенда.
 
-Источники:
-  1. codeload.github.com/POLESNIESOVETI12/web-panel-proxy/tar.gz/v{version}
-     — canonical tarball endpoint
-  2-4. 3 gh-proxy зеркала (gh-proxy.com / ghproxy.net / gh.llkk.cc) —
-       обрабатывают блокировки GitHub в RU-сегменте (паттерн dnscrypt_update)
-  5. github.com/POLESNIESOVETI12/web-panel-proxy/archive/refs/tags/v{version}.tar.gz
-     — прямой GitHub (если codeload недоступен)
+Источники (в порядке приоритета):
+  1. GitLab raw (chimera-v5 branch) — fastest, no auth, public CDN, works in RU
+  2. jsDelivr CDN (serves files from our GitHub repo) — global edge cache
+  3. GitHub raw — public, may have CDN delay for large binary files
+  4. GitHub release asset (release wpp-v2.4.2)
+  5. canonical codeload tarball endpoint (upstream POLESNIESOVETI12) — DEAD
+     since upstream repo was deleted from GitHub, kept as legacy fallback
+  6-11. gh-proxy зеркала upstream'а (тоже мертвы, но паттерн сохранён)
+  12. прямой GitHub archive endpoint (upstream, тоже мёртв)
 
-jsDelivr/Statically CDN НЕ подходят для тарболов > 25 MB — они обслуживают
-отдельные файлы, не архивы целиком. Поэтому ladder из 5 URL, как в
-triple_panel._front_mirror_urls().
+Tarball source: /var/lib/xray-installer/wpp_panel_www/ on server 1 (full
+copy of upstream v2.4.2 release artifacts preserved before upstream repo
+disappeared from GitHub in late September 2026).
+
+The tarball is also committed to chimera repo at vendor/wpp-front/ so any
+public CDN serving GitHub/GitLab raw files can serve it (jsDelivr, GitLab
+raw, GitHub raw, etc.).
 """
 from __future__ import annotations
 
@@ -27,13 +33,30 @@ if __package__ in (None, ""):
     if str(_ROOT) not in sys.path:
         sys.path.insert(0, str(_ROOT))
 
-# Константы апстрима (MIT © POLESNIESOVETI12)
+# Константы апстрима (MIT © POLESNIESOVETI12) — DEAD since upstream repo
+# was deleted from GitHub. Kept for legacy/compat — old install scripts that
+# still reference UPSTREAM_REPO_FULL will keep working if upstream ever
+# comes back (unlikely).
 UPSTREAM_OWNER  = "POLESNIESOVETI12"
 UPSTREAM_REPO   = "web-panel-proxy"
 UPSTREAM_REPO_FULL = f"{UPSTREAM_OWNER}/{UPSTREAM_REPO}"
 
+# Наш форк chimera-project — где мы поддерживаем код (incl. WPP frontend).
+# GitHub: inferno1978/Chimera-Project, branch: main (synced from chimera-v5)
+# GitLab: netwalker071778/chimera-project, branch: chimera-v5 (primary)
+OUR_GITHUB_OWNER  = "inferno1978"
+OUR_GITHUB_REPO   = "Chimera-Project"
+OUR_GITHUB_FULL   = f"{OUR_GITHUB_OWNER}/{OUR_GITHUB_REPO}"
+OUR_GITLAB_FULL   = "netwalker071778/chimera-project"
+OUR_GITLAB_BRANCH = "chimera-v5"
+
+# Вендорный тарболл — коммитнут в chimera repo, доступен через любой CDN
+# обслуживающий GitHub/GitLab raw files.
+VENDOR_PATH = "vendor/wpp-front/web-panel-proxy-v{version}.tar.gz"
+
 # Зеркала gh-proxy для обхода DPI-блокировок (паттерн dnscrypt_mirrors.py).
-# Порядок: самый стабильный → менее надёжный.
+# Порядок: самый стабильный → менее надёжный. Применяются только к upstream
+# URL (которые сейчас мертвы), но паттерн сохранён для будущего апстрима.
 _GH_PROXY_HOSTS = (
     "gh-proxy.com",
     "ghproxy.net",
@@ -53,39 +76,43 @@ def front_mirror_urls(filename: str, *, version: str = "",
     Используется PackageSpec.mirror_urls_builder. **kwargs проглатываются,
     чтобы совпадать с сигнатурой других mirror-билдеров в Chimera.
     """
-    # Нормализуем версию: убираем ведущее 'v' для codeload, добавляем для тегов
     ver = (version or "").lstrip("v")
     if not ver:
-        # Если версия не передана — берём main branch (как у triple_panel,
-        # апстрим которого тоже не тегает релизы). Для WPP это менее критично
-        # (теги есть), но fallback не повредит.
-        ver = "main"
+        # Если версия не передана — парсим из имени файла
+        import re
+        m = re.search(r"-v?(\d+\.\d+\.\d+)", filename) if filename else None
+        ver = m.group(1) if m else "2.4.2"  # default fallback
 
-    tag = ver if ver.startswith("v") or ver == "main" else f"v{ver}"
-    ref_for_archive = ver if ver == "main" else tag  # codeload без ведущего v
+    tag = f"v{ver}"
+    vendor_path = VENDOR_PATH.format(version=ver)
+    release_tag = f"wpp-v{ver}"
 
     urls: list[str] = [
-        # 1. canonical codeload tarball endpoint
-        f"https://codeload.github.com/{UPSTREAM_REPO_FULL}/tar.gz/refs/tags/{tag}"
-            if ver != "main" else
-        f"https://codeload.github.com/{UPSTREAM_REPO_FULL}/tar.gz/refs/heads/main",
+        # 1. GitLab raw — primary, public, no auth, works in RU segment
+        f"https://gitlab.com/{OUR_GITLAB_FULL}/-/raw/{OUR_GITLAB_BRANCH}/{vendor_path}",
+        # 2. jsDelivr CDN — serves files from GitHub repo, global edge cache
+        f"https://cdn.jsdelivr.net/gh/{OUR_GITHUB_FULL}@main/{vendor_path}",
+        # 3. GitHub raw — public, may have CDN delay for large binary files
+        f"https://raw.githubusercontent.com/{OUR_GITHUB_FULL}/main/{vendor_path}",
+        # 4. GitHub release asset — public download URL (may have propagation delay)
+        f"https://github.com/{OUR_GITHUB_FULL}/releases/download/{release_tag}/web-panel-proxy-v{ver}.tar.gz",
     ]
 
-    # 2-4. gh-proxy зеркала (обёрнутая форма: ?url=... для gh-proxy.com,
-    # path-based для ghproxy.net и gh.llkk.cc — все они понимают оба синтаксиса
-    # на практике).
+    # Legacy upstream URLs (DEAD but kept for compat if upstream returns):
+    # 5. canonical codeload tarball endpoint
+    urls.append(
+        f"https://codeload.github.com/{UPSTREAM_REPO_FULL}/tar.gz/refs/tags/{tag}"
+    )
+
+    # 6-11. gh-proxy зеркала (path-based + ?url= form для каждого хоста)
     direct_archive = (
         f"https://github.com/{UPSTREAM_REPO_FULL}/archive/refs/tags/{tag}.tar.gz"
-        if ver != "main" else
-        f"https://github.com/{UPSTREAM_REPO_FULL}/archive/refs/heads/main.tar.gz"
     )
     for proxy_host in _GH_PROXY_HOSTS:
-        # gh-proxy-формы: <host>/<full-url> и <host>/?url=<full-url>
         urls.append(f"https://{proxy_host}/{direct_archive}")
         urls.append(f"https://{proxy_host}/?url={direct_archive}")
 
-    # 5. прямой GitHub archive endpoint (последний fallback, обычно
-    # блокируется DPI, но работает за пределами RU).
+    # 12. прямой GitHub archive endpoint (последний fallback)
     urls.append(direct_archive)
 
     return urls
@@ -95,17 +122,22 @@ def version_file_urls() -> list[str]:
     """
     Список URL для файла VERSION апстрима (для проверки последней версии).
 
-    WPP тегирует релизы (v2.4.2 и т.д.), поэтому берём /releases/latest
-    через GitHub API как primary source, raw README как fallback.
+    Upstream is DEAD — these URLs return 404. The wpp_update.py module
+    uses GitHub API releases/latest as primary source — also dead.
+    Falling back to our fork's tags + our wpp_packages.WPP_FRONT_VERSION
+    constant for version pinning.
     """
     return [
-        # 1. GitHub API releases/latest (canonical)
+        # 1. Our GitHub tags (descending order — latest first via API)
+        f"https://api.github.com/repos/{OUR_GITHUB_FULL}/tags",
+        # 2. Our GitLab tags
+        f"https://gitlab.com/api/v4/projects/{OUR_GITLAB_FULL.replace('/', '%2F')}/repository/tags",
+        # 3. Our raw wpp_packages.py — parse WPP_FRONT_VERSION constant
+        f"https://gitlab.com/{OUR_GITLAB_FULL}/-/raw/{OUR_GITLAB_BRANCH}/chimera/modules/wpp_packages.py",
+        # 4. jsDelivr (if GitLab raw blocked)
+        f"https://cdn.jsdelivr.net/gh/{OUR_GITHUB_FULL}@main/chimera/modules/wpp_packages.py",
+        # 5. Legacy upstream GitHub API (DEAD but kept for compat)
         f"https://api.github.com/repos/{UPSTREAM_REPO_FULL}/releases/latest",
-        # 2. raw README (быстрый fallback — парсим "WEB PANEL PROXY X.Y.Z"
-        #    из первой строки h1)
-        f"https://raw.githubusercontent.com/{UPSTREAM_REPO_FULL}/main/README.md",
-        # 3. jsDelivr (если raw блокирован, jsDelivr обслуживает raw-файлы)
-        f"https://cdn.jsdelivr.net/gh/{UPSTREAM_REPO_FULL}@main/README.md",
     ]
 
 
