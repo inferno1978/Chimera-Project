@@ -50,6 +50,104 @@ def duration(value):
     return f'{value//86400} д. {value%86400//3600} ч.' if value >= 86400 else f'{value//3600} ч. {value%3600//60} мин.'
 
 
+def _hour_label(h):
+    """'07' → '07:00' style label for hour 0..23."""
+    return f"{h:02d}:00"
+
+
+def _render_hourly_pattern(pattern):
+    """Render Variant B — 24-bar chart of avg traffic per hour-of-day."""
+    if not pattern or not pattern.get('buckets'):
+        return '<div class="hourly-empty">Нет данных за последние 7 дней.</div>'
+    buckets = pattern['buckets']
+    max_total = max(1, pattern.get('max_avg_total', 0))
+    days_observed = pattern.get('days_observed', 0)
+    tz_label = pattern.get('tz', 'UTC')
+    bars = []
+    for b in buckets:
+        h = b.get('hour', 0)
+        up = max(0, int(b.get('up', 0)))
+        down = max(0, int(b.get('down', 0)))
+        total = up + down
+        bar_h = (total / max_total) * 100 if total > 0 else 0.5  # min 0.5% for visibility
+        # inside-bar up/down split
+        up_pct = (up / total * 100) if total > 0 else 0
+        down_pct = 100 - up_pct
+        title = f"{_hour_label(h)} — ↑ {size(up)} · ↓ {size(down)} · avg of {b.get('days',0)} days"
+        bars.append(
+            f'<div class="hourly-bar" style="height:{bar_h:.2f}%" title="{esc(title)}">'
+            f'<div class="hourly-seg down" style="height:{down_pct:.1f}%"></div>'
+            f'<div class="hourly-seg up" style="height:{up_pct:.1f}%"></div>'
+            f'</div>'
+        )
+    axis = ''.join(f'<span>{h:02d}</span>' for h in range(24))
+    return (
+        f'<div class="hourly-chart">{"".join(bars)}</div>'
+        f'<div class="hourly-axis">{axis}</div>'
+        f'<div class="hourly-legend">'
+        f'<span><i class="up"></i>↑ Отправка</span>'
+        f'<span><i class="down"></i>↓ Получение</span>'
+        f'<span class="muted">Среднее за {days_observed} дн. · TZ {esc(tz_label)}</span>'
+        f'</div>'
+    )
+
+
+def _render_hourly_heatmap(heatmap):
+    """Render Variant C — 7×24 calendar heatmap (Mon..Sun × 00..23)."""
+    if not heatmap or not heatmap.get('rows'):
+        return '<div class="hourly-empty">Нет данных за последние 7 дней.</div>'
+    rows = heatmap['rows']
+    max_total = max(1, heatmap.get('max_total', 0))
+    days_observed = heatmap.get('days_observed', 0)
+    tz_label = heatmap.get('tz', 'UTC')
+    # Header row with hour labels (skip the first cell which is the corner)
+    header = '<div class="heatmap-corner"></div>' + ''.join(
+        f'<div class="heatmap-hour-label">{h:02d}</div>' for h in range(24)
+    )
+    body_rows = []
+    for row in rows:
+        name = row.get('name', '')
+        cells = []
+        for cell in row.get('cells', []):
+            h = cell.get('hour', 0)
+            up = max(0, int(cell.get('up', 0)))
+            down = max(0, int(cell.get('down', 0)))
+            total = up + down
+            # 5 intensity levels: 0 (empty) / 1 (low) / 2 (mid) / 3 (high) / 4 (max)
+            if total == 0:
+                level = 0
+            else:
+                ratio = total / max_total
+                if ratio < 0.05:
+                    level = 0
+                elif ratio < 0.25:
+                    level = 1
+                elif ratio < 0.50:
+                    level = 2
+                elif ratio < 0.75:
+                    level = 3
+                else:
+                    level = 4
+            title = f"{name} {_hour_label(h)} — ↑ {size(up)} · ↓ {size(down)}"
+            cells.append(
+                f'<div class="heatmap-cell" data-level="{level}" title="{esc(title)}"></div>'
+            )
+        body_rows.append(
+            f'<div class="heatmap-row">'
+            f'<div class="heatmap-row-label">{esc(name)}</div>'
+            f'{"".join(cells)}'
+            f'</div>'
+        )
+    return (
+        f'<div class="heatmap-grid">{header}{"".join(body_rows)}</div>'
+        f'<div class="hourly-legend">'
+        f'<span class="muted">Меньше</span>'
+        f'<span class="heatmap-scale"><i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i></span>'
+        f'<span class="muted">Больше · {days_observed} дн. · TZ {esc(tz_label)}</span>'
+        f'</div>'
+    )
+
+
 def icon(name):
     paths = {'grid': '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
              'users': '<circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M17 4a3 3 0 0 1 0 6m1 4a5 5 0 0 1 3 4v3"/>',
@@ -587,6 +685,46 @@ dialog{scrollbar-width:none}dialog::-webkit-scrollbar{display:none}
 @media(max-width:1000px){.local-node-card,.node-connect-card{height:auto}}
 '''
 
+# CSS for hourly traffic pattern (Variant B) and weekly heatmap (Variant C)
+CSS += '''
+.hourly-card{margin-top:18px}.heatmap-card{margin-top:18px}
+.hourly-chart{display:grid;grid-template-columns:repeat(24,minmax(0,1fr));gap:3px;height:140px;align-items:end;padding:8px 0 4px;border-bottom:1px solid var(--line)}
+.hourly-bar{position:relative;width:100%;min-height:2px;border-radius:3px 3px 0 0;background:var(--input);cursor:help;transition:filter .15s,transform .1s;overflow:hidden}
+.hourly-bar:hover{filter:brightness(1.18);transform:scaleY(1.04)}
+.hourly-seg{position:absolute;left:0;right:0}
+.hourly-seg.up{bottom:0;background:var(--accent)}
+.hourly-seg.down{top:0;background:var(--amber)}
+.hourly-axis{display:grid;grid-template-columns:repeat(24,minmax(0,1fr));font:9px ui-monospace,monospace;color:var(--muted);text-align:center;padding:5px 0 0}
+.hourly-axis span{display:block}
+.hourly-legend{display:flex;flex-wrap:wrap;gap:14px;font-size:10px;color:var(--muted);margin-top:8px}
+.hourly-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.hourly-legend i.up{background:var(--accent)}
+.hourly-legend i.down{background:var(--amber)}
+.hourly-legend .muted{margin-left:auto}
+.hourly-empty{padding:30px 12px;text-align:center;color:var(--muted);font-size:12px}
+.heatmap-grid{display:grid;grid-template-columns:34px repeat(24,minmax(0,1fr));gap:3px;padding:8px 0 4px;border-bottom:1px solid var(--line)}
+.heatmap-corner{grid-column:1;grid-row:1}
+.heatmap-hour-label{font:8px ui-monospace,monospace;color:var(--muted);text-align:center;padding:3px 0}
+.heatmap-row{display:contents}
+.heatmap-row-label{font:10px ui-monospace,monospace;color:var(--muted);text-align:right;padding:6px 6px 0 0;align-self:center}
+.heatmap-cell{aspect-ratio:1;border-radius:3px;background:var(--input);cursor:help;transition:filter .15s,transform .1s}
+.heatmap-cell:hover{filter:brightness(1.3);transform:scale(1.15)}
+.heatmap-cell[data-level="0"]{background:var(--input)}
+.heatmap-cell[data-level="1"]{background:color-mix(in srgb,var(--accent) 22%,var(--input))}
+.heatmap-cell[data-level="2"]{background:color-mix(in srgb,var(--accent) 45%,var(--input))}
+.heatmap-cell[data-level="3"]{background:color-mix(in srgb,var(--accent) 70%,var(--input))}
+.heatmap-cell[data-level="4"]{background:var(--accent)}
+.heatmap-scale{display:inline-flex;gap:2px;align-items:center;margin:0 6px;vertical-align:middle}
+.heatmap-scale i{display:inline-block;width:11px;height:11px;border-radius:2px}
+.heatmap-scale i[data-level="0"]{background:var(--input)}
+.heatmap-scale i[data-level="1"]{background:color-mix(in srgb,var(--accent) 22%,var(--input))}
+.heatmap-scale i[data-level="2"]{background:color-mix(in srgb,var(--accent) 45%,var(--input))}
+.heatmap-scale i[data-level="3"]{background:color-mix(in srgb,var(--accent) 70%,var(--input))}
+.heatmap-scale i[data-level="4"]{background:var(--accent)}
+@media(max-width:900px){.hourly-chart{height:100px}.heatmap-grid{grid-template-columns:28px repeat(24,minmax(0,1fr))}.heatmap-row-label{font-size:9px;padding-right:3px}.heatmap-hour-label{font-size:7px}}
+@media(max-width:600px){.hourly-chart{height:80px;gap:1px}.hourly-axis{font-size:8px}.heatmap-grid{gap:1px}.heatmap-cell{border-radius:2px}}
+'''
+
 
 CLIENTS_JS='''<script>
 const clientPath=@@PATH@@,clientCsrf=@@CSRF@@,clientRows=document.getElementById('clientRows'),allRows=Array.from(clientRows.querySelectorAll('[data-client]')),search=document.getElementById('accountSearch'),filter=document.getElementById('clientFilter'),proto=document.getElementById('protocolFilter'),sort=document.getElementById('clientSort'),notice=document.getElementById('clientNotice');let changing=false;
@@ -714,20 +852,23 @@ def _dashboard_body_legacy(data, subs, profiles, traffic, path, domain, csrf, pr
     controls=''.join(f'<button data-range="{n}" class="{"selected" if n==hours else ""}">{n} ч</button>' for n in (1,6,24))
     records=client_records(subs,profiles,traffic,domain,proxy_link)
     shown=sorted(records,key=lambda r:(bool(r['totals']['active']),r['totals']['up']+r['totals']['down']),reverse=True)[:8]
-    return f'''<div data-live-block="health" class="live-block">{health}</div><section class="card resource-deck live-block" data-live-block="resources"><div class="resource-grid">{''.join(resources)}</div></section><div class="overview-stats live-block" data-live-block="overview">{stats}</div><div class="dashboard-grid"><section class="card graph-card"><div class="card-title"><div><span class="eyebrow">TRAFFIC / LIVE HISTORY</span><h2>Трафик прокси</h2></div><div class="range">{controls}</div></div><div class="graph-speeds live-block" data-live-block="speeds"><div><span>↑ Отправка</span><b>{size(latest.get('up_rate')) if traffic_fresh else '—'}</b><small> / с</small></div><div><span>↓ Получение</span><b>{size(latest.get('down_rate')) if traffic_fresh else '—'}</b><small> / с</small></div></div><div class="chart-wrap live-block" data-live-block="chart">{graph}</div><div class="legend"><span><i></i>Отправка</span><span class="down"><i></i>Получение</span><span>До 24 часов · замер ~10 с · UTC</span></div></section><section class="card"><div class="card-title"><h2>Службы и версия</h2><span class="pill">{esc(current)}</span></div><div class="node-label"><i></i><div class="node-domain">{esc(domain)}</div></div><div class="service-list live-block" data-live-block="services">{services_html}</div><div class="update-box"><div class="actions"><button id="checkUpdate">{icon('refresh')}Загрузить версии</button></div><div class="version-row"><label for="panelRelease">Панель</label><select id="panelRelease" aria-label="Версия панели"><option>Сначала загрузите список</option></select><button class="primary" id="startUpdate" hidden>Установить</button></div><p id="updateStatus" role="status">Можно обновиться или вернуться на прежний стабильный релиз GitHub</p></div></section></div><section class="card version-manager"><div class="card-title"><div><h2>Версии компонентов</h2><p>Обновление и откат без выпуска новой версии панели</p></div><button id="checkComponents">{icon('refresh')}Загрузить версии</button></div><div class="version-row"><label for="xrayRelease">Xray</label><select id="xrayRelease"><option>Сначала загрузите список</option></select><button data-component-install="xray" class="primary" disabled>Установить</button><small class="version-state" id="xrayCurrent">Текущая версия определяется…</small></div><div class="version-row"><label for="openfluxRelease">OpenFlux</label><select id="openfluxRelease"><option>Сначала загрузите список</option></select><button data-component-install="openflux" class="primary" disabled>Установить</button><small class="version-state" id="openfluxCurrent">Текущая версия определяется…</small></div><p id="componentStatus" class="note" role="status">Перед заменой создаётся резервная копия. Если служба не запустится, прежний бинарник восстановится автоматически.</p></section><div class="two-col equal"><section class="card"><div class="card-title"><h2>Ресурсы сервера</h2><span class="pill">VPS</span></div><div class="detail-list live-block" data-live-block="server-details">{details}</div></section><section class="card"><div class="card-title"><h2>Накопленный трафик</h2></div><div class="detail-list live-block" data-live-block="traffic-details"><div class="detail-line"><span>Отправлено</span><strong>↑ {size(total_up)}</strong></div><div class="detail-line"><span>Получено</span><strong>↓ {size(total_down)}</strong></div><div class="detail-line"><span>Последнее измерение</span><strong>{str(age)+' с назад' if latest else 'Нет измерений'}</strong></div></div><p class="note">Только трафик прокси. Активность — передача данных за последние 90 секунд, не число устройств онлайн.</p></section></div><section class="card"><div class="card-title"><h2>Пользователи и подписки</h2><a href="{esc(path)}/users" class="btn quiet">Управление →</a></div><div class="live-block" data-live-block="clients">{client_glances(shown,path)}<small>Показано {len(shown)} из {len(records)} · сначала передающие данные</small></div></section>'''
+    # New: hourly pattern (Variant B — 24-bar chart) and heatmap (Variant C — 7×24 grid)
+    hourly_pattern_html=_render_hourly_pattern(data.get('hourly_pattern'))
+    hourly_heatmap_html=_render_hourly_heatmap(data.get('hourly_heatmap'))
+    return f'''<div data-live-block="health" class="live-block">{health}</div><section class="card resource-deck live-block" data-live-block="resources"><div class="resource-grid">{''.join(resources)}</div></section><div class="overview-stats live-block" data-live-block="overview">{stats}</div><div class="dashboard-grid"><section class="card graph-card"><div class="card-title"><div><span class="eyebrow">TRAFFIC / LIVE HISTORY</span><h2>Трафик прокси</h2></div><div class="range">{controls}</div></div><div class="graph-speeds live-block" data-live-block="speeds"><div><span>↑ Отправка</span><b>{size(latest.get('up_rate')) if traffic_fresh else '—'}</b><small> / с</small></div><div><span>↓ Получение</span><b>{size(latest.get('down_rate')) if traffic_fresh else '—'}</b><small> / с</small></div></div><div class="chart-wrap live-block" data-live-block="chart">{graph}</div><div class="legend"><span><i></i>Отправка</span><span class="down"><i></i>Получение</span><span>До 24 часов · замер ~10 с · UTC</span></div></section><section class="card"><div class="card-title"><h2>Службы и версия</h2><span class="pill">{esc(current)}</span></div><div class="node-label"><i></i><div class="node-domain">{esc(domain)}</div></div><div class="service-list live-block" data-live-block="services">{services_html}</div><div class="update-box"><div class="actions"><button id="checkUpdate">{icon('refresh')}Загрузить версии</button></div><div class="version-row"><label for="panelRelease">Панель</label><select id="panelRelease" aria-label="Версия панели"><option>Сначала загрузите список</option></select><button class="primary" id="startUpdate" hidden>Установить</button></div><p id="updateStatus" role="status">Можно обновиться или вернуться на прежний стабильный релиз GitHub</p></div></section></div><section class="card hourly-card live-block" data-live-block="hourly-pattern"><div class="card-title"><div><span class="eyebrow">HOURLY PATTERN · LAST 7 DAYS</span><h2>Трафик по часам суток</h2></div></div>{hourly_pattern_html}<p class="note">Средний трафик за каждый час суток за последние 7 дней. Помогает увидеть типичный паттерн использования — когда обычно пик и провал.</p></section><section class="card heatmap-card live-block" data-live-block="hourly-heatmap"><div class="card-title"><div><span class="eyebrow">WEEKLY HEATMAP · 7×24</span><h2>Трафик по дням и часам</h2></div></div>{hourly_heatmap_html}<p class="note">Тепловая карта интенсивности по дням недели и часам. Помогает увидеть разницу между буднями и выходными.</p></section><section class="card version-manager"><div class="card-title"><div><h2>Версии компонентов</h2><p>Обновление и откат без выпуска новой версии панели</p></div><button id="checkComponents">{icon('refresh')}Загрузить версии</button></div><div class="version-row"><label for="xrayRelease">Xray</label><select id="xrayRelease"><option>Сначала загрузите список</option></select><button data-component-install="xray" class="primary" disabled>Установить</button><small class="version-state" id="xrayCurrent">Текущая версия определяется…</small></div><div class="version-row"><label for="openfluxRelease">OpenFlux</label><select id="openfluxRelease"><option>Сначала загрузите список</option></select><button data-component-install="openflux" class="primary" disabled>Установить</button><small class="version-state" id="openfluxCurrent">Текущая версия определяется…</small></div><p id="componentStatus" class="note" role="status">Перед заменой создаётся резервная копия. Если служба не запустится, прежний бинарник восстановится автоматически.</p></section><div class="two-col equal"><section class="card"><div class="card-title"><h2>Ресурсы сервера</h2><span class="pill">VPS</span></div><div class="detail-list live-block" data-live-block="server-details">{details}</div></section><section class="card"><div class="card-title"><h2>Накопленный трафик</h2></div><div class="detail-list live-block" data-live-block="traffic-details"><div class="detail-line"><span>Отправлено</span><strong>↑ {size(total_up)}</strong></div><div class="detail-line"><span>Получено</span><strong>↓ {size(total_down)}</strong></div><div class="detail-line"><span>Последнее измерение</span><strong>{str(age)+' с назад' if latest else 'Нет измерений'}</strong></div></div><p class="note">Только трафик прокси. Активность — передача данных за последние 90 секунд, не число устройств онлайн.</p></section></div><section class="card"><div class="card-title"><h2>Пользователи и подписки</h2><a href="{esc(path)}/users" class="btn quiet">Управление →</a></div><div class="live-block" data-live-block="clients">{client_glances(shown,path)}<small>Показано {len(shown)} из {len(records)} · сначала передающие данные</small></div></section>'''
 
 
 
 def _dashboard_page_legacy(body,path,csrf):
     return f'''<div class="page-head"><div><h1>Дашборд</h1><p>Сервер, подключения и использование трафика</p></div><div class="actions"><span id="liveIndicator" class="live-indicator"><i></i><b>Онлайн</b><small id="liveAge">сейчас</small></span><button id="refreshDashboard">{icon('refresh')}Обновить</button></div></div><p id="dashboardNotice" class="note" role="status" hidden></p><div id="dashboardContent">{body}</div><dialog id="updateAvailableDialog" class="update-dialog" aria-labelledby="updateDialogTitle"><div class="dialog-head"><div><small class="eyebrow">НОВАЯ ВЕРСИЯ</small><h2 id="updateDialogTitle">Доступно обновление</h2></div><button type="button" data-close-dialog aria-label="Закрыть уведомление">×</button></div><div class="update-dialog-body"><div class="update-release"><span class="update-release-mark">{icon('refresh')}</span><div><span>WEB PANEL PROXY</span><strong><span id="updateCurrentVersion"></span> → <span id="updateLatestVersion"></span></strong></div></div><p>Перед установкой панель создаст резервную копию. Подключения могут кратковременно прерваться.</p></div><div class="update-dialog-actions"><button type="button" id="updateNoticeLater">Позже</button><button type="button" class="primary" id="updateNoticeInstall">Обновить</button></div></dialog><script>
-const root=document.getElementById('dashboardContent'),notice=document.getElementById('dashboardNotice'),live=document.getElementById('liveIndicator'),liveAge=document.getElementById('liveAge'),updateDialog=document.getElementById('updateAvailableDialog');let range=1,busy=false,updating=false,lastSuccess=Date.now();
+const root=document.getElementById('dashboardContent'),notice=document.getElementById('dashboardNotice'),live=document.getElementById('liveIndicator'),liveAge=document.getElementById('liveAge'),updateDialog=document.getElementById('updateAvailableDialog');let range=1,busy=false,updating=false,lastSuccess=Date.now();try{{window._browserTZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'Europe/Moscow'}}catch(e){{window._browserTZ='Europe/Moscow'}}
 function updateDismissed(version){{try{{return localStorage.getItem('wpp-update-dismissed:'+version)==='1'}}catch(e){{return false}}}}
 function dismissUpdate(version){{try{{localStorage.setItem('wpp-update-dismissed:'+version,'1')}}catch(e){{}}}}
 function maybeNotifyUpdate(d){{window.dispatchEvent(new CustomEvent('wpp-update-status',{{detail:d}}))}}
 function updateView(d){{const p=document.getElementById('updateStatus'),b=document.getElementById('startUpdate'),select=document.getElementById('panelRelease');if(!p||!b||!select)return;updating=['queued','running'].includes(d.phase);if(Array.isArray(d.releases)&&d.releases.length){{const old=select.value;select.innerHTML=d.releases.map(v=>'<option value="'+v+'">'+v.replace(/^v/,'')+(v.replace(/^v/,'')===(d.current||'').replace(/^v/,'')?' · установлена':'')+'</option>').join('');if(d.releases.includes(old))select.value=old}}p.textContent=d.message||(d.checked?'Версии загружены.':'Опубликованные стабильные релизы GitHub');b.hidden=!Array.isArray(d.releases)||!d.releases.length||updating;b.textContent='Установить выбранную';document.getElementById('checkUpdate').disabled=updating;select.disabled=updating;if(updating){{notice.hidden=false;notice.textContent='Изменение версии выполняется. Панель может временно отключиться; не запускайте повторную установку.'}}if(d.available)maybeNotifyUpdate(d)}}
 function patchLive(html){{const template=document.createElement('template');template.innerHTML=html;template.content.querySelectorAll('[data-live-block]').forEach(next=>{{const current=root.querySelector('[data-live-block="'+CSS.escape(next.dataset.liveBlock)+'"]');if(!current||current.innerHTML===next.innerHTML)return;current.classList.add('refreshing');requestAnimationFrame(()=>{{current.innerHTML=next.innerHTML;current.className=next.className;current.setAttribute('data-live-block',next.dataset.liveBlock)}})}});root.querySelectorAll('[data-range]').forEach(b=>b.classList.toggle('selected',Number(b.dataset.range)===range))}}
 function updateClock(){{const seconds=Math.floor((Date.now()-lastSuccess)/1000);liveAge.textContent=seconds<2?'сейчас':seconds+' с назад';live.classList.toggle('stale',seconds>20);live.classList.toggle('offline',seconds>45)}}
-async function refresh(){{if(busy||document.hidden)return;busy=true;try{{const r=await fetch('{esc(path)}/dashboard-data?hours='+range,{{cache:'no-store'}});if(r.redirected){{location.href='{esc(path)}/login';return}}if(!r.ok)throw new Error('Нет ответа от панели');const d=await r.json();patchLive(d.html);updateView(d.update);lastSuccess=Date.now();updateClock();if(!updating)notice.hidden=true}}catch(e){{live.classList.add('offline');notice.hidden=false;notice.textContent=updating?'Панель перезапускается во время обновления. Ожидаем восстановления связи…':'Нет связи с панелью. Данные на экране могут быть устаревшими.'}}finally{{busy=false}}}}
+async function refresh(){{if(busy||document.hidden)return;busy=true;try{{const r=await fetch('{esc(path)}/dashboard-data?hours='+range+'&tz='+encodeURIComponent(window._browserTZ||'Europe/Moscow'),{{cache:'no-store'}});if(r.redirected){{location.href='{esc(path)}/login';return}}if(!r.ok)throw new Error('Нет ответа от панели');const d=await r.json();patchLive(d.html);updateView(d.update);lastSuccess=Date.now();updateClock();if(!updating)notice.hidden=true}}catch(e){{live.classList.add('offline');notice.hidden=false;notice.textContent=updating?'Панель перезапускается во время обновления. Ожидаем восстановления связи…':'Нет связи с панелью. Данные на экране могут быть устаревшими.'}}finally{{busy=false}}}}
 async function automaticUpdateCheck(status){{if(status?.checked&&Date.now()/1000-Number(status.checked)<21600)return;try{{const r=await fetch('{esc(path)}/update-check',{{method:'POST',body:new URLSearchParams({{csrf:'{esc(csrf)}'}})}});if(!r.ok||r.redirected)return;updateView(await r.json())}}catch(e){{}}}}
 document.getElementById('updateNoticeLater').addEventListener('click',()=>updateDialog.close());document.getElementById('updateNoticeInstall').addEventListener('click',()=>{{const button=document.getElementById('startUpdate');updateDialog.close();if(button&&!button.hidden)button.click()}});updateDialog.addEventListener('close',()=>{{if(updateDialog.dataset.version)dismissUpdate(updateDialog.dataset.version)}});
 document.getElementById('refreshDashboard').addEventListener('click',refresh);root.addEventListener('click',async e=>{{const r=e.target.closest('[data-range]');if(r){{range=Number(r.dataset.range);refresh();return}}const b=e.target.closest('#checkUpdate,#startUpdate');if(!b||busy)return;const start=b.id==='startUpdate',target=document.getElementById('panelRelease').value;if(start&&!confirm('Установить версию '+target+'? Будет создана резервная копия. Панель и подключения могут временно прерваться.'))return;busy=true;b.disabled=true;try{{const body={{csrf:'{esc(csrf)}'}};if(start)body.target=target;const r=await fetch('{esc(path)}/'+(start?'update-start':'update-check'),{{method:'POST',body:new URLSearchParams(body)}});if(r.redirected)throw new Error('Сессия завершена. Войдите заново.');const d=await r.json();if(!r.ok)throw new Error(d.message||'Ошибка обновления');updateView(d)}}catch(err){{document.getElementById('updateStatus').textContent=err.message}}finally{{busy=false;b.disabled=false}}}});
@@ -750,14 +891,14 @@ def dashboard_body(data, subs, profiles, traffic, path, domain, csrf, proxy_link
 
 def dashboard_page(body, path, csrf):
     return f'''<div class="page-head"><div><h1>Дашборд</h1><p>Сервер, подключения и использование трафика</p></div><div class="actions"><span id="liveIndicator" class="live-indicator"><i></i><b>Онлайн</b><small id="liveAge">сейчас</small></span><button id="refreshDashboard">{icon('refresh')}Обновить</button></div></div><p id="dashboardNotice" class="note" role="status" hidden></p><div id="dashboardContent">{body}</div><dialog id="updateAvailableDialog" class="update-dialog" aria-labelledby="updateDialogTitle"><div class="dialog-head"><div><small class="eyebrow">НОВАЯ ВЕРСИЯ</small><h2 id="updateDialogTitle">Доступно обновление</h2></div><button type="button" data-close-dialog aria-label="Закрыть уведомление">×</button></div><div class="update-dialog-body"><div class="update-release"><span class="update-release-mark">{icon('refresh')}</span><div><span>WEB PANEL PROXY</span><strong><span id="updateCurrentVersion"></span> → <span id="updateLatestVersion"></span></strong></div></div><p>Подробности, выбор версии и безопасная установка находятся в разделе «Обновления».</p></div><div class="update-dialog-actions"><button type="button" id="updateNoticeLater">Позже</button><a class="btn primary" href="{esc(path)}/updates">Открыть обновления</a></div></dialog><script>
-const root=document.getElementById('dashboardContent'),notice=document.getElementById('dashboardNotice'),live=document.getElementById('liveIndicator'),liveAge=document.getElementById('liveAge'),updateDialog=document.getElementById('updateAvailableDialog');let range=1,busy=false,updating=false,lastSuccess=Date.now();
+const root=document.getElementById('dashboardContent'),notice=document.getElementById('dashboardNotice'),live=document.getElementById('liveIndicator'),liveAge=document.getElementById('liveAge'),updateDialog=document.getElementById('updateAvailableDialog');let range=1,busy=false,updating=false,lastSuccess=Date.now();try{{window._browserTZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'Europe/Moscow'}}catch(e){{window._browserTZ='Europe/Moscow'}}
 function updateDismissed(version){{try{{return localStorage.getItem('wpp-update-dismissed:'+version)==='1'}}catch(e){{return false}}}}
 function dismissUpdate(version){{try{{localStorage.setItem('wpp-update-dismissed:'+version,'1')}}catch(e){{}}}}
 function maybeNotifyUpdate(d){{window.dispatchEvent(new CustomEvent('wpp-update-status',{{detail:d}}))}}
 function updateView(d){{if(!d)return;updating=['queued','running'].includes(d.phase);if(updating){{notice.hidden=false;notice.textContent='Изменение версии выполняется. Откройте раздел «Обновления», чтобы увидеть статус.'}}if(d.available)maybeNotifyUpdate(d)}}
 function patchLive(html){{const template=document.createElement('template');template.innerHTML=html;template.content.querySelectorAll('[data-live-block]').forEach(next=>{{const current=root.querySelector('[data-live-block="'+CSS.escape(next.dataset.liveBlock)+'"]');if(!current||current.innerHTML===next.innerHTML)return;current.classList.add('refreshing');requestAnimationFrame(()=>{{current.innerHTML=next.innerHTML;current.className=next.className;current.setAttribute('data-live-block',next.dataset.liveBlock)}})}});root.querySelectorAll('[data-range]').forEach(b=>b.classList.toggle('selected',Number(b.dataset.range)===range))}}
 function updateClock(){{const seconds=Math.floor((Date.now()-lastSuccess)/1000);liveAge.textContent=seconds<2?'сейчас':seconds+' с назад';live.classList.toggle('stale',seconds>20);live.classList.toggle('offline',seconds>45)}}
-async function refresh(){{if(busy||document.hidden)return;busy=true;try{{const r=await fetch('{esc(path)}/dashboard-data?hours='+range,{{cache:'no-store'}});if(r.redirected){{location.href='{esc(path)}/login';return}}if(!r.ok)throw new Error('Нет ответа от панели');const d=await r.json();patchLive(d.html);updateView(d.update);lastSuccess=Date.now();updateClock();if(!updating)notice.hidden=true}}catch(e){{live.classList.add('offline');notice.hidden=false;notice.textContent=updating?'Панель перезапускается во время обновления. Ожидаем восстановления связи…':'Нет связи с панелью. Данные на экране могут быть устаревшими.'}}finally{{busy=false}}}}
+async function refresh(){{if(busy||document.hidden)return;busy=true;try{{const r=await fetch('{esc(path)}/dashboard-data?hours='+range+'&tz='+encodeURIComponent(window._browserTZ||'Europe/Moscow'),{{cache:'no-store'}});if(r.redirected){{location.href='{esc(path)}/login';return}}if(!r.ok)throw new Error('Нет ответа от панели');const d=await r.json();patchLive(d.html);updateView(d.update);lastSuccess=Date.now();updateClock();if(!updating)notice.hidden=true}}catch(e){{live.classList.add('offline');notice.hidden=false;notice.textContent=updating?'Панель перезапускается во время обновления. Ожидаем восстановления связи…':'Нет связи с панелью. Данные на экране могут быть устаревшими.'}}finally{{busy=false}}}}
 async function automaticUpdateCheck(status){{if(status?.checked&&Date.now()/1000-Number(status.checked)<21600)return;try{{const r=await fetch('{esc(path)}/update-check',{{method:'POST',body:new URLSearchParams({{csrf:'{esc(csrf)}'}})}});if(!r.ok||r.redirected)return;updateView(await r.json())}}catch(e){{}}}}
 document.getElementById('updateNoticeLater').addEventListener('click',()=>updateDialog.close());updateDialog.addEventListener('close',()=>{{if(updateDialog.dataset.version)dismissUpdate(updateDialog.dataset.version)}});document.getElementById('refreshDashboard').addEventListener('click',refresh);root.addEventListener('click',e=>{{const r=e.target.closest('[data-range]');if(r){{range=Number(r.dataset.range);refresh()}}}});setInterval(refresh,5000);setInterval(updateClock,1000);document.addEventListener('visibilitychange',()=>{{if(!document.hidden)refresh()}});fetch('{esc(path)}/update-status',{{cache:'no-store'}}).then(r=>r.ok&&!r.redirected?r.json():null).then(d=>{{if(d){{updateView(d);automaticUpdateCheck(d)}}}}).catch(()=>automaticUpdateCheck(null));
 </script>'''
@@ -906,7 +1047,65 @@ const blob=new Blob([csv],{type:'text/csv'});const a=document.createElement('a')
 a.href=URL.createObjectURL(blob);a.download='traffic.csv';document.body.appendChild(a);a.click();document.body.removeChild(a);}
 async function loadTraffic(){
 const d=await api('/api/portal/traffic');if(!d)return;
-lastTrafficData=d;renderTraffic(d);startTrafficRefresh();}
+lastTrafficData=d;renderTraffic(d);startTrafficRefresh();loadTrafficHourly();}
+/* === Hourly pattern + heatmap (Variant B + C) — fetch from /api/portal/traffic-hourly === */
+let _browserTZ='Europe/Moscow';
+try{_browserTZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'Europe/Moscow';}catch(e){}
+async function loadTrafficHourly(){
+const url='/api/portal/traffic-hourly?tz='+encodeURIComponent(_browserTZ);
+let d;try{d=await api(url);}catch(e){return;}
+if(!d)return;
+const hc=document.getElementById('hourly-container');
+const hm=document.getElementById('heatmap-container');
+if(hc)hc.innerHTML=renderHourlyPattern(d.pattern||{});
+if(hm)hm.innerHTML=renderHourlyHeatmap(d.heatmap||{});
+}
+function _fmtBytes(b){b=b||0;if(b>=1024*1024*1024)return (b/1024/1024/1024).toFixed(2)+' ГБ';
+if(b>=1024*1024)return (b/1024/1024).toFixed(1)+' МБ';if(b>=1024)return Math.round(b/1024)+' КБ';return b+' Б';}
+function renderHourlyPattern(p){
+const buckets=p.buckets||[];if(!buckets.length)return '<div class="portal-empty"><span class="ico">📭</span>Нет данных за последние 7 дней.</div>';
+const maxT=Math.max(1,p.max_avg_total||0);
+const tz=p.tz||'UTC';const days=p.days_observed||0;
+const bars=buckets.map(function(b){
+const h=b.hour||0;const up=Math.max(0,b.up||0);const down=Math.max(0,b.down||0);
+const total=up+down;const bh=total>0?(total/maxT*100):0.5;
+const upPct=total>0?(up/total*100):0;const downPct=100-upPct;
+const title=String(h).padStart(2,'0')+':00 — ↑ '+_fmtBytes(up)+' · ↓ '+_fmtBytes(down)+' · avg of '+(b.days||0)+' days';
+return '<div class="hourly-bar" style="height:'+bh.toFixed(2)+'%" title="'+esc(title)+'">'+
+'<div class="hourly-seg down" style="height:'+downPct.toFixed(1)+'%"></div>'+
+'<div class="hourly-seg up" style="height:'+upPct.toFixed(1)+'%"></div></div>';
+}).join('');
+const axis=''.concat.apply('',Array.from({length:24},function(_,h){return '<span>'+String(h).padStart(2,'0')+'</span>';}));
+return '<div class="hourly-chart">'+bars+'</div>'+
+'<div class="hourly-axis">'+axis+'</div>'+
+'<div class="hourly-legend"><span><i class="up"></i>↑ Отправка</span>'+
+'<span><i class="down"></i>↓ Получение</span>'+
+'<span class="muted">Среднее за '+days+' дн. · TZ '+esc(tz)+'</span></div>';
+}
+function renderHourlyHeatmap(hm){
+const rows=hm.rows||[];if(!rows.length)return '<div class="portal-empty"><span class="ico">📭</span>Нет данных за последние 7 дней.</div>';
+const maxT=Math.max(1,hm.max_total||0);
+const tz=hm.tz||'UTC';const days=hm.days_observed||0;
+let header='<div class="heatmap-corner"></div>';
+for(let h=0;h<24;h++)header+='<div class="heatmap-hour-label">'+String(h).padStart(2,'0')+'</div>';
+let body='';
+rows.forEach(function(r){
+body+='<div class="heatmap-row"><div class="heatmap-row-label">'+esc(r.name||'')+'</div>';
+(r.cells||[]).forEach(function(c){
+const h=c.hour||0;const up=Math.max(0,c.up||0);const down=Math.max(0,c.down||0);
+const total=up+down;let lvl=0;
+if(total>0){const ratio=total/maxT;
+if(ratio<0.05)lvl=0;else if(ratio<0.25)lvl=1;else if(ratio<0.5)lvl=2;else if(ratio<0.75)lvl=3;else lvl=4;}
+const title=esc((r.name||'')+' '+String(h).padStart(2,'0')+':00 — ↑ '+_fmtBytes(up)+' · ↓ '+_fmtBytes(down));
+body+='<div class="heatmap-cell" data-level="'+lvl+'" title="'+title+'"></div>';
+});
+body+='</div>';
+});
+return '<div class="heatmap-grid">'+header+body+'</div>'+
+'<div class="hourly-legend"><span class="muted">Меньше</span>'+
+'<span class="heatmap-scale"><i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i></span>'+
+'<span class="muted">Больше · '+days+' дн. · TZ '+esc(tz)+'</span></div>';
+}
 function renderTraffic(d){
 const c=document.getElementById('traffic-container');
 function fmt(b){b=b||0;const u=['ГБ','МБ','КБ','Б'];const f=[1024*1024*1024,1024*1024,1024,1];
@@ -1913,6 +2112,14 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <div class="tab-panel" id="panel-traffic">
 <div class="card"><div class="card-title">📊 Трафик</div>
 <div id="traffic-container"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></div>
+<div class="card" id="hourly-card"><div class="card-title">🕐 Трафик по часам суток</div>
+<div id="hourly-container"><div class="skeleton skeleton-card"></div></div>
+<div class="portal-info" style="margin-top:14px"><b>ℹ️ Средний трафик за каждый час суток за последние 7 дней.</b> Помогает увидеть типичный паттерн — когда обычно пик и провал.</div>
+</div>
+<div class="card" id="heatmap-card"><div class="card-title">🔥 Трафик по дням и часам</div>
+<div id="heatmap-container"><div class="skeleton skeleton-card"></div></div>
+<div class="portal-info" style="margin-top:14px"><b>ℹ️ Тепловая карта интенсивности по дням недели и часам.</b> Помогает увидеть разницу между буднями и выходными.</div>
+</div>
 <div class="card" id="ttl-card" style="display:none"><div class="card-title">⏰ Срок действия</div>
 <div id="ttl-container"></div></div>
 </div>

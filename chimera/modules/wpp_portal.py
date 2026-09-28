@@ -486,6 +486,28 @@ def handle_get(handler, path: str, query: dict) -> None:
         _send_json(handler, {**traffic, **ttl})
         return
 
+    if path == "/api/portal/traffic-hourly":
+        # Hourly pattern (Variant B — 24 bars) + heatmap (Variant C — 7×24 grid)
+        # Aggregated from wpp-metrics history (sampled every 10s, retained 7d).
+        # TZ is taken from ?tz= query param (defaults to Europe/Moscow).
+        user = _require_user(handler)
+        if user is None:
+            return
+        try:
+            from chimera.modules import wpp_metrics
+            tz = (query.get("tz", ["Europe/Moscow"]) or ["Europe/Moscow"])[0]
+            _send_json(handler, {
+                "pattern":  wpp_metrics.hourly_pattern(days=7, tz=tz),
+                "heatmap":  wpp_metrics.hourly_heatmap(days=7, tz=tz),
+            })
+        except Exception as exc:
+            _send_json(handler, {
+                "pattern": {"buckets": [], "days_observed": 0, "max_avg_total": 0, "tz": tz},
+                "heatmap": {"rows": [], "max_total": 0, "days_observed": 0, "tz": tz},
+                "error": str(exc),
+            })
+        return
+
     if path == "/api/portal/health":
         user = _require_user(handler)
         if user is None:
