@@ -90,16 +90,28 @@ def front_mirror_urls(filename: str, *, version: str = "",
     urls: list[str] = [
         # 1. GitLab raw — primary, public, no auth, works in RU segment
         f"https://gitlab.com/{OUR_GITLAB_FULL}/-/raw/{OUR_GITLAB_BRANCH}/{vendor_path}",
-        # 2. jsDelivr CDN — serves files from GitHub repo, global edge cache
-        f"https://cdn.jsdelivr.net/gh/{OUR_GITHUB_FULL}@main/{vendor_path}",
-        # 3. GitHub raw — public, may have CDN delay for large binary files
+        # 2. Self-hosted on production server 1 (cdn2.example)
+        #    Stable URL, no external CDN dependency. Served via nginx at
+        #    https://cdn2.example:9745/wpp-front/...
+        #    Tarball source: same /var/lib/xray-installer/wpp_panel_www/ copy.
+        f"https://cdn2.example:9745/wpp-front/web-panel-proxy-v{ver}.tar.gz",
+        # 3. GitHub raw — was added during GitHub setup but our account was
+        #    flagged/restricted by GitHub auto-abuse detection (account is
+        #    6 months old, 12.5MB binary push triggered shadow-ban).
+        #    Returns 404 publicly even though API works with PAT auth.
+        #    Kept as fallback in case account is restored.
         f"https://raw.githubusercontent.com/{OUR_GITHUB_FULL}/main/{vendor_path}",
-        # 4. GitHub release asset — public download URL (may have propagation delay)
+        # 4. GitHub release asset — same restriction as #3, 404 publicly.
+        #    Asset exists via API (verified), but public download URL fails.
         f"https://github.com/{OUR_GITHUB_FULL}/releases/download/{release_tag}/web-panel-proxy-v{ver}.tar.gz",
+        # 5. jsDelivr CDN — was added but also returns 404 for our repo.
+        #    jsDelivr API returns 502 "Couldn't fetch versions" — they can't
+        #    access our repo metadata either (same GitHub restriction).
+        f"https://cdn.jsdelivr.net/gh/{OUR_GITHUB_FULL}@main/{vendor_path}",
     ]
 
-    # Legacy upstream URLs (DEAD but kept for compat if upstream returns):
-    # 5. canonical codeload tarball endpoint
+    # Legacy upstream URLs (DEAD — upstream repo was deleted from GitHub):
+    # 6. canonical codeload tarball endpoint
     urls.append(
         f"https://codeload.github.com/{UPSTREAM_REPO_FULL}/tar.gz/refs/tags/{tag}"
     )
