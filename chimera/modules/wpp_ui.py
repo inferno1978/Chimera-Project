@@ -470,14 +470,14 @@ def nodes_ui(nodes, local, connection_token, path, csrf):
     for node in nodes:
         icon_flag=node_flag_image(node.get('country_code','UN'),path)
         cards.append(f'''<article class="card node-card">
-<div class="node-card-head"><span class="node-flag">{icon_flag}</span><div class="node-card-name"><h2>{esc(node.get('name','Локация'))}</h2><span>{esc(node.get('country_name','Сервер'))}</span></div><span class="badge {'on' if node.get('enabled',True) else ''}">{'Подключена' if node.get('enabled',True) else 'Отключена'}</span></div>
+<div class="node-card-head"><span class="node-flag">{icon_flag}</span><div class="node-card-name"><h2>{esc(node.get('name') or 'Город не определён')}</h2><span>{esc(node.get('country_name') or 'Страна не определена')}</span></div><span class="badge {'on' if node.get('enabled',True) else ''}">{'Подключена' if node.get('enabled',True) else 'Отключена'}</span></div>
 <div class="node-endpoint">{icon('link')}<span>{esc(node.get('url',''))}</span></div>
 <div class="node-card-meta"><div><span>Версия</span><strong>{esc(node.get('version','—'))}</strong></div><div><span>Подключения</span><strong>VLESS · Hysteria2</strong></div></div>
 <form class="node-remove" method="post" action="{esc(path)}/node-action" data-confirm="Удалить ноду из этой панели?"><input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="operation" value="delete"><input type="hidden" name="id" value="{esc(node.get('id',''))}"><button class="danger">Удалить ноду</button></form></article>''')
     local_flag=node_flag_image(local.get('country_code','UN'),path)
     country_options=node_country_select(local)
-    local_country=local.get('country_name','Сервер')
-    local_city=local.get('name') or local_country
+    local_country=local.get('country_name') or 'Страна не определена'
+    local_city=local.get('name') or 'Город не определён'
     empty=f'''<div class="nodes-empty"><span>{icon('nodes')}</span><h3>Здесь появятся ваши локации</h3><p>Установите WPP на другом VPS и вставьте его Node API token в форму выше.</p></div>'''
     return f'''<div class="page-head nodes-page-head"><div><span class="eyebrow">DISTRIBUTED ACCESS</span><h1>Ноды и локации</h1><p>Объединяйте несколько VPS в одну подписку и управляйте ими из этой панели</p></div><div class="nodes-count"><strong>{len(nodes)+1}</strong><span>локаций<br>в системе</span></div></div>
 <div class="nodes-grid">
@@ -1130,6 +1130,16 @@ function copySub(){const el=document.getElementById('sub-url-box');if(!el)return
 navigator.clipboard.writeText(el.textContent).then(function(){showToast('URL подписки скопирован');}).catch(function(){showToast('Ошибка копирования','error');});}
 
 /* === 4. IP-адреса === */
+/* Convert 2-letter ISO country code (RU, NL, DE...) to flag emoji.
+   Uses Regional Indicator Symbols (U+1F1E6–U+1F1FF). Returns 🏳️ on bad input. */
+function countryFlag(cc){
+  if(!cc||cc.length!==2)return '🏳️';
+  cc=cc.toUpperCase();
+  const A=0x41,Z=0x5A,base=0x1F1E6;
+  const c1=cc.charCodeAt(0),c2=cc.charCodeAt(1);
+  if(c1<A||c1>Z||c2<A||c2>Z)return '🏳️';
+  return String.fromCodePoint(base+(c1-A),base+(c2-A));
+}
 async function loadIPs(){
 const d=await api('/api/portal/ips');if(!d)return;
 const detected=d.detected_ip||'';
@@ -1155,7 +1165,8 @@ let rows='';
 ips.forEach(function(ip){
 const pinChip=ip.pinned?'<span class="portal-chip on">📌 закреплён</span>':'<span class="portal-chip">не закреплён</span>';
 const g=ip.geo||{};
-const geoTxt=(g.city||g.country||g.isp)?('📍 '+esc([g.city,g.country].filter(Boolean).join(', '))+(g.isp?(' · '+esc(g.isp)):'')):'';
+const flag=countryFlag(g.country_code||'');
+const geoTxt=(g.city||g.country||g.isp)?(flag+' '+esc([g.city,g.country].filter(Boolean).join(', '))+(g.isp?(' · '+esc(g.isp)):'')):'';
 rows+='<div class="portal-tile" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
 '<div style="font:600 14px ui-monospace,monospace;color:var(--accent);min-width:0;flex:1;overflow-wrap:anywhere">'+esc(ip.ip)+'</div>'+
 pinChip+
