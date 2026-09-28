@@ -465,19 +465,35 @@ def node_country_select(local):
     return ''.join(options)
 
 
+def _node_label(val, fallback):
+    """Return val if it's a real non-empty label, else fallback.
+    Treats empty/None and dash-only strings ('—', '-', '–', '−') as missing.
+    Some cascade node APIs persist '—' as the default city when geo lookup
+    returns no city — we want to render 'Город не определён' instead.
+    """
+    if not val:
+        return fallback
+    s = val.strip()
+    if not s or set(s) <= set('—-−–'):
+        return fallback
+    return val
+
+
 def nodes_ui(nodes, local, connection_token, path, csrf):
     cards=[]
     for node in nodes:
         icon_flag=node_flag_image(node.get('country_code','UN'),path)
+        node_city=_node_label(node.get('name'), 'Город не определён')
+        node_country=_node_label(node.get('country_name'), 'Страна не определена')
         cards.append(f'''<article class="card node-card">
-<div class="node-card-head"><span class="node-flag">{icon_flag}</span><div class="node-card-name"><h2>{esc(node.get('name') or 'Город не определён')}</h2><span>{esc(node.get('country_name') or 'Страна не определена')}</span></div><span class="badge {'on' if node.get('enabled',True) else ''}">{'Подключена' if node.get('enabled',True) else 'Отключена'}</span></div>
+<div class="node-card-head"><span class="node-flag">{icon_flag}</span><div class="node-card-name"><h2>{esc(node_city)}</h2><span>{esc(node_country)}</span></div><span class="badge {'on' if node.get('enabled',True) else ''}">{'Подключена' if node.get('enabled',True) else 'Отключена'}</span></div>
 <div class="node-endpoint">{icon('link')}<span>{esc(node.get('url',''))}</span></div>
 <div class="node-card-meta"><div><span>Версия</span><strong>{esc(node.get('version','—'))}</strong></div><div><span>Подключения</span><strong>VLESS · Hysteria2</strong></div></div>
 <form class="node-remove" method="post" action="{esc(path)}/node-action" data-confirm="Удалить ноду из этой панели?"><input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="operation" value="delete"><input type="hidden" name="id" value="{esc(node.get('id',''))}"><button class="danger">Удалить ноду</button></form></article>''')
     local_flag=node_flag_image(local.get('country_code','UN'),path)
     country_options=node_country_select(local)
-    local_country=local.get('country_name') or 'Страна не определена'
-    local_city=local.get('name') or 'Город не определён'
+    local_country=_node_label(local.get('country_name'), 'Страна не определена')
+    local_city=_node_label(local.get('name'), 'Город не определён')
     empty=f'''<div class="nodes-empty"><span>{icon('nodes')}</span><h3>Здесь появятся ваши локации</h3><p>Установите WPP на другом VPS и вставьте его Node API token в форму выше.</p></div>'''
     return f'''<div class="page-head nodes-page-head"><div><span class="eyebrow">DISTRIBUTED ACCESS</span><h1>Ноды и локации</h1><p>Объединяйте несколько VPS в одну подписку и управляйте ими из этой панели</p></div><div class="nodes-count"><strong>{len(nodes)+1}</strong><span>локаций<br>в системе</span></div></div>
 <div class="nodes-grid">
