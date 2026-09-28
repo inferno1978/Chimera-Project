@@ -287,7 +287,7 @@ def _geo_lookup(ip):
         return cached[1]
     try:
         import urllib.request
-        url = "http://ip-api.com/json/{0}?fields=city,country,isp&lang=ru".format(ip)
+        url = "http://ip-api.com/json/{0}?fields=city,country,countryCode,isp&lang=ru".format(ip)
         req = urllib.request.Request(
             url, headers={"User-Agent": "chimera-portal/1.0"}
         )
@@ -296,6 +296,7 @@ def _geo_lookup(ip):
         geo = {
             "city": str(data.get("city", "") or ""),
             "country": str(data.get("country", "") or ""),
+            "country_code": str(data.get("countryCode", "") or "").upper(),
             "isp": str(data.get("isp", "") or ""),
         }
         _GEO_CACHE[ip] = (now, geo)
