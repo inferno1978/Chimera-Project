@@ -829,8 +829,18 @@ TRAFFIC_CSS = '''/* traffic tab */
 @keyframes tfGrowY{from{transform:scaleY(0);opacity:0}to{transform:scaleY(1);opacity:1}}
 @keyframes tfGrowX{from{transform:scaleX(0)}to{transform:scaleX(1)}}'''
 
-LOAD_TRAFFIC_JS = '''async function loadTraffic(){
+LOAD_TRAFFIC_JS = '''let lastTrafficData=null,trafficPeriod=30,trafficInterval=null;
+function startTrafficRefresh(){if(trafficInterval)clearInterval(trafficInterval);trafficInterval=setInterval(function(){loadTraffic();},30000);}
+function setTrafficPeriod(p){trafficPeriod=p;if(lastTrafficData)renderTraffic(lastTrafficData);}
+function exportTrafficCSV(){const d=lastTrafficData;if(!d||!d.daily||!d.daily.length){showToast('Нет данных для экспорта','error');return;}
+let csv='date,bytes,gb\\n';
+d.daily.forEach(function(r){csv+=(r.date||'')+','+(r.bytes||0)+','+((r.bytes||0)/1024/1024/1024).toFixed(4)+'\\n';});
+const blob=new Blob([csv],{type:'text/csv'});const a=document.createElement('a');
+a.href=URL.createObjectURL(blob);a.download='traffic.csv';document.body.appendChild(a);a.click();document.body.removeChild(a);}
+async function loadTraffic(){
 const d=await api('/api/portal/traffic');if(!d)return;
+lastTrafficData=d;renderTraffic(d);startTrafficRefresh();}
+function renderTraffic(d){
 const c=document.getElementById('traffic-container');
 function fmt(b){b=b||0;const u=['ГБ','МБ','КБ','Б'];const f=[1024*1024*1024,1024*1024,1024,1];
 for(let i=0;i<f.length;i++){if(b>=f[i]||i===f.length-1)return (b/f[i]).toFixed(i===3?0:(i<2?2:1))+' '+u[i];}return '0 Б';}
@@ -854,12 +864,19 @@ heroIco+'</div>'+
 '<div class="tf-split-track"><div class="tf-split-fill down" style="width:'+downPct+'%"></div></div></div>'+
 '</div></div>';
 h+='<div class="card tf-daily"><div class="card-title">📈 Трафик по дням</div>';
-const daily=(d.daily||[]).slice(0,14);
+h+='<div class="tf-period-row" style="margin-bottom:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">'+
+'<button class="btn ghost sm tf-period-btn" data-period="7" onclick="setTrafficPeriod(7)">7 дней</button>'+
+'<button class="btn ghost sm tf-period-btn" data-period="30" onclick="setTrafficPeriod(30)">30 дней</button>'+
+'<button class="btn ghost sm tf-period-btn" data-period="0" onclick="setTrafficPeriod(0)">Всё</button>'+
+'<button class="btn ghost sm" onclick="exportTrafficCSV()" style="margin-left:auto">📥 Экспорт CSV</button>'+
+'</div>';
+const allDaily=(d.daily||[]).slice().reverse();
+const daily=trafficPeriod>0?allDaily.slice(-trafficPeriod):allDaily;
 if(daily.length){
 let maxB=Math.max.apply(null,daily.map(function(x){return x.bytes||0;}));
 if(!maxB||maxB<1){maxB=1;}
 h+='<div class="tf-chart">';
-daily.slice().reverse().forEach(function(r,i){
+daily.forEach(function(r,i){
 const v=r.bytes||0;const pct=Math.max(2.5,v/maxB*100);
 const dt=r.date?r.date.slice(5):'';
 h+='<div class="tf-bar-col" title="'+esc(r.date)+': '+fmtShort(v)+'">'+
@@ -871,15 +888,31 @@ h+='</div>';
 h+='<div class="tf-empty"><span class="ico">📅</span>История трафика собирается.<br>Возвращайтесь завтра — здесь появится график по дням.</div>';
 }
 h+='</div>';
+const forecastGb=(d.monthly_forecast_gb!=null?d.monthly_forecast_gb:(d.avg_per_day_bytes||0)*30/1024/1024/1024);
 h+='<div class="card"><div class="card-title">📋 Статистика</div><div class="tf-stats">'+
 '<div class="tf-stat accent"><span>Дней активно</span><b>'+(d.days_active||0)+'</b></div>'+
 '<div class="tf-stat"><span>Среднее/день</span><b>'+fmtShort(d.avg_per_day_bytes||0)+'</b></div>'+
+(forecastGb?'<div class="tf-stat green"><span>📈 Прогноз/мес</span><b>~'+(typeof forecastGb==='number'?forecastGb.toFixed(2):forecastGb)+' ГБ</b></div>':'')+
 '<div class="tf-stat green"><span>↓ Получено</span><b>'+fmtShort(down)+'</b></div>'+
 '<div class="tf-stat"><span>↑ Отправлено</span><b>'+fmtShort(up)+'</b></div>'+
 (d.reset_date?'<div class="tf-stat"><span>Сброс xray</span><b style="font-size:12px">'+esc(d.reset_date)+'</b></div>':'')+
 (d.limit_gb?'<div class="tf-stat accent"><span>Лимит</span><b>'+d.limit_gb+' ГБ</b></div>':'')+
 '</div></div>';
+const pt=d.protocol_traffic||{};
+const vless=pt.vless||{up:0,down:0},mtp=pt.mtproto||{up:0,down:0};
+if(vless.up||vless.down||mtp.up||mtp.down){
+h+='<div class="card"><div class="card-title">🧬 Трафик по протоколам</div><div class="tf-stats">'+
+'<div class="tf-stat accent"><span>VLESS ↑/↓</span><b style="font-size:11px">'+fmtShort(vless.up)+' / '+fmtShort(vless.down)+'</b></div>'+
+'<div class="tf-stat"><span>MTProto ↑/↓</span><b style="font-size:11px">'+fmtShort(mtp.up)+' / '+fmtShort(mtp.down)+'</b></div>'+
+'</div></div>';
+}
 c.innerHTML=h;
+document.querySelectorAll('.tf-period-btn').forEach(function(b){
+const isActive=b.dataset.period==String(trafficPeriod);
+b.style.borderColor=isActive?'var(--accent)':'var(--line)';
+b.style.color=isActive?'var(--accent)':'var(--text)';
+b.style.background=isActive?'var(--tint)':'var(--raised)';
+});
 const tc=document.getElementById('ttl-card');
 if(d.has_ttl){
 tc.style.display='';
@@ -1019,11 +1052,12 @@ const plLabel=links.length===1?'ссылка':(links.length<5?'ссылки':'с
 let h='<div class="portal-hero"><div class="portal-hero-top"><div>'+
 '<div class="portal-hero-label">Подключение</div>'+
 '<div class="portal-hero-title">🔗 '+links.length+' '+plLabel+'</div>'+
-'<div class="portal-hero-sub">Скопируйте ссылку или отсканируйте QR-код</div></div>'+
+'<div class="portal-hero-sub">Скопируйте ссылку, отсканируйте QR или откройте в приложении</div></div>'+
 '<span class="portal-proto-badge">'+esc(proto)+'</span></div></div>';
 h+='<div class="portal-grid">';
 links.forEach(function(item,i){
 const qr='/api/portal/qr?data='+encodeURIComponent(item.link);
+const isVlessLink=new RegExp('^vless://','i').test(item.link||'');
 h+='<div class="portal-tile" style="display:flex;flex-direction:column">'+
 '<div class="portal-tile-head"><span class="portal-chip accent">'+esc(item.protocol||'LINK')+'</span>'+
 '<div class="portal-tile-title">'+esc(item.label||'Подключение')+'</div></div>'+
@@ -1031,6 +1065,7 @@ h+='<div class="portal-tile" style="display:flex;flex-direction:column">'+
 '<div class="portal-code-box" id="link-'+i+'" title="Нажмите чтобы скопировать" onclick="copyLink('+i+')">'+esc(item.link)+'</div>'+
 '<div class="portal-btn-row"><button class="btn ghost sm" onclick="copyLink('+i+')">📋 Копировать</button>'+
 '<span class="portal-cpy-ok" id="cpy-'+i+'">✓ скопировано</span></div>'+
+(isVlessLink?'<a class="btn sm" href="'+esc(item.link)+'" style="margin-top:8px;width:100%;justify-content:center">🚀 Открыть в приложении</a>':'')+
 '</div>';
 });
 h+='</div>';
@@ -1098,19 +1133,26 @@ let hh='<div class="portal-hero"><div class="portal-hero-top"><div>'+
 '<div class="portal-hero-sub">Управление whitelist для защиты от блокировок по IP</div></div>'+
 (detected?'<span class="portal-proto-badge">📡 '+esc(detected)+'</span>':'<span class="portal-chip">IP не определён</span>')+
 '</div></div>';
+/* Prominent "auto-add my IP" button — accent, full-width, with 📡 icon */
+hh+='<button class="btn" style="width:100%;justify-content:center;padding:14px;margin-bottom:12px;font-size:14px" onclick="addAutoIP()">'+
+'📡 Добавить мой IP'+(detected?(' ('+esc(detected)+')'):'')+
+'</button>';
 det.innerHTML=hh;
 const c=document.getElementById('ips-list');
 const ips=d.ips||[];
 if(!ips.length){
-c.innerHTML='<div class="portal-empty"><span class="ico">📭</span>IP-адресов нет.<br>Добавьте свой IP ниже.</div>';
+c.innerHTML='<div class="portal-empty"><span class="ico">📭</span>IP-адресов нет.<br>Нажмите кнопку выше, чтобы добавить свой текущий IP.</div>';
 return;
 }
 let rows='';
 ips.forEach(function(ip){
 const pinChip=ip.pinned?'<span class="portal-chip on">📌 закреплён</span>':'<span class="portal-chip">не закреплён</span>';
+const g=ip.geo||{};
+const geoTxt=(g.city||g.country||g.isp)?('📍 '+esc([g.city,g.country].filter(Boolean).join(', '))+(g.isp?(' · '+esc(g.isp)):'')):'';
 rows+='<div class="portal-tile" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
 '<div style="font:600 14px ui-monospace,monospace;color:var(--accent);min-width:0;flex:1;overflow-wrap:anywhere">'+esc(ip.ip)+'</div>'+
 pinChip+
+(geoTxt?'<span style="font:11px ui-monospace,monospace;color:var(--muted);flex:1 1 100%">'+geoTxt+'</span>':'')+
 '<span style="font:10px ui-monospace,monospace;color:var(--muted)">'+esc(ip.added_at||'')+'</span>'+
 '<button class="btn ghost sm" onclick="pinIP(\\''+esc(ip.ip)+'\\','+ip.pinned+')">'+(ip.pinned?'Открепить':'Закрепить')+'</button>'+
 '<button class="btn danger sm" onclick="removeIP(\\''+esc(ip.ip)+'\\')">🗑 Удалить</button>'+
@@ -1149,6 +1191,27 @@ else{cls='on';w=100;t='сильный';}
 fill.className='portal-progress-fill '+cls;
 fill.style.width=w+'%';
 lbl.textContent=t;
+pwChecklist(v);
+}
+function pwChecklist(v){
+v=v||'';
+const has8=v.length>=8;
+const hasLetter=/[a-zA-Zа-яА-ЯёЁ]/.test(v)&&/[0-9]/.test(v);
+const hasSpec=/[^a-zA-Z0-9а-яА-ЯёЁ]/.test(v);
+const setItem=function(id,ok){
+const el=document.getElementById(id);
+if(el){el.style.color=ok?'var(--green)':'var(--muted)';el.textContent=(ok?'✓':'○')+' '+(el.dataset.label||'');}
+};
+setItem('pw-chk-len',has8);
+setItem('pw-chk-alnum',hasLetter);
+setItem('pw-chk-spec',hasSpec);
+}
+async function loadPasswordInfo(){
+let d=null;
+try{d=await api('/api/portal/password-info');}catch(e){return;}
+if(!d)return;
+const el=document.getElementById('pw-changed-at-box');
+if(el){el.textContent=d.password_changed_at?('Последняя смена: '+d.password_changed_at):'Пароль ещё не менялся (используйте выданный администратором).';}
 }
 async function changePassword(){
 const v=document.getElementById('new-pass').value.trim();
@@ -1159,7 +1222,7 @@ if(btn){btn.disabled=true;btn.innerHTML='Сохранение…';}
 const r=await fetch('/portal/password',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_password:v})});
 const d=await r.json().catch(()=>({}));
 if(btn){btn.disabled=false;btn.innerHTML=old;}
-if(r.ok){showToast('Пароль изменён');document.getElementById('new-pass').value='';pwStrength('');}
+if(r.ok){showToast('Пароль изменён');document.getElementById('new-pass').value='';pwStrength('');loadPasswordInfo();}
 else showToast(d.error||'Ошибка','error');}
 
 /* === 6. Сателлиты === */
@@ -1247,6 +1310,8 @@ c.innerHTML=h;
 }
 
 /* === 8. Сервер === */
+let healthInterval=null;
+function startHealthRefresh(){if(healthInterval)clearInterval(healthInterval);healthInterval=setInterval(function(){loadHealth();},30000);}
 async function loadHealth(){
 const d=await api('/api/portal/health');if(!d)return;
 const g=document.getElementById('sys-grid');
@@ -1267,10 +1332,27 @@ pStat('SSL дней',sslOk?sslDays:'N/A',(sslOk&&sslDays<14)?'amber':(sslOk?'gre
 pStat('Порт',d.server_port||'—','')+
 pStat('Uptime (ч)',d.uptime_hours||'—','')+
 '</div>';
+/* SSL certificate details */
+const ci=d.cert_info||{};
+if(ci.issuer||ci.valid_from||ci.valid_to||ci.subject){
+h+='<div class="portal-tile" style="margin-top:14px"><div class="portal-tile-head"><span class="portal-chip accent">SSL</span><div class="portal-tile-title">🔐 Сертификат</div></div>'+
+(ci.issuer?'<div class="portal-tile-row"><span class="label">Эмитент</span><span class="val" style="font-size:11px">'+esc(ci.issuer)+'</span></div>':'')+
+(ci.subject?'<div class="portal-tile-row"><span class="label">Субъект</span><span class="val" style="font-size:11px">'+esc(ci.subject)+'</span></div>':'')+
+(ci.valid_from?'<div class="portal-tile-row"><span class="label">Действует с</span><span class="val" style="font-size:11px">'+esc(ci.valid_from)+'</span></div>':'')+
+(ci.valid_to?'<div class="portal-tile-row"><span class="label">Действует до</span><span class="val" style="font-size:11px">'+esc(ci.valid_to)+'</span></div>':'')+
+'</div>';
+}
+/* Protocol explanation info-box */
+const protoMode=String(d.protocol_mode||'reality').toLowerCase();
+h+='<div class="portal-info" style="margin-top:14px"><b>ℹ️ Протоколы:</b><br>'+
+(protoMode.indexOf('reality')>=0?'<b>REALITY</b> — маскирует VPN-трафик под обычный HTTPS к доверенному сайту. Невозможно обнаружить DPI.<br>':'')+
+(protoMode.indexOf('xhttp')>=0||protoMode.indexOf('x-http')>=0?'<b>xHTTP</b> — передаёт данные через HTTP-запросы, маскируя под обычный веб-трафик.<br>':'')+
+'Текущий режим: <b>'+esc(d.protocol_mode||'reality')+'</b></div>';
 if(d.timestamp){
 h+='<div class="portal-tile" style="margin-top:14px"><div class="portal-tile-row"><span class="label">Время последней проверки</span><span class="val">'+esc(d.timestamp)+'</span></div></div>';
 }
 g.innerHTML=h;
+startHealthRefresh();
 }
 
 /* === 9. AmneziaWG === */
@@ -1389,6 +1471,19 @@ PORTAL_POLISH_CSS = """/* === portal visual polish: transitions, skeletons, ring
   .tab{flex:0 0 auto;font-size:0.7rem}
   body{padding-bottom:60px}
 }
+
+/* 11. Header connection-status dot */
+.conn-dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 2px var(--bg);transition:background .2s,box-shadow .2s}
+.conn-dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
+.conn-dot.off{background:var(--red);box-shadow:0 0 8px var(--red)}
+
+/* 12. Password requirements checklist */
+.pw-checklist{display:flex;flex-direction:column;gap:6px;margin-top:12px;font:12px ui-monospace,monospace;color:var(--muted)}
+.pw-checklist span{display:flex;align-items:center;gap:6px}
+
+/* 13. Recommended client badge */
+.cfg-client-card.recommended{border-color:var(--accent);box-shadow:0 0 0 2px var(--tint)}
+.cfg-client-card.recommended::after{content:"⭐ Рекомендуется для вашего устройства";position:absolute;top:8px;right:8px;background:var(--accent);color:var(--on-accent);font:600 9px inherit;padding:4px 8px;border-radius:6px;z-index:2;letter-spacing:.02em}
 """
 
 PORTAL_POLISH_JS = """/* === Portal visual polish JS === */
@@ -1403,6 +1498,47 @@ function toggleTheme(){
 }
 /* Collapsible sections */
 function toggleCollapse(el){el.classList.toggle('collapsed');}
+/* Connection-status dot: turns green when detected_ip is in user's whitelist */
+async function loadConnStatus(){
+  let d=null;
+  try{d=await api('/api/portal/ips');}catch(e){return;}
+  if(!d)return;
+  const dot=document.getElementById('conn-dot');
+  if(!dot)return;
+  const detected=(d.detected_ip||'').trim();
+  const ips=(d.ips||[]).map(function(x){return x.ip;});
+  if(!detected){dot.className='conn-dot';dot.title='IP не определён';return;}
+  const matched=ips.some(function(ip){return ip===detected||(ip&&ip.indexOf(detected+'/')===0);});
+  dot.className='conn-dot '+(matched?'on':'off');
+  dot.title=matched?('Ваш IP в whitelist ('+detected+')'):('Ваш IP '+detected+' не в whitelist — добавьте его во вкладке IP');
+}
+/* Recommended client detection — matches navigator.userAgent to one card */
+function detectRecommendedClient(){
+  const ua=(navigator.userAgent||'').toLowerCase();
+  const cards=document.querySelectorAll('.cfg-client-card[data-platforms]');
+  if(!cards.length)return;
+  let want='';
+  if(/iphone|ipad|ipod|ios/.test(ua)){want='ios';}
+  else if(/android/.test(ua)){want='android';}
+  else if(/mac|darwin/.test(ua)){want='mac';}
+  else if(/linux/.test(ua)&&!/android/.test(ua)){want='linux';}
+  else if(/windows|win32|win64/.test(ua)){want='win';}
+  if(!want){return;}
+  /* Priority order: native-only clients first, then cross-platform ones */
+  const priority={win:['v2rayN','Mihomo','Hiddify','Karing','Sing-box','AmneziaWG'],
+    mac:['Hiddify','Karing','Mihomo','Sing-box','AmneziaWG'],
+    linux:['Mihomo','Hiddify','Karing','Sing-box','AmneziaWG'],
+    android:['v2rayNG','NekoBox','Hiddify','Karing','Mihomo','Sing-box','AmneziaWG'],
+    ios:['Shadowrocket','Streisand','Hiddify','Karing','Sing-box']};
+  const order=priority[want]||[];
+  let chosen=null;
+  for(let i=0;i<order.length&&!chosen;i++){
+    cards.forEach(function(c){
+      if(c.dataset.client===order[i]){chosen=c;}
+    });
+  }
+  if(chosen){chosen.classList.add('recommended');}
+}
 /* Pull-to-refresh — at scrollY=0, drag down >50px then release to refresh all */
 (function(){
   let startY=0,pulling=false;
@@ -1422,7 +1558,7 @@ function toggleCollapse(el){el.classList.toggle('collapsed');}
     pulling=false;
     if(hint.classList.contains('visible')){
       hint.classList.remove('visible');
-      loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();
+      loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();loadConnStatus();
     }
   },{passive:true});
 })();
@@ -1529,7 +1665,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <div class="header">
 <div class="avatar">{initial}</div>
 <div style="flex:1;min-width:0">
-<h1>{name}</h1>
+<h1 style="display:flex;align-items:center;gap:8px">{name}<span id="conn-dot" class="conn-dot" title="Статус подключения" aria-label="Статус подключения"></span></h1>
 <div class="sub">{email}</div>
 </div>
 <button class="theme-toggle-btn" id="theme-toggle-btn" onclick="toggleTheme()" title="Сменить тему" aria-label="Сменить тему">☀️</button>
@@ -1594,7 +1730,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <div class="cfg-section-head"><span class="cfg-sec-ico">📱</span> Клиентские приложения <span class="cfg-sec-sub">последние версии с GitHub / App Store</span></div>
 <div class="cfg-client-grid">
 
-<div class="cfg-client-card">
+<div class="cfg-client-card" data-client="Mihomo" data-platforms="win,mac,linux,android">
 <div class="cfg-client-head"><span class="cfg-client-ico">🌀</span>
 <div class="cfg-client-name">Clash Meta / Mihomo</div></div>
 <div class="cfg-client-desc">Ядро Clash на базе mihomo. GUI-оболочки: Clash Verge, FlClash.</div>
@@ -1603,7 +1739,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <a class="cfg-client-dl" href="https://github.com/MetaCubeX/mihomo/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
 </div>
 
-<div class="cfg-client-card">
+<div class="cfg-client-card" data-client="Sing-box" data-platforms="win,mac,linux,android,ios">
 <div class="cfg-client-head"><span class="cfg-client-ico">🟢</span>
 <div class="cfg-client-name">Sing-box</div></div>
 <div class="cfg-client-desc">Универсальное ядро: VLESS / Reality / Trojan / Hysteria.</div>
@@ -1612,7 +1748,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <a class="cfg-client-dl" href="https://github.com/SagerNet/sing-box/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
 </div>
 
-<div class="cfg-client-card">
+<div class="cfg-client-card" data-client="Hiddify" data-platforms="win,mac,linux,android,ios">
 <div class="cfg-client-head"><span class="cfg-client-ico">📦</span>
 <div class="cfg-client-name">Hiddify</div></div>
 <div class="cfg-client-desc">Кроссплатформенный клиент с авто-настройкой и QR.</div>
@@ -1621,7 +1757,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <a class="cfg-client-dl" href="https://github.com/hiddify/hiddify-app/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
 </div>
 
-<div class="cfg-client-card">
+<div class="cfg-client-card" data-client="v2rayN" data-platforms="win">
 <div class="cfg-client-head"><span class="cfg-client-ico">🖥️</span>
 <div class="cfg-client-name">v2rayN</div></div>
 <div class="cfg-client-desc">Популярный клиент для Windows на ядре Xray.</div>
@@ -1630,7 +1766,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <a class="cfg-client-dl" href="https://github.com/2dust/v2rayN/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
 </div>
 
-<div class="cfg-client-card">
+<div class="cfg-client-card" data-client="v2rayNG" data-platforms="android">
 <div class="cfg-client-head"><span class="cfg-client-ico">📱</span>
 <div class="cfg-client-name">v2rayNG</div></div>
 <div class="cfg-client-desc">Android-клиент на ядре Xray, импорт по QR/ссылке.</div>
@@ -1639,7 +1775,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <a class="cfg-client-dl" href="https://github.com/2dust/v2rayNG/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
 </div>
 
-<div class="cfg-client-card">
+<div class="cfg-client-card" data-client="Karing" data-platforms="win,mac,linux,android,ios">
 <div class="cfg-client-head"><span class="cfg-client-ico">🦊</span>
 <div class="cfg-client-name">Karing</div></div>
 <div class="cfg-client-desc">Кроссплатформенный клиент с поддержкой всех форматов.</div>
@@ -1648,7 +1784,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <a class="cfg-client-dl" href="https://github.com/KaringNet/karing/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
 </div>
 
-<div class="cfg-client-card">
+<div class="cfg-client-card" data-client="NekoBox" data-platforms="android">
 <div class="cfg-client-head"><span class="cfg-client-ico">🐱</span>
 <div class="cfg-client-name">NekoBox</div></div>
 <div class="cfg-client-desc">Android-клиент на ядре sing-box, импорт по QR.</div>
@@ -1657,7 +1793,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <a class="cfg-client-dl" href="https://github.com/MatsuriDayo/NekoBoxForAndroid/releases/latest" target="_blank" rel="noopener">📥 Скачать</a>
 </div>
 
-<div class="cfg-client-card">
+<div class="cfg-client-card" data-client="Streisand" data-platforms="ios">
 <div class="cfg-client-head"><span class="cfg-client-ico">🌉</span>
 <div class="cfg-client-name">Streisand</div></div>
 <div class="cfg-client-desc">iOS-клиент с поддержкой VLESS/Reality, скан QR.</div>
@@ -1666,7 +1802,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <a class="cfg-client-dl" href="https://apps.apple.com/app/streisand/id1504799924" target="_blank" rel="noopener">🛍 App Store</a>
 </div>
 
-<div class="cfg-client-card">
+<div class="cfg-client-card" data-client="Shadowrocket" data-platforms="ios">
 <div class="cfg-client-head"><span class="cfg-client-ico">🚀</span>
 <div class="cfg-client-name">Shadowrocket</div></div>
 <div class="cfg-client-desc">iOS-клиент, скан QR-кода или вставка ссылки.</div>
@@ -1675,7 +1811,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <a class="cfg-client-dl" href="https://apps.apple.com/app/shadowrocket/id932747747" target="_blank" rel="noopener">🛍 App Store</a>
 </div>
 
-<div class="cfg-client-card">
+<div class="cfg-client-card" data-client="AmneziaWG" data-platforms="win,mac,linux,android,ios">
 <div class="cfg-client-head"><span class="cfg-client-ico">🛡️</span>
 <div class="cfg-client-name">AmneziaWG</div></div>
 <div class="cfg-client-desc">WireGuard-совместимый туннель с защитой от DPI-детекции.</div>
@@ -1736,11 +1872,18 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <div class="portal-hero-title">🔒 Смена пароля</div>
 <div class="portal-hero-sub">Минимум 8 символов. Не используйте пароль от VPN.</div>
 </div><span class="portal-proto-badge">🔒</span></div></div>
+<div class="portal-info" id="pw-changed-at-box" style="margin-bottom:14px">Последняя смена: загружается…</div>
+<div id="pw-changed-at" style="display:none"></div>
 <div class="portal-tile">
 <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Новый пароль</label>
 <input class="input" id="new-pass" type="password" placeholder="Введите новый пароль" oninput="pwStrength(this.value)" style="width:100%">
 <div class="portal-progress" id="pw-bar"><div class="portal-progress-fill off" id="pw-fill" style="width:0%"></div></div>
 <div class="portal-meta"><span id="pw-label">—</span><span>мин. 8 символов</span></div>
+<div class="pw-checklist">
+<span id="pw-chk-len" data-label="8+ символов">○ 8+ символов</span>
+<span id="pw-chk-alnum" data-label="буквы + цифры">○ буквы + цифры</span>
+<span id="pw-chk-spec" data-label="спецсимволы">○ спецсимволы</span>
+</div>
 </div>
 <div class="portal-btn-row">
 <button class="btn" id="pw-submit" onclick="changePassword()">Сменить пароль</button>
@@ -1801,6 +1944,7 @@ async function api(p){{const r=await fetch(p,{{credentials:'same-origin'}});if(r
 {PORTAL_POLISH_JS}
 
 loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();
+loadPasswordInfo();loadConnStatus();detectRecommendedClient();
 </script>
 </body></html>'''
 
