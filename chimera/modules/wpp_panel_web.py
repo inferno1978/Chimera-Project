@@ -854,8 +854,11 @@ class Handler(BaseHTTPRequestHandler):
             try: hours=int(parse_qs(urlparse(self.path).query).get("hours",["1"])[0])
             except ValueError: hours=1
             if hours not in (1,6,24): hours=1
+            # Read user's browser TZ from query param (default Europe/Moscow).
+            # Frontend sends via Intl.DateTimeFormat().resolvedOptions().timeZone.
+            tz=parse_qs(urlparse(self.path).query).get("tz",["Europe/Moscow"])[0]
             profiles=[{"id":"primary","name":"Основной WEB Proxy","secret":primary(),"protocol":"web","enabled":True,"backend_port":443}]+users()
-            body=dashboard_body(server_metrics.dashboard_data(hours),subscription_registry(),profiles,traffic(),
+            body=dashboard_body(server_metrics.dashboard_data(hours,tz=tz),subscription_registry(),profiles,traffic(),
                                 PANEL_PATH,DOMAIN,self.csrf(),proxy_link,web_updates.current_version(),hours)
             if path.endswith("/dashboard-data"):
                 self.send_json({"html":body,"update":web_updates.get_status()})
