@@ -565,6 +565,34 @@ def _install() -> tuple[bool, str]:
     else:
         _success("Сервис активен и отвечает на HTTP")
 
+    # ── 9b. Устанавливаем wpp-metrics.timer (сборщик метрик для дашборда) ──
+    # Без этого таймера dashboard показывает «Измерения VPS ещё не получены»
+    # и график трафика пустой. Таймер тикает каждые 10s, пишет сэмпл в
+    # /var/lib/xray-installer/wpp_metrics.json.
+    try:
+        from chimera.modules.wpp_metrics import install_timer as _install_metrics_timer
+        _info("Устанавливаю сборщик метрик (wpp-metrics.timer, 10s интервал)...")
+        _mt_ok, _mt_msg = _install_metrics_timer()
+        if _mt_ok:
+            _success("Сборщик метрик установлен и запущен")
+            # Trigger first sample immediately so dashboard has data
+            # right after install (otherwise user waits up to 10s for first tick).
+            try:
+                from chimera.modules.wpp_metrics import collect_once as _collect_once
+                _collect_once()
+                _info("Первый сэмпл метрик собран — дашборд сразу покажет данные")
+            except Exception as _exc:
+                _warn(f"Первый сэмпл не удалось собрать сразу: {_exc} "
+                      "(таймер всё равно тикнет через 10s)")
+        else:
+            _warn(f"Не удалось установить сборщик метрик: {_mt_msg}. "
+                  "Дашборд будет без данных. Установите вручную: "
+                  "python3 -c 'from chimera.modules.wpp_metrics import "
+                  "install_timer; print(install_timer())'")
+    except ImportError:
+        _warn("Модуль wpp_metrics недоступен — сборщик метрик не установлен. "
+              "Дашборд будет без данных.")
+
     # ── 10. Показываем URL доступа ──
     try:
         public_ip = _detect_public_ip()
