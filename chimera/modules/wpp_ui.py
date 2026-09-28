@@ -1035,8 +1035,46 @@ TRAFFIC_CSS = '''/* traffic tab */
 .tf-progress-fill.off{background:var(--red)}
 .tf-progress-meta{display:flex;justify-content:space-between;font:10px ui-monospace,monospace;color:var(--muted)}
 @keyframes tfGrowY{from{transform:scaleY(0);opacity:0}to{transform:scaleY(1);opacity:1}}
-@keyframes tfGrowX{from{transform:scaleX(0)}to{transform:scaleX(1)}}'''
+@keyframes tfGrowX{from{transform:scaleX(0)}to{transform:scaleX(1)}}
 
+/* === hourly pattern (Variant B) + heatmap (Variant C) — shared with admin CSS === */
+.hourly-card{margin-top:18px}.heatmap-card{margin-top:18px}
+.hourly-chart{display:grid;grid-template-columns:repeat(24,minmax(0,1fr));gap:3px;height:140px;align-items:end;padding:8px 0 4px;border-bottom:1px solid var(--line)}
+.hourly-bar{position:relative;width:100%;min-height:2px;border-radius:3px 3px 0 0;background:var(--input);cursor:help;transition:filter .15s,transform .1s;overflow:hidden}
+.hourly-bar:hover{filter:brightness(1.18);transform:scaleY(1.04)}
+.hourly-seg{position:absolute;left:0;right:0}
+.hourly-seg.up{bottom:0;background:var(--accent)}
+.hourly-seg.down{top:0;background:var(--amber)}
+.hourly-axis{display:grid;grid-template-columns:repeat(24,minmax(0,1fr));font:9px ui-monospace,monospace;color:var(--muted);text-align:center;padding:5px 0 0;gap:3px}
+.hourly-axis span{display:block;text-align:center}
+.hourly-legend{display:flex;flex-wrap:wrap;gap:14px;font-size:10px;color:var(--muted);margin-top:8px;align-items:center}
+.hourly-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.hourly-legend i.up{background:var(--accent)}
+.hourly-legend i.down{background:var(--amber)}
+.hourly-legend .muted{margin-left:auto}
+.hourly-empty{padding:30px 12px;text-align:center;color:var(--muted);font-size:12px}
+.heatmap-grid{display:grid;grid-template-columns:34px repeat(24,minmax(0,1fr));gap:3px;padding:8px 0 4px;border-bottom:1px solid var(--line)}
+.heatmap-corner{grid-column:1;grid-row:1}
+.heatmap-hour-label{font:8px ui-monospace,monospace;color:var(--muted);text-align:center;padding:3px 0}
+.heatmap-row{display:contents}
+.heatmap-row-label{font:10px ui-monospace,monospace;color:var(--muted);text-align:right;padding:6px 6px 0 0;align-self:center}
+.heatmap-cell{aspect-ratio:1;border-radius:3px;background:var(--input);cursor:help;transition:filter .15s,transform .1s}
+.heatmap-cell:hover{filter:brightness(1.3);transform:scale(1.15)}
+.heatmap-cell[data-level="0"]{background:var(--input)}
+.heatmap-cell[data-level="1"]{background:color-mix(in srgb,var(--accent) 22%,var(--input))}
+.heatmap-cell[data-level="2"]{background:color-mix(in srgb,var(--accent) 45%,var(--input))}
+.heatmap-cell[data-level="3"]{background:color-mix(in srgb,var(--accent) 70%,var(--input))}
+.heatmap-cell[data-level="4"]{background:var(--accent)}
+.heatmap-scale{display:inline-flex;gap:2px;align-items:center;margin:0 6px;vertical-align:middle}
+.heatmap-scale i{display:inline-block;width:11px;height:11px;border-radius:2px}
+.heatmap-scale i[data-level="0"]{background:var(--input)}
+.heatmap-scale i[data-level="1"]{background:color-mix(in srgb,var(--accent) 22%,var(--input))}
+.heatmap-scale i[data-level="2"]{background:color-mix(in srgb,var(--accent) 45%,var(--input))}
+.heatmap-scale i[data-level="3"]{background:color-mix(in srgb,var(--accent) 70%,var(--input))}
+.heatmap-scale i[data-level="4"]{background:var(--accent)}
+@media(max-width:900px){.hourly-chart{height:100px}.heatmap-grid{grid-template-columns:28px repeat(24,minmax(0,1fr))}.heatmap-row-label{font-size:9px;padding-right:3px}.heatmap-hour-label{font-size:7px}}
+@media(max-width:600px){.hourly-chart{height:80px;gap:1px}.hourly-axis{font-size:8px}.heatmap-grid{gap:1px}.heatmap-cell{border-radius:2px}}
+'''
 LOAD_TRAFFIC_JS = '''let lastTrafficData=null,trafficPeriod=30,trafficInterval=null;
 function startTrafficRefresh(){if(trafficInterval)clearInterval(trafficInterval);trafficInterval=setInterval(function(){loadTraffic();},30000);}
 function setTrafficPeriod(p){trafficPeriod=p;if(lastTrafficData)renderTraffic(lastTrafficData);}
