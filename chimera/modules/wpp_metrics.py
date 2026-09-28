@@ -46,7 +46,7 @@ STATE         = Path("/var/lib/xray-installer/wpp_metrics.json")
 ERROR_FILE    = Path("/var/lib/xray-installer/wpp_metrics_error.json")
 LOCK_FILE     = STATE.parent / "wpp_metrics.lock"
 PROC           = Path("/proc")
-HISTORY_LIMIT = 8641  # 24 часа × 3600 / 10 секунд = 8640 + 1
+HISTORY_LIMIT = 60481  # 7 days × 24 × 3600 / 10 = 60480 + 1 (extended from 24h to 7d for hourly pattern)
 _MAIN_PY      = Path("/opt/chimera/main.py") if Path("/opt/chimera/main.py").exists() else _ROOT / "main.py"
 
 # Chimera services (vs WPP's web-panel-proxy-xray.service и т.д.)
@@ -345,8 +345,51 @@ def collect_once() -> None:
 
 # ─── DASHBOARD DATA ───────────────────────────────────────────────────────────
 
-def dashboard_data(hours: int = 1) -> dict:
-    """Возвращает {latest, history, collector_error} для dashboard_body."""
+# Try to import zoneinfo (Python 3.9+) for proper TZ-aware bucketing.
+# Falls back to time.localtime (UTC on most servers) if unavailable.
+try:
+    from zoneinfo import ZoneInfo
+    _HAS_ZONEINFO = True
+except ImportError:
+    _HAS_ZONEINFO = False
+    ZoneInfo = None  # type: ignore
+
+
+def _tzinfo(tz_name: str):
+    """Return a zoneinfo.ZoneInfo for tz_name, or None on failure."""
+    if not _HAS_ZONEINFO or not tz_name:
+        return None
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return None
+
+
+def _hour_local(ts: int, tzinfo) -> tuple[int, str, int]:
+    """Return (hour, date_key YYYY-MM-DD, day_of_week 0=Mon..6=Sun) for ts in given tz.
+
+    If tzinfo is None, falls back to time.localtime (server tz, usually UTC).
+    """
+    if tzinfo is None:
+        lt = time.localtime(ts)
+        return (lt.tm_hour,
+                "%04d-%02d-%02d" % (lt.tm_year, lt.tm_mon, lt.tm_mday),
+                lt.tm_wday)
+    try:
+        from datetime import datetime
+        dt = datetime.fromtimestamp(ts, tz=tzinfo)
+        return (dt.hour,
+                "%04d-%02d-%02d" % (dt.year, dt.month, dt.day),
+                dt.weekday())  # Monday=0..Sunday=6 (same as tm_wday)
+    except Exception:
+        lt = time.localtime(ts)
+        return (lt.tm_hour,
+                "%04d-%02d-%02d" % (lt.tm_year, lt.tm_mon, lt.tm_mday),
+                lt.tm_wday)
+
+
+def dashboard_data(hours: int = 1, tz: str = "Europe/Moscow") -> dict:
+    """Возвращает {latest, history, collector_error, hourly_pattern, hourly_heatmap} для dashboard_body."""
     data = read_state()
     cutoff = int(time.time()) - hours * 3600
     return {
@@ -354,6 +397,156 @@ def dashboard_data(hours: int = 1) -> dict:
         "history":         [p for p in data.get("history", [])
                             if p.get("time", 0) >= cutoff],
         "collector_error": read_state(ERROR_FILE),
+        "hourly_pattern":  hourly_pattern(days=7, tz=tz),
+        "hourly_heatmap":  hourly_heatmap(days=7, tz=tz),
+    }
+
+
+def hourly_pattern(days: int = 7, tz: str = "Europe/Moscow") -> dict:
+    """Aggregate traffic history by hour-of-day (0..23) over last `days` days.
+
+    For each hour-of-day bucket, sums up_rate × 10s + down_rate × 10s for all
+    samples whose localtime (in given tz) hour matches the bucket, then divides
+    by the number of distinct calendar days observed in that bucket — giving
+    average bytes per hour-of-day, smoothing out one-off spikes.
+
+    Args:
+      days: how many days back to look (default 7).
+      tz: IANA timezone name (e.g. 'Europe/Moscow', 'UTC'). Samples are
+         bucketed by local hour in this tz, so '19:00' on the chart means
+         19:00 in user's wall clock, not UTC.
+
+    Returns:
+      {
+        "buckets": [{"hour": 0, "up": 1234, "down": 5678, "days": 7, "avg_total": 6912}, ...],
+        "days_observed": 7,
+        "max_avg_total": 12345,
+        "tz": "Europe/Moscow"
+      }
+    """
+    data = read_state()
+    history = data.get("history", [])
+    empty = {"buckets": [{"hour": h, "up": 0, "down": 0, "days": 0, "avg_total": 0}
+                          for h in range(24)],
+             "days_observed": 0, "max_avg_total": 0, "tz": tz}
+    if not history:
+        return empty
+    cutoff = int(time.time()) - days * 86400
+    SAMPLE_SEC = 10  # matches wpp-metrics.timer interval
+    tzinfo = _tzinfo(tz)
+    # bucket[hour] = {up, down, days:set(YYYY-MM-DD)}
+    buckets = {h: {"up": 0, "down": 0, "days": set()} for h in range(24)}
+    for sample in history:
+        ts = sample.get("time", 0)
+        if ts < cutoff:
+            continue
+        hour, date_key, _ = _hour_local(ts, tzinfo)
+        if not (0 <= hour <= 23):
+            continue
+        up_bytes = max(0, float(sample.get("up_rate", 0) or 0)) * SAMPLE_SEC
+        down_bytes = max(0, float(sample.get("down_rate", 0) or 0)) * SAMPLE_SEC
+        buckets[hour]["up"] += up_bytes
+        buckets[hour]["down"] += down_bytes
+        buckets[hour]["days"].add(date_key)
+    out_buckets = []
+    max_avg = 0
+    for h in range(24):
+        b = buckets[h]
+        n_days = len(b["days"])
+        avg_up = int(b["up"] / n_days) if n_days else 0
+        avg_down = int(b["down"] / n_days) if n_days else 0
+        avg_total = avg_up + avg_down
+        if avg_total > max_avg:
+            max_avg = avg_total
+        out_buckets.append({
+            "hour": h,
+            "up": avg_up,
+            "down": avg_down,
+            "days": n_days,
+            "avg_total": avg_total,
+        })
+    all_days = set()
+    for b in buckets.values():
+        all_days |= b["days"]
+    return {
+        "buckets": out_buckets,
+        "days_observed": len(all_days),
+        "max_avg_total": max_avg,
+        "tz": tz,
+    }
+
+
+# Russian day-of-week short names (tm_wday: 0=Mon..6=Sun)
+_DOW_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def hourly_heatmap(days: int = 7, tz: str = "Europe/Moscow") -> dict:
+    """Build a 7×24 heatmap of total traffic per (day-of-week, hour-of-day).
+
+    For each (dow, hour) cell, sums up_rate × 10s + down_rate × 10s for all
+    samples matching that combination in given tz. Returns 7 rows (Mon..Sun)
+    × 24 cells (00..23). Used for the calendar-style heatmap like GitHub
+    contributions — helps spot weekly patterns (e.g. weekend evenings).
+
+    Args:
+      days: how many days back to look (default 7).
+      tz: IANA timezone name.
+
+    Returns:
+      {
+        "rows": [{"dow": 0, "name": "Пн", "cells": [{"hour":0,"up":X,"down":Y,"total":Z}, ...]}, ...],
+        "max_total": 123456,
+        "days_observed": 7,
+        "tz": "Europe/Moscow"
+      }
+    """
+    data = read_state()
+    history = data.get("history", [])
+    empty_rows = [{"dow": d, "name": _DOW_RU[d],
+                   "cells": [{"hour": h, "up": 0, "down": 0, "total": 0}
+                             for h in range(24)]}
+                  for d in range(7)]
+    if not history:
+        return {"rows": empty_rows, "max_total": 0, "days_observed": 0, "tz": tz}
+    cutoff = int(time.time()) - days * 86400
+    SAMPLE_SEC = 10
+    tzinfo = _tzinfo(tz)
+    # cells[dow][hour] = {up, down, days:set()}
+    cells = [[{"up": 0, "down": 0, "days": set()} for _ in range(24)] for _ in range(7)]
+    for sample in history:
+        ts = sample.get("time", 0)
+        if ts < cutoff:
+            continue
+        hour, date_key, dow = _hour_local(ts, tzinfo)
+        if not (0 <= hour <= 23) or not (0 <= dow <= 6):
+            continue
+        up_bytes = max(0, float(sample.get("up_rate", 0) or 0)) * SAMPLE_SEC
+        down_bytes = max(0, float(sample.get("down_rate", 0) or 0)) * SAMPLE_SEC
+        cells[dow][hour]["up"] += up_bytes
+        cells[dow][hour]["down"] += down_bytes
+        cells[dow][hour]["days"].add(date_key)
+    rows = []
+    max_total = 0
+    all_days = set()
+    for dow in range(7):
+        row_cells = []
+        for hour in range(24):
+            c = cells[dow][hour]
+            n_days = len(c["days"])
+            # average per day for that (dow, hour) combination
+            up_avg = int(c["up"] / n_days) if n_days else 0
+            down_avg = int(c["down"] / n_days) if n_days else 0
+            total = up_avg + down_avg
+            if total > max_total:
+                max_total = total
+            all_days |= c["days"]
+            row_cells.append({"hour": hour, "up": up_avg, "down": down_avg, "total": total})
+        rows.append({"dow": dow, "name": _DOW_RU[dow], "cells": row_cells})
+    return {
+        "rows": rows,
+        "max_total": max_total,
+        "days_observed": len(all_days),
+        "tz": tz,
     }
 
 
