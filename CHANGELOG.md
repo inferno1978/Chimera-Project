@@ -1,4 +1,310 @@
 # Changelog
+
+# Changelog new entry — WPP User Portal full rework (28 Sep 2026)
+
+## FEAT(wpp_ui): полная переработка User Portal — визуальный редизайн 10 табов, 24 UX-фичи, alignment палитры с admin — 28 сентября 2026
+
+**Контекст:** User Portal (часть `/portal/*` WPP, перенесённая в коммите
+`fdaf436` из `rest_api.py`) работал, но визуально выглядел «голым»: базовый
+тёмный фон без иерархии, скроллбары на длинных ссылках, QR-коды на разных
+высотах, b4-сет оверфлоу в узких карточках, кнопка «Открепить IP» не
+работала, плагины-клиенты (v2rayN, NekoBox и т.д.) шли простым списком без
+ссылок на GitHub. Палитра портала (`#0a0e17`/`#4d9eff` blue) не совпадала
+с админкой (`#101318`/`#3b82f6` graphite-blue) — пользователь видел
+«какую-то зелёную» юзерку на фоне «тёмно-серой» админки.
+
+**Решение:** четыре блока работ — (1) визуальный редизайн всех 10 табов в
+едином стиле с traffic-табом (gradient hero, stats grid, styled tiles),
+(2) bug-fixes первого тестирования, (3) 24 UX-фичи (10 визуальных + 14
+функциональных), (4) точечные правки после ревью пользователя
+(NekoBox-fork, recommended-badge, palette alignment, THEME_INIT script
+placement).
+
+### Реализация — 16 коммитов, ~2370 строк дельты
+
+#### Группа 1. Базовый UI/UX — QR alignment + scrollable link-box — 5 коммитов
+
+QR-коды на вкладке «🔗 Подключение» располагались на разных высотах,
+потому что у `.link-box` была переменная высота, зависящая от длины URL.
+
+- `e7fa259` — первая попытка: `min-height` на `.link-box` + label div.
+- `5b2fe5a` — CSS-правило `min-height` на `.link-box` только.
+- `bd539f3` — `min-height` + `overflow:hidden` на `.link-box`.
+- `323f091` — фиксированная высота `48px` + `overflow:hidden`.
+- `69881a8` — финальное: `.link-box` стал `height:48px;overflow-y:auto`
+  + `onclick=copyLink()` для click-to-copy. Длинные ссылки теперь
+  прокручиваются внутри бокса и не ломают выравнивание QR.
+
+#### Группа 2. Визуальный редизайн Traffic + всех 9 остальных табов — 2 коммита
+
+- `c0c0756` — **Traffic tab** получил:
+  - `.portal-hero` gradient header с radial-glow в углу;
+  - per-day bar chart (CSS-only, `flex-direction:column-reverse`+
+    `flex-basis:calc(bytes/max*100%)` без зависимостей);
+  - uplink/downlink split bar (`.portal-progress-fill.on` gradient
+    green→accent);
+  - stats grid (`.portal-stats` с `grid-template-columns:repeat(auto-fill,
+    minmax(125px,1fr))`);
+  - pStat() helper для единообразных `<div class="portal-stat">` блоков.
+
+- `f53184d` — остальные **9 табов** (Подключение, Подписка, Конфиги, IP,
+  Пароль, Сателлиты, YouTube DPI, Сервер, AmneziaWG) приведены к тому же
+  visual language: gradient hero, stats grid, `.portal-tile` карточки с
+  hover-эффектом `border-color:var(--accent)`, `.portal-empty` для
+  empty states, `.portal-code-box` (click-to-copy), `.portal-qr-frame`
+  (white background for QR scannability), `.portal-btn-row`,
+  `.portal-dl-grid`, `.portal-info`, `.portal-danger`,
+  `.portal-progress`, `.portal-meta`, `.portal-proto-badge`,
+  `.portal-chip` (on/off/accent variants), `.portal-tile-row`.
+
+  Введены shared CSS-константы:
+  - `PORTAL_TABS_CSS` — общие `.portal-*` примитивы для всех табов;
+  - `TRAFFIC_CSS` + `LOAD_TRAFFIC_JS` — стили и JS traffic-таба
+    (вынесены из f-string чтобы избежать удвоения `{{` braces);
+  - `CONFIGS_CSS` — стили configs-таба.
+
+#### Группа 3. Bug-fixes первого тестирования — 4 коммита
+
+После первого ручного тестирования нашлись:
+
+- `a0f7b73` — **3 бага за один проход:**
+  1. **B4 stat overflow**: длинные имена active-set (`watchdog-web.telegram.org`)
+     выходили за пределы узких карточек. CSS `.portal-stat-val` таргетил
+     несуществующий элемент — pStat() рендерит `<b>` внутри `.portal-stat`.
+     Fix: таргетить `.portal-stat b` с `white-space:nowrap;overflow:hidden;
+     text-overflow:ellipsis;display:block`.
+  2. **pinIP unpin не работал**: функция `pinIP()` сначала вызывала pin,
+     и только как fallback — unpin. Fix: `pinIP(ip,pinned)` — если
+     `pinned=true`, вызывать unpin API; иначе pin API.
+  3. **DELETE /api/portal/ips 404**: в `wpp_portal.py` отсутствовала
+     `handle_delete()`. Fix: добавлена функция + wired в
+     `wpp_panel_web.do_DELETE`.
+
+- `a843f8d` — **pinIP onclick**: inline `onclick="pinIP('${ip}','${ip.pinned}')"`
+  с правильным экранированием кавычек для f-string. Решение через
+  SFTP-uploaded Python script (Python-парсер ломался на多层ных escape).
+
+- `b2a55b3` — **stat-val nowrap**: дополнительная попытка (не сработала
+  из-за неверного селектора, исправлено в следующем коммите).
+
+- `2acdb70` — финальное: `.portal-stat b` с
+  `white-space:nowrap;overflow:hidden;text-overflow:ellipsis`.
+
+#### Группа 4. Конфиги-таб — клиентские карточки с GitHub-ссылками — 1 коммит
+
+- `80e9165` — **Configs tab** переработан:
+  - **Серверные конфиги**: `.cfg-server-card` карточки с иконкой, названием,
+    описанием, format-badge (VLESS / Clash YAML / Sing-box JSON / Hiddify
+    JSON / AWG .conf).
+  - **Клиентские приложения**: `.cfg-client-card` карточки (3-в-ряд на
+    десктопе, 1-в-ряд на мобиле) с иконкой, названием, описанием,
+    platform-badges (Win/macOS/Linux/Android/iOS), format-badge, и кнопкой
+    «📥 Скачать» со ссылкой на GitHub releases/latest или App Store.
+    10 клиентов: v2rayN, v2rayNG, Shadowrocket, Streisand, NekoBox,
+    Hiddify, Karing, Mihomo/Clash Meta, Sing-box, AmneziaWG.
+  - Info-box «ℹ️ Как пользоваться» с 3-шаговым гайдом.
+
+#### Группа 5. Visual polish — 10 фич — 1 коммит
+
+- `78ef4fd` — визуальные улучшения:
+  1. **Tab transitions** — `.tab-panel.active` получает
+     `animation:pFade .4s ease both` (translateY 6px → 0, opacity 0 → 1).
+  2. **Skeleton loading** — `.skeleton` и `.skeleton-card` с
+     `linear-gradient(90deg, var(--input) 25%, var(--raised) 50%,
+     var(--input) 75%)` + `background-size:200% 100%` +
+     `animation:skeleton 1.5s infinite`. Все `load*()` функции рендерят
+     skeleton-карточки до прихода данных.
+  3. **Theme toggle** — кнопка `.theme-toggle-btn` в хедере, onclick
+     `toggleTheme()` инвертирует `data-theme` на `<html>` и пишет в
+     localStorage `wpp-theme`.
+  4. **QR hover zoom** — `.portal-qr-frame img:hover` →
+     `transform:scale(1.05)` + `box-shadow` для подъёма.
+  5. **Empty state illustrations** — `.portal-empty` с большим emoji в
+     `.ico` и muted-текстом, рендерится если API вернул пустой массив.
+  6. **Progress ring for traffic limit** — SVG conic-gradient fallback
+     через `.portal-progress-fill` (height:8px, gradient fill по % usage).
+  7. **Collapsible sections** — `.portal-collapse` + `.portal-collapse-body`
+     с `max-height:9999px↔0` + `opacity:1↔0` transition.
+  8. **Mobile bottom navigation** — `@media(max-width:600px)` фиксирует
+     `.tabs` внизу экрана (`position:fixed;bottom:0`), добавляет
+     `body{padding-bottom:60px}`.
+  9. **Pull-to-refresh** — `#ptr-hint` под хедером, `touchstart/move/end`
+     listeners на `window`, при `scrollY<=0 && dy>50` показывает подсказку,
+     на release вызывает все `load*()` функции.
+  10. **Toast animation** — `.toast` flex с SVG checkmark (`stroke-dasharray:30`
+      + `@keyframes drawCheck` от 30 до 0 за 0.3s).
+
+#### Группа 6. Functional enhancements — 14 фич — 1 коммит
+
+- `aabbca9` — функциональные улучшения (новые API endpoints +
+  UI-обогащение):
+
+  1. **Real-time traffic auto-refresh** — `let trafficInterval;`
+     `startTrafficRefresh()` (`setInterval(loadTraffic, 30000)` с
+     `clearInterval` перед новым `setInterval`).
+  2. **Traffic by protocol** — блок «🧬 Трафик по протоколам» с 2 stat-card
+     (VLESS ↑/↓, MTProto ↑/↓), рендерится только если счётчик > 0.
+     New API field: `protocol_traffic` в `/api/portal/traffic`.
+  3. **Monthly forecast** — stat-card «📈 Прогноз/мес» с `~X ГБ`. New API
+     field: `monthly_forecast_gb` (fallback на `avg_per_day*30/GiB`).
+  4. **Period selector** — 3 кнопки (7 дней / 30 дней / Всё) + кнопка
+     📥 Экспорт CSV. `setTrafficPeriod(p)` фильтрует `allDaily.slice(-p)`,
+     перерендерит через `renderTraffic(lastTrafficData)` без повторного
+     fetch.
+  5. **Export CSV** — `exportTrafficCSV()` строит `date,bytes,gb\n` из
+     `lastTrafficData.daily`, создаёт Blob, `URL.createObjectURL`,
+     программный click по `<a download="traffic.csv">`.
+  6. **Open in app deep links** — для каждого `vless://` линка в
+     `loadLinks()` рендерится `<a class="btn sm" href="{item.link}">🚀
+     Открыть в приложении</a>`. Браузер сам открывает deep link в
+     зарегистрированном VPN-клиенте.
+  7. **Connection status indicator** — `<span id="conn-dot">` в хедере
+     рядом с именем пользователя. `loadConnStatus()` делает GET
+     `/api/portal/ips`, проверяет есть ли `detected_ip` в `d.ips[].ip`
+     (с поддержкой CIDR), ставит класс `.on`/`.off` (зелёная/красная
+     с glow).
+  8. **Recommended client detection** — каждой `.cfg-client-card`
+     добавлены `data-client` и `data-platforms` атрибуты.
+     `detectRecommendedClient()` читает `navigator.userAgent`, определяет
+     платформу (iphone→ios, android, mac, linux, win), затем по
+     приоритетному списку (native-only клиенты впереди: Win→v2rayN,
+     Android→v2rayNG, iOS→Shadowrocket) находит первый матч и добавляет
+     класс `.recommended`. CSS: border-accent + glow + `::after` badge
+     «⭐ Рекомендуется».
+  9. **Live stats auto-refresh** — `let healthInterval;`
+     `startHealthRefresh()` (`setInterval(loadHealth, 30000)`), вызывается
+     в конце `loadHealth()`.
+  10. **Certificate info** — в `loadHealth()` рендерится `.portal-tile` с
+      заголовком «🔐 Сертификат», 4 строки (Эмитент, Субъект, Действует с,
+      Действует до). Только если `d.cert_info` содержит хотя бы одно поле.
+      New API field: `cert_info` в `/api/portal/health`.
+  11. **Protocol explanation** — info-box после stat-блока: «ℹ️ Протоколы:»
+      + условно `<b>REALITY</b> — маскирует VPN-трафик под обычный HTTPS...`
+      (если `protocol_mode` содержит «reality») + `<b>xHTTP</b> — передаёт
+      данные через HTTP-запросы...` (если «xhttp»).
+  12. **Prominent auto-add IP button** — в `loadIPs()` сразу после hero
+      рендерится `<button class="btn" style="width:100%; padding:14px;
+      font-size:14px" onclick="addAutoIP()">📡 Добавить мой IP
+      {detected_ip ? ('+detected_ip+') : ''}</button>`. Full-width,
+      accent, 14px padding.
+  13. **IP geo-info in cards** — каждая IP-карта обогащается
+      `<span style="font:11px ui-monospace,monospace;color:var(--muted);
+      flex:1 1 100%">📍 city, country · isp</span>`, если geo-данные есть.
+      New API field: `geo` в каждой записи `ips[]` из
+      `/api/portal/ips`.
+  14. **Last changed date + checklist (Password tab)** — info-box
+      `#pw-changed-at-box` рендерит «Последняя смена: {date}». New API
+      endpoint: `GET /api/portal/password-info`.
+      `.pw-checklist` с 3 `<span>` элементами (8+ символов / буквы+цифры /
+      спецсимволы), `pwChecklist(v)` переключает `color:var(--green)` при
+      выполнении и `textContent` с `✓`/`○` префиксом. `pwStrength` теперь
+      вызывает `pwChecklist` в конце.
+
+#### Группа 7. Точечные правки после ревью пользователя — 2 коммита
+
+После показа пользователю обнаружились:
+
+- `ac59ce3` — **3 правки**:
+  1. **NekoBox fork**: карточка NekoBox теперь указывает на
+     `github.com/qr243vbi/nekobox/releases/tag/5.11.28.3` (мод с extras
+     для РФ-ДПИ), описание упоминает «Мод qr243vbi v5.11.28.3 с extras
+     для РФ-ДПИ».
+  2. **Recommended badge**: сокращён с 37 символов («⭐ Рекомендуется для
+     вашего устройства») до 13 («⭐ Рекомендуется»), добавлен
+     `padding-top:34px` на `.cfg-client-card.recommended` чтобы badge
+     больше никогда не перекрывал описание клиента.
+  3. **Цветовая палитра**: первая попытка alignment с admin — но я
+     ошибочно скопировал stale-палитру из line 73 CSS constant
+     (`#071116`/`#56decb` teal), не заметив override на line 138
+     (`#101318`/`#1b1e24`/`#3b82f6` graphite-blue).
+
+- `17c280a` — **коррекция** палитры:
+  - Прочитал computed CSS variables через headless Chromium (agent-browser):
+    PORTAL был `--bg:#071116;--accent:#56decb` (teal), а ADMIN был
+    `--bg:#101318;--accent:#3b82f6` (graphite-blue) —
+    несовпадение подтверждено.
+  - Заменил все `#071116`/`#0f2028`/`#56decb`/`#eaf0ed`/`#087c6d` и
+    связанные RGBA на ACTUAL admin graphite-blue палитру:
+    - **Dark**: `--bg:#101318; --surface:#1b1e24; --raised:#22262e;
+      --input:#171a20; --line:#303641; --text:#f3f5f8; --muted:#93a0b8;
+      --accent:#3b82f6; --on-accent:#fff; --tint:#3b82f619;
+      --green:#41c78d; --red:#f06f75; --amber:#dcae43;
+      --shadow:0 14px 46px #0006`.
+    - **Light**: `--bg:#f3f5f8; --surface:#fff; --raised:#eef1f5;
+      --input:#f9fafc; --line:#d8dde6; --text:#202630; --muted:#667188;
+      --accent:#2563d9; --green:#25865b; --amber:#916918; --red:#bd464c;
+      --shadow:0 8px 30px #17203614`.
+  - Хардкод-RGBA тинтов в `.portal-chip.on/off/accent`, `.badge.on/off`,
+    `.cfg-format-badge` border тоже выровнены под admin's RGB:
+    green `(65,199,141)`, red `(240,111,117)`, accent `(59,130,246)`.
+  - **THEME_INIT script placement fix**: в `portal_login_page()` inline
+    `<script>` был ВНУТРИ `<style>` блока (CSS-парсер его молча
+    игнорировал, поэтому `data-theme` оставался `(unset)` на логин-странице
+    даже после fix'а). Вынесен ПЕРЕД `<style>` как сиблинг, в точности
+    как admin's `THEME_INIT`. Теперь `theme="dark"` явно выставляется на
+    обеих страницах (раньше только если `wpp-theme` есть в localStorage).
+  - f-string brace escaping: `try{var t=...}` → `try{{var t=...}}`
+    (Python f-string literal brace escape, иначе SyntaxError).
+  - Verified via agent-browser: portal и admin оба вычисляют
+    `--bg=#101318, --surface=#1b1e24, --accent=#3b82f6` на dark theme.
+
+### Затронутые файлы
+
+- `chimera/modules/wpp_ui.py` (~1100 → 2372 строк, +1272 строк):
+  - `portal_login_page(path, csrf, error)` — WPP-styled login с
+    graphite-blue палитрой + корректный THEME_INIT script.
+  - `portal_page(user, path)` — все 10 табов с единым визуальным языком.
+  - Новые CSS-константы: `PORTAL_TABS_CSS`, `TRAFFIC_CSS`,
+    `LOAD_TRAFFIC_JS`, `CONFIGS_CSS`, `PORTAL_POLISH_CSS`,
+    `PORTAL_POLISH_JS`.
+  - Новые JS-функции: `loadLinks`, `loadSubscription`, `loadTraffic`,
+    `loadHealth`, `loadIPs`, `loadSatellites`, `loadB4`, `loadAWG`,
+    `loadConnStatus`, `loadPasswordInfo`, `detectRecommendedClient`,
+    `startTrafficRefresh`, `startHealthRefresh`, `setTrafficPeriod`,
+    `exportTrafficCSV`, `addAutoIP`, `pinIP`, `copyLink`,
+    `toggleTheme`, `toggleCollapse`, `pStat`, `pBadge`, `esc`, `api`,
+    `showToast`, `switchTab`.
+- `chimera/modules/wpp_portal.py` (690 → 1011 строк, +321 строк):
+  - `handle_delete()` для DELETE `/api/portal/ips`.
+  - Новые API endpoints: `/api/portal/password-info`,
+    `/api/portal/traffic` обогащён `protocol_traffic` + `monthly_forecast_gb`,
+    `/api/portal/health` обогащён `cert_info`,
+    `/api/portal/ips` обогащён `geo` (city/country/isp) для каждого IP.
+  - `POST /portal/password` теперь пишет `password_changed_at` timestamp.
+
+### Дизайн-решения
+
+1. **Shared CSS-константы** (`PORTAL_TABS_CSS` и др.) вынесены из f-string
+   чтобы избежать удвоения `{{` braces и упростить поддержку — правка в
+   одном месте применяется ко всем табам.
+2. **Графитово-синяя палитра** выбрана как «источник истины» — admin
+   уже использовал её (override line 138 в CSS constant), portal
+   подогнан под admin, не наоборот. Light-тема аналогично выровнена.
+3. **Recommended client detection** сделан per-platform с приоритетом
+   native-only клиентов (v2rayN на Win, v2rayNG на Android,
+   Shadowrocket на iOS) — это то, что обычный пользователь поставит
+   первым делом.
+4. **Theme toggle** сохраняет тему в `localStorage` под ключом
+   `wpp-theme` — ТОТ ЖЕ ключ что admin. Это означает что пользователь
+   сменив тему в админке, увидит ту же тему в портале (и наоборот).
+5. **Connection status dot** использует `loadConnStatus()` который
+   переиспользует `/api/portal/ips` (без нового endpoint) — меньше
+   нагрузки на бэкенд.
+6. **Real-time polling** (30s для traffic + health) использует
+   `setInterval` с `clearInterval` перед новым запуском —
+   предотвращает stack утечек при частом переключении табов.
+
+### Деплой
+
+Все 16 коммитов запушены в:
+- **GitLab**: `chimera-v5` branch (`e7fa259..17c280a`).
+- **GitHub**: `main` branch (refspec `chimera-v5:main`).
+
+Сервис `wpp-web` перезапускался после каждой группы коммитов, проверялся
+через `curl http://127.0.0.1:9744/portal/{,home,login}` + через headless
+Chromium (agent-browser) — все рендеры возвращают HTTP 200, вычисленные CSS
+variables на портале и в админке идентичны.
+
 ## FEAT(wpp): объединение Admin Panel + User Portal в WPP, fingerprint dropdown, VLESS URL auto-fill, Admin gap UI — 27 сентября 2026
 
 **Кейс:** в chimera существовало два независимых веб-сервиса:
