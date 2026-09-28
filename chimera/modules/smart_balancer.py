@@ -180,34 +180,31 @@ def _probe_tcp_latency(host: str, port: int, timeout: float = PROBE_TIMEOUT_SEC)
 def _probe_bandwidth_ttfb(host: str, port: int,
                           timeout: float = PROBE_TIMEOUT_SEC) -> float:
     """
-    Измеряет TTFB через curl с прокси через ноду.
+    Оценивает bandwidth-прокси через TTFB-показатель.
+
+    Исторически использовал HTTP HEAD к http://{host}:{port} через curl —
+    но это ДЕЛАЕТ НЕВАЛИДНЫЕ REALITY-ЛОГИ на chimera-нодах: REALITY слушает
+    TLS на порту 443, получает HTTP-plaintext → пишет "REALITY: processed
+    invalid connection from <HOST>:" → fail2ban/autoban банит source IP
+    после 10 ошибок в 10 минут. После бана TCP-connect получает RST → probe
+    пишет «недоступна», хотя нода реально работает.
+
+    Новый подход: два последовательных TCP-latency замера. Разница даёт
+    оценку bandwidth-загрузки ноды (больше дрейф → нода загружена).
     Возвращает время в мс или float("inf").
-
-    Примечание: curl пробует соединение напрямую к ноде (TCP),
-    что косвенно отражает bandwidth. Для точного измерения
-    нужен http-прокси, но это усложняет конфиг; пока используем
-    прямой HTTP HEAD к публичному URL с таймаутом.
     """
-    try:
-        r = subprocess.run(
-            [
-                "curl", "-s", "-o", "/dev/null",
-                "-w", "%{time_starttransfer}",
-                "--connect-timeout", str(int(timeout)),
-                "--max-time", str(int(timeout * 1.5)),
-                "--resolve", f"{host}:{port}:{host}",
-                f"http://{host}:{port}",
-            ],
-            capture_output=True, text=True, timeout=timeout + 3
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return float(r.stdout.strip()) * 1000.0
-    except Exception:
-        pass
-
-    # Fallback: просто TCP латентность как оценка bandwidth
-    lat = _probe_tcp_latency(host, port, timeout)
-    return lat * 1.5 if lat != float("inf") else float("inf")
+    lat1 = _probe_tcp_latency(host, port, timeout)
+    if lat1 == float("inf"):
+        return float("inf")
+    # Второй замер — разница между первым и вторым как показатель загрузки
+    lat2 = _probe_tcp_latency(host, port, timeout)
+    if lat2 == float("inf"):
+        return lat1 * 1.5
+    # Используем среднее двух замеров × 1.5 как bandwidth estimate.
+    # Меньше чем у одной попытки — сглаживает jitter, но всё ещё
+    # отражает фактическую задержку соединения до ноды.
+    avg = (lat1 + lat2) / 2.0
+    return avg * 1.5
 
 
 def _probe_active_connections(host: str, port: int) -> int:
