@@ -814,6 +814,164 @@ class TestChainEntryMultiXhttpRegression(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Mode B + PROTOCOL_MODE='xhttp_reality': entry-инбаунд xHTTP+REALITY
+# (живой тест Mode A на DE 2026-09-29 прошёл; Mode B entry ранее проваливался
+#  в else-ветку REALITY TCP — GAP, закрытый для каскада RU→DE)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestChainEntryMultiXhttpRealityEntry(unittest.TestCase):
+    """Mode B + xhttp_reality: inbound = xhttp+reality на SERVER_PORT
+    (Xray владеет портом напрямую), clients БЕЗ flow, outbound к
+    xhttp_reality-exit с transport=xhttp + REALITY TLS."""
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+        self._tmpdir = tempfile.mkdtemp()
+        self._config_dir = Path(self._tmpdir) / "xray"
+        self._config_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _prepare(self):
+        c = self._fake_core
+        c._assert_reality_dest_sane = lambda *a, **kw: None
+        c._run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+        c._build_xhttp_settings = MagicMock(return_value=(
+            {"path": "/7f78c7e5", "mode": "stream-up"},
+            {"tcpFastOpen": True},
+        ))
+        c._build_tls_settings_xhttp = MagicMock(return_value={})
+        c._build_sockopt = MagicMock(return_value={"tcpFastOpen": True})
+        c._build_exit_xhttp_outbound_settings = MagicMock(return_value={
+            "path": "/7f78c7e5", "mode": "stream-up"
+        })
+        c._xray_log_block = MagicMock(return_value={"loglevel": "info"})
+        c._apply_stats_to_config = MagicMock()
+        c._set_config_owner = MagicMock()
+        c.build_split_tunnel_routing_rules = MagicMock(return_value=[])
+        c.generate_xray_config = MagicMock()
+        c.generate_xray_config_xhttp = MagicMock()
+        c.info = MagicMock()
+        c.warn = MagicMock()
+        c.success = MagicMock()
+        c.log_to_file = MagicMock()
+        c._h2_reapply_transport_if_active = MagicMock()
+        c.PROTOCOL_MODE = "xhttp_reality"
+        c.PARAM_DOMAIN = "chimeraprodvpn.online"
+        c.PARAM_UUID = "11111111-2222-3333-4444-555555555555"
+        c.XTLS_FLOW = ""
+        c.XHTTP_MODE = "stream-up"
+        c.XHTTP_PATH = "/7f78c7e5"
+        c.XHTTP_BACKEND_PORT = 8443
+        c.XHTTP_TCP_NO_DELAY = False
+        c.XHTTP_ENABLE_SESSION_RESUMPTION = False
+        c.AWG_EXIT_ENABLED = False
+        c.H2_EXIT_ENABLED = False
+        c.PARAM_REALITY_DEST = ""
+        c.PARAM_SOCKET_PATH = "/dev/shm/4e3460f3.socket"
+        c.PARAM_SPIDERX = "/1f9l8n"
+        c.PARAM_PRIVATE_KEY = "PRIVKEY_XHR"
+        c.PARAM_PUBLIC_KEY = "PUBKEY_XHR"
+        c.PARAM_SHORTID = "db4eaf93"
+        c.SERVER_PORT = 8443
+        c.AWG_FWMARK = 1000
+        c.SPLIT_TUNNEL_ENABLED = False
+        c.IS_IPV6_AVAILABLE = False
+        c.DNSCRYPT_LISTEN_PORT = 5300
+        c.DNSCRYPT_LISTEN_ADDR = "127.0.0.1"
+        c.DNSCRYPT_INSTALLED = False
+        c.CHAIN_BALANCER_STRATEGY = "roundRobin"
+        c.CHAIN_PINNED_NODE_INDEX = -1
+        c.CONFIG_DIR = self._config_dir
+        c.XRAY_BIN = "/usr/local/bin/xray"
+        c.Any = object
+        # Exit-нода = существующий DE xhttp_reality (Mode A, живой тест)
+        c.CHAIN_NODES = [{
+            "host":    "31.77.168.49",
+            "port":    8443,
+            "uuid":    "b360ca55-6947-47e4-a9d7-7faeffb2cb48",
+            "pubkey":  "DE_PUB",
+            "shortid": "desid012",
+            "sni":     "totalshadows.online",
+            "fp":      "chrome",
+            "proto":   "xhttp_reality",
+            "path":    "/7f78c7e5",
+            "xhttp_mode": "stream-up",
+        }]
+        c.CHAIN_EXIT_HOST = ""
+        c.CHAIN_EXIT_PORT = 443
+        c.CHAIN_EXIT_UUID = ""
+        c.CHAIN_EXIT_PUBKEY = ""
+        c.CHAIN_EXIT_SHORTID = ""
+        c.CHAIN_EXIT_SNI = ""
+        c.CHAIN_EXIT_FP = "chrome"
+
+    def _generate(self):
+        from chimera.modules import chain_nodes
+        with patch.object(Path, "exists",
+                          lambda self: False if "usr/local/etc/xray" in str(self)
+                          else Path.exists(self)):
+            chain_nodes.generate_xray_config_chain_entry_multi()
+        return json.loads((self._config_dir / "config.json").read_text())
+
+    def test_entry_inbound_xhttp_reality(self):
+        """Entry-инбаунд: network=xhttp + security=reality на SERVER_PORT,
+        REALITY dest=socket, serverNames=свой домен, clients БЕЗ flow."""
+        self._prepare()
+        cfg = self._generate()
+        inb = cfg["inbounds"][0]
+        ss = inb["streamSettings"]
+        # Xray владеет портом напрямую (не loopback-схема Nginx!)
+        self.assertEqual(inb["port"], 8443)
+        self.assertEqual(inb["listen"], "::")
+        # Транспорт + маскировка
+        self.assertEqual(ss["network"], "xhttp",
+                         "ГЛАВНАЯ ПРОВЕРКА GAP: до фикса xhttp_reality "
+                         "проваливался в reality-ветку с network=tcp")
+        self.assertEqual(ss["security"], "reality")
+        self.assertIn("xhttpSettings", ss)
+        self.assertNotIn("tlsSettings", ss,
+                         "LE-сертификат не нужен — TLS терминирует REALITY")
+        rs = ss["realitySettings"]
+        self.assertEqual(rs["dest"], "/dev/shm/4e3460f3.socket")
+        self.assertEqual(rs["serverNames"], ["chimeraprodvpn.online"])
+        self.assertEqual(rs["privateKey"], "PRIVKEY_XHR")
+        self.assertEqual(rs["shortIds"], ["db4eaf93"])
+        # clients БЕЗ flow (xhttp не поддерживает xtls-rprx-vision)
+        for cl in inb["settings"]["clients"]:
+            self.assertNotIn("flow", cl)
+
+    def test_exit_outbound_xhttp_reality(self):
+        """Outbound к DE-exit: network=xhttp + security=reality,
+        xhttpSettings + realitySettings (serverName=SNI ноды)."""
+        self._prepare()
+        cfg = self._generate()
+        ob = next(o for o in cfg["outbounds"]
+                  if str(o.get("tag", "")).startswith("chain-exit-"))
+        ss = ob["streamSettings"]
+        self.assertEqual(ss["network"], "xhttp")
+        self.assertEqual(ss["security"], "reality")
+        self.assertIn("xhttpSettings", ss)
+        self.assertEqual(ss["realitySettings"]["publicKey"], "DE_PUB")
+        self.assertEqual(ss["realitySettings"]["serverName"],
+                         "totalshadows.online")
+        # пользователи outbound без flow
+        for u in ob["settings"]["vnext"][0]["users"]:
+            self.assertNotIn("flow", u)
+
+    def test_routing_single_exit_no_balancer(self):
+        """1 exit-нода → без balancer, TCP catch-all → chain-exit-1."""
+        self._prepare()
+        cfg = self._generate()
+        self.assertEqual(cfg.get("routing", {}).get("balancers", []), [])
+        tcp_rule = next((r for r in cfg["routing"]["rules"]
+                         if r.get("network") == "tcp"), None)
+        self.assertIsNotNone(tcp_rule)
+        self.assertEqual(tcp_rule["outboundTag"], "chain-exit-1")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # BUGFIX: регенерация конфига сохраняет юзеров (anti-EOF)
 # ══════════════════════════════════════════════════════════════════════════════
 class TestChainEntryMultiPreservesUsers(unittest.TestCase):

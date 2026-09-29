@@ -1575,9 +1575,23 @@ def _users_collect_for_config(param_uuid: str, param_email: str = "") -> list[di
         out.append({"uuid": uid, "email": email})
 
     if param_uuid and param_uuid not in seen_uuids:
+        # BUGFIX (live-тест DE 2026-09-29, баг 2): email-дедуп молча
+        # ВЫБРАСЫВАЛ param_uuid, когда его email (дефолт "user@{домен}")
+        # уже был занят юзером из users.json/config.json. UUID при этом
+        # попадал в state.json → экспорт генерил ссылки с uuid, которого
+        # НЕТ в clients[] инбаунда → «invalid request user id» у клиента.
+        # UUID — это auth-identity (обязан быть в инбаунде, если он в
+        # state.json), email — всего лишь метка. При коллизии email
+        # делаем его уникальным, а uuid НЕ теряем никогда.
         p_email = param_email or f"{param_uuid[:8]}@xray"
-        if p_email not in seen_emails:
-            out.append({"uuid": param_uuid, "email": p_email})
+        if p_email in seen_emails:
+            base = f"{param_uuid[:8]}@xray"
+            p_email = base
+            _n = 2
+            while p_email in seen_emails:
+                p_email = f"{base.split('@')[0]}-{_n}@{base.split('@')[1]}"
+                _n += 1
+        out.append({"uuid": param_uuid, "email": p_email})
     return out
 
 
