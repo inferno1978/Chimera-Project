@@ -90,6 +90,20 @@ def configure_firewall() -> None:
         def _ufw_allow_if_missing(port: int, proto: str, comment: str) -> None:
             r = _run(["ufw", "status"], capture=True, check=False)
             if re.search(rf'^{port}/{proto}.*ALLOW', r.stdout, re.MULTILINE):
+                #  UFW-правило уже есть (прошлая установка / легаси / правило
+                # создано вручную) — раньше здесь был ранний return, и порт
+                # НЕ попадал в port_registry → реестр врал о свободном порте
+                # (кейс DE-стенда: UFW 443/8443 существовали до установки,
+                # реестр остался пустым). Регистрируем постфактум — реестр
+                # должен знать правду независимо от истории UFW-правил.
+                try:
+                    from chimera.modules.port_registry import (
+                        port_register, SERVICE_VLESS,
+                    )
+                    port_register(SERVICE_VLESS, port, proto,
+                                  comment=comment, force=True)
+                except Exception:
+                    pass
                 return
             #  миграция на port_registry (с backward compat fallback).
             # SSH (22) и HTTP (80) — критичные порты, регистрируем под SERVICE_VLESS

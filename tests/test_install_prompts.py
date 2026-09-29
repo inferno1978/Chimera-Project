@@ -217,10 +217,6 @@ class TestPromptH1H4Unique(unittest.TestCase):
         self.assertGreaterEqual(self._warn.call_count, 3)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class TestPromptProtocolModeRenders(unittest.TestCase):
     """Регрессия живого теста 29.09.2026 (DE-стенд): prompt_protocol_mode
     падал с NameError('YELLOW') при рендере пункта [3] xhttp_reality —
@@ -235,7 +231,9 @@ class TestPromptProtocolModeRenders(unittest.TestCase):
         with patch("builtins.input", side_effect=[choice, "2"]), \
              patch.object(core_mod, "_prompt_xhttp_options") as _mxhr, \
              patch.object(core_mod, "success"), \
-             patch.object(core_mod, "warn"):
+             patch.object(core_mod, "warn"), \
+             patch.object(ip, "_check_vless_server_port",
+                          return_value=(True, [], [], None)):
             ip.prompt_protocol_mode()
         return core_mod
 
@@ -252,3 +250,165 @@ class TestPromptProtocolModeRenders(unittest.TestCase):
         core_mod = self._run_choice("3")
         self.assertEqual(core_mod.PROTOCOL_MODE, "xhttp_reality")
         self.assertEqual(core_mod.SERVER_PORT, 8443)
+
+
+class TestServerPortVerdict(unittest.TestCase):
+    """_server_port_verdict — классификация конфликтов порта VLESS.
+
+    Ключевой кейс: переустановка поверх живого стека — собственный
+    слушатель xray на порту НЕ блокирующий (иначе переустановка на тот
+    же порт была бы невозможна)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_xray_listener_not_blocking_on_reinstall(self):
+        from chimera.modules.install_prompts import _server_port_verdict
+        conflicts = [{
+            "type": "system",
+            "service": "xray (pid=123)",
+            "detail": "Порт уже слушается процессом: xray (pid=123)",
+        }]
+        has_blocking, blocking, notes = _server_port_verdict(conflicts, True)
+        self.assertFalse(has_blocking)
+        self.assertEqual(blocking, [])
+        self.assertEqual(len(notes), 1)
+        self.assertIn("не конфликт", notes[0])
+
+    def test_xray_listener_blocking_on_fresh_install(self):
+        from chimera.modules.install_prompts import _server_port_verdict
+        conflicts = [{
+            "type": "system",
+            "service": "xray (pid=123)",
+            "detail": "Порт уже слушается процессом: xray (pid=123)",
+        }]
+        has_blocking, blocking, notes = _server_port_verdict(conflicts, False)
+        self.assertTrue(has_blocking)
+        self.assertEqual(len(blocking), 1)
+
+    def test_foreign_listener_always_blocking(self):
+        from chimera.modules.install_prompts import _server_port_verdict
+        conflicts = [{
+            "type": "system",
+            "service": "nginx (pid=5)",
+            "detail": "Порт уже слушается процессом: nginx (pid=5)",
+        }]
+        # Даже при переустановке чужой nginx — блокирующий конфликт.
+        has_blocking, _, _ = _server_port_verdict(conflicts, True)
+        self.assertTrue(has_blocking)
+
+    def test_registry_conflict_blocking(self):
+        from chimera.modules.install_prompts import _server_port_verdict
+        conflicts = [{
+            "type": "registry",
+            "service": "web_panel",
+            "detail": "Зарегистрирован за сервисом 'web_panel'",
+        }]
+        has_blocking, blocking, _ = _server_port_verdict(conflicts, True)
+        self.assertTrue(has_blocking)
+        self.assertIn("web_panel", blocking[0])
+
+    def test_no_conflicts(self):
+        from chimera.modules.install_prompts import _server_port_verdict
+        has_blocking, blocking, notes = _server_port_verdict([], True)
+        self.assertFalse(has_blocking)
+        self.assertEqual((blocking, notes), ([], []))
+
+
+class TestSuggestVlessAltPort(unittest.TestCase):
+    """_suggest_vless_alt_port — первая свободная альтернатива."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_returns_first_free_candidate(self):
+        import chimera.modules.install_prompts as ip
+        occupied = {443, 8443}
+        def fake_is_free(port, proto="tcp", exclude_service=None):
+            return (port not in occupied, [])
+        with patch.object(ip, "_VLESS_ALT_PORT_CANDIDATES",
+                          [443, 8443, 2053, 2083]):
+            # Мокаем port_registry.port_is_free по месту импорта.
+            import chimera.modules.port_registry as pr
+            with patch.object(pr, "port_is_free", side_effect=fake_is_free):
+                self.assertEqual(ip._suggest_vless_alt_port(8443), 2053)
+
+    def test_none_if_all_occupied(self):
+        import chimera.modules.install_prompts as ip
+        with patch.object(ip, "_VLESS_ALT_PORT_CANDIDATES", [443, 8443]):
+            import chimera.modules.port_registry as pr
+            with patch.object(pr, "port_is_free",
+                              side_effect=lambda p, *_a, **_k: (False, [])):
+                self.assertIsNone(ip._suggest_vless_alt_port(443))
+
+
+class TestPromptXrayListenPort(unittest.TestCase):
+    """_prompt_xray_listen_port — интерактивный выбор порта с port_registry.
+
+    Сценарии (мок _check_vless_server_port):
+      - свободный порт принимается сразу
+      - конфликт + альтернатива → «1» переключает на альтернативу
+      - конфликт + «всё равно» → остаёмся на выбранном порту
+      - конфликт + перевыбор → повторный выбор порта
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _run(self, inputs, check_fn):
+        import chimera.modules.install_prompts as ip
+        import chimera._core as core_mod
+        with patch("builtins.input", side_effect=inputs), \
+             patch.object(ip, "_check_vless_server_port", side_effect=check_fn), \
+             patch.object(core_mod, "success"), \
+             patch.object(core_mod, "warn"):
+            port = ip._prompt_xray_listen_port(core_mod)
+        return port, core_mod
+
+    def test_free_port_accepted(self):
+        port, core_mod = self._run(
+            ["2"], lambda p, reinstall: (True, [], [], None))
+        self.assertEqual(port, 8443)
+        self.assertEqual(core_mod.SERVER_PORT, 8443)
+        self.assertEqual(core_mod.XHTTP_PORT, 8443)
+
+    def test_conflict_alt_accepted(self):
+        def check(port, reinstall):
+            if port == 8443:
+                return (False, ["Зарегистрирован за 'web_panel'"], [], 2053)
+            return (True, [], [], None)
+        # «2» выбираем 8443 → конфликт → «1» = альтернатива 2053
+        port, core_mod = self._run(["2", "1"], check)
+        self.assertEqual(port, 2053)
+        self.assertEqual(core_mod.SERVER_PORT, 2053)
+
+    def test_conflict_keep_anyway(self):
+        def check(port, reinstall):
+            if port == 8443:
+                return (False, ["Порт уже слушается nginx"], [], 2053)
+            return (True, [], [], None)
+        # «2» → 8443; конфликт; «2» = всё равно использовать 8443
+        port, _ = self._run(["2", "2"], check)
+        self.assertEqual(port, 8443)
+
+    def test_conflict_rechoose(self):
+        def check(port, reinstall):
+            if port == 8443:
+                return (False, ["Занят"], [], 2053)
+            return (True, [], [], None)
+        # «2» → 8443; конфликт; «3» = выбрать другой; «1» → 443 (свободен)
+        port, _ = self._run(["2", "3", "1"], check)
+        self.assertEqual(port, 443)
+
+    def test_manual_port_then_conflict_alt(self):
+        def check(port, reinstall):
+            if port == 9443:
+                return (False, ["Зарегистрирован за 'telemt'"], [], 2087)
+            return (True, [], [], None)
+        # «3» ручной ввод → 9443 → конфликт → «1» = 2087
+        port, _ = self._run(["3", "9443", "1"], check)
+        self.assertEqual(port, 2087)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

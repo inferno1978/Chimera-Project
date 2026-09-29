@@ -304,7 +304,8 @@ class TestAghAutostartInGenerators(unittest.TestCase):
         при пересборке» выражается именно в параметре вызова.
         """
         sites = [
-            ("chimera/modules/xray_install.py", 2),   # reality + xhttp
+            # 3 генератора: reality + xhttp + xhttp_reality (dda9e54)
+            ("chimera/modules/xray_install.py", 3),
             ("chimera/modules/chain_nodes.py", 2),    # legacy + multi
         ]
         for rel, expected in sites:

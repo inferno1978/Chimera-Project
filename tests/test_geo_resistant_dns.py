@@ -148,9 +148,10 @@ class TestXrayGeneratorsSync(unittest.TestCase):
     """4. xhttp-генератор синхронен с главным (+)."""
 
     def test_quad9_live_fallback_count(self):
-        # 2 в generate_xray_config + 2 в generate_xray_config_xhttp.
+        # 2 в generate_xray_config + 2 в generate_xray_config_xhttp
+        # + 2 в generate_xray_config_xhttp_reality (dda9e54).
         needle = '"address": "9.9.9.9", "port": 53, "network": "udp", "skipFallback": False'
-        self.assertEqual(_XRAY_SRC.count(needle), 4)
+        self.assertEqual(_XRAY_SRC.count(needle), 6)
 
 
 class TestSafeApplyPreset(unittest.TestCase):

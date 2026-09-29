@@ -785,5 +785,223 @@ class TestFileLock(unittest.TestCase):
                 f.close()
 
 
+class TestPortAudit(unittest.TestCase):
+    """port_audit — сверка реестра с реальными слушателями (stale-детект).
+
+    Кейс-первоисточник: прод-RU, web_panel:8443 в реестре, а порт фактически
+    слушает xray (Mode B) — запись «мёртвая», но её никто не видит.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _audit_with(self, entries, ss_tcp="", ss_udp=""):
+        """port_audit с замоканными ss/ufw/реестром."""
+        from chimera.modules import port_registry as pr
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            if cmd and cmd[0] == "ss" and len(cmd) > 1:
+                # cmd = ["ss", "-tlnp"] / ["ss", "-ulnp"]
+                m.stdout = ss_tcp if cmd[1].startswith("-t") else ss_udp
+            else:
+                m.stdout = ""
+            return m
+
+        with patch.object(pr, "_registry_load", return_value=entries), \
+             patch.object(pr, "_ss_available", return_value=True), \
+             patch.object(pr.subprocess, "run", side_effect=fake_run), \
+             patch.object(pr.shutil, "which", return_value=None):
+            return pr.port_audit()
+
+    def test_live_listener_not_stale(self):
+        entries = [{"service": "vless", "port": 443, "proto": "tcp",
+                    "comment": "VLESS REALITY"}]
+        ss = ("State Recv-Q Send-Q Local Address:Port Peer Process\n"
+              "LISTEN 0 511 0.0.0.0:443 0.0.0.0:* "
+              "users:((\"xray\",pid=1,fd=8))")
+        res = self._audit_with(entries, ss_tcp=ss)
+        self.assertEqual(len(res), 1)
+        self.assertFalse(res[0]["stale_suspect"])
+        self.assertIn("xray", res[0]["listening"])
+
+    def test_silent_port_is_stale_suspect(self):
+        # Кейс прода: web_panel:8443 числится, но молчит (порт занял xray).
+        entries = [{"service": "web_panel", "port": 8443, "proto": "tcp",
+                    "comment": "rest_api web panel"}]
+        ss = ("LISTEN 0 511 0.0.0.0:443 0.0.0.0:* "
+              "users:((\"xray\",pid=1,fd=8))")
+        res = self._audit_with(entries, ss_tcp=ss)
+        self.assertTrue(res[0]["stale_suspect"])
+        self.assertIn("stale", res[0]["note"])
+
+    def test_port_hopping_exempt_from_stale(self):
+        # REDIRECT-диапазон не имеет слушателя по дизайну — это норма.
+        entries = [{"service": "port_hopping", "port": 10000, "proto": "tcp",
+                    "comment": "port hopping range"}]
+        res = self._audit_with(entries, ss_tcp="")
+        self.assertFalse(res[0]["stale_suspect"])
+        self.assertIn("REDIRECT", res[0]["note"])
+
+    def test_ssh_port_never_stale(self):
+        entries = [{"service": "vless", "port": 22, "proto": "tcp",
+                    "comment": "SSH"}]
+        res = self._audit_with(entries, ss_tcp="")
+        self.assertFalse(res[0]["stale_suspect"])
+
+    def test_udp_listener_detected(self):
+        entries = [{"service": "dnscrypt", "port": 5300, "proto": "udp",
+                    "comment": "upstream"}]
+        ss_udp = ("State Recv-Q Send-Q Local Address:Port Peer Process\n"
+                  "UNCONN 0 0 127.0.0.1:5300 0.0.0.0:* "
+                  "users:((\"dnscrypt\",pid=2,fd=9))")
+        res = self._audit_with(entries, ss_tcp="", ss_udp=ss_udp)
+        self.assertFalse(res[0]["stale_suspect"])
+        self.assertIn("dnscrypt", res[0]["listening"])
+
+    def test_port_audit_stale_filters(self):
+        from chimera.modules import port_registry as pr
+        entries = [
+            {"service": "vless", "port": 443, "proto": "tcp"},
+            {"service": "web_panel", "port": 8443, "proto": "tcp"},
+        ]
+        ss = ("LISTEN 0 511 0.0.0.0:443 0.0.0.0:* "
+              "users:((\"xray\",pid=1,fd=8))")
+        with patch.object(pr, "_registry_load", return_value=entries), \
+             patch.object(pr, "_ss_available", return_value=True), \
+             patch.object(pr.subprocess, "run") as _mr, \
+             patch.object(pr.shutil, "which", return_value=None):
+            _mr.return_value = MagicMock(returncode=0, stdout=ss)
+            stale = pr.port_audit_stale()
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(stale[0]["service"], "web_panel")
+
+    def test_listener_mismatch_marks_stale(self):
+        # Кейс прод-RU: web_panel:8443 в реестре, а порт слушает xray —
+        # запись «мёртвая», audit обязан её подсветить (не «молчит», а
+        # «перехвачен чужим процессом»).
+        entries = [{"service": "web_panel", "port": 8443, "proto": "tcp",
+                    "comment": "rest_api web panel"}]
+        ss = ("LISTEN 0 65535 *:8443 *:* "
+              "users:((\"xray\",pid=2410444,fd=9))")
+        res = self._audit_with(entries, ss_tcp=ss)
+        self.assertTrue(res[0]["stale_suspect"])
+        self.assertIn("xray", res[0]["listening"])
+        self.assertIn("перехвачен", res[0]["note"])
+
+    def test_expected_listener_not_stale(self):
+        # vless:443 слушает xray — норма (регрессия mismatch-детекта).
+        entries = [{"service": "vless", "port": 443, "proto": "tcp",
+                    "comment": "VLESS REALITY :443"}]
+        ss = ("LISTEN 0 65535 *:443 *:* "
+              "users:((\"xray\",pid=1,fd=6))")
+        res = self._audit_with(entries, ss_tcp=ss)
+        self.assertFalse(res[0]["stale_suspect"])
+        self.assertEqual(res[0]["note"], "слушает xray (pid=1)")
+
+    def test_service_port_22_80_mismatch_ignored(self):
+        # vless-тег включает 22/80 (SSH/ACME) — их слушают sshd/nginx,
+        # для тега vless это НЕ mismatch (служебные порты).
+        entries = [{"service": "vless", "port": 80, "proto": "tcp",
+                    "comment": "HTTP (certbot ACME)"}]
+        ss = ("LISTEN 0 511 0.0.0.0:80 0.0.0.0:* "
+              "users:((\"nginx\",pid=1,fd=8))")
+        res = self._audit_with(entries, ss_tcp=ss)
+        self.assertFalse(res[0]["stale_suspect"])
+
+    def test_unknown_tag_listener_not_flagged(self):
+        # Тег без маппинга (b4_web, wpp_web…) — слушатель есть, но чего
+        # ожидать неизвестно → mismatch не проверяем, не stale.
+        entries = [{"service": "b4_web", "port": 9700, "proto": "tcp",
+                    "comment": "b4 Web UI"}]
+        ss = ("LISTEN 0 511 127.0.0.1:9700 0.0.0.0:* "
+              "users:((\"python3\",pid=2,fd=8))")
+        res = self._audit_with(entries, ss_tcp=ss)
+        self.assertFalse(res[0]["stale_suspect"])
+
+
+class TestPortDropEntry(unittest.TestCase):
+    """port_drop_entry — ручное снятие одной записи (инструмент аудита)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._reg_file = self._tmpdir / "ports.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch(self):
+        from chimera.modules import port_registry
+        lock_file = self._reg_file.with_suffix(".lock")
+        import contextlib
+
+        @contextlib.contextmanager
+        def _combined():
+            with patch.object(port_registry, "PORT_REGISTRY_FILE", self._reg_file), \
+                 patch.object(port_registry, "LOCK_FILE", lock_file):
+                yield
+        return _combined()
+
+    def test_drop_existing_entry(self):
+        from chimera.modules import port_registry as pr
+        with self._patch():
+            pr._registry_save([
+                {"service": "web_panel", "port": 8443, "proto": "tcp",
+                 "comment": "rest_api", "registered_at": "x"},
+            ])
+            with patch.object(pr, "ufw_close_port",
+                              return_value=(True, "Удалено 1 правил")) as _muc:
+                ok, msg = pr.port_drop_entry("web_panel", 8443, "tcp")
+            self.assertTrue(ok)
+            _muc.assert_called_once()
+            # Запись исчезла из реестра.
+            self.assertEqual(pr._registry_load(), [])
+
+    def test_drop_missing_entry_fails(self):
+        from chimera.modules import port_registry as pr
+        with self._patch():
+            pr._registry_save([])
+            ok, msg = pr.port_drop_entry("web_panel", 8443, "tcp")
+        self.assertFalse(ok)
+        self.assertIn("не найдена", msg)
+
+
+class TestReleasePrevVlessPort(unittest.TestCase):
+    """_core._release_prev_vless_port — переустановка со сменой порта.
+
+    Раньше старый порт (server_port из state.json) оставался открытым в UFW
+    и занятым в реестре навсегда — кейс класса Telemt:8443.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _run(self, prev_port, current_port):
+        import chimera._core as core_mod
+        from chimera.modules import port_registry as pr
+        core_mod.SERVER_PORT = current_port
+        with patch.object(pr, "ufw_close_port",
+                          return_value=(True, "ok")) as _muc, \
+             patch.object(pr, "port_unregister", return_value=True) as _mun:
+            core_mod._release_prev_vless_port(prev_port)
+        return _muc, _mun
+
+    def test_old_port_released(self):
+        _muc, _mun = self._run(prev_port=8443, current_port=443)
+        _muc.assert_called_once()
+        self.assertEqual(_muc.call_args[0][0], 8443)
+        _mun.assert_called_once()
+        self.assertEqual(_mun.call_args[0][1], 8443)
+
+    def test_ssh_http_current_not_released(self):
+        for prev in (22, 80, 443):
+            _muc, _mun = self._run(prev_port=prev, current_port=443)
+            _muc.assert_not_called()
+            _mun.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

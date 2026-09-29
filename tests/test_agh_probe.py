@@ -437,9 +437,10 @@ class TestGeneratorIntegration(unittest.TestCase):
         import chimera.modules.xray_install as xi
         self.assertIs(xi.agh_dns_available, agh_dns_available)
         src = Path(xi.__file__).read_text(encoding="utf-8")
-        # оба генератора (REALITY и xHTTP) содержат вызов + AGH-ветку
-        self.assertEqual(src.count("agh_dns_available(run=_run"), 2)
-        self.assertEqual(src.count('{"address": "127.0.0.1", "port": 53,'), 2)
+        # все три генератора (REALITY, xHTTP, xHTTP+REALITY) содержат
+        # вызов + AGH-ветку (dda9e54 добавил generate_xray_config_xhttp_reality)
+        self.assertEqual(src.count("agh_dns_available(run=_run"), 3)
+        self.assertEqual(src.count('{"address": "127.0.0.1", "port": 53,'), 3)
 
     def test_chain_nodes_imports_and_calls(self):
         import chimera.modules.chain_nodes as cn
