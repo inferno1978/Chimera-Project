@@ -622,6 +622,36 @@ class TestUsersCollectForConfig(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["email"], "alice@xray")
 
+    def test_email_collision_does_not_drop_param_uuid(self):
+        """РЕГРЕССИЯ бага 2 (live-тест DE 2026-09-29): email-дедуп молча
+        выбрасывал param_uuid, если его email (дефолт user@{домен}) уже
+        занят юзером из users.json. UUID попадал в state.json → экспорт
+        генерил ссылку с uuid, которого НЕТ в clients[] инбаунда →
+        «invalid request user id». UUID — auth-identity, не теряем его
+        никогда: при коллизии делаем email уникальным."""
+        # users.json-юзер с тем же email, что дефолтный param_email
+        self._users_file.write_text(json.dumps([
+            {"uuid": "existing-uuid",
+             "email": "user@fleet-a.example", "name": "prod-user"},
+        ]))
+        result = self._collect(
+            param_uuid="wizard-uuid",
+            param_email="user@fleet-a.example")
+        uuids = [u["uuid"] for u in result]
+        self.assertIn("existing-uuid", uuids,
+                      "Существующий юзер обязан остаться")
+        self.assertIn("wizard-uuid", uuids,
+                      "param_uuid НЕ должен молча теряться при коллизии "
+                      "email — иначе экспорт выдаст нерабочую ссылку")
+        self.assertEqual(len(result), 2)
+        emails = [u["email"] for u in result]
+        self.assertEqual(len(emails), len(set(emails)),
+                         "Все email должны быть уникальны")
+        # Email мастера при коллизии пересобирается из uuid, а не молча
+        # дублируется/теряется
+        wizard = next(u for u in result if u["uuid"] == "wizard-uuid")
+        self.assertNotEqual(wizard["email"], "user@fleet-a.example")
+
     def test_disabled_user_excluded(self):
         """Disabled-юзер в clients не попадает (xray не должен его пускать)."""
         self._users_file.write_text(json.dumps([

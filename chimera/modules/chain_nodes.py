@@ -2396,7 +2396,52 @@ def generate_xray_config_chain_entry_multi() -> None:
         _cfg_users = [{"uuid": PARAM_UUID,
                        "email": f"user@{PARAM_DOMAIN}"}]
 
-    if PROTOCOL_MODE == "xhttp":
+    if PROTOCOL_MODE == "xhttp_reality":
+        # xHTTP + REALITY entry (Mode B): гибрид, зеркалящий Mode A
+        # (generate_xray_config_xhttp_reality) — Xray владеет SERVER_PORT
+        # напрямую (REALITY терминирует TLS), транспорт xHTTP (mode/path,
+        # xmux/padding). Nginx — только unix-сокет с сайтом-заглушкой
+        # (fallback dest). clients БЕЗ flow (xhttp не поддерживает vision).
+        # Живой тест Mode A: DE 203.0.113.106:8443 — работает (2026-09-29).
+        _xhttp_s_x, _sockopt_x = _build_xhttp_settings(XHTTP_MODE, XHTTP_PATH)
+        info(f"chain B + xHTTP+REALITY: inbound на :{SERVER_PORT} напрямую "
+             f"(network=xhttp, security=reality, mode={XHTTP_MODE}, "
+             f"path={XHTTP_PATH})")
+        client_inbound = {
+            "tag":      "inbound-xhttp-reality",
+            "port":     SERVER_PORT,          # публичный порт — REALITY TLS
+            "listen":   "::",
+            "protocol": "vless",
+            "settings": {
+                "clients": _clients_from_users(_cfg_users),  # БЕЗ flow
+                "decryption": "none",
+            },
+            "sniffing": _build_chain_sniffing(awg=AWG_EXIT_ENABLED),
+            "streamSettings": {
+                "network":       "xhttp",
+                "sockopt":       _sockopt_x,
+                "security":      "reality",
+                # Транспортный слой xHTTP (mode/path/extra: padding, xmux)
+                "xhttpSettings": _xhttp_s_x,
+                # TLS-маскировка REALITY — dest=unix-сокет nginx
+                # (сайт-заглушка), serverNames=свой домен.
+                "realitySettings": {
+                    "show":        False,
+                    "dest":        (PARAM_REALITY_DEST + ":443") if AWG_EXIT_ENABLED else PARAM_SOCKET_PATH,
+                    "xver":        0 if AWG_EXIT_ENABLED else 1,
+                    "spiderX":     PARAM_SPIDERX,
+                    "serverNames": [PARAM_REALITY_DEST if AWG_EXIT_ENABLED else PARAM_DOMAIN],
+                    "privateKey":  PARAM_PRIVATE_KEY,
+                    "publicKey":   PARAM_PUBLIC_KEY,
+                    "shortIds":    [PARAM_SHORTID],
+                    # Гейт версий клиента — лениво из state.json (меню 5b);
+                    # подробный комментарий — в reality-ветке ниже.
+                    "minClientVer": _min_client_ver(),
+                    "maxClientVer": "",
+                },
+            },
+        }
+    elif PROTOCOL_MODE == "xhttp":
         # Схема Nginx → Xray (loopback backend):
         # Xray-core не поддерживает fallbacks для xHTTP (задокументированное
         # ограничение — https://github.com/XTLS/Xray-core/discussions/4113).

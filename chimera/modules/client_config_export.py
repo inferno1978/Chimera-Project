@@ -74,6 +74,7 @@ def do_generate_client_config() -> None:
     log_to_file  = core.log_to_file
     STATE_FILE   = core.STATE_FILE
     CYAN, NC, DIM = core.CYAN, core.NC, core.DIM
+    YELLOW = core.YELLOW
 
     print()
     print()
@@ -125,8 +126,53 @@ def do_generate_client_config() -> None:
         _box_warn("Домен или UUID не найдены в state.json")
         return
 
+    # ── Честность экспорта (баг 2, live-тест DE 2026-09-29) ──────────────
+    # UUID из state.json обязан быть в clients[] живого инбаунда на порту
+    # server_port — иначе ссылка не пройдёт авторизацию на сервере
+    # («invalid request user id» → EOF). Проверяем против живого
+    # config.json и ГРОМКО предупреждаем, а не молча выдаём битую ссылку.
+    try:
+        _ib_client_ids = None
+        for _cfg_p in (Path("/etc/xray/config.json"),
+                       Path("/usr/local/etc/xray/config.json")):
+            if not _cfg_p.exists():
+                continue
+            _live_cfg = json.loads(_cfg_p.read_text())
+            for _ib in _live_cfg.get("inbounds", []):
+                if str(_ib.get("port", "")) == str(port):
+                    _ib_client_ids = [c.get("id", "")
+                                      for c in _ib.get("settings", {}).get("clients", [])]
+                    break
+            if _ib_client_ids is not None:
+                break
+        if _ib_client_ids is not None and vuuid not in _ib_client_ids:
+            _box_warn(
+                f"UUID из state.json ({vuuid}) ОТСУТСТВУЕТ в clients[] "
+                f"инбаунда :{port} — ссылки с ним РАБОТАТЬ НЕ БУДУТ "
+                f"(invalid request user id). UUID инбаунда: "
+                f"{', '.join(_ib_client_ids) or '—'}. Добавьте UUID в "
+                f"инбаунд (менеджер юзеров → применить) и повторите экспорт.")
+            log_to_file("WARN", f"export: state uuid {vuuid} отсутствует "
+                                 f"в clients[] инбаунда :{port}")
+    except Exception:
+        pass  # config.json недоступен (тестовое окружение) — проверку не блокируем
+
+    # ── Честный экспорт (баги 3–5, live-тест DE 2026-09-29) ──────────────
+    # xHTTP-транспорт поддерживают ТОЛЬКО клиенты на ядре Xray-core.
+    # Живые пробы 2026-09-29 (DE, xhttp_reality:8443):
+    #   • xray 26.3.27, vless-ссылка type=xhttp        → РАБОТАЕТ
+    #   • sing-box 1.11.15 / 1.12.0 / 1.13.0           → FATAL
+    #     "unknown transport type: xhttp"
+    #   • mihomo v1.19.4 tcp+reality fallback на xhr-порт → не подключается
+    #     (transport mismatch: после REALITY-хендшейка инбаунд ждёт xhttp)
+    # Поэтому для xhttp_reality НЕ генерим заведомо нерабочие форматы —
+    # только vless-ссылку + честное предупреждение. Экспорт не врёт.
+    _xhr_mode = (proto == "xhttp_reality")
+
     # --- Clash Meta YAML ---
-    if proto == "reality":
+    if _xhr_mode:
+        clash_proxy = ""   # mihomo не поддерживает xHTTP — файл не генерим
+    elif proto == "reality":
         # REALITY + mihomo (рецепт B, Xray-core 26.9.8+): серверная
         # библиотека xtls/reality требует keyShare X25519MLKEM768 в
         # ClientHello; в mihomo он есть только у HelloChrome_Auto, опция
@@ -162,41 +208,6 @@ def do_generate_client_config() -> None:
             rules:
               - MATCH,Proxy
         """)
-    elif proto == "xhttp_reality":
-        # xHTTP + REALITY → mihomo FALLBACK на tcp+reality: mihomo не
-        # поддерживает xHTTP-транспорт (network:http + reality-opts вместе
-        # не работают). Рецепт = reality-ветка (MLKEM768 + chrome FP —
-        # барьер Xray-core 26.9.8+). Юзер предупреждён при установке:
-        # mihomo-клиенты не подключатся к xHTTP+REALITY-ноде.
-        clash_proxy = textwrap.dedent(f"""\
-            # xHTTP+REALITY node — mihomo fallback to tcp+reality
-            # (mihomo не поддерживает xHTTP-транспорт)
-            proxies:
-              - name: VLESS-xHTTP-REALITY-fallback
-                type: vless
-                server: {domain}
-                port: {port}
-                uuid: {vuuid}
-                network: tcp
-                tls: true
-                udp: true
-                flow: {xtls_flow_val}
-                reality-opts:
-                  public-key: {pub_key}
-                  short-id: {short_id}
-                  support-x25519mlkem768: true
-                client-fingerprint: chrome
-                servername: {sni}
-
-            proxy-groups:
-              - name: Proxy
-                type: select
-                proxies:
-                  - VLESS-xHTTP-REALITY-fallback
-
-            rules:
-              - MATCH,Proxy
-        """)
     else:  # xhttp
         clash_proxy = textwrap.dedent(f"""\
             proxies:
@@ -227,7 +238,7 @@ def do_generate_client_config() -> None:
     # CDN masking: при активном профиле добавляем экспертные extra-поля
     # в transport и host в URL. Симметрично серверному inbound.
     _cdn_masking_active = bool(state.get("xhttp_cdn_masking", False))
-    if _cdn_masking_active:
+    if _cdn_masking_active and not _xhr_mode:
         try:
             from chimera.modules.xhttp_cdn_masking import (
                 build_xhttp_cdn_masking_client_xhttp_settings,
@@ -238,7 +249,9 @@ def do_generate_client_config() -> None:
         except ImportError:
             _cdn_masking_active = False  # fallback на обычный xhttp
             _cdn_host_param = domain
-    if proto == "reality":
+    if _xhr_mode:
+        singbox = None   # sing-box/NekoBox/Hiddify не поддерживают xHTTP
+    elif proto == "reality":
         singbox = {
             "outbounds": [{
                 "type": "vless",
@@ -247,34 +260,6 @@ def do_generate_client_config() -> None:
                 "server_port": port,
                 "uuid": vuuid,
                 **( {"flow": xtls_flow_val} if xtls_flow_val else {} ),
-                "tls": {
-                    "enabled": True,
-                    "server_name": sni,
-                    "utls": {"enabled": True, "fingerprint": fp},
-                    "reality": {
-                        "enabled": True,
-                        "public_key": pub_key,
-                        "short_id": short_id,
-                    }
-                }
-            }]
-        }
-    elif proto == "xhttp_reality":
-        # xHTTP + REALITY: транспорт xHTTP (mode/path) + TLS-маскировка
-        # REALITY. Без flow (xhttp-транспорт не поддерживает vision).
-        # CDN masking неприменим: REALITY не работает через CDN-прокси.
-        singbox = {
-            "outbounds": [{
-                "type": "vless",
-                "tag": "vless-out",
-                "server": domain,
-                "server_port": port,
-                "uuid": vuuid,
-                "transport": {
-                    "type": "xhttp",
-                    "mode": xhttp_mode,
-                    "path": xhttp_path,
-                },
                 "tls": {
                     "enabled": True,
                     "server_name": sni,
@@ -342,7 +327,22 @@ def do_generate_client_config() -> None:
     hiddify_file = out_dir / "hiddify.json"
     vless_link_file = out_dir / "vless-link.txt"
 
-    clash_file.write_text(clash_proxy)
+    # xHTTP+REALITY: clash/singbox/hiddify не генерим (см. блок
+    # «Честный экспорт» выше) — только рабочая vless-ссылка.
+    # Удаляем ЗАЛЕДАВШИЕ файлы от прошлых экспортов (другой протокол),
+    # чтобы рядом со ссылкой не лежали заведомо нерабочие конфиги.
+    if _xhr_mode:
+        for _stale in (clash_file, singbox_file, hiddify_file,
+                       out_dir / "vless-link-ios.txt"):
+            try:
+                if _stale.exists():
+                    _stale.unlink()
+                    log_to_file("INFO", f"export: удалён устаревший файл "
+                                         f"(не поддерживается для xhttp_reality): {_stale}")
+            except Exception:
+                pass
+    if clash_proxy:
+        clash_file.write_text(clash_proxy)
 
     # --- Hiddify JSON --- (тот же формат что sing-box, с routing)
     # ВАЖНО: Hiddify-копия создаётся ДО инъекции singbox_client_rulesets.
@@ -350,24 +350,25 @@ def do_generate_client_config() -> None:
     # route → rule_set/rules). Если бы инъекция попала в Hiddify-конфиг,
     # mixing схем вызвал бы путаницу. Поэтому: shallow-copy делаем сейчас,
     # инъекцию в singbox — ниже, после записи hiddify.json.
-    hiddify_config = {**singbox}
-    hiddify_config["routing"] = {
-        "rules": [{"type": "default", "outbound": "vless-out"}]
-    }
-    hiddify_file.write_text(json.dumps(hiddify_config, indent=2, ensure_ascii=False))
+    if singbox is not None:
+        hiddify_config = {**singbox}
+        hiddify_config["routing"] = {
+            "rules": [{"type": "default", "outbound": "vless-out"}]
+        }
+        hiddify_file.write_text(json.dumps(hiddify_config, indent=2, ensure_ascii=False))
 
-    # --- Sing-box JSON ---
-    # singbox_client_rulesets: опциональная инъекция route.rule_set + rules
-    # с готовыми .srs-списками для Podkop/OpenWrt (РФ-домены → direct и т.д.).
-    # По умолчанию ВЫКЛЮЧЕНО — обратная совместимость 100%.
-    # См. chimera/modules/singbox_client_rulesets.py
-    try:
-        from chimera.modules.singbox_client_rulesets import inject_route_rulesets
-        inject_route_rulesets(singbox, "vless-out")
-    except Exception as _e:
-        log_to_file("WARN", f"singbox_client_rulesets.inject failed: {_e}")
+        # --- Sing-box JSON ---
+        # singbox_client_rulesets: опциональная инъекция route.rule_set + rules
+        # с готовыми .srs-списками для Podkop/OpenWrt (РФ-домены → direct и т.д.).
+        # По умолчанию ВЫКЛЮЧЕНО — обратная совместимость 100%.
+        # См. chimera/modules/singbox_client_rulesets.py
+        try:
+            from chimera.modules.singbox_client_rulesets import inject_route_rulesets
+            inject_route_rulesets(singbox, "vless-out")
+        except Exception as _e:
+            log_to_file("WARN", f"singbox_client_rulesets.inject failed: {_e}")
 
-    singbox_file.write_text(json.dumps(singbox, indent=2, ensure_ascii=False))
+        singbox_file.write_text(json.dumps(singbox, indent=2, ensure_ascii=False))
 
     # --- VLESS-ссылка --- (plain text, для импорта в v2rayN/Karing/NekoBox)
     if proto == "reality":
@@ -415,14 +416,19 @@ def do_generate_client_config() -> None:
     # для этого UUID. Постпроцессор to_ios_karing_link убирает flow из
     # ссылки, но без shadow-клиента Xray рвёт хендшейк. Поэтому создаём
     # shadow (без flow) и собираем ссылку на его UUID.
-    # Для xHTTP: flow не используется в принципе — обычный vless_link
+    # Для xHTTP (TLS): flow не используется в принципе — обычный vless_link
     # уже iOS-safe, просто копируем.
+    # Для xHTTP+REALITY: файл НЕ создаём — Karing/V2Box/Hiddify (ядро
+    # sing-box) xHTTP не поддерживают; iOS-клиентам на ядре Xray та же
+    # vless-link.txt подходит без изменений (честный экспорт, баги 3–5).
     # Если config.json недоступен (тестовое окружение или Xray не установлен) —
     # graceful fallback: оставляем только постпроцессор. Это лучше, чем
-    # ронять весь do_generate_client_config, ведь остальные 4 файла
+    # ронять весь do_generate_client_config, ведь остальные файлы
     # (clash/singbox/hiddify/vless-link) уже сгенерированы.
     ios_link_file = out_dir / "vless-link-ios.txt"
-    if proto == "reality":
+    if _xhr_mode:
+        ios_link_file = None   # честный экспорт: дубль ссылки не нужен
+    elif proto == "reality":
         try:
             from chimera.modules.users_manager import (
                 _users_get_config, _users_get_or_create_ios_shadow,
@@ -466,9 +472,33 @@ def do_generate_client_config() -> None:
             from chimera.modules.ios_link_variant import to_ios_karing_link
             ios_link_file.write_text(to_ios_karing_link(vless_link) + "\n")
     else:
-        # xHTTP / xHTTP+REALITY — shadow не нужен, flow нет.
+        # xHTTP (TLS) — shadow не нужен, flow нет.
+        # (xHTTP+REALITY отсекён выше — ios_link_file = None.)
         from chimera.modules.ios_link_variant import to_ios_karing_link
         ios_link_file.write_text(to_ios_karing_link(vless_link) + "\n")
+
+    # ── Итоговый отчёт: только реально сгенерированные файлы ────────────
+    if _xhr_mode:
+        # Честный экспорт: перечисляем лишь то, что создано, и объясняем,
+        # почему остальные форматы не генерируются (баги 3–5).
+        _box_ok(f"VLESS-ссылка → {vless_link_file}")
+        _box_row()
+        _box_row(f"  {YELLOW}⚠ mihomo (Clash Meta) НЕ поддерживает транспорт xHTTP — "
+                 f"clash-meta.yaml не сгенерирован.{NC}")
+        _box_row(f"  {YELLOW}⚠ sing-box (NekoBox/Hiddify/Karing/V2Box) НЕ поддерживает "
+                 f"xHTTP — sing-box.json/hiddify.json не сгенерированы.{NC}")
+        _box_row()
+        _box_row(f"  {DIM}Рабочие клиенты: v2rayN, v2rayNG, Nekoray — ядро "
+                 f"Xray-core ≥ 24.11.30 (type=xhttp).{NC}")
+        _box_row(f"  {DIM}Ссылка выше проверена живым подключением на стенде "
+                 f"2026-09-29.{NC}")
+        _box_row()
+        _box_row(f"  {DIM}Скопируйте ссылку на клиентское устройство:{NC}")
+        _box_row(f"    {CYAN}scp root@{domain}:{vless_link_file} .{NC}")
+        _box_bottom()
+        log_to_file("INFO", f"Client configs generated (xhttp_reality, "
+                             f"vless-link only): {vless_link_file}")
+        return
 
     _box_ok(f"Clash Meta   → {clash_file}")
     _box_ok(f"Sing-box     → {singbox_file}")
