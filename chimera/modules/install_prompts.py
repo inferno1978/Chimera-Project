@@ -691,6 +691,7 @@ def prompt_protocol_mode() -> None:
     _prompt_xhttp_options = core._prompt_xhttp_options
     GREEN = core.GREEN
     CYAN  = core.CYAN
+    YELLOW = core.YELLOW
     NC    = core.NC
 
     _box_top(f"Режим протокола")

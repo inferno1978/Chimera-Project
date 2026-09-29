@@ -219,3 +219,36 @@ class TestPromptH1H4Unique(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestPromptProtocolModeRenders(unittest.TestCase):
+    """Регрессия живого теста 29.09.2026 (DE-стенд): prompt_protocol_mode
+    падал с NameError('YELLOW') при рендере пункта [3] xhttp_reality —
+    YELLOW не был импортирован из core. Тест рендерит бокс протокола для
+    ВСЕХ трёх вариантов, чтобы ловить undefined-имена на этапе CI.
+    """
+
+    def _run_choice(self, choice: str) -> None:
+        _setup_core_in_sysmodules()
+        import chimera.modules.install_prompts as ip
+        import chimera._core as core_mod
+        with patch("builtins.input", side_effect=[choice, "2"]), \
+             patch.object(core_mod, "_prompt_xhttp_options") as _mxhr, \
+             patch.object(core_mod, "success"), \
+             patch.object(core_mod, "warn"):
+            ip.prompt_protocol_mode()
+        return core_mod
+
+    def test_choice1_reality_renders(self):
+        core_mod = self._run_choice("1")
+        self.assertEqual(core_mod.PROTOCOL_MODE, "reality")
+
+    def test_choice2_xhttp_renders(self):
+        core_mod = self._run_choice("2")
+        self.assertEqual(core_mod.PROTOCOL_MODE, "xhttp")
+
+    def test_choice3_xhttp_reality_renders_no_nameerror(self):
+        """Главный регрессионный кейс: [3] xhttp_reality (баг YELLOW)."""
+        core_mod = self._run_choice("3")
+        self.assertEqual(core_mod.PROTOCOL_MODE, "xhttp_reality")
+        self.assertEqual(core_mod.SERVER_PORT, 8443)
