@@ -110,10 +110,10 @@ def do_generate_client_config() -> None:
     _install_mode = state.get("install_mode", "A")
     _awg_exit = state.get("awg_exit_enabled", False) and _install_mode == "B"
     _reality_dest = state.get("reality_dest", "")
-    if proto == "reality" and _awg_exit and _reality_dest:
+    if proto in ("reality", "xhttp_reality") and _awg_exit and _reality_dest:
         sni = _reality_dest   # Mode B + AWG: SNI = домен маскировки (чужой сайт)
-    elif proto == "reality":
-        sni = domain          # Mode A классика или Mode B chain: SNI = собственный домен
+    elif proto in ("reality", "xhttp_reality"):
+        sni = domain          # Mode A / Mode B chain / xHTTP+REALITY: свой домен
     else:
         sni = domain          # xHTTP TLS: SNI = собственный домен
     # === END FIX 2 ===
@@ -158,6 +158,41 @@ def do_generate_client_config() -> None:
                 type: select
                 proxies:
                   - VLESS-Reality
+
+            rules:
+              - MATCH,Proxy
+        """)
+    elif proto == "xhttp_reality":
+        # xHTTP + REALITY → mihomo FALLBACK на tcp+reality: mihomo не
+        # поддерживает xHTTP-транспорт (network:http + reality-opts вместе
+        # не работают). Рецепт = reality-ветка (MLKEM768 + chrome FP —
+        # барьер Xray-core 26.9.8+). Юзер предупреждён при установке:
+        # mihomo-клиенты не подключатся к xHTTP+REALITY-ноде.
+        clash_proxy = textwrap.dedent(f"""\
+            # xHTTP+REALITY node — mihomo fallback to tcp+reality
+            # (mihomo не поддерживает xHTTP-транспорт)
+            proxies:
+              - name: VLESS-xHTTP-REALITY-fallback
+                type: vless
+                server: {domain}
+                port: {port}
+                uuid: {vuuid}
+                network: tcp
+                tls: true
+                udp: true
+                flow: {xtls_flow_val}
+                reality-opts:
+                  public-key: {pub_key}
+                  short-id: {short_id}
+                  support-x25519mlkem768: true
+                client-fingerprint: chrome
+                servername: {sni}
+
+            proxy-groups:
+              - name: Proxy
+                type: select
+                proxies:
+                  - VLESS-xHTTP-REALITY-fallback
 
             rules:
               - MATCH,Proxy
@@ -212,6 +247,34 @@ def do_generate_client_config() -> None:
                 "server_port": port,
                 "uuid": vuuid,
                 **( {"flow": xtls_flow_val} if xtls_flow_val else {} ),
+                "tls": {
+                    "enabled": True,
+                    "server_name": sni,
+                    "utls": {"enabled": True, "fingerprint": fp},
+                    "reality": {
+                        "enabled": True,
+                        "public_key": pub_key,
+                        "short_id": short_id,
+                    }
+                }
+            }]
+        }
+    elif proto == "xhttp_reality":
+        # xHTTP + REALITY: транспорт xHTTP (mode/path) + TLS-маскировка
+        # REALITY. Без flow (xhttp-транспорт не поддерживает vision).
+        # CDN masking неприменим: REALITY не работает через CDN-прокси.
+        singbox = {
+            "outbounds": [{
+                "type": "vless",
+                "tag": "vless-out",
+                "server": domain,
+                "server_port": port,
+                "uuid": vuuid,
+                "transport": {
+                    "type": "xhttp",
+                    "mode": xhttp_mode,
+                    "path": xhttp_path,
+                },
                 "tls": {
                     "enabled": True,
                     "server_name": sni,
@@ -313,6 +376,16 @@ def do_generate_client_config() -> None:
                       f"&security=reality&sni={sni}"
                       f"&fp={fp}&pbk={pub_key}&sid={short_id}"
                       f"&type=tcp#VLESS-Reality")
+    elif proto == "xhttp_reality":
+        # xHTTP + REALITY: type=xhttp + security=reality, БЕЗ flow.
+        # pbk/sid — ключи REALITY, path/mode — endpoint xHTTP.
+        from urllib.parse import quote as _url_quote
+        _xr_path_enc = _url_quote(xhttp_path, safe="")
+        vless_link = (f"vless://{vuuid}@{domain}:{port}"
+                      f"?encryption=none&security=reality&sni={sni}"
+                      f"&fp={fp}&pbk={pub_key}&sid={short_id}"
+                      f"&type=xhttp&path={_xr_path_enc}"
+                      f"&mode={xhttp_mode}#VLESS-xHTTP-REALITY")
     else:
         from urllib.parse import quote as _url_quote
         xhttp_path_enc = _url_quote(xhttp_path, safe="")
@@ -393,7 +466,7 @@ def do_generate_client_config() -> None:
             from chimera.modules.ios_link_variant import to_ios_karing_link
             ios_link_file.write_text(to_ios_karing_link(vless_link) + "\n")
     else:
-        # xHTTP — shadow не нужен, flow нет.
+        # xHTTP / xHTTP+REALITY — shadow не нужен, flow нет.
         from chimera.modules.ios_link_variant import to_ios_karing_link
         ios_link_file.write_text(to_ios_karing_link(vless_link) + "\n")
 
@@ -628,7 +701,7 @@ def do_share_config_server() -> None:
             _sc_install_mode = state.get("install_mode", "A")
             _sc_awg = state.get("awg_exit_enabled", False) and _sc_install_mode == "B"
             _sc_reality_dest = state.get("reality_dest", "")
-            if proto == "reality" and _sc_awg and _sc_reality_dest:
+            if proto in ("reality", "xhttp_reality") and _sc_awg and _sc_reality_dest:
                 sni = _sc_reality_dest
             else:
                 sni = domain
@@ -638,6 +711,15 @@ def do_share_config_server() -> None:
                         f"&security=reality&sni={sni}"
                         f"&fp={fp}&pbk={pub_key}&sid={short_id}"
                         f"&type=tcp#VLESS-Reality")
+            elif proto == "xhttp_reality":
+                # xHTTP + REALITY: type=xhttp + security=reality, без flow.
+                _sc_xr_path = urllib.parse.quote(state.get("xhttp_path", "/"), safe="")
+                _sc_xr_mode = state.get("xhttp_mode", "stream-up")
+                link = (f"vless://{vuuid}@{domain}:{port}"
+                        f"?encryption=none&security=reality&sni={sni}"
+                        f"&fp={fp}&pbk={pub_key}&sid={short_id}"
+                        f"&type=xhttp&path={_sc_xr_path}"
+                        f"&mode={_sc_xr_mode}#VLESS-xHTTP-REALITY")
             else:
                 xhttp_path = urllib.parse.quote(state.get("xhttp_path", "/"), safe="")
                 xhttp_mode = state.get("xhttp_mode", "stream-up")

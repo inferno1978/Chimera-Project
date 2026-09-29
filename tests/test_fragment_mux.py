@@ -133,5 +133,72 @@ class TestMuxPresets(unittest.TestCase):
             self.assertIn(proto, _SINGBOX_PROTOCOLS)
 
 
+class TestXhttpRealityBranches(unittest.TestCase):
+    """xhttp_reality — транспорт xHTTP + REALITY TLS, БЕЗ flow."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._state = {
+            "protocol_mode": "xhttp_reality",
+            "domain": "vpn.example.com",
+            "server_port": 443,
+            "uuid": "test-uuid",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+            "fingerprint": "chrome",
+            "xhttp_path": "/xhttp",
+            "xhttp_mode": "stream-up",
+            "xtls_flow": "xtls-rprx-vision",
+        }
+
+    def test_resolve_sni_returns_reality_dest_for_awg_mode_b(self):
+        from chimera.modules.fragment_mux import _resolve_sni
+        state = {**self._state, "awg_exit_enabled": True,
+                 "install_mode": "B", "reality_dest": "dest.example.com:443"}
+        self.assertEqual(_resolve_sni(state), "dest.example.com")
+
+    def test_resolve_sni_returns_domain_without_awg(self):
+        from chimera.modules.fragment_mux import _resolve_sni
+        self.assertEqual(_resolve_sni(self._state), "vpn.example.com")
+
+    def test_xray_json_without_flow_and_with_reality(self):
+        from chimera.modules.fragment_mux import _build_xray_mux_json
+        cfg = _build_xray_mux_json(self._state, "1-3", "3-7", "10-20", 8, 16)
+        ob = cfg["outbounds"][0]
+        ss = ob["streamSettings"]
+        # users БЕЗ flow — xhttp-транспорт несовместим с vision
+        self.assertNotIn("flow", ob["settings"]["vnext"][0]["users"][0])
+        self.assertEqual(ss["network"], "xhttp")
+        self.assertEqual(ss["security"], "reality")
+        self.assertEqual(ss["xhttpSettings"],
+                         {"path": "/xhttp", "mode": "stream-up"})
+        rs = ss["realitySettings"]
+        self.assertFalse(rs["show"])
+        self.assertEqual(rs["serverName"], "vpn.example.com")
+        self.assertEqual(rs["publicKey"], "PUBKEY")
+        self.assertEqual(rs["shortId"], "abcd1234")
+        self.assertEqual(rs["spiderX"], "/")
+        self.assertNotIn("tlsSettings", ss)
+        # mux присутствует, fragment в sockopt
+        self.assertTrue(ob["mux"]["enabled"])
+        self.assertEqual(ss["sockopt"]["fragment"]["length"], "3-7")
+
+    def test_singbox_json_transport_xhttp_tls_reality_no_flow(self):
+        from chimera.modules.fragment_mux import _build_singbox_mux_json
+        cfg = _build_singbox_mux_json(self._state, "1-3", "3-7", "10-20",
+                                      "h2mux")
+        ob = cfg["outbounds"][0]
+        self.assertNotIn("flow", ob)
+        self.assertEqual(ob["transport"],
+                         {"type": "xhttp", "mode": "stream-up",
+                          "path": "/xhttp"})
+        self.assertEqual(ob["tls"]["server_name"], "vpn.example.com")
+        self.assertTrue(ob["tls"]["utls"]["enabled"])
+        self.assertTrue(ob["tls"]["reality"]["enabled"])
+        self.assertEqual(ob["tls"]["reality"]["public_key"], "PUBKEY")
+        self.assertTrue(ob["multiplex"]["enabled"])
+        self.assertTrue(ob["fragment"]["enabled"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

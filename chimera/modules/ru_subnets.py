@@ -344,7 +344,7 @@ def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
     # ExecStartPre: rm -f PARAM_SOCKET_PATH — это удаляет unix-сокет которым
     # владеет nginx (nginx bind-ится на него), вызывая EOF у клиентов.
     # Патчим unit на лету перед restart чтобы исправить существующие установки.
-    if PROTOCOL_MODE == "reality" and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
+    if PROTOCOL_MODE in ("reality", "xhttp_reality") and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
         try:
             svc_text = XRAY_SERVICE.read_text()
             if f"rm -f {PARAM_SOCKET_PATH}" in svc_text:

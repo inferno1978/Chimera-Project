@@ -137,6 +137,41 @@ class TestGenerateAllPresets(unittest.TestCase):
         for r in non_baseline:
             self.assertFalse(r["ok"])
 
+    def test_baseline_xhttp_reality_without_flow(self):
+        """baseline-пресет при xhttp_reality: xhttp + REALITY, БЕЗ flow."""
+        from chimera.modules.fragment_presets import _generate_one, PRESET_MATRIX
+        self._state.write_text(json.dumps({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "xhttp_reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+            "fingerprint": "chrome",
+            "xhttp_path": "/xhttp",
+            "xhttp_mode": "stream-up",
+            "xtls_flow": "xtls-rprx-vision",
+        }))
+        baseline = next(p for p in PRESET_MATRIX if p["packets"] is None)
+        with self._patch()[0], self._patch()[1], self._patch()[2], self._patch()[3]:
+            path = _generate_one(baseline)
+        self.assertIsNotNone(path)
+        data = json.loads(path.read_text())
+        ob = data["outbounds"][0]
+        ss = ob["streamSettings"]
+        # users БЕЗ flow — xhttp-транспорт несовместим с vision
+        self.assertNotIn("flow", ob["settings"]["vnext"][0]["users"][0])
+        self.assertEqual(ss["network"], "xhttp")
+        self.assertEqual(ss["security"], "reality")
+        self.assertEqual(ss["xhttpSettings"],
+                         {"path": "/xhttp", "mode": "stream-up"})
+        rs = ss["realitySettings"]
+        # SNI по канону: без AWG — domain
+        self.assertEqual(rs["serverName"], "vpn.example.com")
+        self.assertEqual(rs["publicKey"], "PUBKEY")
+        self.assertEqual(rs["shortId"], "abcd1234")
+        # baseline — без fragment в sockopt
+        self.assertNotIn("fragment", ss["sockopt"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

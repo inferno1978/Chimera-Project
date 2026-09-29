@@ -132,7 +132,7 @@ def _resolve_sni(state: dict) -> str:
     reality_dest = state.get("reality_dest", "")
     awg_exit     = state.get("awg_exit_enabled", False)
     install_mode = state.get("install_mode", "A")
-    if proto == "reality" and awg_exit and install_mode == "B" and reality_dest:
+    if proto in ("reality", "xhttp_reality") and awg_exit and install_mode == "B" and reality_dest:
         return reality_dest.split(":")[0]
     return domain
 
@@ -157,6 +157,16 @@ def _base_uri_params(
             f"vless://{uuid_str}@{host}:{port}"
             f"?type=xhttp&security=tls&sni={sni}"
             f"&path={path_enc}&mode={xhttp_mode}&fp={fp}"
+        )
+    elif proto == "xhttp_reality":
+        # xHTTP + REALITY: type=xhttp + security=reality, БЕЗ flow
+        # (xhttp-транспорт не поддерживает xtls-rprx-vision).
+        path_enc = urllib.parse.quote(xhttp_path, safe="/")
+        return (
+            f"vless://{uuid_str}@{host}:{port}"
+            f"?type=xhttp&security=reality&pbk={pbk}"
+            f"&fp={fp}&sni={sni}&sid={sid}"
+            f"&path={path_enc}&mode={xhttp_mode}"
         )
     else:
         return (
@@ -273,6 +283,24 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
                 "xhttpSettings": {"path": xhttp_path, "mode": xhttp_mode},
             },
         }
+    elif proto == "xhttp_reality":
+        # xHTTP + REALITY: транспорт xhttp + REALITY TLS, БЕЗ flow
+        # (в отличие от tcp+reality — users без flow, xhttpSettings
+        # + realitySettings в одном streamSettings).
+        outbound = {
+            "tag": "proxy", "protocol": "vless",
+            "settings": {"vnext": [{"address": domain, "port": port,
+                "users": [{"id": uuid_val, "encryption": "none"}]}]},
+            "streamSettings": {
+                "network": "xhttp", "security": "reality", "sockopt": sockopt,
+                "xhttpSettings": {"path": xhttp_path, "mode": xhttp_mode},
+                "realitySettings": {
+                    "show": False, "fingerprint": fp,
+                    "serverName": sni, "publicKey": pub_key,
+                    "shortId": short_id, "spiderX": "/",
+                },
+            },
+        }
     else:
         outbound = {
             "tag": "proxy", "protocol": "vless",
@@ -323,6 +351,7 @@ def _build_singbox_json(state: dict, packets: str, length: str,
     short_id   = state.get("short_id", "")
     xtls_flow  = state.get("xtls_flow", "xtls-rprx-vision")
     xhttp_path = state.get("xhttp_path", "/")
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 
@@ -342,6 +371,22 @@ def _build_singbox_json(state: dict, packets: str, length: str,
                 "enabled": True, "server_name": sni,
                 "utls": {"enabled": True, "fingerprint": fp},
                 "reality": {"enabled": True, "public_key": pub_key, "short_id": short_id},
+            },
+            **dial_fields,
+        }
+    elif proto == "xhttp_reality":
+        # xHTTP + REALITY (sing-box/NekoBox): transport xhttp + REALITY,
+        # БЕЗ flow (фрагментация работает — она на уровне TCP/TLS).
+        outbound = {
+            "type": "vless", "tag": "vless-out",
+            "server": domain, "server_port": port, "uuid": uuid_val,
+            "transport": {"type": "xhttp", "mode": xhttp_mode,
+                          "path": xhttp_path},
+            "tls": {
+                "enabled": True, "server_name": sni,
+                "utls": {"enabled": True, "fingerprint": fp},
+                "reality": {"enabled": True, "public_key": pub_key,
+                            "short_id": short_id},
             },
             **dial_fields,
         }

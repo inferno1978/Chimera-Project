@@ -598,15 +598,18 @@ def _generate_vless_links(user: dict) -> list[dict]:
     fp = state.get("fingerprint", "chrome")
     proto = state.get("protocol_mode", "reality")
     xhttp_path = state.get("xhttp_path", "/")
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     xtls_flow = state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision"
 
-    # SNI: Mode B + AWG → reality_dest, else domain
+    # SNI: Mode B + AWG → reality_dest, else domain.
+    # xhttp_reality использует ключи REALITY — те же правила SNI, что и
+    # classic reality (ветка xhttp-reality, план XHTTP_REALITY_PLAN.md).
     install_mode = state.get("install_mode", "A")
     awg_exit = state.get("awg_exit_enabled", False) and install_mode == "B"
     reality_dest = state.get("reality_dest", "")
-    if proto == "reality" and awg_exit and reality_dest:
+    if proto in ("reality", "xhttp_reality") and awg_exit and reality_dest:
         sni = reality_dest
-    elif proto == "reality":
+    elif proto in ("reality", "xhttp_reality"):
         sni = domain
     else:
         sni = domain
@@ -649,6 +652,18 @@ def _generate_vless_links(user: dict) -> list[dict]:
                 f"&security=reality&sni={sni}"
                 f"&fp={fp}&pbk={pub_key}&sid={short_id}"
                 f"&type=tcp#{_tag_user}")
+    elif proto == "xhttp_reality":
+        # xHTTP+REALITY: транспорт xhttp + маскировка REALITY.
+        # security=reality (не tls), type=xhttp, БЕЗ flow — xhttp-транспорт
+        # не поддерживает xtls-rprx-vision. mode= обязателен: клиентам на
+        # xray-core нужен режим транспорта (в старой xhttp-ветке ниже mode
+        # не добавляется — там он не обязателен, здесь без него никак).
+        xhttp_path_enc = _url_quote(xhttp_path, safe="")
+        link = (f"vless://{uuid_val}@{domain}:{port}"
+                f"?encryption=none&security=reality&sni={sni}"
+                f"&fp={fp}&pbk={pub_key}&sid={short_id}"
+                f"&type=xhttp&path={xhttp_path_enc}"
+                f"&mode={xhttp_mode}#{_tag_user}")
     else:
         xhttp_path_enc = _url_quote(xhttp_path, safe="")
         link = (f"vless://{uuid_val}@{domain}:{port}"
@@ -665,6 +680,15 @@ def _generate_vless_links(user: dict) -> list[dict]:
                      f"&security=reality&sni={sni}"
                      f"&fp={fp}&pbk={pub_key}&sid={short_id}"
                      f"&type=tcp#{_tag_user_v6}")
+        elif proto == "xhttp_reality":
+            # xHTTP+REALITY для IPv6: те же параметры, что и в IPv4-ветке
+            # выше (type=xhttp, security=reality, без flow, с mode=).
+            xhttp_path_enc = _url_quote(xhttp_path, safe="")
+            link6 = (f"vless://{uuid_val}@[{ipv6}]:{port}"
+                     f"?encryption=none&security=reality&sni={sni}"
+                     f"&fp={fp}&pbk={pub_key}&sid={short_id}"
+                     f"&type=xhttp&path={xhttp_path_enc}"
+                     f"&mode={xhttp_mode}#{_tag_user_v6}")
         else:
             xhttp_path_enc = _url_quote(xhttp_path, safe="")
             link6 = (f"vless://{uuid_val}@[{ipv6}]:{port}"
@@ -789,7 +813,16 @@ def _generate_clash_config(user: dict) -> str:
     xhttp_path = state.get("xhttp_path", "/")
     xtls_flow = state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision"
 
-    group_proxies = ["VLESS-Reality" if proto == "reality" else "VLESS-xHTTP"]
+    # Имя ноды (proxies + proxy-groups должны совпадать). Для xhttp_reality —
+    # имя с суффиксом "-fallback": mihomo не поддерживает xHTTP-транспорт,
+    # конфиг ниже — фолбэк на tcp+reality (юзер предупреждён при установке).
+    if proto == "reality":
+        node_name = "VLESS-Reality"
+    elif proto == "xhttp_reality":
+        node_name = "VLESS-xHTTP-REALITY-fallback"
+    else:
+        node_name = "VLESS-xHTTP"
+    group_proxies = [node_name]
 
     if proto == "reality":
         clash = f"""proxies:
@@ -806,6 +839,44 @@ def _generate_clash_config(user: dict) -> str:
       public-key: {pub_key}
       short-id: {short_id}
     client-fingerprint: {fp}
+    servername: {sni}
+
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+"""
+        for p in group_proxies:
+            clash += f"      - {p}\n"
+        clash += """
+rules:
+  - MATCH,Proxy
+"""
+    elif proto == "xhttp_reality":
+        # xHTTP+REALITY → mihomo fallback на tcp+reality: mihomo не умеет
+        # network:http вместе с reality-opts (юзер предупреждён при установке,
+        # что mihomo не поддерживается).
+        # support-x25519mlkem768 (внутри reality-opts): Xray-core 26.9.8+
+        # требует keyShare X25519MLKEM768 в ClientHello; в mihomo он есть
+        # только у HelloChrome_Auto, опция запрещает его вырезание. Поэтому
+        # client-fingerprint фиксирован на chrome, а не из state.json
+        # (как в reality-ветке client_config_export.py).
+        clash = f"""# xHTTP+REALITY node — mihomo fallback to tcp+reality (mihomo не поддерживает xHTTP)
+proxies:
+  - name: {node_name}
+    type: vless
+    server: {domain}
+    port: {port}
+    uuid: {uuid_val}
+    network: tcp
+    tls: true
+    udp: true
+    flow: {xtls_flow}
+    reality-opts:
+      public-key: {pub_key}
+      short-id: {short_id}
+      support-x25519mlkem768: true
+    client-fingerprint: chrome
     servername: {sni}
 
 proxy-groups:
@@ -858,9 +929,20 @@ def _generate_singbox_config(user: dict) -> str:
     short_id = state.get("short_id", "")
     fp = state.get("fingerprint", "chrome")
     proto = state.get("protocol_mode", "reality")
-    sni = domain
     xhttp_path = state.get("xhttp_path", "/")
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     xtls_flow = state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision"
+
+    # SNI: Mode B + AWG → reality_dest, else domain (как в
+    # _generate_vless_links). xhttp_reality использует ключи REALITY —
+    # те же правила SNI, что и classic reality.
+    install_mode = state.get("install_mode", "A")
+    awg_exit = state.get("awg_exit_enabled", False) and install_mode == "B"
+    reality_dest = state.get("reality_dest", "")
+    if proto in ("reality", "xhttp_reality") and awg_exit and reality_dest:
+        sni = reality_dest
+    else:
+        sni = domain
 
     if proto == "reality":
         config = {
@@ -871,6 +953,35 @@ def _generate_singbox_config(user: dict) -> str:
                 "server_port": port,
                 "uuid": uuid_val,
                 **({"flow": xtls_flow} if xtls_flow else {}),
+                "tls": {
+                    "enabled": True,
+                    "server_name": sni,
+                    "utls": {"enabled": True, "fingerprint": fp},
+                    "reality": {
+                        "enabled": True,
+                        "public_key": pub_key,
+                        "short_id": short_id,
+                    }
+                }
+            }]
+        }
+    elif proto == "xhttp_reality":
+        # xHTTP+REALITY: транспорт xhttp (mode+path) + REALITY TLS, БЕЗ flow
+        # (xhttp-транспорт не поддерживает xtls-rprx-vision). Старую
+        # xhttp-ветку ниже (transport type "http") не трогаем — она для
+        # legacy-режима xHTTP+TLS с LE-сертификатом.
+        config = {
+            "outbounds": [{
+                "type": "vless",
+                "tag": "vless-out",
+                "server": domain,
+                "server_port": port,
+                "uuid": uuid_val,
+                "transport": {
+                    "type": "xhttp",
+                    "mode": xhttp_mode,
+                    "path": xhttp_path,
+                },
                 "tls": {
                     "enabled": True,
                     "server_name": sni,
@@ -939,15 +1050,17 @@ def _generate_hiddify_config(user: dict) -> str:
     proto = state.get("protocol_mode", "reality")
     sni = domain
     xhttp_path = state.get("xhttp_path", "/")
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     xtls_flow = state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision"
 
-    # SNI: Mode B + AWG → reality_dest, else domain (как в _generate_vless_links)
+    # SNI: Mode B + AWG → reality_dest, else domain (как в _generate_vless_links).
+    # xhttp_reality использует ключи REALITY — те же правила SNI.
     install_mode = state.get("install_mode", "A")
     awg_exit = state.get("awg_exit_enabled", False) and install_mode == "B"
     reality_dest = state.get("reality_dest", "")
-    if proto == "reality" and awg_exit and reality_dest:
+    if proto in ("reality", "xhttp_reality") and awg_exit and reality_dest:
         sni = reality_dest
-    elif proto == "reality":
+    elif proto in ("reality", "xhttp_reality"):
         sni = domain
 
     if proto == "reality":
@@ -959,6 +1072,39 @@ def _generate_hiddify_config(user: dict) -> str:
                 "server_port": port,
                 "uuid": uuid_val,
                 "flow": xtls_flow,
+                "tls": {
+                    "enabled": True,
+                    "server_name": sni,
+                    "utls": {"enabled": True, "fingerprint": fp},
+                    "reality": {
+                        "enabled": True,
+                        "public_key": pub_key,
+                        "short_id": short_id,
+                    }
+                }
+            }],
+            "routing": {
+                "rules": [
+                    {"type": "default", "outbound": "vless-out"}
+                ]
+            }
+        }
+    elif proto == "xhttp_reality":
+        # xHTTP+REALITY: копия структуры reality-ветки (REALITY TLS +
+        # routing), но транспорт xhttp (mode+path) и БЕЗ flow — xhttp
+        # не поддерживает xtls-rprx-vision.
+        config = {
+            "outbounds": [{
+                "type": "vless",
+                "tag": "vless-out",
+                "server": domain,
+                "server_port": port,
+                "uuid": uuid_val,
+                "transport": {
+                    "type": "xhttp",
+                    "mode": xhttp_mode,
+                    "path": xhttp_path,
+                },
                 "tls": {
                     "enabled": True,
                     "server_name": sni,

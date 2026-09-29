@@ -734,5 +734,102 @@ class TestRateLimiting(unittest.TestCase):
         self.assertIn("RATE_LIMIT_S = 2", script)
 
 
+class TestInnerScriptBuildVlessLink(unittest.TestCase):
+    """_build_vless_link В СГЕНЕРИРОВАННОМ inner-скрипте — поведенческий тест.
+
+    ast.parse (TestGeneratedScriptSyntax) ловит только SyntaxError от
+    экранирования {{ }}. Здесь inner-скрипт реально исполняется через exec()
+    (main-guard не срабатывает: __name__ в exec-неймспейсе != "__main__"),
+    подменяется STATE_FILE и проверяется канонический формат ссылок.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state_file = self._tmpdir / "state.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _get_inner_link(self, state_dict):
+        from chimera.modules import tg_client_bot
+        script = tg_client_bot._generate_client_bot_script(
+            {"token": "123456:ABC-DEF", "admin_id": "987654321",
+             "rate_limit_seconds": 2})
+        ns = {}
+        exec(compile(script, "inner_client_bot.py", "exec"), ns)
+        self._state_file.write_text(json.dumps(state_dict))
+        ns["STATE_FILE"] = self._state_file
+        return ns["_build_vless_link"]("")
+
+    def test_xhttp_reality_canonical_link(self):
+        """xHTTP+REALITY: security=reality + type=xhttp + mode, БЕЗ flow."""
+        link = self._get_inner_link({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "xhttp_reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd",
+            "xhttp_path": "/xhttp",
+            "xhttp_mode": "stream-up",
+            "fingerprint": "chrome",
+            "server_port": 443,
+        })
+        self.assertTrue(link.startswith(
+            "vless://test-uuid@vpn.example.com:443?"))
+        self.assertIn("encryption=none", link)
+        self.assertIn("security=reality", link)
+        self.assertIn("pbk=PUBKEY", link)
+        self.assertIn("sid=abcd", link)
+        self.assertIn("type=xhttp", link)
+        self.assertIn("path=/xhttp", link)
+        self.assertIn("mode=stream-up", link)
+        self.assertNotIn("flow=", link)
+        self.assertIn("#VLESS-xHTTP-REALITY", link)
+
+    def test_xhttp_reality_mode_b_awg_sni(self):
+        """Mode B + AWG: SNI из reality_dest (правило REALITY унаследовано)."""
+        link = self._get_inner_link({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "xhttp_reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd",
+            "xhttp_path": "/xhttp",
+            "reality_dest": "dest.example.com:443",
+            "awg_exit_enabled": True,
+            "install_mode": "B",
+        })
+        self.assertIn("sni=dest.example.com", link)
+        self.assertNotIn("flow=", link)
+
+    def test_reality_and_xhttp_regression(self):
+        """Регрессия: старые ветки reality/xhttp inner-скрипта не изменились."""
+        link = self._get_inner_link({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd",
+            "xtls_flow": "xtls-rprx-vision",
+        })
+        self.assertIn("type=tcp", link)
+        self.assertIn("security=reality", link)
+        self.assertIn("flow=xtls-rprx-vision", link)
+        self.assertIn("#VLESS-REALITY", link)
+
+        link = self._get_inner_link({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "xhttp",
+            "xhttp_path": "/xh",
+        })
+        self.assertIn("type=xhttp", link)
+        self.assertIn("security=tls", link)
+        self.assertIn("#VLESS-xHTTP", link)
+        self.assertNotIn("flow=", link)
+
+
 if __name__ == "__main__":
     unittest.main()
