@@ -3799,6 +3799,33 @@ def _verify_xray_dns_via_agh() -> bool:
     return False
 
 
+def _release_prev_vless_port(prev_port: int) -> None:
+    """Переустановка со сменой порта: освободить СТАРЫЙ VLESS-порт.
+
+     раньше при do_full_install поверх живой установки старый порт
+    (server_port из state.json) оставался «открытым в UFW и занятым в
+    реестре» навсегда — тот же класс бага, что и кейс Telemt:8443.
+    Смена порта через меню (reconfigure.py) закрывала старый порт, полная
+    переустановка — нет. Теперь семантика едина: порт сменился — старый
+    закрыт (UFW-правило + запись port_registry).
+    22/80 не трогаем (SSH lockout / certbot ACME), текущий порт тоже.
+    """
+    if not prev_port or prev_port in (22, 80, SERVER_PORT):
+        return
+    try:
+        from chimera.modules.port_registry import (
+            ufw_close_port, port_unregister, SERVICE_VLESS,
+        )
+        ufw_close_port(prev_port, "tcp", SERVICE_VLESS,
+                       legacy_comments=["VLESS", "VLESS reconfigure"])
+        port_unregister(SERVICE_VLESS, prev_port, "tcp")
+        info(f"Порт Xray менялся: старый порт {prev_port}/tcp закрыт (UFW + реестр)")
+        log_to_file("INFO", f"port_registry: старый VLESS-порт {prev_port} "
+                    "освобождён при переустановке")
+    except Exception as e:
+        warn(f"Не удалось освободить старый порт {prev_port}: {e}")
+
+
 def do_full_install() -> None:
     global INSTALL_STARTED, PARAM_USE_DNSCRYPT, DNSCRYPT_INSTALLED
     global PARAM_USE_AGHOME, AGHOME_INSTALLED
@@ -3806,6 +3833,18 @@ def do_full_install() -> None:
     global H2_EXIT_ENABLED
 
     PROGRESS.init(100, "Установка")
+
+    #  ДО промптов: snapshot старого server_port из state.json — после
+    # prompt_protocol_mode() ядро уже будет держать НОВЫЙ порт, а state.json
+    # перезапишется установкой. Без snapshot нечем будет освобождать старый.
+    _prev_vless_port = None
+    try:
+        if STATE_FILE.exists():
+            _prev_vless_port = int(
+                (json.loads(STATE_FILE.read_text()) or {}).get("server_port") or 0
+            ) or None
+    except Exception:
+        _prev_vless_port = None
 
     _check_resources()
     _check_ipv6_preflight()
@@ -3873,6 +3912,9 @@ def do_full_install() -> None:
     # self-signed. Порядок безопасен: 22/80/SERVER_PORT открываются до
     # enable, остальные шаги UFW-aware (port_registry/_open_wizard_access).
     configure_firewall();           PROGRESS.update(5,  "Файрволл")
+    #  Файрволл зарегистрировал НОВЫЙ порт — освобождаем СТАРЫЙ
+    # (переустановка со сменой порта; кейс класса Telemt:8443).
+    _release_prev_vless_port(_prev_vless_port)
     # AdGuard Home (v37): DNS-сервер :53 поверх DNSCrypt — после
     # установки dnscrypt (upstream-требование). Внутри install_aghome:
     # миграция dnscrypt с :53 → wizard (:3000, ждём до 5 мин) → финализация
@@ -5200,14 +5242,18 @@ def do_manage_users() -> None:
                             f"#{u.get('name','user')}"
                         )
                     elif proto == "xhttp_reality":
-                        # xHTTP + REALITY: host = IP (как у reality-рецепта,
-                        # без DNS-зависимости), sni/keys — REALITY,
-                        # type/path/mode — транспорт xHTTP. БЕЗ flow.
+                        # xHTTP + REALITY: host = домен (консистентно с
+                        # linkqr_lib.build_vless_link_for_user и
+                        # client_config_export — все экспорты Chimery
+                        # отдают домен), fallback на IP если домен не
+                        # настроен. sni/keys — REALITY, type/path/mode —
+                        # транспорт xHTTP. БЕЗ flow.
                         import urllib.parse
                         _ul_fp = st.get("fingerprint", "chrome") or "chrome"
                         _ul_path = urllib.parse.quote(xhttp_path, safe="/")
+                        _ul_host = domain or server_ip
                         link = (
-                            f"vless://{u['uuid']}@{server_ip}:{port}"
+                            f"vless://{u['uuid']}@{_ul_host}:{port}"
                             f"?encryption=none&security=reality&sni={_ul_sni}"
                             f"&fp={_ul_fp}&pbk={pub_key}&sid={short_id}"
                             f"&type=xhttp&path={_ul_path}&mode={xhttp_mode}"

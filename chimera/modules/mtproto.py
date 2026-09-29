@@ -2082,6 +2082,59 @@ def _mtproto_ufw_close(port: int) -> None:
         _run(["ufw", "delete", "allow", f"{port}/tcp"])
         _box_ok(f"UFW: правило для порта {port}/tcp удалено.")
 
+
+def _mtproto_close_all_ports(extra_port: "int | None" = None) -> list:
+    """Освобождает ВСЕ порты Telemt: реестр + UFW (полное удаление).
+
+     кейс прода (RU-стенд, 2026-09-29): Telemt был установлен на 8443,
+    потом переустановлен на 9443. _full_uninstall закрывал только ТЕКУЩИЙ
+    порт из конфига (9443), а запись/UFW-правило старого 8443 остались
+    висеть навсегда (orphaned allow — порт открыт снаружи, реестр молчит).
+    Port registry именно для этого и делался: при удалении сервиса
+    закрываются ВСЕ его порты, а не только последний.
+
+    Паттерн — uninstall.py::_close_tag: собрать все записи тега
+    port_list_for_service → для каждой ufw_close_port + port_unregister.
+    extra_port — текущий порт из конфига (его закрываем даже если в
+    реестре записи нет — правило могло остаться legacy-комментарием).
+    Возвращает список строк для вывода пользователю.
+    """
+    lines: list = []
+    ports_seen: set = set()
+    try:
+        if extra_port:
+            ports_seen.add(int(extra_port))
+    except Exception:
+        pass
+    try:
+        from chimera.modules.port_registry import (
+            port_list_for_service, ufw_close_port, port_unregister,
+            SERVICE_TELEMT_MTPROTO,
+        )
+        for e in port_list_for_service(SERVICE_TELEMT_MTPROTO):
+            try:
+                ports_seen.add(int(e.get("port", 0)))
+            except Exception:
+                continue
+        for p in sorted(ports_seen):
+            if not p:
+                continue
+            try:
+                ufw_close_port(p, "tcp", SERVICE_TELEMT_MTPROTO,
+                               legacy_comments=["Telemt MTProxy"])
+                lines.append(f"  UFW: правило для порта {p}/tcp удалено.")
+            except Exception:
+                pass
+        # Снимаем ВСЕ записи тега (а не только текущий порт).
+        if port_unregister(SERVICE_TELEMT_MTPROTO):
+            lines.append("  port_registry: все записи telemt_mtproto сняты.")
+    except Exception:
+        # port_registry недоступен — fallback хотя бы по текущему порту.
+        if extra_port:
+            _mtproto_ufw_close(int(extra_port))
+            lines.append(f"  UFW: правило для порта {extra_port}/tcp удалено (fallback).")
+    return lines
+
 def _apply_optimizations() -> None:
     try:
         ram_mb = int(subprocess.check_output(
@@ -2210,8 +2263,10 @@ def _full_uninstall(silent: bool = False) -> bool:
         _run(["iptables", "-X", chain])
     _box_ok("iptables-цепочки удалены.")
 
-    #  миграция на port_registry (с legacy comment).
-    _mtproto_ufw_close(port)
+    #  миграция на port_registry: закрываем ВСЕ порты Telemt, а не только
+    # текущий из конфига (кейс orphaned 8443 после переезда 8443→9443).
+    for _line in _mtproto_close_all_ports(extra_port=port):
+        _box_ok(_line.strip())
 
     # iOS-фикс (ext_port) — его UFW/реестр не чистились при полном
     # удалении Telemt (orphaned allow + stale запись SERVICE_TELEMT_IOS_FIX)
@@ -3605,6 +3660,12 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     # ── Установка ─────────────────────────────────────────────────────────────
     print()
     _info("Останавливаю старую установку...")
+    #  ДО _write_config: запоминаем СТАРЫЙ порт — после перезаписи конфига
+    # взять его будет неоткуда. Если порт меняется, старый обязан уйти из
+    # реестра и UFW (кейс прод-RU: 8443 остался открытым после переезда
+    # на 9443 — orphaned allow жил месяцами).
+    _had_prev_config = CONFIG_FILE.exists()
+    _prev_port = _get_port() if _had_prev_config else None
     _run(["systemctl", "stop", SERVICE_NAME])
     time.sleep(1)
 
@@ -3654,6 +3715,16 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     _info("Установка systemd-сервиса...")
     _install_service()
     _setup_ufw(port)
+
+    #  Смена порта при (пере)установке: освобождаем СТАРЫЙ порт Telemt
+    # (UFW-правило + запись в реестре). Раньше старый порт оставался
+    # «открытым снаружи и занятым в реестре» навсегда — кейс 8443→9443.
+    if _prev_port is not None and _had_prev_config and _prev_port != port:
+        _info(f"Порт меняется {_prev_port} → {port}: закрываю старый порт...")
+        _mtproto_ufw_close(_prev_port)
+        # Перезапишем текущий порт, чтобы _get_port() ниже по коду
+        # (accounting и пр.) видел уже новый.
+        _prev_port = None
 
     # ── Xray: dokodemo-door + iptables REDIRECT ───────────────────────────────
     tproxy_ok_msg = ""

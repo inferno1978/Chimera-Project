@@ -1885,5 +1885,79 @@ class TestReturnRuleIdempotency(unittest.TestCase):
         self.assertEqual(rules.get(("iptables", "uid:999"), 0), 1)
 
 
+class TestMtprotoCloseAllPorts(unittest.TestCase):
+    """_mtproto_close_all_ports — освобождение ВСЕХ портов Telemt.
+
+    Кейс-первоисточник (прод-RU, 2026-09-29): Telemt переезжал 8443→9443,
+    _full_uninstall закрывал только текущий порт из конфига — старый 8443
+    остался orphaned UFW-правилом навсегда. Теперь при удалении закрываются
+    ВСЕ порты тега (паттерн uninstall.py::_close_tag).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_all_tag_ports_closed_plus_current(self):
+        from chimera.modules import mtproto
+        from chimera.modules import port_registry as pr
+        entries = [
+            {"service": "telemt_mtproto", "port": 8443, "proto": "tcp"},
+            {"service": "telemt_mtproto", "port": 9443, "proto": "tcp"},
+        ]
+        with patch.object(pr, "port_list_for_service", return_value=entries), \
+             patch.object(pr, "ufw_close_port",
+                          return_value=(True, "ok")) as _muc, \
+             patch.object(pr, "port_unregister", return_value=True) as _mun:
+            lines = mtproto._mtproto_close_all_ports(extra_port=443)
+        # UFW закрыт для всех трёх: старый 8443, новый 9443 и текущий 443.
+        closed = sorted(c.args[0] for c in _muc.call_args_list)
+        self.assertEqual(closed, [443, 8443, 9443])
+        # Снятие регистрации — ВСЕ записи тега (без port=).
+        _mun.assert_called_once()
+        self.assertEqual(_mun.call_args.args, ("telemt_mtproto",))
+        self.assertTrue(any("telemt_mtproto" in l for l in lines))
+
+    def test_registry_unavailable_fallback_no_crash(self):
+        """port_registry недоступен (import/вызов падает) — не роняем удаление."""
+        from chimera.modules import mtproto
+        from chimera.modules import port_registry as pr
+
+        def _boom(*a, **kw):
+            raise RuntimeError("port_registry unavailable")
+
+        with patch.object(pr, "port_list_for_service", side_effect=_boom), \
+             patch.object(pr, "ufw_close_port", side_effect=_boom), \
+             patch.object(pr, "port_unregister", side_effect=_boom), \
+             patch.object(mtproto.shutil, "which", return_value=None):
+            lines = mtproto._mtproto_close_all_ports(extra_port=9443)
+        # Fallback прошёл без исключения (закрытие по текущему порту не
+        # удалось — ufw нет, но удаление не должно падать).
+        self.assertIsInstance(lines, list)
+
+    def test_full_uninstall_uses_close_all_ports(self):
+        """_full_uninstall обязан звать _mtproto_close_all_ports (не только
+        _mtproto_ufw_close текущего порта) — регрессия кейса 8443."""
+        from chimera.modules import mtproto
+
+        _ios_fake = types.ModuleType("chimera.modules.telemt_ios_fix")
+        _ios_fake._load_state = lambda: None
+        _ios_fake._remove_rules = lambda: None
+        _ios_fake._save_state = lambda cfg: None
+        _ios_fake.IosFixConfig = MagicMock()
+
+        with patch.object(mtproto, "_run"), \
+             patch.object(mtproto, "_get_port", return_value=9443), \
+             patch.object(mtproto, "_banner"), \
+             patch.object(mtproto, "_mtproto_close_all_ports") as _mca, \
+             patch.object(sys.modules["chimera._core"] if "chimera._core" in sys.modules
+                          else types.ModuleType("x"), "_pause", create=True), \
+             patch.dict(sys.modules,
+                        {"chimera.modules.telemt_ios_fix": _ios_fake}):
+            ok = mtproto._full_uninstall(silent=True)
+        self.assertTrue(ok)
+        _mca.assert_called_once()
+        self.assertEqual(_mca.call_args.kwargs.get("extra_port"), 9443)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
