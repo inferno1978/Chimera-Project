@@ -167,14 +167,27 @@ def _probe_tcp_latency(host: str, port: int, timeout: float = PROBE_TIMEOUT_SEC)
     """
     Измеряет TCP RTT (SYN → ACK) в миллисекундах.
     Возвращает float("inf") если нода недоступна.
+
+    Prefer IPv4: если у хоста есть A и AAAA записи, пробуем IPv4 первым.
+    IPv6 может быть медленным (5+ секунд), что искажает latency-оценку.
     """
     try:
-        t0 = time.monotonic()
-        with socket.create_connection((host, port), timeout=timeout):
-            pass
-        return (time.monotonic() - t0) * 1000.0
+        addrs = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        addrs.sort(key=lambda a: 0 if a[0] == socket.AF_INET else 1)
     except Exception:
         return float("inf")
+    for family, socktype, proto, canonname, sockaddr in addrs:
+        try:
+            t0 = time.monotonic()
+            s = socket.socket(family, socktype, proto)
+            s.settimeout(timeout)
+            s.connect(sockaddr)
+            elapsed = (time.monotonic() - t0) * 1000.0
+            s.close()
+            return elapsed
+        except Exception:
+            continue
+    return float("inf")
 
 
 def _probe_bandwidth_ttfb(host: str, port: int,
