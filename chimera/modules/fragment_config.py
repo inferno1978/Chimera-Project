@@ -221,6 +221,51 @@ def generate_fragment_client_config(
                 },
             },
         }
+    elif protocol_mode == "xhttp_reality":
+        # xHTTP + REALITY: транспорт xhttp + REALITY TLS, БЕЗ flow
+        # (xhttp несовместим с xtls-rprx-vision — users без flow,
+        # xhttpSettings + realitySettings в одном streamSettings;
+        # фрагментация совместима — она на уровне TCP/TLS ClientHello).
+        xhttp_path = state.get("xhttp_path", "/")
+        xhttp_mode = state.get("xhttp_mode", "stream-up")
+        fp         = state.get("fingerprint", "chrome") or "chrome"
+        # SNI по канону xhttp_reality (как _resolve_sni в fragment_link.py):
+        # Mode B + AWG-exit → reality_dest (совпадает с serverNames сервера),
+        # иначе — domain. Легаси-ветку reality ниже не трогаем.
+        awg_dest = state.get("reality_dest", "")
+        if (state.get("awg_exit_enabled") and state.get("install_mode") == "B"
+                and awg_dest):
+            sni = awg_dest.split(":")[0]
+        else:
+            sni = server_host
+        outbound = {
+            "tag":      "proxy",
+            "protocol": "vless",
+            "settings": {
+                "vnext": [{
+                    "address": server_host,
+                    "port":    server_port,
+                    "users":   [{"id": uuid_val, "encryption": "none"}],
+                }],
+            },
+            "streamSettings": {
+                "network":  "xhttp",
+                "security": "reality",
+                "sockopt":  sockopt,
+                "xhttpSettings": {
+                    "path": xhttp_path,
+                    "mode": xhttp_mode,
+                },
+                "realitySettings": {
+                    "show":        False,
+                    "fingerprint": fp,
+                    "serverName":  sni,
+                    "publicKey":   pub_key,
+                    "shortId":     short_id,
+                    "spiderX":     "/",
+                },
+            },
+        }
     else:
         # REALITY
         sni = reality_dest.split(":")[0] if ":" in reality_dest else reality_dest

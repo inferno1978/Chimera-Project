@@ -155,7 +155,9 @@ def _load_state() -> Optional[dict]:
 def _resolve_sni(state: dict) -> str:
     proto        = state.get("protocol_mode", "reality")
     reality_dest = state.get("reality_dest", "")
-    if (proto == "reality" and state.get("awg_exit_enabled")
+    # xhttp_reality наследует SNI-правило классического reality:
+    # в Mode B с AWG-exit сервер ждёт SNI = reality_dest (serverNames).
+    if (proto in ("reality", "xhttp_reality") and state.get("awg_exit_enabled")
             and state.get("install_mode") == "B" and reality_dest):
         return reality_dest.split(":")[0]
     return state.get("domain", "")
@@ -180,8 +182,10 @@ def _build_xray_mux_json(state: dict, frag_packets: str, frag_length: str,
     sockopt = build_fragment_sockopt(frag_packets, frag_length, frag_interval)
     mux     = build_mux_outbound_patch(concurrency, xudp)
 
-    # Mux несовместим с xtls-rprx-vision — при mux flow убираем
-    flow = xtls_flow if (xtls_flow and proto != "reality") else None
+    # Mux несовместим с xtls-rprx-vision — при mux flow убираем.
+    # xhttp_reality — тоже всегда без flow: xhttp-транспорт не работает
+    # с vision (ветка ниже его не использует, None — защита от регрессии).
+    flow = xtls_flow if (xtls_flow and proto not in ("reality", "xhttp_reality")) else None
 
     if proto == "xhttp":
         outbound = {
@@ -193,6 +197,25 @@ def _build_xray_mux_json(state: dict, frag_packets: str, frag_length: str,
                 "tlsSettings": {"serverName": sni, "allowInsecure": False,
                                 "fingerprint": fp},
                 "xhttpSettings": {"path": xhttp_path, "mode": xhttp_mode},
+            },
+            "mux": mux,
+        }
+    elif proto == "xhttp_reality":
+        # xHTTP + REALITY: транспорт xhttp + REALITY TLS, БЕЗ flow
+        # (xhttp несовместим с xtls-rprx-vision; mux живёт на уровне
+        # протокола и с REALITY совместим). Формат — как в fragment_link.
+        outbound = {
+            "tag": "proxy", "protocol": "vless",
+            "settings": {"vnext": [{"address": domain, "port": port,
+                "users": [{"id": uuid_val, "encryption": "none"}]}]},
+            "streamSettings": {
+                "network": "xhttp", "security": "reality", "sockopt": sockopt,
+                "xhttpSettings": {"path": xhttp_path, "mode": xhttp_mode},
+                "realitySettings": {
+                    "show": False, "fingerprint": fp,
+                    "serverName": sni, "publicKey": pub_key,
+                    "shortId": short_id, "spiderX": "/",
+                },
             },
             "mux": mux,
         }
@@ -247,6 +270,10 @@ def _build_singbox_mux_json(state: dict, frag_packets: str, frag_length: str,
     short_id   = state.get("short_id", "")
     xtls_flow  = state.get("xtls_flow", "xtls-rprx-vision")
     xhttp_path = state.get("xhttp_path", "/")
+    # xhttp_mode нужен ветке xhttp_reality (раньше читался только
+    # в xray-билдере — для sing-box добавлен здесь, по аналогии
+    # с fragment_noise._build_singbox_noise_json).
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 
@@ -264,6 +291,23 @@ def _build_singbox_mux_json(state: dict, frag_packets: str, frag_length: str,
             "type": "vless", "tag": "vless-out",
             "server": domain, "server_port": port, "uuid": uuid_val,
             **({"flow": xtls_flow} if xtls_flow else {}),
+            "tls": {
+                "enabled": True, "server_name": sni,
+                "utls": {"enabled": True, "fingerprint": fp},
+                "reality": {"enabled": True, "public_key": pub_key,
+                            "short_id": short_id},
+            },
+            "multiplex": multiplex,
+            **dial,
+        }
+    elif proto == "xhttp_reality":
+        # xHTTP + REALITY (sing-box): transport xhttp + REALITY, БЕЗ flow
+        # (фрагментация в dial_fields работает — она на уровне TCP).
+        outbound = {
+            "type": "vless", "tag": "vless-out",
+            "server": domain, "server_port": port, "uuid": uuid_val,
+            "transport": {"type": "xhttp", "mode": xhttp_mode,
+                          "path": xhttp_path},
             "tls": {
                 "enabled": True, "server_name": sni,
                 "utls": {"enabled": True, "fingerprint": fp},

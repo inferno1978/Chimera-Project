@@ -320,18 +320,33 @@ def _get_vless_link(user_uuid: Optional[str] = None) -> str:
     fp           = state.get("fingerprint", "chrome") or "chrome"
     xtls_flow    = state.get("xtls_flow", "xtls-rprx-vision") or ""
     xhttp_path   = state.get("xhttp_path", "/")
+    xhttp_mode   = state.get("xhttp_mode", "stream-up")
     install_mode = state.get("install_mode", "A")
     awg_exit     = state.get("awg_exit_enabled", False)
 
-    # SNI: для режима B с AWG — используем reality_dest, иначе domain
+    # SNI: для режима B с AWG — используем reality_dest, иначе domain.
+    # xhttp_reality наследует правило REALITY (те же ключи/dest маскировки).
     sni = domain
-    if proto == "reality" and awg_exit and install_mode == "B":
+    if proto in ("reality", "xhttp_reality") and awg_exit and install_mode == "B":
         sni = state.get("reality_dest", domain).split(":")[0]
 
     if not domain or not uuid_val:
         return ""
 
-    if proto == "xhttp":
+    if proto == "xhttp_reality":
+        # xHTTP + REALITY: транспорт xhttp + маскировка REALITY.
+        # security=reality, type=xhttp, БЕЗ flow (xhttp-транспорт не
+        # поддерживает xtls-rprx-vision). pbk/sid — как у reality-ветки,
+        # path/mode — как у xhttp-ветки.
+        from urllib.parse import quote as _uq
+        path_enc = _uq(xhttp_path, safe="/")
+        link = (
+            f"vless://{uuid_val}@{domain}:{port}"
+            f"?encryption=none&security=reality&sni={sni}"
+            f"&fp={fp}&pbk={pub_key}&sid={short_id}"
+            f"&type=xhttp&path={path_enc}&mode={xhttp_mode}#VLESS-xHTTP-REALITY"
+        )
+    elif proto == "xhttp":
         link = (
             f"vless://{uuid_val}@{domain}:{port}"
             f"?type=xhttp&security=tls&path={xhttp_path}"
@@ -493,13 +508,24 @@ def get_vless_link(user_uuid=None):
     fp        = st.get("fingerprint", "chrome") or "chrome"
     xtls_flow = st.get("xtls_flow", "xtls-rprx-vision") or ""
     xhttp_path = st.get("xhttp_path", "/")
+    xhttp_mode = st.get("xhttp_mode", "stream-up")
     awg_exit  = st.get("awg_exit_enabled", False)
     mode      = st.get("install_mode", "A")
+    # SNI: для режима B с AWG — reality_dest (xhttp_reality наследует
+    # правило REALITY — те же ключи/dest маскировки), иначе domain.
     sni = domain
-    if proto == "reality" and awg_exit and mode == "B":
+    if proto in ("reality", "xhttp_reality") and awg_exit and mode == "B":
         sni = st.get("reality_dest", domain).split(":")[0]
     if not domain or not uuid_val:
         return ""
+    if proto == "xhttp_reality":
+        # xHTTP + REALITY: security=reality + type=xhttp, БЕЗ flow
+        # (xhttp-транспорт не поддерживает xtls-rprx-vision).
+        path_enc = urllib.parse.quote(xhttp_path, safe="/")
+        return (f"vless://{{uuid_val}}@{{domain}}:{{port}}"
+                f"?encryption=none&security=reality&sni={{sni}}"
+                f"&fp={{fp}}&pbk={{pub_key}}&sid={{short_id}}"
+                f"&type=xhttp&path={{path_enc}}&mode={{xhttp_mode}}#VLESS-xHTTP-REALITY")
     if proto == "xhttp":
         return (f"vless://{{uuid_val}}@{{domain}}:{{port}}"
                 f"?type=xhttp&security=tls&path={{xhttp_path}}"

@@ -116,6 +116,8 @@ def do_quick_status() -> None:
             _flow  = _qs.get("xtls_flow", "xtls-rprx-vision")
             if _proto == "reality":
                 _proto_label = f"VLESS+REALITY  flow={_flow or 'none'}"
+            elif _proto == "xhttp_reality":
+                _proto_label = "VLESS+xHTTP+REALITY"
             else:
                 _proto_label = "VLESS+xHTTP+TLS"
             _box_row(f"  {BOLD}Конфиг:{NC}")

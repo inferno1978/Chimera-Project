@@ -1503,6 +1503,347 @@ def generate_xray_config_xhttp() -> None:
             warn("Конфигурация создана (валидация вернула предупреждение — возможно, сертификат ещё не получен)")
             log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
 
+
+def generate_xray_config_xhttp_reality() -> None:
+    """
+    Генерация конфига Xray для VLESS + xHTTP + REALITY (Режим A).
+
+    Гибрид двух миров:
+      • Транспорт xHTTP (xmux, padding, HTTP/2-паттерны) — как у
+        generate_xray_config_xhttp(): xhttpSettings от _build_xhttp_settings().
+      • TLS-маскировка REALITY — как у generate_xray_config():
+        realitySettings (dest=unix-socket nginx, serverNames=домен,
+        privateKey/publicKey/shortIds, spiderX, minClientVer).
+
+    Ключевые отличия от generate_xray_config() (tcp+reality):
+      • streamSettings.network = "xhttp" + xhttpSettings (оба блока в одном
+        streamSettings: xhttpSettings AND realitySettings).
+      • НЕТ flow (xhttp-транспорт не поддерживает xtls-rprx-vision) —
+        clients без flow.
+      • Xray владеет SERVER_PORT напрямую (REALITY терминирует TLS),
+        Nginx — только unix-сокет с сайтом-заглушкой (fallback dest).
+
+    Ключевые отличия от generate_xray_config_xhttp() (xhttp+tls):
+      • НЕТ tlsSettings / LE-сертификата для прокси (REALITY делает TLS).
+      • Xray слушает публичный SERVER_PORT, а НЕ 127.0.0.1:XHTTP_BACKEND_PORT
+        (нет nginx TLS-проксирования на :443).
+      • clients БЕЗ flow (в xhttp+tls тоже без flow — тут совпадает).
+    """
+    core = _core_module()
+    # Anti-Empty Identity Guard — UUID/ShortID/REALITY-ключи не должны
+    # быть пустыми при регенерации (см. _core._identity_params_recover).
+    try:
+        core._identity_params_recover()
+    except Exception:
+        pass  # guard не должен блокировать генерацию
+    DNSCRYPT_LISTEN_PORT = core.DNSCRYPT_LISTEN_PORT
+    _assert_reality_dest_sane = core._assert_reality_dest_sane
+    info    = core.info
+    CONFIG_DIR = core.CONFIG_DIR
+    _run    = core._run
+    PARAM_USE_DNSCRYPT = core.PARAM_USE_DNSCRYPT
+    DNSCRYPT_CONF = core.DNSCRYPT_CONF
+    warn    = core.warn
+    PARAM_DOMAIN_STRATEGY = core.PARAM_DOMAIN_STRATEGY
+    IS_IPV6_AVAILABLE = core.IS_IPV6_AVAILABLE
+    DNSCRYPT_INSTALLED = core.DNSCRYPT_INSTALLED
+    DNSCRYPT_LISTEN_ADDR = core.DNSCRYPT_LISTEN_ADDR
+    _xray_log_block = core._xray_log_block
+    SERVER_PORT = core.SERVER_PORT
+    PARAM_UUID = core.PARAM_UUID
+    PARAM_DOMAIN = core.PARAM_DOMAIN
+    AWG_EXIT_ENABLED = core.AWG_EXIT_ENABLED
+    _build_sockopt = core._build_sockopt
+    _build_xhttp_settings = core._build_xhttp_settings
+    XHTTP_MODE = core.XHTTP_MODE
+    XHTTP_PATH = core.XHTTP_PATH
+    PARAM_REALITY_DEST = core.PARAM_REALITY_DEST
+    PARAM_SOCKET_PATH = core.PARAM_SOCKET_PATH
+    PARAM_SPIDERX = core.PARAM_SPIDERX
+    PARAM_PRIVATE_KEY = core.PARAM_PRIVATE_KEY
+    PARAM_PUBLIC_KEY = core.PARAM_PUBLIC_KEY
+    PARAM_SHORTID = core.PARAM_SHORTID
+    # Гейт версий клиента REALITY — лениво из state.json (меню 5b):
+    # "" = выкл (норма для Xray 26.9.8+), "1.8.0" — даунгрейд-рецепт
+    # для 26.7.11–26.7.28 (VLESS_FAQ §18). mihomo-клиенты в этом режиме
+    # не поддерживаются вовсе (fallback на tcp+reality в клиентских
+    # конфигах), но гейт пишем явно — поведение не должно зависеть от
+    # дефолтов ядра при смене версии.
+    _min_client_ver = _min_client_ver_reader(core)
+    AWG_FWMARK = core.AWG_FWMARK
+    SPLIT_TUNNEL_ENABLED = core.SPLIT_TUNNEL_ENABLED
+    build_split_tunnel_routing_rules = core.build_split_tunnel_routing_rules
+    _apply_stats_to_config = core._apply_stats_to_config
+    _set_config_owner = core._set_config_owner
+    XRAY_BIN = core.XRAY_BIN
+    success = core.success
+    log_to_file = core.log_to_file
+
+    _assert_reality_dest_sane()
+    info("Создание конфигурации Xray (xHTTP + REALITY)...")
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # ПАТЧ (синхрон с generate_xray_config): группа/пользователь xray ДО chown.
+    _run(["groupadd", "-f", "xray"], check=False, quiet=True)
+    _run(["useradd", "-r", "-g", "xray", "-s", "/sbin/nologin", "xray"],
+         check=False, quiet=True)
+    try:
+        os.chmod(str(CONFIG_DIR), 0o755)
+        _run(["chown", "root:xray", str(CONFIG_DIR)], check=False, quiet=True)
+    except Exception:
+        pass
+
+    # Динамически определяем реальный порт DNSCrypt (как в reality-ветке)
+    if PARAM_USE_DNSCRYPT:
+        r_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
+                        capture=True, check=False)
+        if r_active.stdout.strip() == "active":
+            real_port: str = ""
+            try:
+                r = _run(["ss", "-ulnp"], capture=True, check=False)
+                for line in r.stdout.splitlines():
+                    if "dnscrypt" in line.lower():
+                        m = re.search(r':(\d+)\s', line)
+                        if m:
+                            real_port = m.group(1)
+                            break
+            except Exception:
+                pass
+            if not real_port and DNSCRYPT_CONF.exists():
+                content = DNSCRYPT_CONF.read_text()
+                m = re.search(r'^listen_addresses\s*=.*?:(\d+)', content, re.MULTILINE)
+                if m:
+                    real_port = m.group(1)
+            if real_port and real_port.isdigit():
+                if real_port != str(DNSCRYPT_LISTEN_PORT):
+                    warn(f"DNSCrypt реально слушает на порту {real_port}, "
+                         f"а не {DNSCRYPT_LISTEN_PORT} — обновляем")
+                DNSCRYPT_LISTEN_PORT = int(real_port)
+                setattr(core, "DNSCRYPT_LISTEN_PORT", DNSCRYPT_LISTEN_PORT)
+                info(f"DNSCrypt порт для Xray config: {DNSCRYPT_LISTEN_PORT}")
+            else:
+                warn(f"Не удалось определить реальный порт DNSCrypt — "
+                     f"используем {DNSCRYPT_LISTEN_PORT}")
+
+    # queryStrategy
+    query_strategy = "UseIPv4"
+    if PARAM_DOMAIN_STRATEGY == "UseIPv6v4":
+        query_strategy = "UseIPv6v4"
+    if not IS_IPV6_AVAILABLE:
+        query_strategy = "UseIPv4"
+
+    # clients — из единого источника юзеров, БЕЗ flow (xhttp-транспорт
+    # не поддерживает xtls-rprx-vision — как в xhttp+tls ветке).
+    try:
+        from chimera.modules.users_manager import (
+            _users_collect_for_config, _clients_from_users)
+        _cfg_users = _users_collect_for_config(
+            PARAM_UUID, f"user@{PARAM_DOMAIN}")
+    except Exception:
+        _cfg_users = [{"uuid": PARAM_UUID,
+                       "email": f"user@{PARAM_DOMAIN}"}]
+    _cfg_clients_no_flow = _clients_from_users(_cfg_users)
+
+    # DNS серверы (AGH-AWARE — идентично reality-ветке)
+    agh_ok, agh_note = agh_dns_available(run=_run, log_info=info,
+                                         log_warn=warn, autostart=True)
+
+    r_active = _run(["systemctl", "is-active", "dnscrypt-proxy"],
+                    capture=True, check=False)
+    dnscrypt_running = (DNSCRYPT_INSTALLED or r_active.stdout.strip() == "active")
+
+    if agh_ok:
+        dns_servers = [
+            {"address": "127.0.0.1", "port": 53,
+             "network": "udp", "skipFallback": False},
+        ]
+        if dnscrypt_running:
+            dns_servers.append(
+                {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
+                 "network": "udp", "skipFallback": False})
+        dns_servers.append(
+            {"address": "9.9.9.9", "port": 53, "network": "udp", "skipFallback": False})
+        dns_servers += [
+            {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
+            {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
+        ]
+        info(f"DNS: AdGuardHome здоров ({agh_note}) — Xray → AGH:53 → DNSCrypt")
+    elif dnscrypt_running:
+        info(f"DNS: используем DNSCrypt-proxy "
+             f"({DNSCRYPT_LISTEN_ADDR}:{DNSCRYPT_LISTEN_PORT})")
+        dns_servers = [
+            {"address": DNSCRYPT_LISTEN_ADDR, "port": DNSCRYPT_LISTEN_PORT,
+             "network": "udp", "skipFallback": False},
+            {"address": "9.9.9.9", "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": True},
+            {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": True},
+        ]
+    elif IS_IPV6_AVAILABLE:
+        info("DNS: настройка IPv6-приоритетных серверов (dual-stack)")
+        dns_servers = [
+            {"address": "2a10:50c0::1:ff",       "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "2a10:50c0::2:ff",        "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "2606:4700:4700::1111",   "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "2606:4700:4700::1001",   "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "2001:4860:4860::8888",   "port": 53, "network": "udp", "skipFallback": True},
+            {"address": "1.1.1.1",                "port": 53, "network": "udp", "skipFallback": True},
+            {"address": "8.8.8.8",                "port": 53, "network": "udp", "skipFallback": True},
+        ]
+    else:
+        info("DNS: настройка IPv4-серверов (IPv6 недоступен)")
+        dns_servers = [
+            {"address": "1.1.1.1", "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": False},
+            {"address": "9.9.9.9", "port": 53, "network": "udp", "skipFallback": True},
+        ]
+
+    # xhttpSettings + sockopt — как у xhttp+tls ветки (транспортный слой).
+    _xhttp_s, _sockopt_x = _build_xhttp_settings(XHTTP_MODE, XHTTP_PATH)
+
+    info(f"xHTTP+REALITY: Xray слушает :{SERVER_PORT} напрямую "
+         f"(network=xhttp, security=reality, mode={XHTTP_MODE}, path={XHTTP_PATH})")
+
+    config: dict[str, Any] = {
+        "log": _xray_log_block(),
+        "dns": {
+            "servers": dns_servers,
+            "hosts": {
+                "dns.google":         "8.8.8.8",
+                "dns.cloudflare.com": "1.1.1.1",
+                "localhost":          "127.0.0.1",
+            },
+            "disableCache":           False,
+            "queryStrategy":          query_strategy,
+            "disableFallback":        False,
+            "disableFallbackIfMatch": True,
+        },
+        "inbounds": [{
+            "tag":      "inbound-xhttp-reality",
+            "port":     SERVER_PORT,          # публичный порт — REALITY TLS
+            "listen":   "::",
+            "protocol": "vless",
+            "settings": {
+                "clients": _cfg_clients_no_flow,
+                "decryption": "none",
+            },
+            "sniffing": {
+                "enabled":      True,
+                "destOverride": ["http", "tls"],
+                "metadataOnly": True if AWG_EXIT_ENABLED else False,
+                "routeOnly":    False,
+            },
+            "streamSettings": {
+                "network":       "xhttp",
+                "sockopt":       _sockopt_x,
+                "security":      "reality",
+                # Транспортный слой xHTTP (mode/path/extra: padding, xmux)
+                "xhttpSettings": _xhttp_s,
+                # TLS-маскировка REALITY — та же, что в tcp+reality:
+                # dest=unix-сокет nginx (сайт-заглушка), serverNames=домен.
+                "realitySettings": {
+                    "show":        False,
+                    "dest":        (PARAM_REALITY_DEST + ":443") if AWG_EXIT_ENABLED else PARAM_SOCKET_PATH,
+                    "xver":        0 if AWG_EXIT_ENABLED else 1,
+                    "spiderX":     PARAM_SPIDERX,
+                    "serverNames": [PARAM_REALITY_DEST if AWG_EXIT_ENABLED else PARAM_DOMAIN],
+                    "privateKey":  PARAM_PRIVATE_KEY,
+                    "publicKey":   PARAM_PUBLIC_KEY,
+                    "shortIds":    [PARAM_SHORTID],
+                    # Гейт версий клиента — см. подробный комментарий в
+                    # generate_xray_config() (VLESS_FAQ §18).
+                    "minClientVer": _min_client_ver(),
+                    "maxClientVer": "",
+                },
+            },
+        }],
+        "outbounds": [
+            {"protocol": "freedom", "tag": "direct",
+             "settings": {"domainStrategy": "UseIPv6v4"},
+             **({"streamSettings": {"sockopt": {"mark": AWG_FWMARK}}}
+                if AWG_EXIT_ENABLED else {})},
+            {"protocol": "blackhole", "tag": "BLOCK"},
+        ],
+        "routing": {
+            "domainStrategy": "IPIfNonMatch",
+            "rules": [
+                {"type": "field", "ip": ["127.0.0.1/32", "::1/128"], "outboundTag": "direct"},
+                {"type": "field", "protocol": ["bittorrent"],  "outboundTag": "BLOCK"},
+                {"type": "field", "network": "tcp,udp", "outboundTag": "direct"},
+            ],
+        },
+    }
+
+    # ── AWG: direct-local outbound + IP-проверка (как в reality-ветке) ──────
+    if AWG_EXIT_ENABLED:
+        _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+        if not any(ob.get("tag") == "direct-local" for ob in config["outbounds"]):
+            config["outbounds"].insert(0, {
+                "protocol": "freedom",
+                "tag":      "direct-local",
+                "settings": {"domainStrategy": _dl_strategy},
+            })
+            info(f"AWG: добавлен outbound direct-local "
+                 f"(domainStrategy={_dl_strategy}, без fwmark → напрямую через default route ОС)")
+        from chimera.modules.split_tunnel import build_awg_ip_check_rule
+        _ip_check_rules = build_awg_ip_check_rule("direct-local")
+        config["routing"]["rules"][:0] = _ip_check_rules
+        info("AWG: IP-проверочные домены (2ip.ru, 2ip.io, myip.ru, whoer.net) → direct-local")
+
+    # ── Split tunneling (Режим A, xHTTP+REALITY) ───────────────────────────
+    if SPLIT_TUNNEL_ENABLED:
+        _st_direct_tag = "direct-local" if AWG_EXIT_ENABLED else "direct"
+        st_rules = build_split_tunnel_routing_rules(
+            proxy_tag="direct", direct_tag=_st_direct_tag)
+        if st_rules:
+            config["routing"]["rules"] = st_rules + config["routing"]["rules"]
+            config["routing"]["geoDataBasePath"] = str(CONFIG_DIR)
+            info(f"Split tunneling: добавлено {len(st_rules)} правил "
+                 f"(Режим A, xHTTP+REALITY, AWG direct_tag={_st_direct_tag})")
+
+    cfg_file = CONFIG_DIR / "config.json"
+    _apply_stats_to_config(config)
+    cfg_file.write_text(json.dumps(config, indent=2, ensure_ascii=False))
+    _set_config_owner(cfg_file)
+
+    # Симлинк (как в reality-ветке)
+    alt_dir = Path("/usr/local/etc/xray")
+    if alt_dir.exists():
+        alt_cfg = alt_dir / "config.json"
+        alt_cfg.unlink(missing_ok=True)
+        try:
+            alt_cfg.symlink_to(cfg_file)
+            info(f"Симлинк /usr/local/etc/xray/config.json → {cfg_file}")
+        except Exception:
+            pass
+
+    r = _run([str(XRAY_BIN), "run", "-test", "-config", str(cfg_file)],
+             capture=True, check=False)
+    if r.returncode == 0:
+        success(f"Конфигурация xHTTP+REALITY валидирована "
+                f"(mode={XHTTP_MODE}, path={XHTTP_PATH}, port={SERVER_PORT}, "
+                f"REALITY dest={PARAM_SOCKET_PATH or PARAM_REALITY_DEST + ':443'})")
+    else:
+        # (geo-self-heal): см. generate_xray_config
+        _healed = False
+        try:
+            _cfg_h = json.loads(cfg_file.read_text())
+            from chimera.modules.split_tunnel import strip_geo_rules
+            if strip_geo_rules(_cfg_h):
+                cfg_file.write_text(json.dumps(_cfg_h, indent=2, ensure_ascii=False))
+                _set_config_owner(cfg_file)
+                r2 = _run([str(XRAY_BIN), "run", "-test", "-config", str(cfg_file)],
+                          capture=True, check=False)
+                if r2.returncode == 0:
+                    _healed = True
+                    warn("GEO-SELF-HEAL: geo-файлы не загрузились — geosite/geoip-"
+                         "правила УДАЛЕНЫ, Xray жив. Обновите geo-файлы "
+                         "(Сеть → 3 → GeoIP/GeoSite).")
+        except Exception:
+            pass
+        if not _healed:
+            warn("Конфигурация создана (валидация вернула предупреждение)")
+            log_to_file("WARN", r.stderr[-1000:] if r.stderr else "")
+
+
 # =============================================================================
 # =============================================================================
 def create_xray_service() -> None:
@@ -1536,6 +1877,12 @@ def create_xray_service() -> None:
     if PROTOCOL_MODE == "xhttp":
         pre_cmds = ""
         svc_desc = "Xray Service (VLESS xHTTP — backend for Nginx TLS)"
+    elif PROTOCOL_MODE == "xhttp_reality":
+        # xHTTP + REALITY: Xray владеет публичным SERVER_PORT напрямую
+        # (REALITY терминирует TLS), nginx — только unix-сокет заглушки.
+        # Как в AWG-ветке: сокет Xray не биндит, pre-команды не нужны.
+        pre_cmds = ""
+        svc_desc = "Xray Service (VLESS xHTTP REALITY)"
     elif AWG_EXIT_ENABLED:
         # === FIX 1c/AWG: В AWG-режиме unix socket не используется.
         # Xray слушает напрямую на 0.0.0.0:SERVER_PORT (TCP).
@@ -2219,7 +2566,7 @@ def _nginx_restart_if_reality() -> None:
     warn    = core.warn
     info    = core.info
 
-    if PROTOCOL_MODE != "reality" or not PARAM_SOCKET_PATH:
+    if PROTOCOL_MODE not in ("reality", "xhttp_reality") or not PARAM_SOCKET_PATH:
         return
     # AWG-режим: Xray слушает напрямую на TCP-порту, unix-сокет не используется
     if AWG_EXIT_ENABLED:

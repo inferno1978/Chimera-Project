@@ -138,6 +138,23 @@ def _users_gen_link(cfg: Path, uuid_str: str, email: str) -> str:
             mode = xhttp_s.get("mode", "stream-up")
             path_enc = urllib.parse.quote(path, safe="/")
             _fp = _fp_from_state()
+            # xHTTP + REALITY: inbound слушает публичный SERVER_PORT напрямую,
+            # в streamSettings ЕСТЬ realitySettings (в отличие от xhttp+tls,
+            # где security:none и TLS терминирует Nginx). Ссылка сочетает
+            # pbk/sid из realitySettings с type=xhttp/path/mode — БЕЗ flow.
+            _rs = ss.get("realitySettings", {})
+            if _rs:
+                _xr_sni = (_rs.get("serverNames") or [""])[0]
+                _xr_pbk = _rs.get("publicKey", "")
+                _xr_sids = _rs.get("shortIds", [""])
+                _xr_sid = _xr_sids[0] if _xr_sids else ""
+                domain = PARAM_DOMAIN or _xr_sni
+                port   = inb.get("port", 443)
+                host   = domain or get_server_ip("4") or ""
+                return (f"vless://{uuid_str}@{host}:{port}"
+                        f"?encryption=none&security=reality&sni={_xr_sni or domain}"
+                        f"&fp={_fp}&pbk={_xr_pbk}&sid={_xr_sid}"
+                        f"&type=xhttp&path={path_enc}&mode={mode}#{label}")
             # ВАЖНО: после перехода на схему Nginx→Xray (loopback backend) Xray-inbound
             # слушает 127.0.0.1:XHTTP_BACKEND_PORT с security:none — без tlsSettings.
             # Поэтому port и domain больше нельзя читать из inbound-конфига
@@ -890,6 +907,16 @@ def _gen_vless_link(host: str, uuid_str: str, pbk: str,
     _, _, _flag = get_server_country_cached()
     _flag_prefix = f"{_flag} " if _flag and _flag != "🌐" else ""
     label = _flag_prefix + urllib.parse.quote(domain)
+    if proto == "xhttp_reality":
+        # xHTTP + REALITY: транспорт xhttp + маскировка REALITY.
+        # security=reality (не tls), type=xhttp (не tcp), БЕЗ flow
+        # (xhttp-транспорт не поддерживает xtls-rprx-vision).
+        # pbk/sid — как у reality-ветки, path/mode — как у xhttp-ветки.
+        path_enc = urllib.parse.quote(xhttp_path, safe="/")
+        return (f"vless://{uuid_str}@{host}:{port}"
+                f"?encryption=none&security=reality&sni={domain}"
+                f"&fp={fp}&pbk={pbk}&sid={sid}"
+                f"&type=xhttp&path={path_enc}&mode={xhttp_mode}#{label}")
     if proto == "xhttp":
         path_enc = urllib.parse.quote(xhttp_path, safe="/")
         _extra_query = ""
@@ -1171,7 +1198,9 @@ def generate_client_links_ios() -> None:
         _box_row()
 
     _box_row()
-    proto_label = f"xHTTP TLS ({XHTTP_MODE})" if proto == "xhttp" else "VLESS+REALITY"
+    proto_label = (f"xHTTP+REALITY ({XHTTP_MODE})" if proto == "xhttp_reality"
+                   else f"xHTTP TLS ({XHTTP_MODE})" if proto == "xhttp"
+                   else "VLESS+REALITY")
     _box_row(f"{BLUE}💡 Протокол: {proto_label} | Порт: {SERVER_PORT}{NC}")
     _box_row(f"{BLUE}💡 Совет:{NC} Импортируйте в Karing (iOS) или Hiddify (iOS)")
     _box_wrap_msg(f"   {DIM}Файлы QR:{NC} ", 12,
@@ -1252,7 +1281,10 @@ def _users_patch_config_no_restart(users: list[dict]) -> bool:
                     continue
                 proto = inb.get("protocol", "")
                 st    = inb.get("streamSettings", {})
-                use_flow = (proto == "vless" and "realitySettings" in st)
+                # xhttp_reality: realitySettings в streamSettings ЕСТЬ, но
+                # транспорт xhttp — flow (xtls-rprx-vision) ЗАПРЕЩЁН.
+                use_flow = (proto == "vless" and "realitySettings" in st
+                            and st.get("network", "tcp") != "xhttp")
                 clients = []
                 for u in users:
                     client: dict = {"id": u["uuid"]}
@@ -1348,7 +1380,10 @@ def _users_apply_to_config(users: list[dict]) -> bool:
                     continue
                 proto = inb.get("protocol", "")
                 st    = inb.get("streamSettings", {})
-                use_flow = (proto == "vless" and "realitySettings" in st)
+                # xhttp_reality: realitySettings в streamSettings ЕСТЬ, но
+                # транспорт xhttp — flow (xtls-rprx-vision) ЗАПРЕЩЁН.
+                use_flow = (proto == "vless" and "realitySettings" in st
+                            and st.get("network", "tcp") != "xhttp")
                 clients = []
                 for u in effective_users:
                     client: dict = {"id": u["uuid"]}
@@ -1619,7 +1654,10 @@ def _unified_save_users(users: list[dict]) -> None:
                     continue
                 proto    = inb.get("protocol", "")
                 st       = inb.get("streamSettings", {})
-                use_flow = (proto == "vless" and "realitySettings" in st)
+                # xhttp_reality: realitySettings в streamSettings ЕСТЬ, но
+                # транспорт xhttp — flow (xtls-rprx-vision) ЗАПРЕЩЁН.
+                use_flow = (proto == "vless" and "realitySettings" in st
+                            and st.get("network", "tcp") != "xhttp")
                 net      = st.get("network", "tcp")
                 clients  = []
                 for u in users:
@@ -1686,7 +1724,7 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
         pub_key    = st.get("public_key", "")
         short_id   = st.get("short_id", "")
         spiderx    = st.get("spiderx", "/")
-    if proto == "reality" and not (pub_key and short_id):
+    if proto in ("reality", "xhttp_reality") and not (pub_key and short_id):
         warn("REALITY-параметры неполны (pbk/sid) — ссылки могут не работать; "
              "проверьте state.json и /etc/xray/config.json")
     xhttp_path = st.get("xhttp_path", "/")
@@ -1697,7 +1735,7 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
     # во всех остальных случаях — собственный домен.
     _awg_exit    = st.get("awg_exit_enabled", False) and install_mode == "B"
     _reality_dest = st.get("reality_dest", "")
-    if proto == "reality" and _awg_exit and _reality_dest:
+    if proto in ("reality", "xhttp_reality") and _awg_exit and _reality_dest:
         _sni = _reality_dest
     else:
         _sni = domain
@@ -1770,7 +1808,9 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
 
     if print_output:
         _box_row()
-        proto_label = f"xHTTP TLS ({xhttp_mode})" if proto == "xhttp" else "VLESS+REALITY"
+        proto_label = (f"xHTTP+REALITY ({xhttp_mode})" if proto == "xhttp_reality"
+                       else f"xHTTP TLS ({xhttp_mode})" if proto == "xhttp"
+                       else "VLESS+REALITY")
         _box_row(f"{BLUE}💡 Протокол: {proto_label} | Порт: {port}{NC}")
         if not ipv6 and install_mode == "A":
             _box_row(f"   {DIM}IPv6 не обнаружен — ссылка IPv6 недоступна{NC}")

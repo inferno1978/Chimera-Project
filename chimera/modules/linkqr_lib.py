@@ -203,13 +203,26 @@ def build_vless_link_for_user(user_uuid: Optional[str] = None,
     awg_exit     = state.get("awg_exit_enabled", False)
 
     # SNI: для режима B с AWG-exit — берём из reality_dest, иначе domain
+    # (xhttp_reality использует ключи REALITY — то же правило SNI)
     sni = domain
-    if proto == "reality" and awg_exit and install_mode == "B":
+    if proto in ("reality", "xhttp_reality") and awg_exit and install_mode == "B":
         sni = (state.get("reality_dest", domain) or domain).split(":")[0]
 
     if not domain or not uuid_val:
         return ""
 
+    if proto == "xhttp_reality":
+        # xHTTP + REALITY: type=xhttp + security=reality, без flow.
+        # pbk/sid — ключи REALITY, path — endpoint xHTTP.
+        from urllib.parse import quote as _uq
+        _xr_path = _uq(xhttp_path, safe="/")
+        _xr_mode = state.get("xhttp_mode", "stream-up")
+        return (
+            f"vless://{uuid_val}@{domain}:{port}"
+            f"?encryption=none&security=reality&sni={sni}"
+            f"&fp={fp}&pbk={pub_key}&sid={short_id}"
+            f"&type=xhttp&path={_xr_path}&mode={_xr_mode}#VLESS-xHTTP-REALITY"
+        )
     if proto == "xhttp":
         return (
             f"vless://{uuid_val}@{domain}:{port}"

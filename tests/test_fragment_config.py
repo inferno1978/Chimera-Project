@@ -201,6 +201,64 @@ class TestGenerateFragmentClientConfig(unittest.TestCase):
         self.assertIn("vpn.example.com", content)
         self.assertIn("test-uuid", content)
 
+    def test_generates_xhttp_reality_config(self):
+        """xhttp_reality: транспорт xhttp + REALITY TLS, БЕЗ flow."""
+        from chimera.modules.fragment_config import generate_fragment_client_config
+        self._state.write_text(json.dumps({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "xhttp_reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+            "fingerprint": "firefox",
+            "xhttp_path": "/xhttp",
+            "xhttp_mode": "stream-up",
+            "xtls_flow": "xtls-rprx-vision",
+        }))
+        with self._patch()[0], self._patch()[1]:
+            result = generate_fragment_client_config("1-3", "3-7", "10-20",
+                                                     label="xhttpreality")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.exists())
+        data = json.loads(result.read_text())
+        ob = data["outbounds"][0]
+        ss = ob["streamSettings"]
+        # users БЕЗ flow — xhttp-транспорт несовместим с vision
+        self.assertNotIn("flow", ob["settings"]["vnext"][0]["users"][0])
+        self.assertEqual(ss["network"], "xhttp")
+        self.assertEqual(ss["security"], "reality")
+        self.assertEqual(ss["xhttpSettings"],
+                         {"path": "/xhttp", "mode": "stream-up"})
+        rs = ss["realitySettings"]
+        # SNI по канону: без AWG — domain
+        self.assertEqual(rs["serverName"], "vpn.example.com")
+        self.assertEqual(rs["publicKey"], "PUBKEY")
+        self.assertEqual(rs["shortId"], "abcd1234")
+        self.assertEqual(rs["spiderX"], "/")
+        # фрагментация на месте
+        self.assertEqual(ss["sockopt"]["fragment"]["length"], "3-7")
+
+    def test_generates_xhttp_reality_config_awg_sni(self):
+        """xhttp_reality + AWG Mode B: SNI = reality_dest (serverNames)."""
+        from chimera.modules.fragment_config import generate_fragment_client_config
+        self._state.write_text(json.dumps({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "xhttp_reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+            "awg_exit_enabled": True,
+            "install_mode": "B",
+            "reality_dest": "dest.example.com:443",
+        }))
+        with self._patch()[0], self._patch()[1]:
+            result = generate_fragment_client_config("1-3", "3-7", "10-20",
+                                                     label="xhttprealityawg")
+        self.assertIsNotNone(result)
+        data = json.loads(result.read_text())
+        rs = data["outbounds"][0]["streamSettings"]["realitySettings"]
+        self.assertEqual(rs["serverName"], "dest.example.com")
+
     def test_sanitizes_label(self):
         """label с пробелами и спецсимволами — санитизируется."""
         from chimera.modules.fragment_config import generate_fragment_client_config

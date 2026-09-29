@@ -271,9 +271,11 @@ def _entry_node(state: dict, user: dict) -> Optional[dict]:
         return None
     proto = state.get("protocol_mode", "reality")
     sni = domain
-    if proto == "reality":
+    if proto in ("reality", "xhttp_reality"):
         # В Mode B + AWG exit SNI = reality_dest (та же логика, что
         # subscription._resolve_sni — клиент обязан видеть тот же SNI).
+        # xhttp_reality наследует SNI/keys-семантику REALITY (правило
+        # worklog: проверка proto == "reality" → in ("reality", "xhttp_reality")).
         awg = state.get("awg_exit_enabled", False)
         if awg and state.get("install_mode", "A") == "B" and state.get("reality_dest", ""):
             sni = state["reality_dest"].split(":")[0]
@@ -286,7 +288,10 @@ def _entry_node(state: dict, user: dict) -> Optional[dict]:
         "sid":        state.get("short_id", ""),
         "sni":        sni,
         "fp":         state.get("fingerprint", "chrome") or "chrome",
-        "flow":       state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision",
+        # xhttp_reality — БЕЗ flow (xhttp-транспорт не поддерживает
+        # xtls-rprx-vision); для reality/xhttp поведение не меняется.
+        "flow":       ("" if proto == "xhttp_reality" else
+                       (state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision")),
         "proto":      proto,
         "path":       state.get("xhttp_path", "/"),
         "xhttp_mode": state.get("xhttp_mode", "stream-up"),
@@ -318,7 +323,10 @@ def collect_nodes(user: dict) -> dict:
             "sid":        nd.get("shortid", ""),
             "sni":        nd.get("sni", "") or nd.get("host", ""),
             "fp":         nd.get("fp", "chrome") or "chrome",
-            "flow":       nd.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision",
+            # xhttp_reality-ноды — flow пустой (xhttp-транспорт без vision);
+            # для reality/xhttp поведение не меняется.
+            "flow":       ("" if nd.get("proto", "reality") == "xhttp_reality"
+                           else (nd.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision")),
             "proto":      nd.get("proto", "reality"),
             "path":       nd.get("path", "/"),
             "xhttp_mode": nd.get("xhttp_mode", "stream-up"),
@@ -405,7 +413,8 @@ def _yq(s: str) -> str:
 
 
 def _mihomo_proxy_block(nd: dict, indent: str = "  ") -> list[str]:
-    """Один proxies[] элемент для mihomo. Reality и xHTTP варианты."""
+    """Один proxies[] элемент для mihomo. Reality, xHTTP и xHTTP+REALITY
+    (последний — fallback на tcp+reality: mihomo не поддерживает xHTTP)."""
     lines = [
         f"{indent}- name: {_yq(nd['name'])}",
         f"{indent}  type: vless",
@@ -442,6 +451,17 @@ def _mihomo_proxy_block(nd: dict, indent: str = "  ") -> list[str]:
         # новых ядер невозможно. Старые mihomo (<1.19.29) неизвестное поле
         # в reality-opts молча игнорируют — конфиг остаётся совместимым.
         # См. worklog: ru-xray26-postfix-verify, LIVE 2026-09-10.
+        #
+        # xhttp_reality-ноды идут ЭТИМ ЖЕ рецептом — mihomo не поддерживает
+        # xHTTP-транспорт вместе с REALITY (network: http + reality-opts
+        # совмещать нельзя) → FALLBACK на tcp+reality. Юзер предупреждён
+        # при установке, что mihomo — fallback-клиент для xhttp_reality.
+        # flow у таких нод пустой → в блоке ниже подставится
+        # xtls-rprx-vision (nd.get('flow') or 'xtls-rprx-vision').
+        if nd["proto"] == "xhttp_reality":
+            # YAML-комментарий отдельной строкой ПЕРЕД блоком ноды
+            # (на уровне элемента списка) — виден прямо в готовом конфиге.
+            lines.insert(0, f"{indent}# xHTTP+REALITY node — mihomo fallback to tcp+reality (mihomo не поддерживает xHTTP)")
         lines += [
             f"{indent}  network: tcp",
             f"{indent}  tls: true",
@@ -1563,7 +1583,7 @@ DIRECT_TAG    = "direct"
 
 
 def _singbox_vless_outbound(nd: dict) -> dict:
-    """sing-box vless outbound (Reality или xHTTP)."""
+    """sing-box vless outbound (Reality, xHTTP или xHTTP+REALITY)."""
     ob: dict = {
         "type": "vless",
         "tag": nd["name"],
@@ -1581,6 +1601,26 @@ def _singbox_vless_outbound(nd: dict) -> dict:
             "enabled": True,
             "server_name": nd["sni"] or nd["host"],
             "utls": {"enabled": True, "fingerprint": nd["fp"]},
+        }
+    elif nd["proto"] == "xhttp_reality":
+        # xHTTP + REALITY (канон sing-box, worklog): транспорт xhttp
+        # (mode из nd, stream-up по умолчанию) + REALITY-объект в TLS,
+        # БЕЗ flow — xhttp-транспорт не поддерживает xtls-rprx-vision.
+        # Ветки xhttp (выше) и reality (ниже) не затронуты.
+        ob["transport"] = {
+            "type": "xhttp",
+            "mode": nd.get("xhttp_mode", "stream-up"),
+            "path": nd.get("path", "/"),
+        }
+        ob["tls"] = {
+            "enabled": True,
+            "server_name": nd["sni"] or nd["host"],
+            "utls": {"enabled": True, "fingerprint": nd["fp"]},
+            "reality": {
+                "enabled": True,
+                "public_key": nd["pbk"],
+                "short_id": nd.get("sid", ""),
+            },
         }
     else:
         if nd.get("flow"):

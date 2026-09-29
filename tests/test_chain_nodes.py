@@ -10,7 +10,7 @@ Unit-тесты для chimera/modules/chain_nodes.py — управление e
   1. _nodes_from_state — нормализация state.json → список exit-нод
      (новый формат chain_nodes + legacy chain_exit_*).
   2. _make_exit_node_config — построение Xray-конфига для exit-ноды
-     (xhttp и reality ветки).
+     (xhttp, reality и xhttp_reality ветки).
   3. _speed_test_node_latency — форматирование latency (mocked socket).
   4. _speed_test_node_geo — парсинг JSON-ответа ip-api (mocked _run).
   5. _access_log_bytes_per_node — парсинг access.log, сопоставление тегов.
@@ -299,6 +299,59 @@ class TestMakeExitNodeConfig(unittest.TestCase):
             cfg = chain_nodes._make_exit_node_config(nd)
         sockopt = cfg["inbounds"][0]["streamSettings"]["sockopt"]
         self.assertTrue(sockopt.get("tcpNoDelay"))
+
+    def test_xhttp_reality_branch_builds_xhttp_reality_inbound(self):
+        """xhttp_reality-нода: inbound xhttp+reality — БЕЗ tlsSettings/LE и БЕЗ flow."""
+        from chimera.modules import chain_nodes
+        with patch.object(self._fake_core, "_build_exit_xhttp_settings",
+                          return_value={"path": "/xhr", "mode": "stream-up"}), \
+             patch.object(self._fake_core, "_build_sockopt",
+                          return_value={}), \
+             patch.object(self._fake_core, "XTLS_FLOW", "xtls-rprx-vision",
+                          create=True):
+            nd = {
+                "proto": "xhttp_reality",
+                "port": 8443,
+                "uuid": "11111111-2222-3333-4444-555555555555",
+                "sni":  "xhr.exit.com",
+                "pubkey":  "PUB",
+                "shortid": "abcd1234",
+                "host": "1.2.3.4",
+                "path": "/xhr",
+                "xhttp_mode": "stream-up",
+            }
+            cfg = chain_nodes._make_exit_node_config(nd)
+
+        inb = cfg["inbounds"][0]
+        self.assertEqual(inb["tag"], "inbound-xhttp-reality")
+        self.assertEqual(inb["port"], 8443)
+        ss = inb["streamSettings"]
+        # Транспорт xHTTP + REALITY TLS — LE-сертификат НЕ нужен
+        self.assertEqual(ss["network"], "xhttp")
+        self.assertEqual(ss["security"], "reality")
+        self.assertNotIn("tlsSettings", ss)
+        # Клиент БЕЗ flow — xHTTP-транспорт несовместим с xtls-rprx-vision
+        client = inb["settings"]["clients"][0]
+        self.assertEqual(client["id"], "11111111-2222-3333-4444-555555555555")
+        self.assertEqual(client["email"], "entry@chain")
+        self.assertNotIn("flow", client)
+        # xhttpSettings делегированы helper'у
+        self.assertEqual(ss["xhttpSettings"]["path"], "/xhr")
+        # sockopt — стиль xhttp-ветки (keepalive/bbr)
+        self.assertEqual(ss["sockopt"]["tcpCongestion"], "bbr")
+        self.assertEqual(ss["sockopt"]["tcpKeepAliveInterval"], 15)
+        # realitySettings — как в reality-ветке: placeholder приватного ключа
+        rs = ss["realitySettings"]
+        self.assertEqual(rs["publicKey"], "PUB")
+        self.assertEqual(rs["shortIds"], ["abcd1234"])
+        self.assertEqual(rs["serverNames"], ["xhr.exit.com"])
+        self.assertEqual(rs["dest"], "xhr.exit.com:443")
+        self.assertIn("privateKey", rs)
+        # Гейт версий клиента присутствует явно (как в reality-ветке)
+        self.assertIn("minClientVer", rs)
+        # Comment ведёт к xray x25519 (приватный ключ REALITY нужен и тут)
+        self.assertIn("xray x25519", cfg["_comment"])
+        self.assertIn("xHTTP + REALITY", cfg["_comment"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════

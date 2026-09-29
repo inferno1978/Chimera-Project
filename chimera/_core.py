@@ -370,7 +370,8 @@ from chimera.modules.xray_install import (
     _verify_sha256, _xray_print_manual_download_hint, _xray_try_local_zip,
     install_xray, _parse_x25519_keys, _parse_x25519_field,
     generate_reality_keys, _detect_xhttp_mode_support,
-    generate_xray_config, generate_xray_config_xhttp, create_xray_service,
+    generate_xray_config, generate_xray_config_xhttp,
+    generate_xray_config_xhttp_reality, create_xray_service,
     _xray_get_release_info, _xray_version_norm, _xray_current_version,
     _xray_geo_is_runetfreedom, _geo_print_manual_download_hint,
     _xray_update_geo_runetfreedom, _xray_do_upgrade, _xray_restart_all_services,
@@ -1123,7 +1124,7 @@ AWG_QUICK_BIN: str = "awg-quick"
 # =============================================================================
 # "reality"  — VLESS + TCP + REALITY (xtls-rprx-vision)  — классический
 # "xhttp"    — VLESS + xHTTP + TLS   (H2/HTTPS маскировка)
-PROTOCOL_MODE: str = "reality"   # "reality" | "xhttp"
+PROTOCOL_MODE: str = "reality"   # "reality" | "xhttp" | "xhttp_reality"
 
 # Режим XTLS-flow (только для PROTOCOL_MODE == "reality")
 # "xtls-rprx-vision"  — Vision (умолчание, лучшая совместимость, рекомендуется)
@@ -2633,8 +2634,15 @@ def parse_vless_link(link: str) -> dict | None:
         ):
             return None
 
-        # Определяем тип протокола
-        if security == "reality":
+        # Определяем тип протокола.
+        # xHTTP+REALITY проверяем ПЕРВЫМ: transport=xhttp + security=reality
+        # (или явный параметр mode=) — иначе такая ссылка ошибочно уйдёт в
+        # generic xhttp-ветку (security=tls) или будет принята за классический
+        # tcp+reality. Классический REALITY (type=tcp, без mode=) остаётся
+        # proto="reality" — существующий парсинг не меняется.
+        if security == "reality" and (net_type in ("xhttp", "http") or "mode" in params):
+            proto = "xhttp_reality"
+        elif security == "reality":
             proto = "reality"
         elif security in ("tls", "") and net_type in ("xhttp", "http"):
             proto = "xhttp"
@@ -2980,6 +2988,8 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
         generate_xray_config_chain_entry_multi()
     elif PROTOCOL_MODE == "xhttp":
         generate_xray_config_xhttp()
+    elif PROTOCOL_MODE == "xhttp_reality":
+        generate_xray_config_xhttp_reality()
     else:
         generate_xray_config()
 
@@ -3091,7 +3101,8 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
     # и перезапустить nginx чтобы он подхватил его.
     # BUGFIX: nginx создаёт unix-сокет при своём bind; ждать сокет ДО restart nginx —
     # deadlock. Сначала перезапускаем nginx, потом ждём подтверждения сокета.
-    if PROTOCOL_MODE == "reality" and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
+    if PROTOCOL_MODE in ("reality", "xhttp_reality") \
+            and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
         rn = _run(["systemctl", "is-active", "nginx"], capture=True, check=False)
         if rn.stdout.strip() == "active":
             _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
@@ -3183,7 +3194,8 @@ def do_rebuild_xray_config() -> None:
     info("Параметры загружены из state.json.")
     info(f"  Режим: {INSTALL_MODE}, протокол: {PROTOCOL_MODE}, домен: {PARAM_DOMAIN}")
     # Если PARAM_SOCKET_PATH пустой — что-то не так с state.json.
-    if PROTOCOL_MODE == "reality" and not AWG_EXIT_ENABLED and not PARAM_SOCKET_PATH:
+    if PROTOCOL_MODE in ("reality", "xhttp_reality") \
+            and not AWG_EXIT_ENABLED and not PARAM_SOCKET_PATH:
         warn("PARAM_SOCKET_PATH пуст — в state.json нет ключа 'socket'.")
         warn("Проверьте: jq '.socket' /var/lib/xray-installer/state.json")
         return
@@ -3207,7 +3219,7 @@ def do_rebuild_xray_config() -> None:
     # ""/unset = гейт ВЫКЛ (дефолт убран); непустой порог жив — mihomo
     # проходит пороги ≤ "1.8.2"; sing-box против 26.9.8+ не пройдёт ни
     # при каком гейте (барьер — MLKEM-чек ClientHello, не версия).
-    if PROTOCOL_MODE == "reality" and PROTOCOL_MODE != "xhttp":
+    if PROTOCOL_MODE in ("reality", "xhttp_reality"):
         try:
             cfg = json.loads((CONFIG_DIR / "config.json").read_text())
             _mcv_want = _min_client_ver_from_state()
@@ -3749,6 +3761,8 @@ def _verify_xray_dns_via_agh() -> bool:
             generate_xray_config_chain_entry_multi()
         elif PROTOCOL_MODE == "xhttp":
             generate_xray_config_xhttp()
+        elif PROTOCOL_MODE == "xhttp_reality":
+            generate_xray_config_xhttp_reality()
         else:
             generate_xray_config()
         regen_ok = True
@@ -3935,6 +3949,8 @@ def do_full_install() -> None:
         
         if PROTOCOL_MODE == "xhttp":
             generate_xray_config_xhttp()           # Режим A, xHTTP TLS
+        elif PROTOCOL_MODE == "xhttp_reality":
+            generate_xray_config_xhttp_reality()   # Режим A, xHTTP + REALITY
         else:
             generate_xray_config()                 # Режим А, REALITY (стандарт)
         PROGRESS.update(5, "Конфиг Xray")
@@ -3994,6 +4010,8 @@ def do_full_install() -> None:
             else:
                 if PROTOCOL_MODE == "xhttp":
                     generate_xray_config_xhttp()
+                elif PROTOCOL_MODE == "xhttp_reality":
+                    generate_xray_config_xhttp_reality()
                 else:
                     generate_xray_config()
     else:
@@ -4092,7 +4110,8 @@ def do_full_install() -> None:
     # Проверка сокета — только в классическом REALITY (не AWG, не xHTTP).
     # В AWG-режиме Xray слушает напрямую TCP-порт, unix-сокета нет.
     # В xHTTP-режиме Xray слушает loopback backend, unix-сокета нет.
-    if PROTOCOL_MODE == "reality" and nginx_ok and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
+    if PROTOCOL_MODE in ("reality", "xhttp_reality") \
+            and nginx_ok and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
         # Nginx уже запущен выше — он создаёт сокет при bind (listen unix:).
         # Ждём подтверждения (обычно <1 сек, но даём 20 сек как в
         # _nginx_restart_if_reality для надёжности на медленных VPS).
@@ -4301,6 +4320,9 @@ def do_full_install() -> None:
     _box_top("УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО ✓")
     if PROTOCOL_MODE == "xhttp":
         proto_label = f"VLESS + xHTTP + TLS (mode={XHTTP_MODE}, path={XHTTP_PATH})"
+    elif PROTOCOL_MODE == "xhttp_reality":
+        proto_label = (f"VLESS + xHTTP + REALITY "
+                       f"(mode={XHTTP_MODE}, path={XHTTP_PATH})")
     else:
         proto_label = "VLESS + TCP + REALITY (xtls-rprx-vision)"
     _box_row(f"  Протокол:     {CYAN}{proto_label}{NC}")
@@ -4311,16 +4333,23 @@ def do_full_install() -> None:
     _box_sep()
     _box_row(f"  {YELLOW}Чувствительные параметры (сохраните!):{NC}")
     _box_row(f"  UUID:         {CYAN}{PARAM_UUID}{NC}")
-    if PROTOCOL_MODE == "reality":
+    if PROTOCOL_MODE in ("reality", "xhttp_reality"):
         _box_row(f"  Private Key:  {CYAN}{PARAM_PRIVATE_KEY}{NC}")
         _box_row(f"  Public Key:   {CYAN}{PARAM_PUBLIC_KEY}{NC}")
         _box_row(f"  Short ID:     {CYAN}{PARAM_SHORTID}{NC}")
         _box_row(f"  SpiderX:      {CYAN}{PARAM_SPIDERX}{NC}")
         _box_row(f"  Socket:       {CYAN}{PARAM_SOCKET_PATH}{NC}")
-    else:
+        if PROTOCOL_MODE == "xhttp_reality":
+            _box_row(f"  xHTTP mode:   {CYAN}{XHTTP_MODE}{NC}")
+            _box_row(f"  xHTTP path:   {CYAN}{XHTTP_PATH}{NC}")
+    elif PROTOCOL_MODE == "xhttp":
         _box_row(f"  xHTTP mode:   {CYAN}{XHTTP_MODE}{NC}")
         _box_row(f"  xHTTP path:   {CYAN}{XHTTP_PATH}{NC}")
         _box_row(f"  TLS cert:     {CYAN}/etc/letsencrypt/live/{PARAM_DOMAIN}/fullchain.pem{NC}")
+    else:
+        _box_row(f"  xHTTP mode:   {CYAN}{XHTTP_MODE}{NC}")
+        _box_row(f"  xHTTP path:   {CYAN}{XHTTP_PATH}{NC}")
+        _box_row(f"  REALITY keys: {CYAN}(см. выше){NC}")
     if INSTALL_MODE == "B":
         _box_sep()
         _box_row(f"  {GREEN}Exit Node(s) (зарубежный VPS, первый):{NC}")
@@ -4335,7 +4364,7 @@ def do_full_install() -> None:
         _box_row(f"  Host:         {CYAN}{nd_host}:{nd_port}{NC}")
         _box_row(f"  UUID:         {CYAN}{nd_uuid}{NC}")
         _box_row(f"  Proto:        {CYAN}{nd_proto.upper()}{NC}")
-        if nd_proto == "reality" and nd_pubkey:
+        if nd_proto in ("reality", "xhttp_reality") and nd_pubkey:
             _box_row(f"  PubKey:       {CYAN}{nd_pubkey[:30]}...{NC}")
             _box_row(f"  ShortID:      {CYAN}{nd_sid}{NC}")
         _box_row(f"  SNI:          {CYAN}{nd_sni}{NC}")
@@ -4550,7 +4579,11 @@ def do_dry_run() -> None:
     proto_label = (
         f"VLESS + xHTTP + TLS  (mode={XHTTP_MODE}, path={XHTTP_PATH})"
         if PROTOCOL_MODE == "xhttp"
-        else "VLESS + TCP + REALITY (xtls-rprx-vision)"
+        else (
+            f"VLESS + xHTTP + REALITY  (mode={XHTTP_MODE}, path={XHTTP_PATH})"
+            if PROTOCOL_MODE == "xhttp_reality"
+            else "VLESS + TCP + REALITY (xtls-rprx-vision)"
+        )
     )
     mode_label = "Обычный сервер (A)" if INSTALL_MODE == "A" else "Каскадный Entry Node (B)"
     _box_row(f"      Протокол:  {CYAN}{proto_label}{NC}")
@@ -5145,12 +5178,13 @@ def do_manage_users() -> None:
                         short_id  = st.get("short_id", "")
                         spiderx   = st.get("spiderx", "/")
                     xhttp_path = st.get("xhttp_path", "/")
+                    xhttp_mode = st.get("xhttp_mode", "stream-up")
                     server_ip = get_server_ip("4")
                     # SNI: при Mode B + AWG — домен маскировки, иначе собственный домен
                     _ul_install_mode = st.get("install_mode", "A")
                     _ul_awg = st.get("awg_exit_enabled", False) and _ul_install_mode == "B"
                     _ul_reality_dest = st.get("reality_dest", "")
-                    if proto == "reality" and _ul_awg and _ul_reality_dest:
+                    if proto in ("reality", "xhttp_reality") and _ul_awg and _ul_reality_dest:
                         _ul_sni = _ul_reality_dest
                     else:
                         _ul_sni = domain
@@ -5163,6 +5197,20 @@ def do_manage_users() -> None:
                             f"&security=reality&sni={_ul_sni}"
                             f"&fp={_ul_fp}&pbk={pub_key}&sid={short_id}"
                             f"&spx={spiderx}&type=tcp"
+                            f"#{u.get('name','user')}"
+                        )
+                    elif proto == "xhttp_reality":
+                        # xHTTP + REALITY: host = IP (как у reality-рецепта,
+                        # без DNS-зависимости), sni/keys — REALITY,
+                        # type/path/mode — транспорт xHTTP. БЕЗ flow.
+                        import urllib.parse
+                        _ul_fp = st.get("fingerprint", "chrome") or "chrome"
+                        _ul_path = urllib.parse.quote(xhttp_path, safe="/")
+                        link = (
+                            f"vless://{u['uuid']}@{server_ip}:{port}"
+                            f"?encryption=none&security=reality&sni={_ul_sni}"
+                            f"&fp={_ul_fp}&pbk={pub_key}&sid={short_id}"
+                            f"&type=xhttp&path={_ul_path}&mode={xhttp_mode}"
                             f"#{u.get('name','user')}"
                         )
                     else:
@@ -9449,7 +9497,7 @@ def _identity_params_recover() -> list:
             PARAM_DOMAIN = new_val
             recovered.append("domain")
 
-    if not PARAM_SOCKET_PATH and PROTOCOL_MODE == "reality" \
+    if not PARAM_SOCKET_PATH and PROTOCOL_MODE in ("reality", "xhttp_reality") \
             and not AWG_EXIT_ENABLED:
         new_val = _first_nonempty(
             state.get("socket", ""),

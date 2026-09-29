@@ -176,7 +176,7 @@ def run_unit_tests() -> None:
 
     # Тест 9: nginx -t (валидность конфига nginx)
     _nginx = find_nginx_bin()
-    _nginx_optional = (_ut_proto == "reality") or _ut_awg
+    _nginx_optional = (_ut_proto in ("reality", "xhttp_reality")) or _ut_awg
     _nginx_label = "nginx -t (конфиг валиден)" if not _nginx_optional else "nginx -t (опц.)"
     if _nginx:
         _r = _run([_nginx, "-t"], capture=True, check=False, quiet=True)
@@ -200,7 +200,7 @@ def run_unit_tests() -> None:
     # Тест 11: certbot доступен
     _certbot = next((p for p in (Path("/snap/bin/certbot"), Path("/usr/bin/certbot"))
                      if p.exists()), None)
-    _certbot_optional = (_ut_proto == "reality")
+    _certbot_optional = (_ut_proto in ("reality", "xhttp_reality"))
     if _certbot_optional:
         _certbot_label = "certbot (опц., REALITY не нужен)"
         if _certbot:

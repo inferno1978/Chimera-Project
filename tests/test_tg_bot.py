@@ -125,6 +125,54 @@ class TestGetVlessLink(unittest.TestCase):
         self.assertIn("security=tls", link)
         self.assertIn("path=/xhttp", link)
 
+    def test_xhttp_reality_mode(self):
+        """xHTTP + REALITY: type=xhttp + security=reality, path/mode, БЕЗ flow."""
+        from chimera.modules.tg_bot import _get_vless_link
+        state = {
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "xhttp_reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+            "xhttp_path": "/xhttp",
+            "xhttp_mode": "stream-up",
+            "fingerprint": "chrome",
+            "server_port": 443,
+        }
+        with self._patch_state(state):
+            link = _get_vless_link()
+        self.assertTrue(link.startswith(
+            "vless://test-uuid@vpn.example.com:443?"))
+        self.assertIn("encryption=none", link)
+        self.assertIn("security=reality", link)
+        self.assertIn("sni=vpn.example.com", link)
+        self.assertIn("fp=chrome", link)
+        self.assertIn("pbk=PUBKEY", link)
+        self.assertIn("sid=abcd1234", link)
+        self.assertIn("type=xhttp", link)
+        self.assertIn("path=/xhttp", link)
+        self.assertIn("mode=stream-up", link)
+        self.assertNotIn("flow=", link)
+
+    def test_xhttp_reality_mode_b_awg_uses_reality_dest_sni(self):
+        """xHTTP+REALITY наследует SNI-правило REALITY: Mode B + AWG → reality_dest."""
+        from chimera.modules.tg_bot import _get_vless_link
+        state = {
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "xhttp_reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd",
+            "xhttp_path": "/xhttp",
+            "reality_dest": "dest.example.com:443",
+            "awg_exit_enabled": True,
+            "install_mode": "B",
+        }
+        with self._patch_state(state):
+            link = _get_vless_link()
+        self.assertIn("sni=dest.example.com", link)
+        self.assertNotIn("flow=", link)
+
     def test_returns_empty_when_no_domain(self):
         from chimera.modules.tg_bot import _get_vless_link
         state = {"uuid": "test-uuid"}
@@ -492,5 +540,93 @@ class TestGenerateBotScriptSyntax(unittest.TestCase):
         self.assertTrue(found, "if __name__ == '__main__' guard not found")
 
 
+class TestGeneratedScriptVlessLink(unittest.TestCase):
+    """get_vless_link В СГЕНЕРИРОВАННОМ inner-скрипте — поведенческий тест.
+
+    ast.parse (TestGenerateBotScriptSyntax) ловит только ошибки экранирования
+    {{ }}. Здесь скрипт реально исполняется через exec() (main-guard не
+    срабатывает: __name__ внутри exec-неймспейса != "__main__"), подменяется
+    STATE_F и проверяется КАНОНИЧЕСКИЙ формат ссылок всех трёх режимов.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "state.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _get_inner_link(self, state_dict):
+        from chimera.modules.tg_bot import _generate_bot_script
+        script = _generate_bot_script(
+            {"token": "123456:ABC-DEF", "admin_id": "111111111",
+             "allowed_users": [], "invite_tokens": {}},
+            {"token": "", "chat_id": ""})
+        ns = {}
+        exec(compile(script, "inner_bot.py", "exec"), ns)
+        self._state.write_text(json.dumps(state_dict))
+        ns["STATE_F"] = self._state
+        return ns["get_vless_link"]()
+
+    def test_xhttp_reality_canonical_link(self):
+        """xHTTP+REALITY: security=reality + type=xhttp + mode, БЕЗ flow."""
+        link = self._get_inner_link({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "xhttp_reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd",
+            "xhttp_path": "/xhttp",
+            "xhttp_mode": "stream-up",
+            "fingerprint": "chrome",
+            "server_port": 443,
+        })
+        self.assertTrue(link.startswith(
+            "vless://test-uuid@vpn.example.com:443?"))
+        self.assertIn("encryption=none", link)
+        self.assertIn("security=reality", link)
+        self.assertIn("pbk=PUBKEY", link)
+        self.assertIn("sid=abcd", link)
+        self.assertIn("type=xhttp", link)
+        self.assertIn("path=/xhttp", link)
+        self.assertIn("mode=stream-up", link)
+        self.assertNotIn("flow=", link)
+        self.assertIn("#VLESS-xHTTP-REALITY", link)
+
+    def test_xhttp_reality_mode_b_awg_sni(self):
+        """Mode B + AWG: SNI из reality_dest (правило REALITY унаследовано)."""
+        link = self._get_inner_link({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "xhttp_reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd",
+            "xhttp_path": "/xhttp",
+            "reality_dest": "dest.example.com:443",
+            "awg_exit_enabled": True,
+            "install_mode": "B",
+        })
+        self.assertIn("sni=dest.example.com", link)
+        self.assertNotIn("flow=", link)
+
+    def test_reality_regression(self):
+        """Регрессия: классическая REALITY-ветка inner-скрипта не изменилась."""
+        link = self._get_inner_link({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd",
+            "xtls_flow": "xtls-rprx-vision",
+        })
+        self.assertIn("type=tcp", link)
+        self.assertIn("security=reality", link)
+        self.assertIn("flow=xtls-rprx-vision", link)
+        self.assertIn("#VLESS-REALITY", link)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

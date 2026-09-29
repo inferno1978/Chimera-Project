@@ -256,9 +256,9 @@ def prompt_parameters() -> None:
         else:
             warn("   Введите 1 или 2")
 
-    # --- 3. Ключи REALITY (только для REALITY) ---
+    # --- 3. Ключи REALITY (REALITY и xHTTP+REALITY) ---
     key_mode = "auto"
-    if PROTOCOL_MODE == "reality":
+    if PROTOCOL_MODE in ("reality", "xhttp_reality"):
         _box_top(f" {BLUE}[5/12] Ключи REALITY (x25519) — будут сгенерированы после установки Xray:{NC}")
         _box_item("1", f"Сгенерировать автоматически (рекомендуется)")
         _box_item("2", f"Ввести вручную (если уже есть пара ключей)")
@@ -304,8 +304,8 @@ def prompt_parameters() -> None:
     else:
         info("[5/12] Ключи REALITY: пропущено (xHTTP TLS использует TLS-сертификат Let's Encrypt)")
 
-    # --- 4. SpiderX (только для REALITY) ---
-    if PROTOCOL_MODE == "reality":
+    # --- 4. SpiderX (REALITY и xHTTP+REALITY) ---
+    if PROTOCOL_MODE in ("reality", "xhttp_reality"):
         _box_top(f" {BLUE}[6/12] SpiderX (путь краулера REALITY):{NC}")
         auto_spx = gen_spiderx()
         _box_item("1", f"Сгенерировать автоматически: {DIM}{auto_spx}{NC}")
@@ -344,8 +344,8 @@ def prompt_parameters() -> None:
         setattr(core, "PARAM_SPIDERX", PARAM_SPIDERX)
         info(f"[6/12] SpiderX: пропущено (xHTTP TLS)")
 
-    # --- 5. Unix Socket (только для REALITY) ---
-    if PROTOCOL_MODE == "reality":
+    # --- 5. Unix Socket (REALITY и xHTTP+REALITY: fallback-dest REALITY) ---
+    if PROTOCOL_MODE in ("reality", "xhttp_reality"):
         # Переиспользуем сокет из xray конфига или state.json если уже установлено
         _existing_sock = ""
         try:
@@ -568,9 +568,14 @@ def prompt_parameters() -> None:
     _box_bottom()
     _box_top(f"Сводка параметров")
     _box_row()
-    proto_str = f"xHTTP TLS (mode={XHTTP_MODE}, path={XHTTP_PATH}, preset={XHTTP_PERF_PRESET})" if PROTOCOL_MODE == "xhttp" else "VLESS + TCP + REALITY"
-    _box_row(f"  {CYAN}Протокол:{NC}        {proto_str}")
     if PROTOCOL_MODE == "xhttp":
+        proto_str = f"xHTTP TLS (mode={XHTTP_MODE}, path={XHTTP_PATH}, preset={XHTTP_PERF_PRESET})"
+    elif PROTOCOL_MODE == "xhttp_reality":
+        proto_str = f"xHTTP + REALITY (mode={XHTTP_MODE}, path={XHTTP_PATH}, preset={XHTTP_PERF_PRESET})"
+    else:
+        proto_str = "VLESS + TCP + REALITY"
+    _box_row(f"  {CYAN}Протокол:{NC}        {proto_str}")
+    if PROTOCOL_MODE in ("xhttp", "xhttp_reality"):
         _box_row(f"  {CYAN}xPaddingBytes:{NC}   {XHTTP_PADDING_BYTES}")
         _box_row(f"  {CYAN}noSSEHeader:{NC}     {XHTTP_NO_SSE_HEADER}")
         _box_row(f"  {CYAN}noGRPCHeader:{NC}    {XHTTP_NO_GRPC_HEADER}")
@@ -591,7 +596,7 @@ def prompt_parameters() -> None:
     _box_row(f"  {CYAN}Порт:{NC}            {SERVER_PORT}")
     _box_row(f"  {CYAN}UUID:{NC}            {PARAM_UUID}")
     _box_row(f"  {CYAN}ShortID:{NC}         {PARAM_SHORTID}")
-    if PROTOCOL_MODE == "reality":
+    if PROTOCOL_MODE in ("reality", "xhttp_reality"):
         if key_mode == "manual":
             _box_row(f"  {CYAN}Public Key:{NC}      {PARAM_PUBLIC_KEY}")
         else:
@@ -697,11 +702,18 @@ def prompt_protocol_mode() -> None:
     _box_item("2", f"🌐 VLESS + xHTTP + TLS")
     _box_desc(f"Трафик выглядит как обычный HTTPS-поток.")
     _box_desc(f"Обходит DPI через маскировку под HTTP/2 или chunked-streaming.")
+    _box_desc(f"Требуется LE-сертификат (получим через certbot).")
+    _box_row()
+    _box_item("3", f"🛡 VLESS + xHTTP + REALITY")
+    _box_desc(f"Транспорт xHTTP (xmux, padding, HTTP/2-паттерны) + маскировка REALITY.")
+    _box_desc(f"LE-сертификат для прокси не нужен (TLS терминирует REALITY).")
+    _box_desc(f"{YELLOW}Только xray-клиенты: v2rayN, NekoBox, sing-box. mihomo НЕ поддерживается.{NC}")
+    _box_desc(f"Без MLKEM768-костыля и без flow.")
     _box_row()
     _box_bottom()
     while True:
         try:
-            choice = input(f"  {CYAN}Выбор [1/2]:{NC} ").strip() or "1"
+            choice = input(f"  {CYAN}Выбор [1/2/3]:{NC} ").strip() or "1"
         except KeyboardInterrupt:
             print()
             raise
@@ -715,8 +727,17 @@ def prompt_protocol_mode() -> None:
             setattr(core, "PROTOCOL_MODE", PROTOCOL_MODE)
             _prompt_xhttp_options()
             break
+        elif choice == "3":
+            PROTOCOL_MODE = "xhttp_reality"
+            setattr(core, "PROTOCOL_MODE", PROTOCOL_MODE)
+            success("Протокол: VLESS + xHTTP + REALITY "
+                    "(xray-клиенты; mihomo — fallback на tcp+reality)")
+            # xHTTP-параметры (mode/path/preset) — те же, что и для xHTTP TLS:
+            # они попадают в xhttpSettings inbound'а и в клиентские ссылки.
+            _prompt_xhttp_options()
+            break
         else:
-            warn("Введите 1 или 2")
+            warn("Введите 1, 2 или 3")
 
     # ── Выбор порта (общий для обоих протоколов) ─────────────────────────────
     _box_top(f"Порт прослушивания Xray")

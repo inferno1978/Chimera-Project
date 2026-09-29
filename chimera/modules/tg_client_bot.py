@@ -905,13 +905,25 @@ def _build_vless_link(uuid_val):
     fp = st.get("fingerprint", "chrome") or "chrome"
     xtls_flow = st.get("xtls_flow", "xtls-rprx-vision") or ""
     xhttp_path = st.get("xhttp_path", "/")
+    xhttp_mode = st.get("xhttp_mode", "stream-up")
     install_mode = st.get("install_mode", "A")
     awg_exit = st.get("awg_exit_enabled", False)
+    # SNI: для режима B с AWG — reality_dest (xhttp_reality наследует
+    # правило REALITY — те же ключи/dest маскировки), иначе domain.
     sni = domain
-    if proto == "reality" and awg_exit and install_mode == "B":
+    if proto in ("reality", "xhttp_reality") and awg_exit and install_mode == "B":
         sni = (st.get("reality_dest", domain) or domain).split(":")[0]
     if not domain or not uuid_val:
         return ""
+    if proto == "xhttp_reality":
+        # xHTTP + REALITY: security=reality + type=xhttp, БЕЗ flow
+        # (xhttp-транспорт не поддерживает xtls-rprx-vision).
+        # pbk/sid — как у reality-ветки, path/mode — как у xhttp-ветки.
+        path_enc = urllib.parse.quote(xhttp_path, safe="/")
+        return (f"vless://{{uuid_val}}@{{domain}}:{{port}}"
+                f"?encryption=none&security=reality&sni={{sni}}"
+                f"&fp={{fp}}&pbk={{pub_key}}&sid={{short_id}}"
+                f"&type=xhttp&path={{path_enc}}&mode={{xhttp_mode}}#VLESS-xHTTP-REALITY")
     if proto == "xhttp":
         return f"vless://{{uuid_val}}@{{domain}}:{{port}}?type=xhttp&security=tls&path={{xhttp_path}}&sni={{sni}}&fp={{fp}}#VLESS-xHTTP"
     flow_part = f"&flow={{xtls_flow}}" if xtls_flow else ""

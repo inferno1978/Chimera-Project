@@ -485,8 +485,8 @@ def do_manage_reality_keys() -> None:
         _box_row(f"  Private Key: {DIM}{cur_priv_hint} (скрыт){NC}")
         _box_sep()
 
-        if proto != "reality":
-            _box_row(f"  {YELLOW}⚠  Протокол не REALITY — ротация ключей неприменима{NC}")
+        if proto not in ("reality", "xhttp_reality"):
+            _box_row(f"  {YELLOW}⚠  Протокол без REALITY-ключей — ротация неприменима{NC}")
             _box_row()
             _box_back()
             _box_bottom()

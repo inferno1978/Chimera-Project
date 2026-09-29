@@ -170,7 +170,7 @@ def _resolve_sni(state: dict) -> str:
     proto        = state.get("protocol_mode", "reality")
     domain       = state.get("domain", "")
     reality_dest = state.get("reality_dest", "")
-    if (proto == "reality" and state.get("awg_exit_enabled")
+    if (proto in ("reality", "xhttp_reality") and state.get("awg_exit_enabled")
             and state.get("install_mode") == "B" and reality_dest):
         return reality_dest.split(":")[0]
     return domain
@@ -208,6 +208,23 @@ def _build_xray_noise_json(
                 "tlsSettings": {"serverName": sni, "allowInsecure": False,
                                 "fingerprint": fp},
                 "xhttpSettings": {"path": xhttp_path, "mode": xhttp_mode},
+            },
+        }
+    elif proto == "xhttp_reality":
+        # xHTTP + REALITY: транспорт xhttp + REALITY TLS, БЕЗ flow
+        # (users без flow; xhttpSettings + realitySettings вместе).
+        outbound = {
+            "tag": "proxy", "protocol": "vless",
+            "settings": {"vnext": [{"address": domain, "port": port,
+                "users": [{"id": uuid_val, "encryption": "none"}]}]},
+            "streamSettings": {
+                "network": "xhttp", "security": "reality", "sockopt": sockopt,
+                "xhttpSettings": {"path": xhttp_path, "mode": xhttp_mode},
+                "realitySettings": {
+                    "show": False, "fingerprint": fp,
+                    "serverName": sni, "publicKey": pub_key,
+                    "shortId": short_id, "spiderX": "/",
+                },
             },
         }
     else:
@@ -263,6 +280,7 @@ def _build_singbox_noise_json(
     short_id   = state.get("short_id", "")
     xtls_flow  = state.get("xtls_flow", "xtls-rprx-vision")
     xhttp_path = state.get("xhttp_path", "/")
+    xhttp_mode = state.get("xhttp_mode", "stream-up")
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 
@@ -275,6 +293,22 @@ def _build_singbox_noise_json(
             "type": "vless", "tag": "vless-out",
             "server": domain, "server_port": port, "uuid": uuid_val,
             **({"flow": xtls_flow} if xtls_flow else {}),
+            "tls": {
+                "enabled": True, "server_name": sni,
+                "utls": {"enabled": True, "fingerprint": fp},
+                "reality": {"enabled": True, "public_key": pub_key,
+                            "short_id": short_id},
+            },
+            **dial,
+        }
+    elif proto == "xhttp_reality":
+        # xHTTP + REALITY (sing-box/NekoBox): transport xhttp + REALITY,
+        # БЕЗ flow (noise/fragment — на уровне TCP, совместимо).
+        outbound = {
+            "type": "vless", "tag": "vless-out",
+            "server": domain, "server_port": port, "uuid": uuid_val,
+            "transport": {"type": "xhttp", "mode": xhttp_mode,
+                          "path": xhttp_path},
             "tls": {
                 "enabled": True, "server_name": sni,
                 "utls": {"enabled": True, "fingerprint": fp},

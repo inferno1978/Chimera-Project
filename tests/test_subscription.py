@@ -166,6 +166,27 @@ class TestResolveSni(unittest.TestCase):
         }
         self.assertEqual(_resolve_sni(state), "dest.example.com")
 
+    def test_returns_reality_dest_for_awg_xhttp_reality_mode_b(self):
+        """xhttp_reality наследует SNI-правило REALITY: Mode B + AWG → reality_dest."""
+        from chimera.modules.subscription import _resolve_sni
+        state = {
+            "protocol_mode": "xhttp_reality", "awg_exit_enabled": True,
+            "install_mode": "B", "reality_dest": "dest.example.com:443",
+            "domain": "vpn.example.com",
+        }
+        self.assertEqual(_resolve_sni(state), "dest.example.com")
+
+    def test_returns_domain_for_xhttp_reality_mode_a(self):
+        """xhttp_reality без AWG (Mode A): SNI = собственный домен."""
+        from chimera.modules.subscription import _resolve_sni
+        state = {
+            "protocol_mode": "xhttp_reality",
+            "reality_dest": "dest.example.com:443",
+            "install_mode": "A",
+            "domain": "vpn.example.com",
+        }
+        self.assertEqual(_resolve_sni(state), "vpn.example.com")
+
 
 class TestBuildUserinfoHeader(unittest.TestCase):
     """_build_userinfo_header — pure."""
