@@ -272,24 +272,67 @@ class TestAwgGuardCron(unittest.TestCase):
 
 
 class TestProbeTcpLatency(unittest.TestCase):
-    """_probe_tcp_latency — TCP проверка (mocked socket)."""
+    """_probe_tcp_latency — TCP проверка (mocked socket).
+
+    6b55d47 (prefer IPv4) переписал функцию с socket.create_connection на
+    getaddrinfo + socket().connect(sockaddr) — старый мок create_connection
+    перестал перехватывать что-либо, и тест зависел от сетевого окружения
+    (в без-DNS контейнере getaddrinfo падал → inf → FAIL). Теперь мокаем
+    актуальный API — детерминизм в любом окружении.
+    """
 
     def setUp(self):
         _setup_core_in_sysmodules()
+        import socket as _socket
+        self._fake_addr = (_socket.AF_INET, _socket.SOCK_STREAM,
+                           6, "", ("1.2.3.4", 443))
 
     def test_returns_positive_on_success(self):
         from chimera.modules.smart_balancer import _probe_tcp_latency
-        with patch("socket.create_connection") as mock_conn:
-            mock_conn.return_value = MagicMock()
+        with patch("socket.getaddrinfo", return_value=[self._fake_addr]), \
+             patch("socket.socket") as mock_sock_cls:
+            mock_sock_cls.return_value = MagicMock()
             result = _probe_tcp_latency("1.2.3.4", 443)
         self.assertGreaterEqual(result, 0)
         self.assertLess(result, float("inf"))
+        # connect обязан идти через SOCKADDR (не через host:port повторно).
+        inst = mock_sock_cls.return_value
+        inst.connect.assert_called_once_with(("1.2.3.4", 443))
 
     def test_returns_inf_on_failure(self):
         from chimera.modules.smart_balancer import _probe_tcp_latency
-        with patch("socket.create_connection", side_effect=OSError("conn refused")):
+        with patch("socket.getaddrinfo", return_value=[self._fake_addr]), \
+             patch("socket.socket") as mock_sock_cls:
+            mock_sock_cls.return_value = MagicMock()
+            mock_sock_cls.return_value.connect.side_effect = OSError(
+                "conn refused")
             result = _probe_tcp_latency("1.2.3.4", 443)
         self.assertEqual(result, float("inf"))
+
+    def test_returns_inf_on_dns_failure(self):
+        from chimera.modules.smart_balancer import _probe_tcp_latency
+        with patch("socket.getaddrinfo",
+                   side_effect=OSError("dns unreachable")):
+            result = _probe_tcp_latency("nonexistent.invalid", 443)
+        self.assertEqual(result, float("inf"))
+
+    def test_prefers_ipv4_over_ipv6(self):
+        """Регрессия 6b55d47: при наличии A и AAAA пробуем IPv4 первым."""
+        import socket as _socket
+        from chimera.modules.smart_balancer import _probe_tcp_latency
+        addrs = [
+            (_socket.AF_INET6, _socket.SOCK_STREAM, 6, "",
+             ("2001:db8::1", 443, 0, 0)),
+            (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("1.2.3.4", 443)),
+        ]
+        with patch("socket.getaddrinfo", return_value=addrs), \
+             patch("socket.socket") as mock_sock_cls:
+            mock_sock_cls.return_value = MagicMock()
+            result = _probe_tcp_latency("dual.example", 443)
+        self.assertLess(result, float("inf"))
+        # Первый созданный сокет — IPv4 (AF_INET).
+        first_family = mock_sock_cls.call_args_list[0].args[0]
+        self.assertEqual(first_family, _socket.AF_INET)
 
 
 if __name__ == "__main__":

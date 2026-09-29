@@ -678,6 +678,228 @@ def prompt_install_mode() -> None:
         warn("Введите A или B")
 
 
+# =============================================================================
+#  ПРОВЕРКА КОНФЛИКТА ПОРТА ЧЕРЕЗ port_registry
+# =============================================================================
+#  Раньше порт VLESS-инбаунда выбирался вслепую: конфликт вскрывался только
+#  на бинд-этапе Xray («address already in use») ИЛИ не вскрывался вовсе
+#  (UFW-правило от удалённого сервиса продолжало открывать порт снаружи,
+#  а реестр молчал — кейс Telemt:8443 на проде). Теперь промпт спрашивает
+#  port_registry (registry + ss-слушатели + UFW) ДО установки.
+#
+#  Кандидаты для авто-предложения (все — «HTTPS-подобные», стандарт для
+#  REALITY-маскировки, меньше внимания DPI):
+_VLESS_ALT_PORT_CANDIDATES = [443, 8443, 2053, 2083, 2087, 2096]
+
+
+def _server_port_verdict(conflicts: list, reinstall: bool) -> tuple:
+    """Классифицирует конфликты порта VLESS-инбаунда. Чистая функция.
+
+    Аргументы:
+      conflicts: список dict'ов от port_registry.port_get_conflicts()
+        (или список строк — тесты/легаси)
+      reinstall: True, если это переустановка поверх живого стека
+        (state.json существует). Своего слушателя xray на старом порту
+        в этом случае ожидаем — это НЕ конфликт.
+
+    Возвращает (has_blocking, blocking: list[str], notes: list[str]):
+      has_blocking — есть ли конфликты, требующие решения пользователя
+      blocking     — описания блокирующих конфликтов
+      notes        — информационные (не блокирующие) замечания
+    """
+    blocking: list = []
+    notes: list = []
+    for c in conflicts:
+        if isinstance(c, dict):
+            ctype = str(c.get("type", ""))
+            detail = str(c.get("detail", ""))
+            service = str(c.get("service", ""))
+        else:
+            ctype, detail, service = "", str(c), ""
+        # Переустановка поверх: собственный слушатель xray на этом порту —
+        # ожидаемая ситуация (старый инбаунд ещё жив), не блокируем.
+        if (ctype == "system" and reinstall
+                and "xray" in service.lower()):
+            notes.append(f"{detail} — наша переустановка, не конфликт")
+            continue
+        blocking.append(detail)
+    return (bool(blocking), blocking, notes)
+
+
+def _suggest_vless_alt_port(port: int) -> "int | None":
+    """Первая свободная альтернатива для VLESS-порта (port_registry).
+
+    Возвращает порт из _VLESS_ALT_PORT_CANDIDATES (кроме самого port),
+    свободный по port_is_free (исключая записи самого VLESS — свои порты
+    не считаем конфликтом), или None, если все кандидаты заняты.
+    """
+    try:
+        from chimera.modules.port_registry import (
+            port_is_free, SERVICE_VLESS,
+        )
+        for cand in _VLESS_ALT_PORT_CANDIDATES:
+            if cand == port:
+                continue
+            free, _ = port_is_free(cand, "tcp", exclude_service=SERVICE_VLESS)
+            if free:
+                return cand
+    except Exception:
+        pass
+    return None
+
+
+def _check_vless_server_port(port: int, reinstall: bool) -> tuple:
+    """Полная проверка порта VLESS-инбаунда через port_registry.
+
+    Возвращает (ok, blocking, notes, suggested_alt).
+    ok=True — порт свободен (или занят только «нашими» вещами).
+    При недоступности port_registry — не блокируем установку
+    (возвращаем ok=True, как у Telemt-рецепта _telemt_check_port_conflict).
+    """
+    try:
+        from chimera.modules.port_registry import (
+            port_get_conflicts, SERVICE_VLESS,
+        )
+        conflicts = port_get_conflicts(port, "tcp",
+                                       exclude_service=SERVICE_VLESS)
+    except Exception:
+        return True, [], [], None
+    has_blocking, blocking, notes = _server_port_verdict(conflicts, reinstall)
+    if not has_blocking:
+        return True, blocking, notes, None
+    return False, blocking, notes, _suggest_vless_alt_port(port)
+
+
+def _prompt_xray_listen_port(core) -> int:
+    """Промпт выбора порта Xray + проверка конфликтов через port_registry.
+
+    Выделено из prompt_protocol_mode() для тестопригодности (кейс
+    Telemt:8443 — конфликт вскрывался только на бинд-этапе или не
+    вскрывался вовсе). Возвращает выбранный порт; мутирует
+    core.SERVER_PORT / core.XHTTP_PORT.
+
+    Сценарии (мокируются в тестах через _check_vless_server_port):
+      - порт свободен → принимается сразу
+      - конфликт (registry/ss/UFW) → альтернатива из
+        _VLESS_ALT_PORT_CANDIDATES / «всё равно» / перевыбор
+      - переустановка поверх (state.json существует): собственный
+        слушатель xray не считается конфликтом
+    """
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_item   = core._box_item
+    _box_bottom = core._box_bottom
+    _box_sep    = core._box_sep
+    _box_back   = core._box_back
+    success = core.success
+    warn    = core.warn
+    GREEN = core.GREEN
+    CYAN  = core.CYAN
+    YELLOW = core.YELLOW
+    DIM   = core.DIM
+    NC    = core.NC
+
+    # Внешний цикл: выбор порта → проверка конфликтов через port_registry
+    # (registry + ss-слушатели + UFW). При конфликте — альтернатива из
+    # _VLESS_ALT_PORT_CANDIDATES или перевыбор. См. helpers выше и кейс
+    # Telemt:8443 (orphaned UFW-правило вскрылось только постфактум).
+    _reinstall = False
+    try:
+        _reinstall = bool(core.STATE_FILE.exists())
+    except Exception:
+        pass
+    SERVER_PORT = None
+    _box_top(f"Порт прослушивания Xray")
+    _box_row()
+    _box_row()
+    _box_item("1", f"443  {GREEN}(рекомендуется — стандартный HTTPS, меньше блокировок){NC}")
+    _box_item("2", f"8443 (альтернатива, часто не блокируется)")
+    _box_item("3", f"Ввести вручную (1–65535)")
+    _box_bottom()
+    while True:
+        # --- собственно выбор порта ---
+        if SERVER_PORT is None:
+            try:
+                ch = input(f"  {CYAN}Выбор [1]: {NC}").strip() or "1"
+            except KeyboardInterrupt:
+                print()
+                raise
+            if ch == "1":
+                SERVER_PORT = 443
+            elif ch == "2":
+                SERVER_PORT = 8443
+            elif ch == "3":
+                while True:
+                    try:
+                        raw = input("  Порт (1–65535): ").strip()
+                    except KeyboardInterrupt:
+                        print()
+                        raise
+                    if raw.isdigit() and 1 <= int(raw) <= 65535:
+                        SERVER_PORT = int(raw)
+                        break
+                    warn("  Введите число от 1 до 65535")
+            else:
+                warn("Введите 1, 2 или 3")
+                continue
+
+        # --- проверка конфликтов через port_registry ---
+        _ok, _blocking, _notes, _alt = _check_vless_server_port(
+            SERVER_PORT, reinstall=_reinstall)
+        if _ok:
+            for _n in _notes:
+                warn(f"  Порт {SERVER_PORT}: {_n}")
+            break
+
+        warn(f"Порт {SERVER_PORT} занят:")
+        for _b in _blocking[:3]:
+            print(f"    {YELLOW}• {_b}{NC}")
+        for _n in _notes[:2]:
+            print(f"    • {_n}")
+        _box_top("⚠  Конфликт порта")
+        _box_row()
+        _box_row(f"  Порт {YELLOW}{SERVER_PORT}{NC} занят другим сервисом/слушателем.")
+        _box_row(f"  Xray не сможет его слушать — «address already in use».")
+        _box_sep()
+        _menu = []
+        if _alt is not None:
+            _box_item("1", f"Использовать {_alt}  {GREEN}(свободен, рекомендуется){NC}")
+            _menu.append("alt")
+        _box_item(str(len(_menu) + 1), f"Всё равно использовать {SERVER_PORT}  {DIM}(может не заработать){NC}")
+        _menu.append("keep")
+        _box_item(str(len(_menu) + 1), "Выбрать другой порт")
+        _menu.append("rechoose")
+        _box_row()
+        _box_back()
+        _box_bottom()
+        try:
+            _ch = input(f"  {CYAN}Выбор [1]: {NC}").strip() or "1"
+        except (KeyboardInterrupt, EOFError):
+            print()
+            raise
+        try:
+            _idx = int(_ch) - 1
+        except ValueError:
+            _idx = 0
+        if _idx < 0 or _idx >= len(_menu):
+            _idx = 0
+        _act = _menu[_idx]
+        if _act == "alt":
+            SERVER_PORT = _alt
+            success(f"  Используем порт {SERVER_PORT}")
+            break
+        if _act == "keep":
+            warn(f"  Продолжаем с портом {SERVER_PORT} на свой риск.")
+            break
+        # rechoose — заново показать меню выбора порта
+        SERVER_PORT = None
+    setattr(core, "SERVER_PORT", SERVER_PORT)
+    XHTTP_PORT = SERVER_PORT   # синхронизируем alias
+    setattr(core, "XHTTP_PORT", XHTTP_PORT)
+    print(f"  {GREEN}✓ Порт: {SERVER_PORT}{NC}")
+    return SERVER_PORT
+
+
 def prompt_protocol_mode() -> None:
     """Выбор режима протокола: VLESS+TCP+REALITY или VLESS+xHTTP+TLS."""
     core = _core_module()
@@ -686,12 +908,15 @@ def prompt_protocol_mode() -> None:
     _box_item   = core._box_item
     _box_desc   = core._box_desc
     _box_bottom = core._box_bottom
+    _box_sep    = core._box_sep
+    _box_back   = core._box_back
     success = core.success
     warn    = core.warn
     _prompt_xhttp_options = core._prompt_xhttp_options
     GREEN = core.GREEN
     CYAN  = core.CYAN
     YELLOW = core.YELLOW
+    DIM   = core.DIM
     NC    = core.NC
 
     _box_top(f"Режим протокола")
@@ -742,45 +967,9 @@ def prompt_protocol_mode() -> None:
             warn("Введите 1, 2 или 3")
 
     # ── Выбор порта (общий для обоих протоколов) ─────────────────────────────
-    _box_top(f"Порт прослушивания Xray")
-    _box_row()
-    _box_row()
-    _box_item("1", f"443  {GREEN}(рекомендуется — стандартный HTTPS, меньше блокировок){NC}")
-    _box_item("2", f"8443 (альтернатива, часто не блокируется)")
-    _box_item("3", f"Ввести вручную (1–65535)")
-    _box_bottom()
-    while True:
-        try:
-            ch = input(f"  {CYAN}Выбор [1]: {NC}").strip() or "1"
-        except KeyboardInterrupt:
-            print()
-            raise
-        if ch == "1":
-            SERVER_PORT = 443
-            setattr(core, "SERVER_PORT", SERVER_PORT)
-            break
-        elif ch == "2":
-            SERVER_PORT = 8443
-            setattr(core, "SERVER_PORT", SERVER_PORT)
-            break
-        elif ch == "3":
-            while True:
-                try:
-                    raw = input("  Порт (1–65535): ").strip()
-                except KeyboardInterrupt:
-                    print()
-                    raise
-                if raw.isdigit() and 1 <= int(raw) <= 65535:
-                    SERVER_PORT = int(raw)
-                    setattr(core, "SERVER_PORT", SERVER_PORT)
-                    break
-                warn("  Введите число от 1 до 65535")
-            break
-        else:
-            warn("Введите 1, 2 или 3")
-    XHTTP_PORT = SERVER_PORT   # синхронизируем alias
-    setattr(core, "XHTTP_PORT", XHTTP_PORT)
-    print(f"  {GREEN}✓ Порт: {SERVER_PORT}{NC}")
+    # Проверка конфликтов через port_registry — внутри
+    # _prompt_xray_listen_port() (выделено для тестопригодности).
+    _prompt_xray_listen_port(core)
 
 
 # =============================================================================

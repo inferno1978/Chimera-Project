@@ -649,6 +649,197 @@ def port_list_for_service(service_tag: str) -> list[dict]:
     return [e for e in _registry_load() if e.get("service") == service_tag]
 
 
+# ── Аудит реестра vs реальность ──────────────────────────────────────────────
+# Теги, чьи порты НЕ обязаны иметь слушателя (iptables REDIRECT / DNAT,
+# трафик перенаправляется ядром без bind()). Для них «порт молчит» — норма,
+# не признак stale-записи.
+_LISTENER_EXEMPT_TAGS = {SERVICE_PORT_HOPPING}
+
+# Ожидаемый процесс-слушатель по тегу (подстроки, lowercase). Если порт
+# слушает ДРУГОЙ процесс — запись, вероятно, stale: сервис удалён/переехал,
+# а порт занял кто-то другой (кейс прод-RU 2026-09-30: web_panel:8443 в
+# реестре, а порт фактически слушает xray — запись «мёртвая», но старый
+# audit её не подсвечивал, ведь порт не молчит).
+# Теги без маппинга не проверяются на mismatch (не знаем, чего ожидать).
+_EXPECTED_PROC_HINTS = {
+    SERVICE_VLESS: ("xray",),
+    SERVICE_TELEMT_MTPROTO: ("telemt",),
+    SERVICE_WEB_PANEL: ("python", "rest_api", "nginx", "gunicorn"),
+    SERVICE_WEB_PANEL_NGINX: ("nginx",),
+    SERVICE_NAIVEPROXY: ("naive",),
+    SERVICE_MIERU: ("mieru",),
+    SERVICE_SINGBOX: ("sing-box", "singbox"),
+    SERVICE_DNSCRYPT: ("dnscrypt",),
+    SERVICE_AGHOME: ("adguard",),
+    SERVICE_HYSTERIA2: ("hysteria",),
+    SERVICE_FPTN: ("fptn",),
+    SERVICE_WDTT: ("wdtt",),
+}
+# awg_standalone / awg_exit — kernel-интерфейс (awg0), процесса-слушателя в
+# ss нет; в _EXPECTED_PROC_HINTS не включаем — mismatch для них не проверяем.
+
+
+# Теги, у которых слушатель loopback-only по дизайну (web-панели, upstream'ы):
+# ss их видят, но если панель стоит — она слушает; отдельной обработки не нужно.
+def port_audit() -> list[dict]:
+    """Аудит реестра: сверка записей с реальными слушателями системы.
+
+    Для каждой записи реестра проверяет (одним ss-вызовом на протокол):
+      - слушается ли порт сейчас (ss -ltnp / ss -ulnp)
+      - есть ли UFW-правило для порта
+
+    Возвращает список dict'ов (по одной на запись реестра):
+      {service, port, proto, comment, listening: str|None,
+       ufw: bool, stale_suspect: bool, note: str}
+
+    stale_suspect=True — порт НЕ слушается, тег не в _LISTENER_EXEMPT_TAGS:
+    вероятна «мёртвая» запись (сервис удалён/переехал, а запись осталась —
+    кейс web_panel:8443 на проде, где порт фактически слушает xray).
+    Это только ПОДОЗРЕНИЕ: сервис может быть временно остановлен —
+    решение об удалении принимает человек (TUI: меню реестра, пункт аудита).
+
+    Служебные порты 22/80 (SSH/ACME) никогда не помечаются stale.
+    """
+    entries = _registry_load()
+    if not entries:
+        return []
+
+    # Один ss-вызов на протокол (а не на запись: реестр с port_hopping
+    # содержит 10k+ записей — поэлементный ss вешал бы аудит на минуты).
+    listeners: dict[str, dict[int, str]] = {"tcp": {}, "udp": {}}
+    for proto in ("tcp", "udp"):
+        if not _ss_available():
+            continue
+        proto_flag = "-t" if proto == "tcp" else "-u"
+        try:
+            r = subprocess.run(
+                ["ss", proto_flag + "lnp"],
+                capture_output=True, text=True, check=False,
+                timeout=_SS_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        if r.returncode != 0:
+            continue
+        for line in r.stdout.splitlines():
+            # Local Address:Port — 4-я колонка: "0.0.0.0:443", "[::]:443",
+            # "127.0.0.1:5300". Процесс — последняя колонка.
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            local = parts[3]
+            if ":" not in local:
+                continue
+            try:
+                _p = int(local.rsplit(":", 1)[1])
+            except ValueError:
+                continue
+            proc_info = parts[-1] if parts else ""
+            m = re.search(r'\("([^"]+)",pid=(\d+)', proc_info)
+            who = f"{m.group(1)} (pid={m.group(2)})" if m else "(unknown)"
+            # Первый встреченный слушатель достаточно информативен.
+            listeners[proto].setdefault(_p, who)
+
+    # UFW-правила — один вызов.
+    ufw_ports: set = set()
+    if shutil.which("ufw"):
+        try:
+            r = subprocess.run(
+                ["ufw", "status"],
+                capture_output=True, text=True, check=False,
+                timeout=_UFW_STATUS_TIMEOUT_SEC,
+            )
+            for m in re.finditer(r'(\d+(?::\d+)?)/(tcp|udp)', r.stdout or ""):
+                span = m.group(1)
+                if ":" in span:   # диапазон 10000:20000 — пропускаем
+                    continue
+                ufw_ports.add(int(span))
+        except Exception:
+            pass
+
+    result: list[dict] = []
+    for e in entries:
+        try:
+            port = int(e.get("port", 0))
+        except Exception:
+            continue
+        proto = e.get("proto", "tcp")
+        svc = e.get("service", "?")
+        who = listeners.get(proto, {}).get(port)
+        in_ufw = port in ufw_ports
+
+        stale = False
+        note = ""
+        if who:
+            note = f"слушает {who}"
+            #  Перехват порта: слушатель есть, но процесс не совпадает с
+            # ожидаемым для тега (web_panel:8443, а слушает xray). Проверяем
+            # только если маппинг тега известен; 22/80 — служебные, там
+            # sshd/nginx — это норма даже под тегом vless.
+            hints = _EXPECTED_PROC_HINTS.get(svc)
+            if (hints and port not in (22, 80)
+                    and not any(h in (who or "").lower() for h in hints)):
+                stale = True
+                note = (f"порт слушает {who} — не ожидаемый для «{svc}» "
+                        f"(перехвачен или запись stale)")
+        elif svc in _LISTENER_EXEMPT_TAGS:
+            note = "REDIRECT-диапазон (без слушателя — норма)"
+        elif port in (22, 80):
+            note = "служебный (SSH/ACME) — не помечается"
+        else:
+            stale = True
+            note = "порт молчит — вероятна stale-запись"
+        result.append({
+            "service": svc,
+            "port": port,
+            "proto": proto,
+            "comment": e.get("comment", "") or "",
+            "listening": who,
+            "ufw": in_ufw,
+            "stale_suspect": stale,
+            "note": note,
+        })
+    return result
+
+
+def port_audit_stale() -> list[dict]:
+    """Только stale-подозреваемые записи (подмножество port_audit())."""
+    return [r for r in port_audit() if r.get("stale_suspect")]
+
+
+def port_drop_entry(service_tag: str, port: int, proto: str = "tcp",
+                    close_ufw: bool = True) -> "tuple[bool, str]":
+    """Ручное снятие ОДНОЙ записи реестра (+ опционально её UFW-правило).
+
+    Инструмент разбора stale-записей после port_audit(): человек смотрит
+    аудит и снимает конкретную запись. UFW-правило закрывается только
+    «наше» (chimera-<tag> или legacy-комментарий telemt) — чужие правила
+    (например, orphaned 'Telemt MTProxy' от старой установки) НЕ трогаем:
+    их владелец может быть ещё жив (кейс RU: 8443 слушает xray под чужим
+    комментарием — правило нужно, коммент легаси).
+
+    Возвращает (ok, message).
+    """
+    # Сначала проверяем, что запись реально есть.
+    if not any(
+        e.get("service") == service_tag
+        and e.get("port") == port
+        and e.get("proto", "tcp") == proto
+        for e in _registry_load()
+    ):
+        return False, f"Запись {service_tag}:{port}/{proto} в реестре не найдена"
+    msg_parts: list = []
+    if close_ufw:
+        try:
+            ok, msg = ufw_close_port(port, proto, service_tag)
+            msg_parts.append(msg)
+        except Exception as e:
+            msg_parts.append(f"UFW: пропущено ({e})")
+    removed = port_unregister(service_tag, port=port, proto=proto)
+    msg_parts.append("запись снята" if removed else "запись не найдена")
+    return removed, "; ".join(msg_parts)
+
+
 # ── UFW helpers (используют реестр для проверки) ─────────────────────────────
 
 def ufw_open_port(port: int, proto: str, service_tag: str,
@@ -897,7 +1088,8 @@ def do_manage_port_registry() -> None:
 
         _box_item("1", "Проверить порт на конфликты")
         _box_item("2", "Показать системных слушателей (ss)")
-        _box_item("3", "Очистить реестр (ТОЛЬКО для разработки/дебага)")
+        _box_item("3", "Аудит: сверка реестра со слушателями (stale-записи)")
+        _box_item("4", "Очистить реестр (ТОЛЬКО для разработки/дебага)")
         _box_row()
         _box_row(f"  {DIM}Реестр хранится в {PORT_REGISTRY_FILE}{NC}")
         _box_back()
@@ -949,6 +1141,68 @@ def do_manage_port_registry() -> None:
             input(f"\n{BLUE}  Нажмите Enter...{NC}")
 
         elif ch == "3":
+            #  Аудит реестра — инструмент разбора кейсов вида «Telemt
+            #  не закрыл за собой 8443»: показывает записи, чьи порты
+            #  сейчас никто не слушает, и позволяет снять конкретную
+            #  запись (+ её chimera-UFW-правило) по номеру. Решение
+            #  всегда за человеком — авточистка запрещена.
+            print()
+            try:
+                audit = port_audit()
+            except Exception as e:
+                _box_warn(f"  Аудит не удался: {e}")
+                continue
+            if not audit:
+                _box_info("  Реестр пуст — аудитить нечего.")
+                continue
+            stale = [r for r in audit if r.get("stale_suspect")]
+            live = len(audit) - len(stale)
+            _box_top("🔎  Аудит реестра портов")
+            _box_row()
+            _box_row(f"  Всего записей: {len(audit)}; с живым слушателем/нормой: {live}")
+            _box_row(f"  {YELLOW}Подозрение на stale (порт молчит): {len(stale)}{NC}")
+            _box_sep()
+            if stale:
+                _box_row(f"  {'#':<4} {'Сервис':<20} {'Порт':<12} {'UFW':<4} {'Комментарий'}")
+                _box_row(f"  {'-'*4} {'-'*20} {'-'*12} {'-'*4} {'-'*30}")
+                for i, r in enumerate(stale, 1):
+                    _box_row(f"  {i:<4} {r['service'][:20]:<20} "
+                             f"{CYAN}{r['port']}/{r['proto']}{NC}   "
+                             f"{'да' if r['ufw'] else '—':<4} "
+                             f"{DIM}{(r['comment'] or '')[:30]}{NC}")
+                    if r.get("note"):
+                        #  Суть подозрения: «порт молчит» или «порт слушает
+                        # X — не ожидаемый для тега» (кейс web_panel:8443,
+                        # слушает xray). Без note строка не информативна.
+                        _box_row(f"  {'':<4} {YELLOW}{r['note'][:60]}{NC}")
+                _box_sep()
+                _box_row(f"  {DIM}Снять запись можно по номеру — UFW-правило chimera-<tag>{NC}")
+                _box_row(f"  {DIM}будет закрыто; чужие/legacy-правила не трогаются.{NC}")
+            else:
+                _box_row(f"  {GREEN}Stale-записей не найдено.{NC}")
+            _box_bottom()
+            if stale:
+                try:
+                    sel = input(f"{CYAN}  Номер записи для снятия "
+                                f"(Enter — ничего не делать):{NC} ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    continue
+                if sel.isdigit() and 1 <= int(sel) <= len(stale):
+                    r = stale[int(sel) - 1]
+                    try:
+                        ok, msg = port_drop_entry(r["service"], r["port"],
+                                                  r["proto"], close_ufw=True)
+                    except Exception as e:
+                        ok, msg = False, str(e)
+                    if ok:
+                        success(f"  {r['service']}:{r['port']}/{r['proto']} — {msg}")
+                    else:
+                        warn(f"  Не снято: {msg}")
+                elif sel:
+                    warn("  Неверный номер — ничего не сделано.")
+            input(f"\n{BLUE}  Нажмите Enter...{NC}")
+
+        elif ch == "4":
             print()
             _box_warn("  Очистка реестра — только для разработки!")
             _box_warn("  В продакшене это сломает conflict detection.")
