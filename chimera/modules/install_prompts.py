@@ -708,7 +708,8 @@ def prompt_protocol_mode() -> None:
     _box_item("3", f"🛡 VLESS + xHTTP + REALITY")
     _box_desc(f"Транспорт xHTTP (xmux, padding, HTTP/2-паттерны) + маскировка REALITY.")
     _box_desc(f"LE-сертификат для прокси не нужен (TLS терминирует REALITY).")
-    _box_desc(f"{YELLOW}Только xray-клиенты: v2rayN, NekoBox, sing-box. mihomo НЕ поддерживается.{NC}")
+    _box_desc(f"{YELLOW}Только клиенты на ядре Xray-core ≥ 24.11.30: v2rayN, v2rayNG, Nekoray.{NC}")
+    _box_desc(f"{YELLOW}sing-box/NekoBox/Hiddify/Karing и mihomo/Clash — НЕ поддерживают xHTTP.{NC}")
     _box_desc(f"Без MLKEM768-костыля и без flow.")
     _box_row()
     _box_bottom()
@@ -732,7 +733,7 @@ def prompt_protocol_mode() -> None:
             PROTOCOL_MODE = "xhttp_reality"
             setattr(core, "PROTOCOL_MODE", PROTOCOL_MODE)
             success("Протокол: VLESS + xHTTP + REALITY "
-                    "(xray-клиенты; mihomo — fallback на tcp+reality)")
+                    "(только Xray-клиенты: v2rayN, v2rayNG, Nekoray)")
             # xHTTP-параметры (mode/path/preset) — те же, что и для xHTTP TLS:
             # они попадают в xhttpSettings inbound'а и в клиентские ссылки.
             _prompt_xhttp_options()

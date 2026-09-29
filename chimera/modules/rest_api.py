@@ -160,6 +160,31 @@ def _get_users() -> list[dict]:
         return []
 
 
+# ── Честный экспорт xhttp_reality (баги 3–5, live-тест DE 2026-09-29) ────
+# xHTTP-транспорт поддерживают ТОЛЬКО клиенты на ядре Xray-core.
+# Живые пробы: sing-box 1.11.15/1.12.0/1.13.0 → FATAL "unknown transport
+# type: xhttp"; mihomo v1.19.4 tcp+reality fallback на xhr-порт → transport
+# mismatch. Hiddify/Karing/V2Box/NekoBox — ядро sing-box → не поддерживают.
+# Для xhttp_reality-нод эти форматы НЕ генерируются: генераторы возвращают
+# "", эндпоинты отдают 501 с честным объяснением (см. _xhttp_unsupported).
+XHTTP_UNSUPPORTED_MSG = (
+    "xHTTP-транспорт поддерживают только клиенты на ядре Xray-core "
+    "(v2rayN, v2rayNG, Nekoray; Xray-core >= 24.11.30). "
+    "mihomo/Clash Meta и sing-box (NekoBox/Hiddify/Karing/V2Box) "
+    "xHTTP НЕ поддерживают — конфиг этого формата не генерируется. "
+    "Используйте vless-ссылку (/api/portal/vless-link или /api/portal/subscription)."
+)
+
+
+def _xhttp_unsupported() -> bool:
+    """True, если текущая нода в режиме xhttp_reality — форматы
+    mihomo/sing-box/hiddify для неё не генерируются (честный экспорт)."""
+    try:
+        return _get_state().get("protocol_mode", "reality") == "xhttp_reality"
+    except Exception:
+        return False
+
+
 def _save_users(users: list[dict]) -> None:
     """Сохраняет список пользователей."""
     core = _core_module()
@@ -797,6 +822,10 @@ def _generate_vless_links(user: dict) -> list[dict]:
 
 def _generate_clash_config(user: dict) -> str:
     """Генерирует Clash Meta YAML для пользователя."""
+    # Честный экспорт: mihomo не поддерживает xHTTP-транспорт (живой тест
+    # 2026-09-29 — transport mismatch) → для xhttp_reality конфига нет.
+    if _xhttp_unsupported():
+        return ""
     links = _generate_vless_links(user)
     if not links:
         return ""
@@ -813,13 +842,11 @@ def _generate_clash_config(user: dict) -> str:
     xhttp_path = state.get("xhttp_path", "/")
     xtls_flow = state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision"
 
-    # Имя ноды (proxies + proxy-groups должны совпадать). Для xhttp_reality —
-    # имя с суффиксом "-fallback": mihomo не поддерживает xHTTP-транспорт,
-    # конфиг ниже — фолбэк на tcp+reality (юзер предупреждён при установке).
+    # Имя ноды (proxies + proxy-groups должны совпадать).
+    # xhttp_reality сюда не доходит: mihomo не поддерживает xHTTP —
+    # генератор выше вернул "" (честный экспорт, живой тест 2026-09-29).
     if proto == "reality":
         node_name = "VLESS-Reality"
-    elif proto == "xhttp_reality":
-        node_name = "VLESS-xHTTP-REALITY-fallback"
     else:
         node_name = "VLESS-xHTTP"
     group_proxies = [node_name]
@@ -852,44 +879,8 @@ proxy-groups:
 rules:
   - MATCH,Proxy
 """
-    elif proto == "xhttp_reality":
-        # xHTTP+REALITY → mihomo fallback на tcp+reality: mihomo не умеет
-        # network:http вместе с reality-opts (юзер предупреждён при установке,
-        # что mihomo не поддерживается).
-        # support-x25519mlkem768 (внутри reality-opts): Xray-core 26.9.8+
-        # требует keyShare X25519MLKEM768 в ClientHello; в mihomo он есть
-        # только у HelloChrome_Auto, опция запрещает его вырезание. Поэтому
-        # client-fingerprint фиксирован на chrome, а не из state.json
-        # (как в reality-ветке client_config_export.py).
-        clash = f"""# xHTTP+REALITY node — mihomo fallback to tcp+reality (mihomo не поддерживает xHTTP)
-proxies:
-  - name: {node_name}
-    type: vless
-    server: {domain}
-    port: {port}
-    uuid: {uuid_val}
-    network: tcp
-    tls: true
-    udp: true
-    flow: {xtls_flow}
-    reality-opts:
-      public-key: {pub_key}
-      short-id: {short_id}
-      support-x25519mlkem768: true
-    client-fingerprint: chrome
-    servername: {sni}
-
-proxy-groups:
-  - name: Proxy
-    type: select
-    proxies:
-"""
-        for p in group_proxies:
-            clash += f"      - {p}\n"
-        clash += """
-rules:
-  - MATCH,Proxy
-"""
+    # (ветка xhttp_reality удалена: mihomo не поддерживает xHTTP —
+    # генератор возвращает "" раньше, см. _xhttp_unsupported)
     else:
         clash = f"""proxies:
   - name: VLESS-xHTTP
@@ -921,6 +912,11 @@ rules:
 
 def _generate_singbox_config(user: dict) -> str:
     """Генерирует Sing-box JSON для пользователя."""
+    # Честный экспорт: sing-box не поддерживает транспорт xhttp (живой
+    # тест 2026-09-29 — "unknown transport type: xhttp") → для
+    # xhttp_reality конфига нет. Hiddify = ядро sing-box → тоже нет.
+    if _xhttp_unsupported():
+        return ""
     state = _get_state()
     domain = state.get("domain", "")
     port = state.get("server_port", 443)
@@ -965,35 +961,8 @@ def _generate_singbox_config(user: dict) -> str:
                 }
             }]
         }
-    elif proto == "xhttp_reality":
-        # xHTTP+REALITY: транспорт xhttp (mode+path) + REALITY TLS, БЕЗ flow
-        # (xhttp-транспорт не поддерживает xtls-rprx-vision). Старую
-        # xhttp-ветку ниже (transport type "http") не трогаем — она для
-        # legacy-режима xHTTP+TLS с LE-сертификатом.
-        config = {
-            "outbounds": [{
-                "type": "vless",
-                "tag": "vless-out",
-                "server": domain,
-                "server_port": port,
-                "uuid": uuid_val,
-                "transport": {
-                    "type": "xhttp",
-                    "mode": xhttp_mode,
-                    "path": xhttp_path,
-                },
-                "tls": {
-                    "enabled": True,
-                    "server_name": sni,
-                    "utls": {"enabled": True, "fingerprint": fp},
-                    "reality": {
-                        "enabled": True,
-                        "public_key": pub_key,
-                        "short_id": short_id,
-                    }
-                }
-            }]
-        }
+    # (ветка xhttp_reality удалена: sing-box не поддерживает транспорт
+    # xhttp — генератор возвращает "" раньше, см. _xhttp_unsupported)
     else:
         config = {
             "outbounds": [{
@@ -1040,6 +1009,10 @@ def _generate_hiddify_config(user: dict) -> str:
     Формат: JSON с outbound (VLESS + REALITY), как в sing-box, но с
     дополнительными полями для Hiddify-совместимости.
     """
+    # Честный экспорт: Hiddify — ядро sing-box, xHTTP не поддерживает
+    # (живой тест 2026-09-29) → для xhttp_reality конфига нет.
+    if _xhttp_unsupported():
+        return ""
     state = _get_state()
     domain = state.get("domain", "")
     port = state.get("server_port", 443)
@@ -1089,39 +1062,8 @@ def _generate_hiddify_config(user: dict) -> str:
                 ]
             }
         }
-    elif proto == "xhttp_reality":
-        # xHTTP+REALITY: копия структуры reality-ветки (REALITY TLS +
-        # routing), но транспорт xhttp (mode+path) и БЕЗ flow — xhttp
-        # не поддерживает xtls-rprx-vision.
-        config = {
-            "outbounds": [{
-                "type": "vless",
-                "tag": "vless-out",
-                "server": domain,
-                "server_port": port,
-                "uuid": uuid_val,
-                "transport": {
-                    "type": "xhttp",
-                    "mode": xhttp_mode,
-                    "path": xhttp_path,
-                },
-                "tls": {
-                    "enabled": True,
-                    "server_name": sni,
-                    "utls": {"enabled": True, "fingerprint": fp},
-                    "reality": {
-                        "enabled": True,
-                        "public_key": pub_key,
-                        "short_id": short_id,
-                    }
-                }
-            }],
-            "routing": {
-                "rules": [
-                    {"type": "default", "outbound": "vless-out"}
-                ]
-            }
-        }
+    # (ветка xhttp_reality удалена: Hiddify — ядро sing-box, xHTTP не
+    # поддерживает — генератор возвращает "" раньше, см. _xhttp_unsupported)
     else:
         config = {
             "outbounds": [{
@@ -1537,6 +1479,15 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             if user is None:
                 return
             clash = _generate_clash_config(user)
+            if not clash:
+                # Честный ответ: для xhttp_reality конфига нет в принципе
+                # (mihomo не поддерживает xHTTP, живой тест 2026-09-29).
+                if _xhttp_unsupported():
+                    self._send_json({"error": "clash config not supported for xhttp_reality",
+                                     "detail": XHTTP_UNSUPPORTED_MSG}, 501)
+                else:
+                    self._send_json({"error": "clash config unavailable"}, 503)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "text/yaml; charset=utf-8")
             self.send_header("Content-Disposition", 'attachment; filename="clash-meta.yaml"')
@@ -1618,7 +1569,11 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             if not body:
                 body = _generate_clash_config(user)
             if not body:
-                self._send_json({"error": "clash config unavailable"}, 503)
+                if _xhttp_unsupported():
+                    self._send_json({"error": "clash config not supported for xhttp_reality",
+                                     "detail": XHTTP_UNSUPPORTED_MSG}, 501)
+                else:
+                    self._send_json({"error": "clash config unavailable"}, 503)
                 return
             self.send_response(200)
             self.send_header("Content-Type", "text/yaml; charset=utf-8")
@@ -1643,7 +1598,11 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             if not body:
                 body = _generate_singbox_config(user)
             if not body:
-                self._send_json({"error": "singbox config unavailable"}, 503)
+                if _xhttp_unsupported():
+                    self._send_json({"error": "singbox config not supported for xhttp_reality",
+                                     "detail": XHTTP_UNSUPPORTED_MSG}, 501)
+                else:
+                    self._send_json({"error": "singbox config unavailable"}, 503)
                 return
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1658,6 +1617,15 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             if user is None:
                 return
             singbox = _generate_singbox_config(user)
+            if not singbox:
+                # Честный ответ: sing-box не поддерживает транспорт xhttp
+                # ("unknown transport type: xhttp", живой тест 2026-09-29).
+                if _xhttp_unsupported():
+                    self._send_json({"error": "singbox config not supported for xhttp_reality",
+                                     "detail": XHTTP_UNSUPPORTED_MSG}, 501)
+                else:
+                    self._send_json({"error": "singbox config unavailable"}, 503)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Disposition", 'attachment; filename="sing-box.json"')
@@ -1671,6 +1639,14 @@ class _VLESSHandler(BaseHTTPRequestHandler):
             if user is None:
                 return
             hiddify = _generate_hiddify_config(user)
+            if not hiddify:
+                # Честный ответ: Hiddify — ядро sing-box, xHTTP не поддерживает.
+                if _xhttp_unsupported():
+                    self._send_json({"error": "hiddify config not supported for xhttp_reality",
+                                     "detail": XHTTP_UNSUPPORTED_MSG}, 501)
+                else:
+                    self._send_json({"error": "hiddify config unavailable"}, 503)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Disposition", 'attachment; filename="hiddify.json"')

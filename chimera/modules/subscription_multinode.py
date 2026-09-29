@@ -413,8 +413,11 @@ def _yq(s: str) -> str:
 
 
 def _mihomo_proxy_block(nd: dict, indent: str = "  ") -> list[str]:
-    """Один proxies[] элемент для mihomo. Reality, xHTTP и xHTTP+REALITY
-    (последний — fallback на tcp+reality: mihomo не поддерживает xHTTP)."""
+    """Один proxies[] элемент для mihomo. Reality и xHTTP.
+
+    xHTTP+REALITY-ноды сюда не доходит: mihomo не поддерживает xHTTP
+    (живой тест 2026-09-29, transport mismatch) — build_mihomo_config
+    исключает их раньше (честный экспорт)."""
     lines = [
         f"{indent}- name: {_yq(nd['name'])}",
         f"{indent}  type: vless",
@@ -452,16 +455,8 @@ def _mihomo_proxy_block(nd: dict, indent: str = "  ") -> list[str]:
         # в reality-opts молча игнорируют — конфиг остаётся совместимым.
         # См. worklog: ru-xray26-postfix-verify, LIVE 2026-09-10.
         #
-        # xhttp_reality-ноды идут ЭТИМ ЖЕ рецептом — mihomo не поддерживает
-        # xHTTP-транспорт вместе с REALITY (network: http + reality-opts
-        # совмещать нельзя) → FALLBACK на tcp+reality. Юзер предупреждён
-        # при установке, что mihomo — fallback-клиент для xhttp_reality.
-        # flow у таких нод пустой → в блоке ниже подставится
-        # xtls-rprx-vision (nd.get('flow') or 'xtls-rprx-vision').
-        if nd["proto"] == "xhttp_reality":
-            # YAML-комментарий отдельной строкой ПЕРЕД блоком ноды
-            # (на уровне элемента списка) — виден прямо в готовом конфиге.
-            lines.insert(0, f"{indent}# xHTTP+REALITY node — mihomo fallback to tcp+reality (mihomo не поддерживает xHTTP)")
+        # xhttp_reality-ноды сюда не доходят (исключены в
+        # build_mihomo_config — mihomo не поддерживает xHTTP).
         lines += [
             f"{indent}  network: tcp",
             f"{indent}  tls: true",
@@ -1022,9 +1017,17 @@ def build_mihomo_config(user: dict) -> str:
     try:
         reg = collect_nodes(user)
         nodes = reg["all"]
+        # Честный экспорт (баги 3–4, live-тест 2026-09-29): mihomo НЕ
+        # поддерживает xHTTP-транспорт — xhr-ноды в mihomo-конфиг не
+        # включаем (fallback на tcp+reality к xhr-инбаунду не работает —
+        # transport mismatch). Список пропущенных нод — в заголовке YAML.
+        _xhr_skipped = [n["name"] for n in nodes
+                        if n.get("proto") == "xhttp_reality"]
+        nodes = [n for n in nodes if n.get("proto") != "xhttp_reality"]
         if not nodes:
             return ""
-        exits = reg["exits"]
+        exits = [n for n in reg["exits"]
+                 if n.get("proto") != "xhttp_reality"]
         domains = _node_domains(nodes)
         exit_names = [n["name"] for n in exits]
         all_names = [n["name"] for n in nodes]
@@ -1043,6 +1046,16 @@ def build_mihomo_config(user: dict) -> str:
             "#  Эталон: client-configs v9 (2026-09-05) — mrs без .dat,",
             "#  AGH-эшелоны DNS, дашборд, ASN-рулинг, TG-каскад по умолчанию.",
             "# ═══════════════════════════════════════════════════════════════════",
+        ]
+        if _xhr_skipped:
+            # Честный экспорт: явно сообщаем, какие ноды и почему исключены.
+            lines += [
+                "#  ⚠ xHTTP+REALITY-ноды НЕ включены (mihomo не поддерживает",
+                "#  транспорт xHTTP): " + ", ".join(_xhr_skipped),
+                "#  Эти ноды доступны только клиентам на ядре Xray-core",
+                "#  (vless-ссылка/подписка base64).",
+            ]
+        lines += [
             "",
             "profile:",
             "  store-selected: true",
@@ -1247,7 +1260,12 @@ def build_mihomo_config(user: dict) -> str:
                             "Balance-Sticky", "Balance-Weighted"]
             # RU-ноды (entry + зеркала) — «домашняя» сторона конфига
             # (эталон v9: группа 🇷🇺 RU-Auto + RU-каскад Telegram).
-            entry = reg["entry"]
+            # Честный экспорт: xhr-entry не входит в mihomo-конфиг (фильтр
+            # выше) — и его имя не должно оставаться в группах (висячая
+            # ссылка, mihomo -t падает).
+            entry = reg.get("entry")
+            if entry and entry.get("proto") == "xhttp_reality":
+                entry = None
             ru_names = ([entry["name"]] if entry else []) + \
                 [m["name"] for m in reg["mirrors"]]
             has_ru = bool(ru_names)
@@ -1602,26 +1620,9 @@ def _singbox_vless_outbound(nd: dict) -> dict:
             "server_name": nd["sni"] or nd["host"],
             "utls": {"enabled": True, "fingerprint": nd["fp"]},
         }
-    elif nd["proto"] == "xhttp_reality":
-        # xHTTP + REALITY (канон sing-box, worklog): транспорт xhttp
-        # (mode из nd, stream-up по умолчанию) + REALITY-объект в TLS,
-        # БЕЗ flow — xhttp-транспорт не поддерживает xtls-rprx-vision.
-        # Ветки xhttp (выше) и reality (ниже) не затронуты.
-        ob["transport"] = {
-            "type": "xhttp",
-            "mode": nd.get("xhttp_mode", "stream-up"),
-            "path": nd.get("path", "/"),
-        }
-        ob["tls"] = {
-            "enabled": True,
-            "server_name": nd["sni"] or nd["host"],
-            "utls": {"enabled": True, "fingerprint": nd["fp"]},
-            "reality": {
-                "enabled": True,
-                "public_key": nd["pbk"],
-                "short_id": nd.get("sid", ""),
-            },
-        }
+    # (ветка xhttp_reality удалена: sing-box не поддерживает транспорт
+    # xhttp — такие ноды исключены в build_singbox_config, живой тест
+    # 2026-09-29 "unknown transport type: xhttp")
     else:
         if nd.get("flow"):
             ob["flow"] = nd["flow"]
@@ -1785,6 +1786,11 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
     try:
         reg = collect_nodes(user)
         nodes = reg["all"]
+        # Честный экспорт (баг 3, live-тест 2026-09-29): sing-box НЕ
+        # поддерживает транспорт xhttp ("unknown transport type: xhttp",
+        # проверено на 1.11.15/1.12.0/1.13.0) — xhr-ноды не включаем.
+        # Если после фильтра нод не осталось — "" (caller отдаст честный 501).
+        nodes = [n for n in nodes if n.get("proto") != "xhttp_reality"]
         if not nodes:
             return ""
 
@@ -1806,12 +1812,18 @@ def build_singbox_config(user: dict, extra_outbounds: Optional[list] = None) -> 
             extra_tags.append(ob["tag"])
 
         node_tags = [nd["name"] for nd in nodes]
-        exit_tags = [nd["name"] for nd in reg["exits"]] or node_tags
+        # Честный экспорт: xhr-ноды исключены из outbounds — их имена не
+        # должны попадать в selector/urltest (висячая ссылка → FATAL).
+        exit_tags = [nd["name"] for nd in reg["exits"]
+                     if nd.get("proto") != "xhttp_reality"] or node_tags
         first_tag = node_tags[0]
         # default селектора — ENTRY-нода (каскад). Exit-ноды напрямую
         # из РФ недоступны (для того и каскад) — дефолт "первый exit" убивал
         # весь трафик и DNS (detour remote-dns через selector) на старте.
-        entry_tag = reg["entry"]["name"] if reg.get("entry") else None
+        _entry_nd = reg.get("entry")
+        entry_tag = (_entry_nd["name"]
+                     if _entry_nd and _entry_nd.get("proto") != "xhttp_reality"
+                     else None)
         default_tag = entry_tag or first_tag
 
         # ── Mieru-DPI (режим «Mieru + B4»): mita как нода конфига ──────

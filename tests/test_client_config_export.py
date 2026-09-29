@@ -325,51 +325,27 @@ class TestGenerateClientConfigXhttpReality(unittest.TestCase):
         self.assertNotIn("flow=", vless_link)
         self.assertIn("#VLESS-xHTTP-REALITY", vless_link)
 
-    def test_clash_xhttp_reality_mihomo_fallback(self):
-        """mihomo-фолбэк: tcp+reality (network tcp + reality-opts +
-        MLKEM768 + chrome FP) с комментарием про фолбэк."""
+    def test_clash_xhttp_reality_not_generated(self):
+        """Честный экспорт (баг 4): mihomo не поддерживает xHTTP —
+        clash-meta.yaml для xhttp_reality НЕ генерируется."""
         written = self._run_generate(_FAKE_STATE_XHTTP_REALITY)
-        clash = written.get("clash-meta.yaml", "")
-        if not clash:
-            self.skipTest("clash-meta.yaml not captured")
-        self.assertIn("network: tcp", clash)
-        self.assertIn("reality-opts:", clash)
-        self.assertIn("support-x25519mlkem768: true", clash)
-        self.assertIn("client-fingerprint: chrome", clash)
-        self.assertIn("flow: xtls-rprx-vision", clash)
-        # Комментарий-маркер фолбэка
-        self.assertIn("mihomo fallback to tcp+reality", clash)
-        # НЕ xhttp-транспорт (mihomo его не умеет)
-        self.assertNotIn("network: http", clash)
+        self.assertNotIn("clash-meta.yaml", written,
+                         "clash-meta.yaml не должен генерироваться для "
+                         "xhttp_reality (mihomo не поддерживает xHTTP)")
 
-    def test_singbox_xhttp_reality(self):
-        """sing-box: transport type=xhttp (mode+path) + TLS REALITY, без flow."""
+    def test_singbox_hiddify_xhttp_reality_not_generated(self):
+        """Честный экспорт (баг 3): sing-box не поддерживает транспорт
+        xhttp — sing-box.json/hiddify.json НЕ генерируются, ios-дубль тоже."""
         written = self._run_generate(_FAKE_STATE_XHTTP_REALITY)
-        singbox_str = written.get("sing-box.json", "")
-        if not singbox_str:
-            self.skipTest("sing-box.json not captured")
-        config = json.loads(singbox_str)
-        ob = config["outbounds"][0]
-        self.assertEqual(ob["type"], "vless")
-        self.assertEqual(ob["transport"]["type"], "xhttp")
-        self.assertEqual(ob["transport"]["mode"], "stream-up")
-        self.assertEqual(ob["transport"]["path"], "/xhttp")
-        self.assertEqual(ob["tls"]["reality"]["public_key"], "TEST_PUB_KEY_123")
-        self.assertEqual(ob["tls"]["reality"]["short_id"], "abcd1234")
-        self.assertEqual(ob["tls"]["server_name"], "fleet-b.example")
-        self.assertNotIn("flow", ob)
-
-    def test_hiddify_xhttp_reality(self):
-        """Hiddify-копия = sing-box + routing rules (наследует xhttp_reality)."""
-        written = self._run_generate(_FAKE_STATE_XHTTP_REALITY)
-        hiddify_str = written.get("hiddify.json", "")
-        if not hiddify_str:
-            self.skipTest("hiddify.json not captured")
-        config = json.loads(hiddify_str)
-        self.assertIn("routing", config)
-        ob = config["outbounds"][0]
-        self.assertEqual(ob["transport"]["type"], "xhttp")
-        self.assertEqual(ob["tls"]["reality"]["enabled"], True)
+        self.assertNotIn("sing-box.json", written,
+                         "sing-box.json не должен генерироваться для "
+                         "xhttp_reality (unknown transport type: xhttp)")
+        self.assertNotIn("hiddify.json", written,
+                         "hiddify.json не должен генерироваться (ядро sing-box)")
+        self.assertNotIn("vless-link-ios.txt", written,
+                         "iOS-дубль ссылки не нужен: Karing/V2Box — sing-box)")
+        # vless-ссылка при этом обязана быть — единственный рабочий формат
+        self.assertIn("vless-link.txt", written)
 
     def test_xhttp_reality_sni_awg_mode_b(self):
         """SNI-правило REALITY наследуется: Mode B + AWG → reality_dest."""
@@ -384,12 +360,8 @@ class TestGenerateClientConfigXhttpReality(unittest.TestCase):
         if not vless_link:
             self.skipTest("vless-link.txt not captured")
         self.assertIn("sni=www.cloudflare.com", vless_link)
-        # sing-box тоже должен получить reality_dest как server_name
-        singbox = json.loads(written.get("sing-box.json", "{}"))
-        if singbox.get("outbounds"):
-            self.assertEqual(
-                singbox["outbounds"][0]["tls"]["server_name"],
-                "www.cloudflare.com")
+        # Честный экспорт: sing-box для xhttp_reality не генерируется вовсе
+        self.assertNotIn("sing-box.json", written)
 
 
 if __name__ == "__main__":
