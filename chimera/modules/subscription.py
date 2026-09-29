@@ -230,7 +230,8 @@ def _resolve_sni(state: dict) -> str:
     reality_dest = state.get("reality_dest", "")
     awg_exit     = state.get("awg_exit_enabled", False)
     install_mode = state.get("install_mode", "A")
-    if proto == "reality" and awg_exit and install_mode == "B" and reality_dest:
+    # xhttp_reality наследует SNI-правило REALITY (те же ключи/dest)
+    if proto in ("reality", "xhttp_reality") and awg_exit and install_mode == "B" and reality_dest:
         return reality_dest.split(":")[0]
     return domain
 
@@ -260,7 +261,7 @@ def _build_vless_uri(user: dict, state: dict) -> Optional[str]:
     uuid_str = user.get("uuid", "")
     if not uuid_str:
         return None
-    if proto == "reality" and not (pub_key and short_id):
+    if proto in ("reality", "xhttp_reality") and not (pub_key and short_id):
         _warn(f"REALITY-параметры неполны (pbk={'да' if pub_key else 'НЕТ'}, "
               f"sid={'да' if short_id else 'НЕТ'}) — ссылка для "
               f"{user.get('email','?')} может не работать; проверьте state.json")
@@ -1033,6 +1034,12 @@ def build_subscription_body_ios(user: dict) -> bytes:
             # Резолвим shadow — email из живого clients[], не из user dict.
             shadow_user = _resolve_ios_shadow_user(user)
             vless = _build_vless_uri(shadow_user, state)
+        elif proto == "xhttp_reality":
+            # xHTTP+REALITY — серверные clients[] БЕЗ flow (xhttp-транспорт
+            # не поддерживает vision), shadow не нужен: ссылка строится
+            # на оригинальном UUID, трансформация to_ios_karing_link()
+            # вырезания flow не заметит (его нет в ссылке).
+            vless = _build_vless_uri(user, state)
         else:
             # xHTTP — flow не используется, shadow не нужен.
             vless = _build_vless_uri(user, state)

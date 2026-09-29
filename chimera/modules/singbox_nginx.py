@@ -468,7 +468,10 @@ def _detect_reality_backend() -> str:
     awg = state.get("awg_exit_enabled", False)
 
     if proto != "reality":
-        return ""  # xHTTP — SNI-dispatch неприменим (nginx http{} уже на :443)
+        # xhttp и xhttp_reality — SNI-dispatch неприменим: в чистом xHTTP
+        # nginx http{} уже на :443; в xHTTP+REALITY Xray сам владеет :443
+        # (REALITY TLS) — перехват SNI сломал бы xhttp-транспорт.
+        return ""
     if awg:
         return ""  # AWG — Xray на :443 напрямую, конфликт
 
@@ -645,6 +648,9 @@ def auto_enable_sni_dispatch(
         awg = state.get("awg_exit_enabled", False)
         if proto == "xhttp":
             error("SNI-dispatch неприменим в xHTTP-режиме: nginx http{} уже на :443")
+        elif proto == "xhttp_reality":
+            error("SNI-dispatch неприменим в xHTTP+REALITY-режиме: "
+                  "Xray владеет :443 (REALITY TLS + xhttp-транспорт)")
         elif awg:
             error("SNI-dispatch неприменим в AWG-режиме: Xray на :443 напрямую")
         else:
@@ -977,6 +983,9 @@ def apply_reality_sni_dispatch_patch(
             if proto == "xhttp":
                 error("SNI-dispatch patch неприменим в xHTTP-режиме "
                       "(nginx http{} уже на :443)")
+            elif proto == "xhttp_reality":
+                error("SNI-dispatch patch неприменим в xHTTP+REALITY-режиме "
+                      "(Xray владеет :443, REALITY TLS + xhttp)")
             elif awg:
                 error("SNI-dispatch patch неприменим в AWG-режиме "
                       "(Xray на :443 напрямую)")
@@ -1258,7 +1267,7 @@ def sni_dispatch_reapply_after_rebuild() -> None:
         state = _read_main_state()
         proto = state.get("protocol_mode", "reality")
         awg = state.get("awg_exit_enabled", False)
-        if proto == "xhttp" or awg:
+        if proto in ("xhttp", "xhttp_reality") or awg:
             warn("SNI-dispatch: protocol_mode сменился на xHTTP/AWG — "
                  "патч отменён. Требуется ручное отключение SNI-dispatch.")
         return

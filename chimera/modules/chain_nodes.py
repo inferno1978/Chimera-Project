@@ -1001,6 +1001,88 @@ def _make_exit_node_config(nd: dict) -> dict:
             "Этот конфиг предназначен для ЗАРУБЕЖНОГО VPS (exit node, xHTTP TLS). "
             "Скопируйте его в /etc/xray/config.json на зарубежном сервере."
         )
+    elif nd_proto == "xhttp_reality":
+        # xHTTP + REALITY exit-нода (третий протокол): транспорт xHTTP,
+        # TLS терминирует REALITY. Отличия от двух веток выше:
+        #   • от xhttp-ветки: НЕТ tlsSettings/LE-сертификата — REALITY сама
+        #     делает TLS-хендшейк (в этом весь смысл связки xhttp+reality);
+        #   • от reality-ветки: НЕТ flow — xHTTP-транспорт несовместим с
+        #     xtls-rprx-vision, клиенты принимаются без flow.
+        inbound = {
+            "tag":      "inbound-xhttp-reality",
+            "port":     nd["port"],
+            "listen":   "::",
+            "protocol": "vless",
+            "settings": {
+                "clients": [{
+                    "id":    nd["uuid"],
+                    "email": "entry@chain",
+                    # БЕЗ flow: xHTTP-транспорт не использует xtls-rprx-vision
+                }],
+                "decryption": "none",
+            },
+            "sniffing": {
+                "enabled":      True,
+                "destOverride": ["http", "tls"],
+                "metadataOnly": False,
+                "routeOnly":    False,
+            },
+            "streamSettings": {
+                "network":  "xhttp",
+                "security": "reality",
+                # sockopt — стиль xhttp-ветки: xHTTP-транспорт требует
+                # bbr/keepalive-оптимизации (у reality-ветки свой _build_sockopt)
+                "sockopt":  {
+                    **tfo_sockopt(),
+                    "tcpKeepAliveInterval": 15,
+                    "tcpKeepAliveIdle":   60,
+                    "tcpUserTimeout":     30000,
+                    "tcpCongestion":      "bbr",
+                    **({"tcpNoDelay": True} if XHTTP_TCP_NO_DELAY else {}),
+                },
+                # tlsSettings НЕТ — TLS делает REALITY, LE-сертификат не нужен
+                "xhttpSettings": _build_exit_xhttp_settings(nd),
+                # realitySettings — как в reality-ветке (else) ПОЛНОСТЬЮ:
+                # для xhttp_reality приватный ключ REALITY тоже обязателен
+                "realitySettings": {
+                    "show":        False,
+                    "dest":        f"{nd['sni']}:443",
+                    "xver":        0,
+                    "spiderX":     "/",
+                    "serverNames": [nd["sni"]],
+                    # ВАЖНО: privateKey нужно вставить вручную после: xray x25519
+                    "privateKey":  "<ВСТАВЬТЕ_PRIVATE_KEY_EXIT_NODE>",
+                    "publicKey":   nd["pubkey"],
+                    "shortIds":    [nd["shortid"]],
+                    # Гейт версий клиента (minClientVer) — механика по факту
+                    # стенда 2026-09-10 (docs/faq/VLESS_FAQ.md §18):
+                    # ClientVer в хендшейке отчитывают ВСЕ — sing-box →
+                    # [1,8,1], mihomo → [1,8,2] (проходит непустые пороги
+                    # ≤ "1.8.2"; прежний комментарий «не отчитывают вовсе»
+                    # был неверен — те тесты валил MLKEM-чек ClientHello
+                    # ядра 26.9.8+, не гейт), Xray-клиент → версию ядра.
+                    # Xray 26.7.11–26.7.28: unset/"" = ДЕФОЛТ-гейт 26.3.27,
+                    # валит mihomo/sing-box, лечится явным minClientVer=
+                    # "1.8.0" (рецепт podkop). Xray 26.9.8+ (наш флот):
+                    # дефолт-гейт УБРАН — unset/"" = гейт выключен,
+                    # непустые пороги живут ("2.0.0" валит mihomo [1,8,2],
+                    # "1.8.0"/"1.0.0" пропускает; sing-box против 26.9.8+
+                    # не пройдёт ни при каком гейте — барьер MLKEM, не
+                    # версия). Значение лениво из state.json ("min_client_ver",
+                    # ставится меню 5b; дефолт "" — норма для 26.9.8+);
+                    # поля пишем ЯВНО, чтобы поведение не зависело от дефолтов
+                    # ядра. Источники: XTLS/Xray-core #6477 (RPRX) +
+                    # PR #6507, MetaCubeX/mihomo#3042, MHSanaei/3x-ui#5922.
+                    "minClientVer": _min_client_ver(),
+                    "maxClientVer": "",
+                },
+            },
+        }
+        comment = (
+            "Этот конфиг предназначен для ЗАРУБЕЖНОГО VPS (exit node, xHTTP + REALITY). "
+            "Скопируйте его в /etc/xray/config.json на зарубежном сервере. "
+            "Приватный ключ REALITY: xray x25519 на exit-VPS, вставьте в privateKey."
+        )
     else:
         inbound = {
             "tag":      "inbound-chain-entry",
@@ -1158,12 +1240,16 @@ def generate_xray_config_chain_exit() -> None:
     # Подсказки зависят от протокола нод
     has_reality_nodes = any(nd.get("proto", "reality") == "reality" for nd in nodes)
     has_xhttp_nodes   = any(nd.get("proto", "reality") == "xhttp"   for nd in nodes)
+    has_xhttp_reality_nodes = any(nd.get("proto") == "xhttp_reality" for nd in nodes)
     if has_reality_nodes:
         info("REALITY exit nodes: сгенерируйте ключи: xray x25519")
         info("И прописать приватный ключ вместо <ВСТАВЬТЕ_PRIVATE_KEY_EXIT_NODE>")
     if has_xhttp_nodes:
         info("xHTTP exit nodes: получите сертификат Let's Encrypt на exit VPS")
         info("certbot certonly --standalone -d <ваш_домен> --non-interactive --agree-tos -m admin@<домен>")
+    if has_xhttp_reality_nodes:
+        # xhttp_reality: ключи x25519 нужны (REALITY TLS), LE-сертификат — НЕТ
+        info("xHTTP+REALITY exit nodes: сгенерируйте ключи xray x25519 на exit VPS и вставьте privateKey (LE-сертификат НЕ нужен)")
 
 
 # =============================================================================
@@ -1234,7 +1320,7 @@ def do_generate_chain_exit_additional_client() -> None:
                 warn("Host обязателен."); return
             port_raw = input("  Порт [443]: ").strip()
             port = int(port_raw) if port_raw else 443
-            proto = (input("  Протокол [reality/xhttp, по умолчанию reality]: ").strip().lower() or "reality")
+            proto = (input("  Протокол [reality/xhttp/xhttp_reality, по умолчанию reality]: ").strip().lower() or "reality")
             sni = input("  SNI: ").strip()
         except (KeyboardInterrupt, EOFError):
             print(); return
@@ -1247,7 +1333,9 @@ def do_generate_chain_exit_additional_client() -> None:
 
     new_uuid = str(uuid.uuid4())
     client_obj: dict = {"id": new_uuid, "email": f"{label}@chain"}
-    if nd.get("proto", "reality") != "xhttp" and XTLS_FLOW:
+    # flow только для классического tcp+reality: xhttp и xhttp_reality —
+    # БЕЗ flow (xHTTP-транспорт несовместим с xtls-rprx-vision)
+    if nd.get("proto", "reality") not in ("xhttp", "xhttp_reality") and XTLS_FLOW:
         client_obj["flow"] = XTLS_FLOW
 
     snippet_path = Path(f"/root/exit_add_client_{new_uuid[:8]}.json")
@@ -1450,6 +1538,7 @@ def _prompt_one_node_from_link(index: int) -> dict | None:
     _box_row()
     _box_wrap_msg(f"  {DIM}Пример: {NC}", 10, f"vless://UUID@host:443?type=tcp&security=reality&pbk=...&sid=...&sni=domain.com&flow=xtls-rprx-vision")
     _box_wrap_msg(f"  {DIM}Или:    {NC}", 10, f"vless://UUID@host:443?type=xhttp&security=tls&sni=domain.com&path=/abc")
+    _box_wrap_msg(f"  {DIM}Или:    {NC}", 10, f"vless://UUID@host:443?type=xhttp&security=reality&sni=domain.com&fp=chrome&pbk=PUBKEY&sid=SID&path=/abc&mode=stream-up")
     _box_row()
 
     _box_bottom()
@@ -1485,6 +1574,12 @@ def _prompt_one_node_from_link(index: int) -> dict | None:
             pubkey_info = f"PubKey: {parsed['pubkey'][:20]}..." if parsed['pubkey'] else "PubKey: не найден!"
             _box_row(f"  Proto:    {parsed['proto'].upper()} ({pubkey_info})")
             _box_row(f"  ShortID:  {parsed['shortid']}")
+        elif parsed['proto'] == 'xhttp_reality':
+            # xHTTP+REALITY: показываем И REALITY-ключи, И параметры транспорта
+            pubkey_info = f"PubKey: {parsed['pubkey'][:20]}..." if parsed['pubkey'] else "PubKey: не найден!"
+            _box_row(f"  Proto:    XHTTP_REALITY ({pubkey_info})")
+            _box_row(f"  ShortID:  {parsed['shortid']}")
+            _box_row(f"  xHTTP:    mode: {parsed['xhttp_mode']}, path: {parsed['path']}")
         else:
             _box_row(f"  Proto:    {parsed['proto'].upper()} (xhttp mode: {parsed['xhttp_mode']}, path: {parsed['path']})")
         _box_row(f"  SNI:      {parsed['sni']}")
@@ -1521,7 +1616,9 @@ def _prompt_one_node_from_link(index: int) -> dict | None:
 
         # Проверка обязательных полей
         warnings = []
-        if parsed['proto'] == 'reality':
+        # REALITY-ключи обязательны и для tcp+reality, и для xhttp+reality —
+        # REALITY TLS требует пару ключей x25519 в любом транспорте
+        if parsed['proto'] in ('reality', 'xhttp_reality'):
             if not parsed['pubkey']:
                 warnings.append("PublicKey отсутствует в ссылке!")
             if not parsed['shortid']:
@@ -1568,6 +1665,15 @@ def _prompt_one_node_from_link(index: int) -> dict | None:
             return _prompt_one_node_manual(index)
 
         # Строим финальный словарь ноды
+        # flow: только tcp+reality использует xtls-rprx-vision в каскадном
+        # outbound'е. xhttp_reality — БЕЗ flow (xHTTP-транспорт); для xhttp
+        # поведение не меняем (дефолт xtls-rprx-vision, поле не потребляется
+        # xhttp-ветками) — контракт совпадает с collect_nodes() в
+        # subscription_multinode.py.
+        if parsed.get("proto") == "xhttp_reality":
+            _node_flow = ""
+        else:
+            _node_flow = parsed.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision"
         node = {
             "host":       parsed["host"],
             "port":       parsed["port"],
@@ -1576,7 +1682,7 @@ def _prompt_one_node_from_link(index: int) -> dict | None:
             "shortid":    parsed["shortid"],
             "sni":        parsed["sni"],
             "fp":         parsed["fp"],
-            "flow":       parsed.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision",
+            "flow":       _node_flow,
             "proto":      parsed["proto"],
             "path":       parsed.get("path", "/"),
             "xhttp_mode": parsed.get("xhttp_mode", "stream-up"),
@@ -1595,7 +1701,9 @@ def _fix_node_fields(index: int, parsed: dict) -> dict | None:
     _box_top(f"Дозаполнение полей Exit Node #{index}")
     _box_row()
 
-    if parsed['proto'] == 'reality':
+    if parsed['proto'] in ('reality', 'xhttp_reality'):
+        # REALITY-ключи нужны обоим REALITY-протоколам: и tcp+reality, и
+        # xhttp+reality (REALITY TLS требует пару ключей x25519 в любом транспорте)
         if not parsed['pubkey']:
             _box_bottom()
             while True:
@@ -1642,6 +1750,13 @@ def _fix_node_fields(index: int, parsed: dict) -> dict | None:
             warn("  Некорректный домен")
 
     _box_bottom()
+    # flow: только tcp+reality (xtls-rprx-vision); xhttp_reality — БЕЗ flow
+    # (xHTTP-транспорт). Для xhttp поведение не меняем — контракт как в
+    # _prompt_one_node_from_link() и collect_nodes() (subscription_multinode).
+    if parsed.get("proto") == "xhttp_reality":
+        _node_flow = ""
+    else:
+        _node_flow = parsed.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision"
     return {
         "host":       parsed["host"],
         "port":       parsed["port"],
@@ -1650,7 +1765,7 @@ def _fix_node_fields(index: int, parsed: dict) -> dict | None:
         "shortid":    parsed["shortid"],
         "sni":        parsed["sni"],
         "fp":         parsed.get("fp", "chrome"),
-        "flow":       parsed.get("flow", "xtls-rprx-vision") or "xtls-rprx-vision",
+        "flow":       _node_flow,
         "proto":      parsed["proto"],
         "path":       parsed.get("path", "/"),
         "xhttp_mode": parsed.get("xhttp_mode", "stream-up"),
@@ -1740,6 +1855,7 @@ def _prompt_one_node_manual(index: int) -> dict | None:
     _box_row(f"{BLUE}[E4] Протокол exit-ноды:{NC}")
     _box_row(f"   {CYAN}[1]{NC} VLESS + TCP + REALITY (xtls-rprx-vision) {GREEN}(рек.){NC}")
     _box_row(f"   {CYAN}[2]{NC} VLESS + xHTTP + TLS")
+    _box_row(f"   {CYAN}[3]{NC} VLESS + xHTTP + REALITY {YELLOW}(только xray-клиенты){NC}")
     _box_bottom()
     while True:
         try:
@@ -1755,7 +1871,10 @@ def _prompt_one_node_manual(index: int) -> dict | None:
         elif v == "2":
             exit_proto = "xhttp"
             break
-        warn("   Введите 1 или 2")
+        elif v == "3":
+            exit_proto = "xhttp_reality"
+            break
+        warn("   Введите 1, 2 или 3")
 
     pubkey = ""
     shortid = ""
@@ -1763,7 +1882,14 @@ def _prompt_one_node_manual(index: int) -> dict | None:
     path_val = "/"
     flow_val = XTLS_FLOW
 
-    if exit_proto == "reality":
+    # Нумерация полей ниже зависит от протокола: у xhttp_reality ДВА блока
+    # промптов (REALITY-ключи + xHTTP-параметры) → последующие SNI/FP
+    # сдвигаются на E9/E10, а xHTTP-поля получают E7/E8.
+    _is_xhr = exit_proto == "xhttp_reality"
+
+    if exit_proto in ("reality", "xhttp_reality"):
+        # REALITY-ключи: нужны и tcp+reality, и xhttp+reality — REALITY TLS
+        # требует пару ключей x25519 независимо от транспорта (xray x25519 на exit-VPS)
         # Public Key
         _box_row(f"{BLUE}[E5] Public Key (pbk) зарубежного VPS:{NC}")
         _box_bottom()
@@ -1795,9 +1921,13 @@ def _prompt_one_node_manual(index: int) -> dict | None:
                 shortid = v
                 break
             warn("   Неверный ShortID (чётное число hex-символов, 2–16)")
-    else:
-        # xHTTP параметры
-        _box_row(f"{BLUE}[E5] xHTTP режим:{NC}")
+
+    if exit_proto in ("xhttp", "xhttp_reality"):
+        # xHTTP-параметры: транспорту xHTTP безразлично, кто терминирует TLS —
+        # LE-сертификат (xhttp) или REALITY (xhttp_reality)
+        _mode_e = "E7" if _is_xhr else "E5"
+        _path_e = "E8" if _is_xhr else "E6"
+        _box_row(f"{BLUE}[{_mode_e}] xHTTP режим:{NC}")
         _box_row(f"   {CYAN}[1]{NC} stream-up {GREEN}(рек.){NC}  {CYAN}[2]{NC} stream-one  {CYAN}[3]{NC} packet-up {YELLOW}(⚠ проверьте версию Xray){NC}")
         _box_bottom()
         while True:
@@ -1821,7 +1951,7 @@ def _prompt_one_node_manual(index: int) -> dict | None:
             warn("   Введите 1, 2 или 3")
 
         auto_path = "/" + gen_hex(4)
-        _box_row(f"{BLUE}[E6] xHTTP path [{auto_path}]:{NC}")
+        _box_row(f"{BLUE}[{_path_e}] xHTTP path [{auto_path}]:{NC}")
         try:
             v = input(f"   Path [{auto_path}]: ").strip()
         except KeyboardInterrupt:
@@ -1830,10 +1960,13 @@ def _prompt_one_node_manual(index: int) -> dict | None:
         if v == "0":
             return None
         path_val = v if v.startswith("/") else auto_path
-        flow_val = ""  # xHTTP не использует flow
+        # xHTTP не использует flow — ни с TLS, ни с REALITY (xHTTP-транспорт
+        # несовместим с xtls-rprx-vision)
+        flow_val = ""
 
     # SNI
-    _box_row(f"{BLUE}[E7] SNI / домен зарубежного VPS:{NC}")
+    _sni_e = "E9" if _is_xhr else "E7"
+    _box_row(f"{BLUE}[{_sni_e}] SNI / домен зарубежного VPS:{NC}")
     _box_bottom()
     while True:
         try:
@@ -1849,7 +1982,8 @@ def _prompt_one_node_manual(index: int) -> dict | None:
         warn("   Некорректный домен")
 
     # Fingerprint
-    _box_row(f"{BLUE}[E8] Fingerprint браузера:{NC}")
+    _fp_e = "E10" if _is_xhr else "E8"
+    _box_row(f"{BLUE}[{_fp_e}] Fingerprint браузера:{NC}")
     _box_bottom()
     fp = _fm_prompt_fingerprint(label=f"Exit Node #{index}", current="chrome")
 
@@ -1874,6 +2008,12 @@ def _prompt_one_node_manual(index: int) -> dict | None:
     if exit_proto == "reality":
         _box_row(f"  PubKey:   {pubkey[:20]}...")
         _box_row(f"  ShortID:  {shortid}")
+    elif exit_proto == "xhttp_reality":
+        # xHTTP+REALITY: показываем И REALITY-ключи, И параметры транспорта —
+        # для этой связки нужны обе группы полей
+        _box_row(f"  PubKey:   {pubkey[:20]}...")
+        _box_row(f"  ShortID:  {shortid}")
+        _box_row(f"  xHTTP:    {xhttp_mode_val}, path={path_val}")
     else:
         _box_row(f"  xHTTP:    {xhttp_mode_val}, path={path_val}")
     _box_row(f"  SNI:      {sni}")
@@ -2157,6 +2297,51 @@ def generate_xray_config_chain_entry_multi() -> None:
                         **({"enableSessionResumption": True} if XHTTP_ENABLE_SESSION_RESUMPTION else {}),
                     },
                     "xhttpSettings": _build_exit_xhttp_outbound_settings(nd),
+                },
+            }
+        elif nd_proto == "xhttp_reality":
+            # xHTTP + REALITY исходящий к exit-ноде: транспорт xHTTP +
+            # REALITY TLS (без LE-сертификата). users БЕЗ flow — как в
+            # xhttp-ветке; realitySettings — как в reality-ветке ниже.
+            out = {
+                "tag":      tag,
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [{
+                        "address": nd["host"],
+                        "port":    nd["port"],
+                        "users":   [{
+                            "id":         nd["uuid"],
+                            "encryption": "none",
+                            # xHTTP не использует flow xtls-rprx-vision
+                            # REALITY: тоже без flow (xHTTP-транспорт)
+                        }],
+                    }],
+                },
+                "streamSettings": {
+                    "network":  "xhttp",
+                    "security": "reality",
+                    # sockopt — xhttp-ветка (bbr/keepalive для xHTTP) ПЛЮС
+                    # AWG-марк: при включённом AWG exit-трафик должен уходить
+                    # в таблицу маршрутизации awg0 (как в reality-ветке)
+                    "sockopt":  {
+                        **tfo_sockopt(),
+                        "tcpKeepAliveInterval": 15,
+                        "tcpKeepAliveIdle":   60,
+                        "tcpUserTimeout":     30000,
+                        "tcpCongestion":      "bbr",
+                        **({"tcpNoDelay": True} if XHTTP_TCP_NO_DELAY else {}),
+                        **({"mark": AWG_FWMARK} if AWG_EXIT_ENABLED else {}),  # ПАТЧ: AWG mark
+                    },
+                    "xhttpSettings": _build_exit_xhttp_outbound_settings(nd),
+                    "realitySettings": {
+                        "show":        False,
+                        "fingerprint": nd.get("fp", "chrome"),
+                        "serverName":  nd.get("sni", ""),
+                        "publicKey":   nd.get("pubkey", ""),
+                        "shortId":     nd.get("shortid", ""),
+                        "spiderX":     "/",
+                    },
                 },
             }
         else:
@@ -3114,6 +3299,21 @@ xHTTP path: {nd.get('path', '/')}
 SNI:        {nd.get('sni', '')}
 FP:         {nd.get('fp', 'chrome')}
 """
+        elif nd_proto == "xhttp_reality":
+            # xHTTP+REALITY: и REALITY-ключи, и параметры транспорта;
+            # Flow НЕТ — xHTTP-транспорт без xtls-rprx-vision
+            nodes_text += f"""
+## ─── Exit Node #{i+1} ({lbl}, xHTTP + REALITY) ──
+Адрес:      {nd['host']}
+Порт:       {nd['port']}
+UUID:       {nd['uuid']}
+PublicKey:  {nd.get('pubkey', '')}
+ShortID:    {nd.get('shortid', '')}
+xHTTP mode: {nd.get('xhttp_mode', 'stream-up')}
+xHTTP path: {nd.get('path', '/')}
+SNI:        {nd.get('sni', '')}
+FP:         {nd.get('fp', 'chrome')}
+"""
         else:
             nodes_text += f"""
 ## ─── Exit Node #{i+1} ({lbl}, VLESS+REALITY) ──
@@ -3153,8 +3353,8 @@ FP:         {nd.get('fp', 'chrome')}
 Порт:       {SERVER_PORT}
 UUID:       {PARAM_UUID}
 Протокол:   {entry_proto_str}
-PublicKey:  {PARAM_PUBLIC_KEY if proto == 'reality' else 'n/a (xHTTP TLS)'}
-ShortID:    {PARAM_SHORTID if proto == 'reality' else 'n/a (xHTTP TLS)'}
+PublicKey:  {PARAM_PUBLIC_KEY if proto in ('reality', 'xhttp_reality') else 'n/a (xHTTP TLS)'}
+ShortID:    {PARAM_SHORTID if proto in ('reality', 'xhttp_reality') else 'n/a (xHTTP TLS)'}
 SNI:        {PARAM_REALITY_DEST if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST) else PARAM_DOMAIN}
 {nodes_text}
 ## ─── Клиентская ссылка (подключаться к Entry Node) ─────

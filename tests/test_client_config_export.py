@@ -63,6 +63,13 @@ _FAKE_STATE_XHTTP = {
     "xhttp_path": "/xhttp",
 }
 
+_FAKE_STATE_XHTTP_REALITY = {
+    **_FAKE_STATE_REALITY,
+    "protocol_mode": "xhttp_reality",
+    "xhttp_path": "/xhttp",
+    "xhttp_mode": "stream-up",
+}
+
 
 class TestGenerateClientConfig(unittest.TestCase):
     """do_generate_client_config — генерация всех 4 файлов."""
@@ -255,6 +262,134 @@ class TestGenerateClientConfig(unittest.TestCase):
             self.skipTest("vless-link.txt not captured")
         self.assertIn("sni=www.cloudflare.com", vless_link)
         self.assertNotIn("sni=total-shadows.online", vless_link)
+
+
+class TestGenerateClientConfigXhttpReality(unittest.TestCase):
+    """xHTTP + REALITY (третий protocol_mode) — vless/clash/singbox/hiddify."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = tempfile.mkdtemp()
+        self._state_file = Path(self._tmpdir) / "state.json"
+        self._out_dir = Path(self._tmpdir) / "configs"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _run_generate(self, state_dict: dict):
+        from chimera.modules import client_config_export
+        self._state_file.write_text(json.dumps(state_dict))
+        core = sys.modules.get("chimera._core")
+        written = {}
+        _orig_write = Path.write_text
+
+        def _capture_write(self_path, data, *a, **kw):
+            s = str(self_path)
+            if "xray-client-configs" in s or "configs" in s:
+                name = Path(s).name
+                dest = self._out_dir / name
+                os.makedirs(str(dest.parent), exist_ok=True)
+                _orig_write(dest, data, *a, **kw)
+                written[name] = data
+                return len(data)
+            return _orig_write(self_path, data, *a, **kw)
+
+        with patch.object(core, "STATE_FILE", self._state_file), \
+             patch.object(client_config_export, "_core_module", return_value=core), \
+             patch.object(Path, "write_text", _capture_write), \
+             patch.object(Path, "mkdir", lambda self, *a, **kw: None):
+            for _fn in ("_box_top", "_box_row", "_box_sep", "_box_bottom",
+                        "_box_ok", "_box_warn", "_box_info"):
+                setattr(core, _fn, MagicMock())
+            core.log_to_file = MagicMock()
+            client_config_export.do_generate_client_config()
+
+        return written
+
+    def test_vless_link_xhttp_reality(self):
+        """vless:// для xhttp_reality: type=xhttp + security=reality,
+        pbk/sid присутствуют, mode= из state, БЕЗ flow."""
+        written = self._run_generate(_FAKE_STATE_XHTTP_REALITY)
+        vless_link = written.get("vless-link.txt", "")
+        if not vless_link:
+            self.skipTest("vless-link.txt not captured")
+        self.assertIn("security=reality", vless_link)
+        self.assertIn("type=xhttp", vless_link)
+        self.assertIn("pbk=TEST_PUB_KEY_123", vless_link)
+        self.assertIn("sid=abcd1234", vless_link)
+        self.assertIn("fp=firefox", vless_link)
+        self.assertIn("mode=stream-up", vless_link)
+        self.assertIn("path=%2Fxhttp", vless_link)
+        # flow быть НЕ должно (xhttp-транспорт не поддерживает vision)
+        self.assertNotIn("flow=", vless_link)
+        self.assertIn("#VLESS-xHTTP-REALITY", vless_link)
+
+    def test_clash_xhttp_reality_mihomo_fallback(self):
+        """mihomo-фолбэк: tcp+reality (network tcp + reality-opts +
+        MLKEM768 + chrome FP) с комментарием про фолбэк."""
+        written = self._run_generate(_FAKE_STATE_XHTTP_REALITY)
+        clash = written.get("clash-meta.yaml", "")
+        if not clash:
+            self.skipTest("clash-meta.yaml not captured")
+        self.assertIn("network: tcp", clash)
+        self.assertIn("reality-opts:", clash)
+        self.assertIn("support-x25519mlkem768: true", clash)
+        self.assertIn("client-fingerprint: chrome", clash)
+        self.assertIn("flow: xtls-rprx-vision", clash)
+        # Комментарий-маркер фолбэка
+        self.assertIn("mihomo fallback to tcp+reality", clash)
+        # НЕ xhttp-транспорт (mihomo его не умеет)
+        self.assertNotIn("network: http", clash)
+
+    def test_singbox_xhttp_reality(self):
+        """sing-box: transport type=xhttp (mode+path) + TLS REALITY, без flow."""
+        written = self._run_generate(_FAKE_STATE_XHTTP_REALITY)
+        singbox_str = written.get("sing-box.json", "")
+        if not singbox_str:
+            self.skipTest("sing-box.json not captured")
+        config = json.loads(singbox_str)
+        ob = config["outbounds"][0]
+        self.assertEqual(ob["type"], "vless")
+        self.assertEqual(ob["transport"]["type"], "xhttp")
+        self.assertEqual(ob["transport"]["mode"], "stream-up")
+        self.assertEqual(ob["transport"]["path"], "/xhttp")
+        self.assertEqual(ob["tls"]["reality"]["public_key"], "TEST_PUB_KEY_123")
+        self.assertEqual(ob["tls"]["reality"]["short_id"], "abcd1234")
+        self.assertEqual(ob["tls"]["server_name"], "total-shadows.online")
+        self.assertNotIn("flow", ob)
+
+    def test_hiddify_xhttp_reality(self):
+        """Hiddify-копия = sing-box + routing rules (наследует xhttp_reality)."""
+        written = self._run_generate(_FAKE_STATE_XHTTP_REALITY)
+        hiddify_str = written.get("hiddify.json", "")
+        if not hiddify_str:
+            self.skipTest("hiddify.json not captured")
+        config = json.loads(hiddify_str)
+        self.assertIn("routing", config)
+        ob = config["outbounds"][0]
+        self.assertEqual(ob["transport"]["type"], "xhttp")
+        self.assertEqual(ob["tls"]["reality"]["enabled"], True)
+
+    def test_xhttp_reality_sni_awg_mode_b(self):
+        """SNI-правило REALITY наследуется: Mode B + AWG → reality_dest."""
+        state = {
+            **_FAKE_STATE_XHTTP_REALITY,
+            "install_mode": "B",
+            "awg_exit_enabled": True,
+            "reality_dest": "www.cloudflare.com",
+        }
+        written = self._run_generate(state)
+        vless_link = written.get("vless-link.txt", "")
+        if not vless_link:
+            self.skipTest("vless-link.txt not captured")
+        self.assertIn("sni=www.cloudflare.com", vless_link)
+        # sing-box тоже должен получить reality_dest как server_name
+        singbox = json.loads(written.get("sing-box.json", "{}"))
+        if singbox.get("outbounds"):
+            self.assertEqual(
+                singbox["outbounds"][0]["tls"]["server_name"],
+                "www.cloudflare.com")
 
 
 if __name__ == "__main__":

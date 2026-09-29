@@ -118,6 +118,7 @@ def do_emergency_repair() -> None:
     setup_nginx_final = core.setup_nginx_final
     generate_xray_config_chain_entry_multi = core.generate_xray_config_chain_entry_multi
     generate_xray_config_xhttp = core.generate_xray_config_xhttp
+    generate_xray_config_xhttp_reality = core.generate_xray_config_xhttp_reality
     generate_xray_config = core.generate_xray_config
     _users_patch_config_no_restart = core._users_patch_config_no_restart
     _ru_subnets_restore_if_needed = core._ru_subnets_restore_if_needed
@@ -376,8 +377,9 @@ def do_emergency_repair() -> None:
             issues.append("config_invalid")
             _box_wrap_msg(f"  {YELLOW}[WARN]{NC} ", 9, f"config.json не валиден — будет пересоздан")
 
-    # Проверяем права на директорию сокета (только для REALITY)
-    if PROTOCOL_MODE == "reality" and PARAM_SOCKET_PATH:
+    # Проверяем права на директорию сокета (REALITY и xHTTP+REALITY:
+    # сокет — dest для REALITY-хендшейка)
+    if PROTOCOL_MODE in ("reality", "xhttp_reality") and PARAM_SOCKET_PATH:
         sock_parent = Path(PARAM_SOCKET_PATH).parent
         if str(sock_parent) not in ("/", "/dev/shm"):
             # Нестандартная директория сокета — проверяем права
@@ -458,8 +460,8 @@ def do_emergency_repair() -> None:
     # www-data в группе xray (нужно для nginx→xray через Unix-сокет)
     _run(["usermod", "-aG", "xray", "www-data"], check=False, quiet=True)
 
-    # Сокет (только REALITY)
-    if PROTOCOL_MODE == "reality" and PARAM_SOCKET_PATH:
+    # Сокет (REALITY и xHTTP+REALITY: сокет — REALITY dest)
+    if PROTOCOL_MODE in ("reality", "xhttp_reality") and PARAM_SOCKET_PATH:
         sock_parent = Path(PARAM_SOCKET_PATH).parent
         if str(sock_parent) not in ("/", "/dev/shm"):
             sock_parent.mkdir(parents=True, exist_ok=True)
@@ -705,6 +707,8 @@ def do_emergency_repair() -> None:
                     generate_xray_config_chain_entry_multi()
                 elif PROTOCOL_MODE == "xhttp":
                     generate_xray_config_xhttp()
+                elif PROTOCOL_MODE == "xhttp_reality":
+                    generate_xray_config_xhttp_reality()
                 else:
                     generate_xray_config()
             _box_ok("Конфиг Xray пересоздан из state.json")
@@ -809,7 +813,7 @@ def do_emergency_repair() -> None:
     # выполняется синхронно в master-процессе при запуске).
     # Проверка релевантна только для REALITY без AWG — при AWG Xray слушает
     # на TCP-порту, сокета нет (PARAM_SOCKET_PATH пуст или не используется).
-    if PROTOCOL_MODE == "reality" and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
+    if PROTOCOL_MODE in ("reality", "xhttp_reality") and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
         if nginx_ok:
             _box_row(f"  {DIM}Ожидание Unix-сокета (создаёт nginx)...{NC}")
             sock_ready = False
