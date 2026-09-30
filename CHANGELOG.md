@@ -1,5 +1,86 @@
 # Changelog
 
+# Changelog new entry — xHTTP+REALITY third protocol mode + port_registry install/uninstall integration (29 Sep 2026)
+
+## FEAT(xhttp_reality): третий protocol_mode — транспорт xHTTP+REALITY: сервер, клиентские конфиги, каскад, подписки, интеграция по всей экосистеме — 29 сентября 2026
+
+**Контекст:** к существующим protocol_mode добавлен третий — `xhttp_reality`:
+транспорт XHTTP поверх REALITY. Режим даёт трафику HTTP-профиль вместо
+голого TCP/TLS и расширяет арсенал обхода DPI. Реализация выполнена по
+письменному плану (`XHTTP_REALITY_PLAN.md`, 6 разделов) с предварительным
+аудитом всех 42 точек ветвления PROTOCOL_MODE по кодовой базе — режим
+поддержан везде, где режим уже был ветвлением, а не только в ядре установки.
+
+**Сервер:**
+- `xray_install.py`: `generate_xray_config_xhttp_reality()` — inbound
+  `network=xhttp` + `security=reality` (xhttpSettings + realitySettings,
+  клиенты без flow);
+- REALITY dest через unix-сокет на nginx (камуфляж тем же механизмом,
+  что и у существующих REALITY-инбаундов);
+- `_core.py`: диспетчеризация третьего protocol_mode, сводка установки.
+
+**Ссылки и клиентские конфиги (полный паритет с другими режимами):**
+- `vless://` — `type=xhttp` + `security=reality` + `mode=`, без flow,
+  варианты IPv4/IPv6, QR-коды;
+- sing-box / Hiddify JSON — transport `xhttp` + `tls.reality`;
+- Clash/mihomo — fallback на `tcp+reality` (транспорт xhttp в mihomo
+  недоступен), post-quantum-ready (`x25519mlkem768`) + YAML-комментарий
+  о причине fallback;
+- REST API и web-панель: генерация ссылок и конфигов всех форматов
+  для нового режима.
+
+**Каскад (entry-нода → exit-нода):**
+- `chain_nodes.py`: exit-конфиг `xhttp_reality`, entry-outbound,
+  меню [3] с ключами и xhttp-параметрами цепочки;
+- парсер vless-ссылок: `security=reality` + `type=xhttp` →
+  автоопределение `xhttp_reality`.
+
+**Подписки:**
+- одиночная и мульти-нодовая ветки: sing-box outbound (xhttp+reality),
+  mihomo-fallback, iOS-подписка без shadow;
+- ТГ-боты (admin + client): выдача ссылок нового режима.
+
+**Фрагментация:** совместима с новым транспортом (уровень TCP/TLS
+ClientHello) — `fragment_link/noise/mux/config/fuzzer/presets` умеют
+vless-URI и outbound'ы xray/sing-box для xhttp+reality.
+
+**Инфраструктура:** emergency repair (сокет-проверки + регенерация
+конфига режима), ротация кредлов (x25519-ротация применима к
+realitySettings), quick_status и backup/rollback знают третий режим.
+
+**Тесты:** расширены сьюты экспорта, каскада, подписок, ТГ-ботов и
+fragment-набора (+ новый fuzzer-сьют); полный прогон сьюта — без регрессий
+относительно базовой ветки.
+
+## FEAT(port_registry): интеграция реестра портов в установку/удаление + аудит stale-записей — 29 сентября 2026
+
+Реестр портов (модуль существует с 26 сентября) вплетён в жизненный цикл
+установки и удаления сервисов:
+
+- **Установка:** выбор порта Xray проверяет конфликты (реестр + активные
+  слушатели + UFW) ДО установки; при конфликте — авто-альтернатива из
+  HTTPS-кандидатов, «всё равно» или перевыбор. Переустановка поверх
+  собственного слушателя конфликтом не считается.
+- **UFW:** уже существующее UFW-правило больше не приводит к тихому
+  пропуску — порт регистрируется постфактум.
+- **Удаление/переустановка:** сервисные порты закрываются целиком по
+  реестру и UFW (включая legacy-комментарии правил), а не только текущий
+  порт из конфига.
+- **Аудит stale-записей:** порты сервисов, установленных до появления
+  реестра, выявляются и вычищаются.
+
+**Тесты:** `tests/test_port_registry.py` (инсталляционные сценарии,
+конфликты, stale-аудит) + новый `tests/test_network_setup.py`
+(регистрация уже открытых в UFW портов).
+
+**Доставка:** `chimera-v5` (fast-forward), зеркало GitHub `main`.
+Коммиты фичи: `b472dd2` (план), `dda9e54` (ядро xhttp_reality),
+`45da91b` (интеграция port_registry).
+
+Все IP, домены, UUID и ключи sanitized.
+
+---
+
 # Changelog new entry — WPP User Portal full rework (28 Sep 2026)
 
 ## FEAT(wpp_ui): полная переработка User Portal — визуальный редизайн 10 табов, 24 UX-фичи, alignment палитры с admin — 28 сентября 2026
