@@ -179,8 +179,9 @@
 | `mtproto_stats.py` | Статистика MTProto |
 | `naiveproxy.py` | NaiveProxy — установка/управление |
 | `naiveproxy_stats.py` | Статистика NaiveProxy |
-| `mieru.py` | Mieru protocol — установка/управление |
+| `mieru.py` | Mieru protocol — установка/управление (меню [C] → mieru_cascade) |
 | `mieru_stats.py` | Статистика Mieru |
+| `mieru_cascade.py` | **Каскад standalone-Mieru Entry→Exit (multi-exit).** Реализует схему из докстринга mieru.py (redsocks+iptables): исходящий трафик mita (Entry) матчится по процессу (cgroup system.slice/mita.service, fallback owner uid=mita через drop-in) → REDIRECT → redsocks (127.0.0.1) → mieru-hop (клиент, изолированный HOME, apply config) → mita Exit (hop-пользователь) → Интернет. Multi-exit: по паре юнитов mieru-hop@/mieru-cascade-redsocks@ на Exit, балансировка iptables statistic (rr) или active-backup (prio); health-timer */2 мин (TCP+E2E `mieru test`) с автребалансом правил. port_registry: регистрация loopback-портов на apply (socks/redsocks/rpc/http, без force), ufw_close+unregister на деактивации/удалении. download_manager: redsocks .deb из пула дистрибутива (mieru_cascade_packages, yandex/ubuntu, dpkg -i как post_install), mieru-клиент при отсутствии. Правила добавляются В КОНЕЦ nat OUTPUT (после TG-REDIRECT Chimera), guard на 127.0.0.0/8, опция strict_udp_block. Провижининг по образцу awg_cascade (две роли через меню, данные Exit→Entry переносятся вручную). get_backup_paths для backup_registry. |
 | `fptn.py` | FPTN — L3 VPN с honeypot anti-probing (свой TUN, Protobuf поверх TLS) |
 | `pq_vless.py` | Post-Quantum VLESS |
 | `vk_bypass_menu.py` | Единое меню VK Whitelist Bypass (4 модуля) |

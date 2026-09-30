@@ -1,5 +1,65 @@
 # Changelog
 
+# Changelog new entry — Mieru Cascade: серверный каскад Entry→Exit для standalone-Mieru (multi-exit, port_registry, download manager) — 1 октября 2026
+
+## FEAT(mieru): mieru_cascade — реализация «схемы с каскадом» из докстринга mieru.py
+
+**Контекст:** в докстринге modules/mieru.py была заложена схема
+«mita Entry (RU) → redsocks + iptables → mita Exit (EU)» — но кода под
+ней не существовало (аудит MIERU-1: `triple_panel_web` честно отвечал
+«Mieru-relay Variant B в Chimera не существует»). Запрос владельца:
+отдельный модуль, подключённый в flow установки standalone-Mieru (не
+аддон), port_registry на установке/удалении, всё под download manager,
+поддержка нескольких Exit-нод.
+
+**Архитектура (Entry, RU):**
+- исходящий трафик mita после расшифровки матчится по процессу:
+  `-m cgroup --path system.slice/mita.service` (первичный; живая проба
+  на прод-серверах A/B/DE: rc=0, iptables 1.8.10 nf_tables), fallback
+  `-m owner --uid-owner mita` через drop-in 60-mieru-cascade-user.conf
+  (User=mita + AmbientCapabilities=CAP_NET_BIND_SERVICE + chown /etc/mita);
+- `REDIRECT → redsocks (127.0.0.1) → SOCKS5 mieru-hop` (клиент mieru,
+  инстанс на Exit: изолированный HOME /var/lib/mieru-cascade/<id>,
+  конфиг через `mieru apply config` — схема валидирована в mieru_dpi);
+- `→ mita Exit (EU)`: hop-пользователь, mTLS + padding (trafficPattern
+  пресета standalone-установки Entry);
+- правила добавляются В КОНЕЦ nat OUTPUT — существующая маршрутизация
+  Chimera (dnscrypt-RETURN, TG-REDIRECT в xray-каскад) сохраняет
+  приоритет; guard на 127.0.0.0/8 (loopback mita не заворачиваем);
+- UDP-нагрузка mita идёт напрямую с Entry (redsocks TCP-only); опция
+  strict_udp_block блокирует её, чтобы не светить RU-IP.
+
+**Multi-exit:**
+- по паре юнитов на Exit: mieru-hop@<id> + mieru-cascade-redsocks@<id>;
+- балансировка iptables statistic (round-robin по соединениям) или
+  active-backup (prio — только первый живой);
+- health-timer mieru-cascade-health.timer (*/2 мин): TCP-проба + E2E
+  `mieru test` реальным клиентом; 2 неудачи подряд исключают Exit из
+  правил, восстановление возвращает (автребаланс + regenerate routing.sh).
+
+**port_registry (требование владельца):**
+- apply/активация: port_register() loopback-портов socks/redsocks/rpc/http
+  (окна 24081+/23081+/25081+/25181+, проверка занятости БЕЗ force —
+  конфликты вроде hybrid_addon:1080 ловятся здесь);
+- деактивация/удаление: ufw_close_port() + port_unregister(); новый тег
+  SERVICE_MIERU_CASCADE (константа, докстринг, _EXPECTED_PROC_HINTS).
+
+**download manager (требование владельца):**
+- redsocks — .deb из пула дистрибутива (mieru_cascade_packages.py:
+  noble 0.5-2build4 подтверждён --print-uris, зеркала yandex/archive,
+  dpkg -i как post_install-валидация), fallback apt-get с честным warn;
+- mieru-клиент на Entry — через существующие зеркала mieru_packages.
+
+**Интеграция:**
+- mieru.py: пункт [C] в меню standalone-Mieru + предложение настроить
+  каскад сразу после установки (flow установки, требование владельца);
+- провижининг по образцу awg_cascade: Exit-нода [2] создаёт
+  hop-пользователя и печатает данные для Entry, Entry [1]→[3]→[4];
+- routing.sh + mieru-cascade-routing.service — реапплай правил при ребуте
+  (генерируется из тех же спеков, что live-правила: один источник истины);
+- health-wrapper PYTHONPATH-safe (паттерн v5.1 из awg_cascade);
+- get_backup_paths() → backup_registry (state + redsocks-конфиги).
+
 # Changelog new entry — xHTTP+REALITY third protocol mode + port_registry install/uninstall integration (29 Sep 2026)
 
 ## FEAT(xhttp_reality): третий protocol_mode — транспорт xHTTP+REALITY: сервер, клиентские конфиги, каскад, подписки, интеграция по всей экосистеме — 29 сентября 2026

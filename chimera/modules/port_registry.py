@@ -59,6 +59,7 @@ API:
   SERVICE_AGHOME_DOQ      — AdGuard Home DoQ (:853/udp)
   SERVICE_OPENFLUX        — OpenFlux exit (carrier-канал, исходящий — без портов)
   SERVICE_OPENFLUX_BRIDGE — OpenFlux bridge SOCKS5 на этой VPS (loopback default)
+  SERVICE_MIERU_CASCADE  — Mieru cascade (loopback: redsocks/socks5/rpc/http на Entry)
 
 Паттерн использования (на примере нового сервиса):
   from chimera.modules.port_registry import (
@@ -177,6 +178,7 @@ SERVICE_AGHOME_DOQ     = "aghome_doq"      # AdGuard Home DoQ (:853/udp)
 # деактивации/удалении.
 SERVICE_OPENFLUX        = "openflux"          # exit-нода (исходящий WSS)
 SERVICE_OPENFLUX_BRIDGE = "openflux_bridge"   # bridge SOCKS5 (loopback default)
+SERVICE_MIERU_CASCADE  = "mieru_cascade"     # каскад standalone-Mieru (loopback, Entry)
 # WPP Web Panel (порт POLESNIESOVETI12/web-panel-proxy) — админ-панель
 # управления VPN-подключениями (VLESS/Hysteria2/AWG/OpenFlux/MTProto).
 # Бэкенд слушает на 127.0.0.1 (SSH-tunnel default) или публично через
@@ -653,6 +655,8 @@ def port_list_for_service(service_tag: str) -> list[dict]:
 # Теги, чьи порты НЕ обязаны иметь слушателя (iptables REDIRECT / DNAT,
 # трафик перенаправляется ядром без bind()). Для них «порт молчит» — норма,
 # не признак stale-записи.
+# mieru_cascade: rpc/http — плейсхолдеры конфига (могут не слушать);
+# socks/redsocks слушают всегда когда каскад активен
 _LISTENER_EXEMPT_TAGS = {SERVICE_PORT_HOPPING}
 
 # Ожидаемый процесс-слушатель по тегу (подстроки, lowercase). Если порт
@@ -674,6 +678,7 @@ _EXPECTED_PROC_HINTS = {
     SERVICE_HYSTERIA2: ("hysteria",),
     SERVICE_FPTN: ("fptn",),
     SERVICE_WDTT: ("wdtt",),
+    SERVICE_MIERU_CASCADE: ("redsocks", "mieru",),
 }
 # awg_standalone / awg_exit — kernel-интерфейс (awg0), процесса-слушателя в
 # ss нет; в _EXPECTED_PROC_HINTS не включаем — mismatch для них не проверяем.
