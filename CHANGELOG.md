@@ -2,6 +2,8 @@
 
 # Changelog new entry — Mieru Cascade: серверный каскад Entry→Exit для standalone-Mieru (multi-exit, port_registry, download manager) — 1 октября 2026
 
+
+
 ## FEAT(mieru): mieru_cascade — реализация «схемы с каскадом» из докстринга mieru.py
 
 **Контекст:** в докстринге modules/mieru.py была заложена схема
@@ -59,6 +61,26 @@
   (генерируется из тех же спеков, что live-правила: один источник истины);
 - health-wrapper PYTHONPATH-safe (паттерн v5.1 из awg_cascade);
 - get_backup_paths() → backup_registry (state + redsocks-конфиги).
+
+**Паритет с mieru addon (день 2, по запросу владельца):**
+- Обфускация (traffic pattern): выбор пресета mita при настройке роли
+  Exit (disabled/basic/medium/aggressive/custom JSON — тот же набор,
+  что «Пресеты обфускации» standalone-Mieru) + per-Exit пресет хопа на
+  Entry (при добавлении Exit и смена в [3]→5). Паттерн хопа обязан
+  совпадать с пресетом mita на Exit; legacy-фолбэк (Exit без
+  hop_preset) — пресет standalone-установки Entry. Пресет виден в
+  EXIT НАСТРОЕН, статусах и списке Exit-ов.
+- Клиентская выдача (порт hybrid_addon._show_mieru_client_links):
+  после успешного [4] Применить (Entry) и [2] Exit-настройки, плюс
+  меню [L] с выбором пользователя — Karing mierus:// с traffic-pattern
+  blob (`mita export traffic-pattern`, единый параметр — защита от
+  двойного traffic-pattern=), Nekobox/Nyamebox mierus://, sing-box
+  JSON для Karing (запасной; dns-секция из standalone-state, BOTH →
+  selector-группа), QR-коды. UDP для Karing — с IP (баг ядра Karing);
+  hop-юзер исключается из прямой выдачи Exit. Проверено живьём на
+  Entry(RU)+Exit(EU): импорт ссылок, egress = Exit, смена пресета
+  medium на обеих нодах → E2E OK.
+
 
 # Changelog new entry — xHTTP+REALITY third protocol mode + port_registry install/uninstall integration (29 Sep 2026)
 

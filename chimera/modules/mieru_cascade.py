@@ -53,6 +53,24 @@ DOWNLOAD MANAGER (требование владельца):
     выводятся рамкой для переноса на Entry вручную.
   • Entry-нода: меню [1] → [3] добавить Exit-ы → [4] применить.
 
+ОБФУСКАЦИЯ (паритет с mieru addon / hybrid_addon):
+  • Exit: выбор пресета mita при настройке роли (disabled/basic/medium/
+    aggressive/custom JSON) — тот же набор, что «Пресеты обфускации»
+    standalone-Mieru; итог виден в рамке EXIT НАСТРОЕН.
+  • Entry: пресет хопа ПЕР-EXIT (добавление/смена в [3]); рекомендуется
+    равный пресету mita на Exit (живой тест: mieru толерантен к
+    рассинхрону, но совпадение = предсказуемая симметрия ног).
+  • Legacy-фолбэк: Exit без hop_preset → пресет standalone-установки
+    Entry (данные, сохранённые до per-Exit пресетов).
+
+КЛИЕНТСКАЯ ВЫДАЧА (порт hybrid_addon._show_mieru_client_links):
+  • После успешного [4] Применить (Entry) и [2] Exit-настройки:
+    Karing mierus:// (+ traffic-pattern blob из `mita export
+    traffic-pattern`), Nekobox/Nyamebox mierus://, sing-box JSON для
+    Karing (запасной, dns-секция из standalone-state, BOTH → selector),
+    QR. UDP для Karing — с IP (баг ядра Karing). Повторно — меню [L]
+    с выбором пользователя; hop-юзер в прямую выдачу не попадает.
+
 Точка входа: из mieru.py (меню standalone-Mieru, пункт [C]) —
     from chimera.modules.mieru_cascade import do_mieru_cascade_menu
     do_mieru_cascade_menu()
@@ -348,6 +366,109 @@ def _seed_hop_instance(exit_node: dict, pattern_cfg: Optional[dict]) -> bool:
         return True
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ОБФУСКАЦИЯ (traffic pattern) — паритет с mieru addon (hybrid_addon)
+#  Меню пресетов + custom JSON + per-Exit паттерн хопа + серверный пресет Exit
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _read_multiline_json() -> Optional[str]:
+    """Многострочный ввод JSON до пустой строки (порт hybrid_addon).
+
+    None при EOF без единой строки — вызывающий код не уйдёт в цикл."""
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            return "\n".join(lines) if lines else None
+        if line.strip() == "":
+            if lines:
+                break
+            continue          # пустые строки до начала ввода — пропускаем
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _ask_pattern_menu(m, current: str = "basic",
+                      subject: str = "хопа") -> tuple:
+    """Меню обфускации (как в аддоне/hybrid_addon + пресеты mieru.py).
+
+    Возвращает (preset_name, custom_cfg):
+      preset_name — 'disabled'|'basic'|'medium'|'aggressive'|'custom'
+      custom_cfg  — dict только для custom, иначе None
+    Enter = текущее значение (current)."""
+    presets = m._MIERU_TRAFFIC_PRESETS      # disabled/basic/medium/aggressive
+    names = list(presets.keys())
+    default_idx = names.index(current) if current in names else 1
+
+    print(f"  {m.CYAN}Обфускация {subject} (traffic pattern):{m.NC}")
+    for i, name in enumerate(names, 1):
+        p = presets[name]
+        marker = f" {m.GREEN}← текущий{m.NC}" if name == current else ""
+        print(f"     {m.DIM}[{i}]{m.NC} {p['label']}{marker}")
+        print(f"         {m.DIM}{p['description']}{m.NC}")
+    print(f"     {m.DIM}[{len(names) + 1}]{m.NC} Custom — вставить свой JSON")
+    raw = proto_ask(f"  {m.CYAN}Выбор [Enter={default_idx + 1}]: {m.NC}",
+                    default=str(default_idx + 1), c=True).strip()
+
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(names):
+            return names[idx], None
+        if idx == len(names):
+            return "custom", _ask_pattern_custom(m)
+    print(f"  {m.YELLOW}⚠{m.NC} неизвестный выбор — оставляю "
+          f"'{current}'")
+    return current, None
+
+
+def _ask_pattern_custom(m) -> Optional[dict]:
+    """Custom trafficPattern JSON (порт hybrid_addon._traffic_pattern_custom).
+    None = ввод не удался → вызывающий код оставит дефолт."""
+    while True:
+        print(f"  {m.CYAN}Вставьте trafficPattern JSON "
+              f"(пустая строка — завершить):{m.NC}")
+        raw = _read_multiline_json()
+        if raw is None:
+            print(f"  {m.YELLOW}⚠{m.NC} ввод прерван — Basic")
+            return None
+        if not raw.strip():
+            print(f"  {m.YELLOW}⚠{m.NC} пустой ввод — ещё раз")
+            continue
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"  {m.RED}✗{m.NC} невалидный JSON: {e}")
+            continue
+        if not isinstance(parsed, dict):
+            print(f"  {m.RED}✗{m.NC} корень должен быть объектом {...}")
+            continue
+        print(f"  {m.GREEN}✓{m.NC} JSON принят")
+        return parsed
+
+
+def _hop_pattern_cfg(exit_node: dict) -> Optional[dict]:
+    """trafficPattern хоп-ноги (Entry → Exit) для конкретного Exit.
+
+    Приоритет: custom-JSON (hop_pattern) → именованный пресет (hop_preset)
+    → legacy-фолбэк: пресет standalone-установки Entry (данные,
+    сохранённые до per-Exit пресетов; на проде B/DE оба = basic).
+
+    Рекомендация: держать паттерн хопа РАВНЫМ пресету mita на Exit.
+    Живой тест 01.10 (B↔DE, medium/basic/disabled-матрица) показал,
+    что mieru толерантен к рассинхрону (кадры self-describing, паттерн
+    — косметика потока клиента: E2E OK во всех комбинациях), но
+    совпадение даёт предсказуемую симметрию обфускации обеих ног."""
+    m = _mieru()
+    if exit_node.get("hop_pattern"):
+        return exit_node["hop_pattern"]
+    name = exit_node.get("hop_preset")
+    if name and name in m._MIERU_TRAFFIC_PRESETS:
+        return m._MIERU_TRAFFIC_PRESETS[name]["config"]
+    return _traffic_pattern_cfg()
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -765,7 +886,6 @@ def _apply_all(st: dict) -> bool:
 
     _ETC_DIR.mkdir(parents=True, exist_ok=True)
     _INST_DIR.mkdir(parents=True, exist_ok=True)
-    pattern_cfg = _traffic_pattern_cfg()
 
     # 1) порты: выделить недостающим (однократно; свои — реюз)
     for e in st.get("exits", []):
@@ -776,10 +896,11 @@ def _apply_all(st: dict) -> bool:
                 return False
             e.update(ports)
 
-    # 2) конфиги инстансов + redsocks
+    # 2) конфиги инстансов + redsocks (паттерн обфускации — per-Exit,
+    #    _hop_pattern_cfg: custom hop_pattern → hop_preset → legacy-фолбэк)
     _write_units()
     for e in st.get("exits", []):
-        _seed_hop_instance(e, pattern_cfg)
+        _seed_hop_instance(e, _hop_pattern_cfg(e))
         (_ETC_DIR / f"redsocks-{e['id']}.conf").write_text(_redsocks_conf(e))
 
     # 3) правила iptables + routing.sh + персист
@@ -891,22 +1012,38 @@ def _setup_exit(st: dict) -> None:
     raw_pass = proto_ask(f"  {m.CYAN}Пароль (Enter=авто): {m.NC}", default="", c=True).strip()
     password = raw_pass or proto_gen_password()
 
+    # обфускация СЕРВЕРА (mita на этом Exit) — паритет с аддоном:
+    # выбор при установке, а не только потом в «Пресеты обфускации».
+    # Паттерн виден в итоговой рамке — его же выбрать на Entry для хопа.
+    cur_tp = mst.get("traffic_preset", "basic")
+    tp_name, tp_custom = _ask_pattern_menu(m, current=cur_tp,
+                                           subject="mita на Exit")
+    if tp_name == "custom" and tp_custom is None:
+        tp_name, tp_custom = cur_tp, None
+
     users.append({"username": username, "password": password})
     mst["users"] = users
 
-    _tp = mst.get("traffic_preset", "basic")
+    cfg_dict = (tp_custom if tp_name == "custom"
+                else m._MIERU_TRAFFIC_PRESETS.get(tp_name, {}).get("config"))
     cfg = m._build_server_config(
         users,
         mst.get("port_start", m._DEFAULT_PORT_START),
         mst.get("port_end", m._DEFAULT_PORT_END),
         mst.get("protocol", m._DEFAULT_PROTOCOL),
-        traffic_pattern=m._MIERU_TRAFFIC_PRESETS.get(_tp, {}).get("config"),
+        traffic_pattern=cfg_dict,
     )
     err = m._apply_server_config(cfg)
     if err:
         print(f"  {m.RED}✗{m.NC} mita apply config: {err[:200]}"); m._pause(); return
+    mst["traffic_preset"] = tp_name
+    if tp_name == "custom":
+        mst["traffic_pattern_custom"] = tp_custom
+    else:
+        mst.pop("traffic_pattern_custom", None)
     proto_save_state(m._MODULE_STATE, mst)
-    _run(["systemctl", "reload-or-restart", m._SERVICE_NAME])
+    # trafficPattern не поддерживает hot-reload — restart (не reload)
+    _run(["systemctl", "restart", m._SERVICE_NAME])
 
     st["role"] = "exit"
     st["exit"] = {
@@ -914,6 +1051,7 @@ def _setup_exit(st: dict) -> None:
         "port_start": mst.get("port_start", m._DEFAULT_PORT_START),
         "port_end": mst.get("port_end", m._DEFAULT_PORT_END),
         "protocol": mst.get("protocol", m._DEFAULT_PROTOCOL),
+        "traffic_preset": tp_name,
     }
     state_save(st)
 
@@ -929,11 +1067,16 @@ def _setup_exit(st: dict) -> None:
     m._box_kv("Порт(ы):", f"{m.YELLOW}{port_str}/{st['exit']['protocol']}{m.NC}")
     m._box_kv("Hop-логин:", f"{m.YELLOW}{username}{m.NC}")
     m._box_kv("Hop-пароль:", f"{m.YELLOW}{password}{m.NC}")
+    m._box_kv("Обфускация:", f"{m.YELLOW}{tp_name}{m.NC} "
+              f"{m.DIM}(выбрать ту же на Entry для хопа){m.NC}")
     m._box_row()
     m._box_info("Перенесите эти данные на Entry (RU): меню Mieru → [C] →")
     m._box_info("[3] Управление Exit-нодами → Добавить.")
     m._box_bot()
     m._pause()
+
+    # прямые ссылки этого сервера (одиночный режим — без каскада)
+    _show_client_links(st)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -961,6 +1104,16 @@ def _prompt_exit() -> Optional[dict]:
     raw_pass = proto_ask(f"  {m.CYAN}Hop-пароль (с Exit): {m.NC}", c=True).strip()
     if not raw_pass:
         print(f"  {m.RED}✗{m.NC} обязателен"); return None
+
+    # обфускация хопа — паритет с аддоном (basic/aggressive/…/custom);
+    # рекомендация: тот же пресет, что у mita на Exit (симметрия ног)
+    print(f"  {m.DIM}(рекомендуется тот же пресет, что у mita на Exit —"
+          f" см. EXIT НАСТРОЕН на Exit-ноде){m.NC}")
+    hop_preset, hop_custom = _ask_pattern_menu(m, current="basic",
+                                               subject="хопа")
+    if hop_preset == "custom" and hop_custom is None:
+        hop_preset, hop_custom = "basic", None
+
     socks_login = proto_ask(
         f"  {m.CYAN}SOCKS5-логин локального mieru (Enter=без): {m.NC}",
         default="", c=True).strip()
@@ -973,6 +1126,8 @@ def _prompt_exit() -> Optional[dict]:
         "id": f"exit-{int(time.time() * 1000) % 100000}-{label.lower()[:12]}",
         "label": label, "host": host, "port": port, "protocol": protocol,
         "username": username, "password": raw_pass,
+        "hop_preset": hop_preset,
+        "hop_pattern": hop_custom,
         "socks_login": socks_login, "socks_password": socks_password,
         "enabled": True, "healthy": None, "latency_ms": None,
         "last_check": "", "fail_streak": 0,
@@ -994,14 +1149,18 @@ def _manage_exits(st: dict) -> None:
                         f"{m.RED}●" if e.get("healthy") is False else "○")
             en = "" if e.get("enabled", True) else f" {m.DIM}(выкл){m.NC}"
             lat = f" {m.DIM}{e.get('latency_ms')}мс{m.NC}" if e.get("latency_ms") else ""
+            hop_tp = e.get("hop_preset") or e.get("hop_pattern") and "custom" \
+                or "(наслед.)"
             m._box_row(f"  {state_ch}{m.NC} {i}. {m.YELLOW}{e['label']}{m.NC} "
                        f"→ {e['host']}:{e['port']}/{e['protocol']}"
                        f"{en}{lat}")
+            m._box_row(f"     {m.DIM}обфускация хопа: {hop_tp}{m.NC}")
         m._box_row()
         m._box_item("1", "Добавить Exit")
         m._box_item("2", "Удалить Exit")
         m._box_item("3", "Вкл/выкл Exit")
         m._box_item("4", "Поднять в списке (приоритет для prio)")
+        m._box_item("5", "🔒 Обфускация хопа (сменить пресет Exit)")
         m._box_item("S", "Strict-UDP: " + ("вкл" if st.get("strict_udp_block") else "выкл"))
         m._box_item("Q", "← Назад")
         m._box_bot(); print()
@@ -1041,11 +1200,230 @@ def _manage_exits(st: dict) -> None:
                 i = int(raw) - 1
                 exits.insert(i - 1, exits.pop(i))
                 state_save(st)
+        elif ch == "5" and exits:
+            raw = proto_ask("  № Exit (обфускация хопа): ", c=True).strip()
+            if raw.isdigit() and 1 <= int(raw) <= len(exits):
+                e = exits[int(raw) - 1]
+                cur = e.get("hop_preset") or "basic"
+                name, custom = _ask_pattern_menu(m, current=cur, subject="хопа")
+                if name == "custom" and custom is None:
+                    name, custom = "basic", None
+                e["hop_preset"] = name
+                e["hop_pattern"] = custom
+                state_save(st)
+                print(f"  {m.GREEN}✓{m.NC} обфускация хопа {e['label']}: "
+                      f"{name} — применится при [4] Применить")
         elif ch == "s":
             st["strict_udp_block"] = not st.get("strict_udp_block", False)
             state_save(st)
         elif ch in ("q", ""):
             return
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  КЛИЕНТСКАЯ ВЫДАЧА (ссылки) — порт из mieru addon (hybrid_addon)
+#  + standalone-флоу mieru.py: Karing mierus:// (+traffic-pattern blob),
+#  Nekobox/Nyamebox mierus://, sing-box JSON для Karing (запасной), QR
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _export_traffic_pattern_blob() -> Optional[str]:
+    """`mita export traffic-pattern` → base64-protobuf blob для mierus://
+    и sing-box JSON (порт hybrid_addon._export_traffic_pattern_blob).
+
+    Blob ЛОКАЛЬНОГО mita = паттерн того сервера, к которому клиент
+    подключается: Entry — каскадная выдача, Exit — одиночная. None при
+    любой проблеме — выдача продолжится без поля (не критично)."""
+    m = _mieru()
+    try:
+        if not m._MITA_BIN.exists():
+            return None
+    except Exception:
+        return None
+    r = _run([str(m._MITA_BIN), "export", "traffic-pattern"], capture=True)
+    if r.returncode != 0:
+        print("  [!] mita export traffic-pattern не удался — "
+              "ссылки будут без traffic-pattern")
+        return None
+    return (r.stdout or "").strip() or None
+
+
+def _show_client_links(st: dict, pick_user: bool = False) -> None:
+    """Клиентская выдача каскада (порт hybrid_addon._show_mieru_client_links
+    + форматы standalone mieru.py — переиспользует его генераторы лениво).
+
+    Роль entry: ссылки для КОНЕЧНЫХ клиентов — подключаются к mita
+    ЭТОГО сервера (Entry), egress через Exit-ноды. Роль exit: прямые
+    ссылки этого сервера (одиночный режим), hop-юзер исключается.
+
+    Особенности форматов (наследованы из mieru.py, проверены живьём):
+      • Karing UDP — с IP (баг ядра Karing: домен+UDP = 0 байт/с);
+        Nekobox/Nyamebox — адрес как есть
+      • traffic-pattern blob — ЕДИНЫЙ параметр в ссылке (защита от
+        двойного traffic-pattern=, багфикс аддона)
+      • sing-box JSON: поле traffic_pattern + dns-секция из state
+        standalone-установки (client_dns), BOTH → selector-группа
+    """
+    m = _mieru()
+    role = st.get("role") or ""
+    if role not in ("entry", "exit"):
+        print("  Роль не настроена — сначала [1] или [2].")
+        m._pause()
+        return
+
+    mst = proto_load_state(m._MODULE_STATE)
+    users = list(mst.get("users", []))
+    if role == "exit":
+        # hop-юзер — служебная нога Entry→Exit, в прямую выдачу не идёт
+        hop = (st.get("exit", {}) or {}).get("hop_username")
+        users = [u for u in users if u.get("username") != hop]
+    if not users:
+        print("  Пользователей нет (меню Mieru → [2]).")
+        m._pause()
+        return
+
+    idx = 0
+    if pick_user and len(users) > 1:
+        for i, u in enumerate(users, 1):
+            print(f"  {i}. {u.get('username')}")
+        try:
+            raw = proto_ask(f"  {m.CYAN}Пользователь [Enter=1] (q=отмена): {m.NC}",
+                            default="1", c=True).strip().lower()
+        except ProtoCancelled:
+            return
+        if raw in ("q", ""):
+            return
+        if raw.isdigit() and 1 <= int(raw) <= len(users):
+            idx = int(raw) - 1
+    u = users[idx]
+    uname = u.get("username", "")
+    pwd = u.get("password", "")
+
+    try:
+        import urllib.parse
+        from chimera.modules.mieru import (
+            _gen_client_share_link,
+            _gen_client_share_link_nekobox,
+            _gen_singbox_outbound,
+            _build_karing_full_config,
+            _build_karing_multi_config,
+            _karing_link_addr,
+            _dns_host_is_domain,
+            _effective_client_addr,
+            _protocol_variants,
+            _print_qr,
+            _print_link_pairs_outside,
+        )
+    except ImportError as e:
+        print(f"  [!] генераторы ссылок недоступны: {e}")
+        m._pause()
+        return
+
+    port_start = int(mst.get("port_start", m._DEFAULT_PORT_START))
+    port_end = int(mst.get("port_end", m._DEFAULT_PORT_END))
+    protocol = mst.get("protocol", m._DEFAULT_PROTOCOL)
+    client_dns = (mst.get("client_dns", "") or "").strip()
+    client_addr = _effective_client_addr()
+    blob = _export_traffic_pattern_blob()
+
+    variants = _protocol_variants(protocol)
+    server_domain = client_addr if _dns_host_is_domain(client_addr) else ""
+    link_pairs = []
+    outbounds = []
+    udp_ip_used = False
+    for p in variants:
+        # Karing-выдача UDP — с IP (баг ядра Karing, см. mieru.py)
+        k_addr, sub = _karing_link_addr(p, client_addr)
+        udp_ip_used = udp_ip_used or sub
+        karing = _gen_client_share_link(
+            k_addr, port_start, port_end, p, uname, pwd,
+            traffic_preset="" if blob else "basic")
+        neko = _gen_client_share_link_nekobox(client_addr, port_start, p,
+                                              uname, pwd)
+        if blob:
+            tp = "traffic-pattern=" + urllib.parse.quote(blob, safe="")
+            karing = f"{karing}&{tp}"
+            neko = f"{neko}&{tp}"
+        link_pairs.append((p, karing, neko))
+        ob = _gen_singbox_outbound(k_addr, port_start, port_end, p,
+                                   uname, pwd)
+        if blob:
+            # поле sing-box (snake_case) несёт тот же blob, что и ссылка
+            ob["traffic_pattern"] = blob
+        if len(variants) > 1:
+            ob["tag"] = f"{ob['tag']}-{p.lower()}"
+        outbounds.append(ob)
+
+    # BOTH — ОБА транспорта в одном JSON + selector; один — обычный конфиг
+    if len(outbounds) > 1:
+        full_config = _build_karing_multi_config(outbounds, client_dns,
+                                                 server_domain)
+    else:
+        full_config = _build_karing_full_config(outbounds[0], client_dns,
+                                                server_domain)
+    mode = "cascade" if role == "entry" else "exit"
+    cfg_path = Path(f"/tmp/karing-mieru-{mode}-{uname}.json")
+    cfg_saved = False
+    try:
+        cfg_path.write_text(
+            json.dumps(full_config, indent=2, ensure_ascii=False),
+            encoding="utf-8")
+        cfg_saved = True
+    except OSError:
+        pass
+
+    os.system("clear")
+    if role == "entry":
+        m._box_top("🔗  КЛИЕНТСКАЯ ВЫДАЧА  •  КАСКАД")
+        m._box_row()
+        for e in st.get("exits", []):
+            if not e.get("enabled", True):
+                continue
+            mark = (f"{m.GREEN}●{m.NC}" if e.get("healthy") is True else
+                    f"{m.RED}●{m.NC}" if e.get("healthy") is False else "○")
+            m._box_row(f"  {mark} {e['label']} → {e['host']} "
+                       f"{m.DIM}(egress){m.NC}")
+        m._box_row()
+        m._box_info("Клиенты подключаются к ЭТОМУ серверу (Entry, RU);")
+        m._box_info("исходящий IP = Exit-нода(ы) выше.")
+    else:
+        m._box_top("🔗  КЛИЕНТСКАЯ ВЫДАЧА  •  ОДИНОЧНЫЙ РЕЖИМ")
+        m._box_row()
+        m._box_info("Прямое подключение к этому серверу (Exit, EU),")
+        m._box_info("без каскада. Каскадная выдача — на Entry-ноде.")
+    m._box_row()
+    port_str = str(port_start) if port_start == port_end \
+        else f"{port_start}-{port_end}"
+    m._box_kv("Пользователь:", f"{m.YELLOW}{uname}{m.NC}")
+    m._box_kv("Пароль:", f"{m.YELLOW}{pwd}{m.NC}")
+    m._box_kv("Сервер:", f"{m.YELLOW}{client_addr}{m.NC}")
+    m._box_kv("Порт(ы):", f"{m.YELLOW}{port_str}/"
+              f"{'+'.join(variants)}{m.NC}")
+    if client_dns:
+        m._box_kv("DNS (через туннель):", f"{m.YELLOW}{client_dns}{m.NC}")
+    tp_label = mst.get("traffic_preset", "basic")
+    m._box_kv("Обфускация:", f"{m.YELLOW}{tp_label}{m.NC}")
+    m._box_row()
+    m._box_info("Ссылки Karing и Nekobox/Nyamebox — ПОД рамкой, целиком.")
+    if cfg_saved:
+        m._box_info(f"Karing JSON (запасной): {cfg_path}")
+    if blob:
+        m._box_info("traffic-pattern — blob от mita (обфускация клиента")
+        m._box_info("синхронизирована с сервером автоматически)")
+    if udp_ip_used:
+        m._box_warn("UDP для Karing — с IP: домен+UDP в Karing не работает")
+    m._box_warn("Karing: ядро sing-box (не Xray-core); время ±30 сек!")
+    if len(users) > 1:
+        m._box_info(f"Другие пользователи: меню каскада → [L] "
+                    f"(всего {len(users)})")
+    m._box_bot()
+    print()
+    _print_link_pairs_outside(link_pairs)
+    for p, share_link, _neko in link_pairs:
+        _print_qr(share_link,
+                  f"Karing / mierus:// для {uname} ({p})"
+                  if len(link_pairs) > 1 else
+                  f"Karing / mierus:// для {uname}")
+    m._pause()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1279,6 +1657,10 @@ def _show_status(st: dict) -> None:
                        f"| {hs} | {e.get('latency_ms') or '—'}мс "
                        f"| socks:{e.get('socks_port') or '—'} "
                        f"redir:{e.get('redsocks_port') or '—'}")
+            hop_tp = e.get("hop_preset") or (
+                "custom" if e.get("hop_pattern") else "(наслед. Entry)")
+            m._box_row(f"     обфускация хопа: {hop_tp} "
+                       f"{m.DIM}(рекомендуется = пресету mita на Exit){m.NC}")
             if e.get("last_check"):
                 m._box_row(f"     {m.DIM}проверка: {e['last_check']}{m.NC}")
         rules_now = sum(
@@ -1298,6 +1680,11 @@ def _show_status(st: dict) -> None:
         m._box_kv("Hop-логин:", str(ex.get("hop_username", "—")))
         m._box_kv("Порт(ы):", f"{ex.get('port_start', '—')}-{ex.get('port_end', '—')}"
                   f"/{ex.get('protocol', '—')}")
+        if ex.get("traffic_preset"):
+            m._box_kv("Обфускация mita:", str(ex.get("traffic_preset")))
+        mst = proto_load_state(m._MODULE_STATE)
+        if mst.get("traffic_preset"):
+            m._box_kv("Пресет (state):", str(mst.get("traffic_preset")))
     m._box_bot()
     m._pause()
 
@@ -1349,6 +1736,7 @@ def do_mieru_cascade_menu() -> None:
         m._box_item("4", "🔄  Применить (конфиги+сервисы+правила+порты)")
         m._box_item("5", "🏥  Health check + ребаланс")
         m._box_item("6", "📊  Статус")
+        m._box_item("L", "🔗  Ссылки для клиентов (Karing/Nekobox/JSON/QR)")
         m._box_sep()
         m._box_item("7", "⏸  Деактивировать (правила+сервисы; данные сохранить)")
         m._box_item("8", f"{m.RED}🗑   Полное удаление{m.NC}")
@@ -1374,7 +1762,12 @@ def do_mieru_cascade_menu() -> None:
                 print("  Нет Exit-ов — добавьте через [3]."); m._pause(); continue
             ok = _apply_all(st)
             print(f"  {'✓ применено' if ok else '⚠ применено с ошибками (см. выше)'}")
-            m._pause()
+            if ok:
+                # клиентская выдача сразу после успешного apply —
+                # ссылки, по которым подключаются конечные клиенты
+                _show_client_links(st)
+            else:
+                m._pause()
         elif ch == "5":
             r = health_tick(verbose=True)
             if not r.get("checked"):
@@ -1382,6 +1775,8 @@ def do_mieru_cascade_menu() -> None:
             m._pause()
         elif ch == "6":
             _show_status(st)
+        elif ch == "l":
+            _show_client_links(st, pick_user=True)
         elif ch == "7":
             deactivate(st, keep_state=True)
             print("  Деактивировано (данные сохранены)."); m._pause()
