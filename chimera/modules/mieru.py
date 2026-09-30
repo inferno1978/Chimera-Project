@@ -2244,6 +2244,7 @@ def do_mieru_menu() -> None:
 
         if not installed:
             _box_item("1", "🚀  Установить Mieru")
+            _box_item("C", "🧅  Каскад Entry→Exit (multi-exit)")
         else:
             _box_item("1", "🚀  Переустановить")
             _box_item("2", "👥  Управление пользователями")
@@ -2251,6 +2252,8 @@ def do_mieru_menu() -> None:
             _box_item("4", "📊  Статус / логи")
             _box_item("5", "📈  Статистика трафика")
             _box_item("6", "🔒  Пресеты обфускации (traffic pattern)")
+            _box_sep()
+            _box_item("C", "🧅  Каскад Entry→Exit (multi-exit)")
             _box_sep()
             _box_item("9", f"{RED}🗑️   Удалить Mieru{NC}")
 
@@ -2266,6 +2269,29 @@ def do_mieru_menu() -> None:
 
         if ch == "1":
             _run_install()
+            # Post-install: предложение каскада (в flow установки standalone —
+            # требование владельца: каскад доступен прямо из установки Mieru)
+            if _is_installed():
+                try:
+                    raw = proto_ask(
+                        f"  {CYAN}Настроить каскад Entry→Exit сейчас? [y/N]: {NC}",
+                        default="N", c=True).strip().lower()
+                    if raw in ("y", "yes", "д", "да"):
+                        from chimera.modules.mieru_cascade import do_mieru_cascade_menu
+                        do_mieru_cascade_menu()
+                except _Cancelled:
+                    pass
+                except ImportError as _e:
+                    print(f"\n  {RED}✗{NC}  Модуль каскада не найден: {_e}")
+                    _pause()
+        elif ch == "c":
+            try:
+                from chimera.modules.mieru_cascade import do_mieru_cascade_menu
+                do_mieru_cascade_menu()
+            except ImportError as _e:
+                print(f"\n  {RED}✗{NC}  Модуль каскада не найден: {_e}"); _pause()
+            except _Cancelled:
+                pass
         elif ch == "2" and installed:
             try: _users_menu()
             except _Cancelled: pass
