@@ -82,8 +82,10 @@ DOWNLOAD MANAGER (требование владельца):
 """
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import fcntl
+import ipaddress
 import json
 import os
 import re
@@ -92,6 +94,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -139,6 +142,18 @@ _MITA_DROPOIN_DIR = Path("/etc/systemd/system/mita.service.d")
 _MITA_DROPOIN     = _MITA_DROPOIN_DIR / "60-mieru-cascade-user.conf"
 
 _MITA_CGROUP = "system.slice/mita.service"
+
+# B4-EXEMPT: освобождение блок-листа mieru_dpi из каскада (двухплечевой
+# сплит, паритет с VLESS+B4 — живой кейс 01.10.2026). Домены включённых
+# сетов b4 (state mieru_dpi.route_domains — тот же список, что в
+# клиентских конфигах [6]) резолвятся в ipset; TCP mita в эти IP идёт
+# НАПРЯМУЮ с Entry (b4 дурит ТСПУ на плече нода→цель, цель видит RU-IP),
+# остальное — как раньше, в Exit-ы через redsocks.
+_B4_IPSET     = "mieru_b4_direct"
+_B4_IPSET_TMP = _B4_IPSET + "_new"
+_B4_RESOLVE_MAX_WORKERS = 16
+_B4_RESOLVE_OVERALL_S   = 25      # потолок фазы резолва (все виды, сек)
+_B4_CURL_TIMEOUT_S      = 4       # один DoH-запрос через hop-socks
 
 # Loopback-окна (запас 50 на тип; rpc/http — плейсхолдеры конфига,
 # слушаются только если mieru proxy поднимает их — проверяется на деплое)
@@ -424,6 +439,179 @@ def _seed_hop_instance(exit_node: dict, pattern_cfg: Optional[dict]) -> bool:
         return True
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  B4-EXEMPT: блок-лист mieru_dpi мимо каскада (паритет с VLESS+B4)
+#
+#  Задача (живой кейс 01.10.2026): сплит-конфиг клиента шлёт блок-лист
+#  на RU-ноду, чтобы его ловил b4 (ломает логику ТСПУ на плече
+#  нода→цель, цель видит RU-IP — у юзера вместо этого весь mita-TCP
+#  уезжал в Exit-ы). Каскад матчит ВЕСЬ TCP mita по cgroup — без
+#  освобождения блок-лист тоже каскадится. Механизм: домены
+#  route_domains (mieru_dpi) резолвятся в ipset _B4_IPSET; nat OUTPUT:
+#  dst ∈ ipset → RETURN (direct с Entry; b4 процессо-агностичен —
+#  Xray, curl или mita без разницы), остальное → REDIRECT Exit-ов.
+#
+#  ВИДЫ РЕЗОЛВА (критично для CDN-геостеринга): клиент NyameBox/Iblis
+#  резолвит домены САМ (remote_dns tls://8.8.8.8 ЧЕРЕЗ туннель → Exit →
+#  вид 8.8.8.8 с гео Exit-а; sniff в приложении НЕ подменяет назначение
+#  для прокси — ConfigBuilder.cpp:1482-1485 без override). Поэтому ipset
+#  наполняется ОБЪЕДИНЕНИЕМ видов:
+#    • RU-вид: системный резолвер ноды (AGH) — так резолвит сам mita
+#      для доменных назначений (socks5h/Karing с DoH
+#      chimeraprodvpn.online:30443 = тот же AGH);
+#    • Exit-вид на каждый Exit: DoH-JSON 8.8.8.8 ЧЕРЕЗ hop-socks этого
+#      Exit — ровно то, что получит реальный клиент каскада.
+#  Промах по всем видам = каскад (мягкая деградация, не поломка).
+#  Own-IP guard: сервисы самой ноды (DoH :30443, AGH :53) не должны
+#  ездить хэмпином Exit→Entry.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _b4_exempt_domains() -> list:
+    """Домены блок-листа из mieru_dpi (route_domains при enabled)."""
+    try:
+        from chimera.modules import mieru_dpi
+        dst = mieru_dpi._load_state()
+        if not dst.get("enabled"):
+            return []
+        return [d for d in (dst.get("route_domains") or []) if d]
+    except Exception:
+        return []
+
+
+def _b4_exempt_active(st: dict) -> bool:
+    """Освобождение включено? st['b4_exempt']: None/True — авто
+    (есть домены + бинарник ipset), False — выключен принудительно."""
+    if st.get("b4_exempt") is False:
+        return False
+    if not shutil.which("ipset"):
+        return False
+    return bool(_b4_exempt_domains())
+
+
+def _b4_own_ip() -> Optional[str]:
+    """Публичный IPv4 ноды (guard от хэмпина сервисов самой ноды)."""
+    try:
+        ip = (_mieru()._get_server_ip() or "").strip()
+    except Exception:
+        return None
+    return ip if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip) else None
+
+
+def _b4_ip_ok(ip: str) -> bool:
+    """IPv4, не приватный/loopback (0.0.0.0 из «заблокированных"
+    ответов AGH в ipset не кладём — матчит лишнее)."""
+    try:
+        p = ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return False
+    return (p.version == 4 and not p.is_private and not p.is_loopback
+            and not p.is_unspecified and not p.is_reserved)
+
+
+def _b4_resolve_ru(domain: str) -> set:
+    """RU-вид: системный резолвер ноды (так же резолвит сам mita)."""
+    try:
+        _, _, ips = socket.gethostbyname_ex(domain)
+        return {ip for ip in ips if _b4_ip_ok(ip)}
+    except Exception:
+        return set()
+
+
+def _b4_resolve_via_socks(domain: str, socks_port: int) -> set:
+    """Exit-вид: DoH-JSON 8.8.8.8 ЧЕРЕЗ hop-socks Exit-а — тот же
+    geosteering, что видит реальный клиент каскада (его remote_dns
+    tls://8.8.8.8 ходит через туннель → Exit)."""
+    url = ("https://8.8.8.8/resolve?name="
+           + urllib.parse.quote(domain) + "&type=A")
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "-m", str(_B4_CURL_TIMEOUT_S),
+             "--socks5-hostname", f"127.0.0.1:{socks_port}", url],
+            capture_output=True, text=True, check=False,
+            timeout=_B4_CURL_TIMEOUT_S + 2)
+    except Exception:
+        return set()
+    if r.returncode != 0 or not r.stdout:
+        return set()
+    try:
+        data = json.loads(r.stdout)
+        if data.get("Status") != 0:
+            return set()
+        return {a["data"] for a in data.get("Answer") or []
+                if a.get("type") == 1 and _b4_ip_ok(a.get("data", ""))}
+    except Exception:
+        return set()
+
+
+def _b4set_ensure() -> bool:
+    """Создать оба ipset (-exist): боевой + временный для swap."""
+    if not shutil.which("ipset"):
+        return False
+    for name in (_B4_IPSET, _B4_IPSET_TMP):
+        _run(["ipset", "create", name, "hash:ip", "maxelem", "65536",
+              "-exist"], capture=True)
+    return True
+
+
+def _b4set_refresh(st: dict, verbose: bool = False) -> dict:
+    """Пересобрать ipset блок-листа (все виды резолва, атомарный swap).
+
+    Вызывается из [4]/apply и health-тика (каждые 2 мин): TTL CDN
+    60-300с — свежесть достаточная; пустой результат (сеть легла)
+    НЕ трогает старый набор. Под локом — до ~25с сети, TUI ждёт
+    честно (wait_hint)."""
+    stats = {"domains": 0, "views": 0, "ips": 0, "failed": 0}
+    domains = _b4_exempt_domains()
+    stats["domains"] = len(domains)
+    if not domains or not _b4set_ensure():
+        return stats
+    ports = [int(e["socks_port"]) for e in st.get("exits", [])
+             if e.get("enabled", True) and e.get("healthy") is not False
+             and e.get("socks_port")]
+    stats["views"] = 1 + len(ports)
+    ips: set = set()
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=_B4_RESOLVE_MAX_WORKERS) as ex:
+        futs = [ex.submit(_b4_resolve_ru, d) if p == 0
+                else ex.submit(_b4_resolve_via_socks, d, p)
+                for d in domains for p in [0] + ports]
+        try:
+            for f in concurrent.futures.as_completed(
+                    futs, timeout=_B4_RESOLVE_OVERALL_S):
+                try:
+                    ips |= f.result(timeout=1)
+                except Exception:
+                    stats["failed"] += 1
+        except concurrent.futures.TimeoutError:
+            stats["failed"] += sum(1 for f in futs if not f.done())
+    if not ips:
+        return stats           # полностью пустой набор — не трогаем старый
+    _run(["ipset", "create", _B4_IPSET_TMP, "hash:ip", "maxelem",
+          "65536", "-exist"], capture=True)
+    _run(["ipset", "flush", _B4_IPSET_TMP], capture=True)
+    try:
+        subprocess.run(
+            ["ipset", "restore", "-exist"],
+            input="".join(f"add {_B4_IPSET_TMP} {ip}\n"
+                          for ip in sorted(ips)),
+            capture_output=True, text=True, check=False, timeout=30)
+    except Exception:
+        pass
+    _run(["ipset", "swap", _B4_IPSET_TMP, _B4_IPSET], capture=True)
+    _run(["ipset", "flush", _B4_IPSET_TMP], capture=True)
+    stats["ips"] = len(ips)
+    if verbose:
+        print(f"  b4-exempt ipset: {len(ips)} IP из {stats['views']} "
+              f"видов ({stats['domains']} доменов, промахов "
+              f"{stats['failed']})")
+    return stats
+
+
+def _b4set_destroy() -> None:
+    for name in (_B4_IPSET, _B4_IPSET_TMP):
+        _run(["ipset", "destroy", name], capture=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -738,6 +926,27 @@ def _rule_specs(st: dict, bal: Optional[dict] = None) -> list:
         "rest": M + ["-p", "tcp", "-d", "127.0.0.0/8", "-j", "RETURN"],
     })
 
+    # b4-exempt (двухплечевой сплит, паритет с VLESS+B4): блок-лист
+    # mieru_dpi → НАПРЯМУЮ с Entry (b4 дурит ТСПУ, цель видит RU-IP),
+    # остальное — в Exit-ы; own-IP guard — сервисы самой ноды (DoH
+    # chimeraprodvpn.online:30443 и пр.) не гонять хэмпином через Exit
+    if _b4_exempt_active(st):
+        own = _b4_own_ip()
+        if own:
+            specs.append({
+                "table": "nat", "chain": "OUTPUT",
+                "rest": M + ["-p", "tcp", "-d", own,
+                             "-m", "comment", "--comment", "mcs-b4-ownip",
+                             "-j", "RETURN"],
+            })
+        specs.append({
+            "table": "nat", "chain": "OUTPUT",
+            "rest": M + ["-p", "tcp",
+                         "-m", "set", "--match-set", _B4_IPSET, "dst",
+                         "-m", "comment", "--comment", "mcs-b4-exempt",
+                         "-j", "RETURN"],
+        })
+
     act = _active_exits(st)
     pin_eff, _fb = _effective_pinned(st, act)
     strategy = (st.get("strategy") or "rr").lower()
@@ -883,6 +1092,9 @@ def _live_cascade_rules(st: dict) -> Optional[dict]:
                     break
             if not ours and "127.0.0.0/8" in argv and "RETURN" in argv:
                 ours = True
+            if not ours and ("mcs-b4-exempt" in argv
+                             or "mcs-b4-ownip" in argv):
+                ours = True
             if (not ours and "REJECT" in argv
                     and "icmp-port-unreachable" in argv):
                 ours = True
@@ -1009,6 +1221,9 @@ def _purge_orphan_rules(st: dict) -> None:
                     break
             if not ours and "127.0.0.0/8" in argv and "RETURN" in argv:
                 ours = True
+            if not ours and ("mcs-b4-exempt" in argv
+                             or "mcs-b4-ownip" in argv):
+                ours = True
             if (not ours and "REJECT" in argv
                     and "icmp-port-unreachable" in argv):
                 ours = True
@@ -1038,6 +1253,14 @@ def _rule_specs_all_variants(st: dict) -> list:
         # чтобы после обновления модуля не осталось хвостов
         _add({"table": "nat", "chain": "OUTPUT",
               "rest": M + ["-p", "tcp", "!", "-d", "127.0.0.0/8",
+                           "-j", "RETURN"]})
+        # b4-exempt-поколения: set-правило перечислимо (статичный argv);
+        # own-IP динамический — ловится applied_rules-реплеем и
+        # сигнатурой mcs-b4-ownip в _purge_orphan_rules
+        _add({"table": "nat", "chain": "OUTPUT",
+              "rest": M + ["-p", "tcp",
+                           "-m", "set", "--match-set", _B4_IPSET, "dst",
+                           "-m", "comment", "--comment", "mcs-b4-exempt",
                            "-j", "RETURN"]})
         for e in st.get("exits", []):
             rp = e.get("redsocks_port")
@@ -1085,6 +1308,11 @@ def _routing_sh_text(st: dict) -> str:
         "# 0) удалить ТОЧНЫЕ правила последнего apply (веса/вероятности",
         "#    неперечислимы — только точный replay по applied_rules)",
     ]
+    # ipset блок-листа ДО правил: -m set требует существующий set. После
+    # ребута набор пуст до первого health-тика (≤2 мин мягкой деградации:
+    # блок-лист уедет в каскад, не сломается).
+    lines.append("ipset create " + _B4_IPSET +
+                 " hash:ip maxelem 65536 -exist 2>/dev/null || true")
     for sp in applied:
         argv = _spec_argv(sp, add=False)
         lines.append("while " + " ".join(argv) +
@@ -1383,6 +1611,11 @@ def _apply_all(st: dict) -> bool:
         _seed_hop_instance(e, _hop_pattern_cfg(e))
         (_ETC_DIR / f"redsocks-{e['id']}.conf").write_text(_redsocks_conf(e))
 
+    # ipset блок-листа ДО правил: -m set требует существующий set
+    # (пустой до первого refresh — miss = каскад, мягкая деградация)
+    if _b4_exempt_active(st):
+        _b4set_ensure()
+
     # 3+4) правила + сервисы + персист — под локом (сериализация с
     # health-тиком, фикс гонки 01.10): state_save обязан попасть в ту
     # же критическую секцию, что и _rules_apply
@@ -1402,6 +1635,11 @@ def _apply_all(st: dict) -> bool:
             _run(["systemctl", "restart", unit])
 
         state_save(st)
+
+    # вне лока: резолв доменов блок-листа (сеть, ~10-25с) — правила
+    # уже смотрят на set; освежать можно и из health-тика
+    if _b4_exempt_active(st):
+        _b4set_refresh(st)
     return ok_rules
 
 
@@ -1776,8 +2014,10 @@ def _show_client_links(st: dict, pick_user: bool = False) -> None:
     Особенности форматов (наследованы из mieru.py, проверены живьём):
       • Karing UDP — с IP (баг ядра Karing: домен+UDP = 0 байт/с);
         Nekobox/Nyamebox — адрес как есть
-      • traffic-pattern blob — ЕДИНЫЙ параметр в ссылке (защита от
-        двойного traffic-pattern=, багфикс аддона)
+      • traffic-pattern blob: в Karing-ссылке — ДЕФИС (живьём
+        подтверждён), в NekoBox-ссылке — ПОДЧЁРКИВАНИЕ traffic_pattern
+        (парсер MieruBean.cpp:24; дефис приложение молча теряло);
+        NekoBox-ссылку строит генератор целиком (server_ports обязателен)
       • sing-box JSON: поле traffic_pattern + dns-секция из state
         standalone-установки (client_dns), BOTH → selector-группа
     """
@@ -1855,12 +2095,17 @@ def _show_client_links(st: dict, pick_user: bool = False) -> None:
         karing = _gen_client_share_link(
             k_addr, port_start, port_end, p, uname, pwd,
             traffic_preset="" if blob else "basic")
-        neko = _gen_client_share_link_nekobox(client_addr, port_start, p,
-                                              uname, pwd)
+        # NekoBox/Nyamebox: формат строит генератор (server_ports +
+        # multiplexing + traffic_pattern ПОДЧЁРКИВАНИЕМ — парсер
+        # MieruBean.cpp читает именно так; дефис он молча терял)
+        neko = _gen_client_share_link_nekobox(
+            client_addr, port_start, p, uname, pwd,
+            traffic_pattern=blob or "", port_end=port_end)
         if blob:
+            # Karing: паттерн ДЕФИСОМ — живьём подтверждён импортом
+            # (гибрид/каскад всегда несут ровно один traffic-pattern)
             tp = "traffic-pattern=" + urllib.parse.quote(blob, safe="")
             karing = f"{karing}&{tp}"
-            neko = f"{neko}&{tp}"
         link_pairs.append((p, karing, neko))
         ob = _gen_singbox_outbound(k_addr, port_start, port_end, p,
                                    uname, pwd)
@@ -2136,6 +2381,11 @@ def _health_tick_locked(verbose: bool = False) -> dict:
                         print(f"  {m.GREEN}📌{m.NC} пиннинг: {pin_lbl} "
                               f"восстановлен → возврат с {pre_lbl}")
     state_save(st)
+    # b4-exempt: освежить ipset блок-листа (RU-вид + вид каждого живого
+    # Exit; TTL CDN 60-300с — см. секцию B4-EXEMPT). Под локом тика:
+    # ~10-25с сети, TUI-меню в это время честно ждёт (wait_hint).
+    if _b4_exempt_active(st):
+        _b4set_refresh(st, verbose=verbose)
     return result
 
 
@@ -2191,6 +2441,7 @@ def deactivate(st: dict, keep_state: bool = True) -> None:
         # entry, applied уже пуст)
         with _cascade_lock():
             _strip_rules(st)
+            _b4set_destroy()
             _ROUTING_SH.unlink(missing_ok=True)
             if keep_state:
                 st["role"] = ""

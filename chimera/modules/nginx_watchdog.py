@@ -257,6 +257,8 @@ def _nginx_watchdog_run() -> None:
             _log("WARN", f"Xray unix-socket {sock_path} недоступен — "
                          f"возможно нужно reload xray")
             if _run(["systemctl", "reload", "xray"]) != 0:
+                # (start-limit-fix): reset-failed перед рестартом
+                _run(["systemctl", "reset-failed", "xray"])
                 _run(["systemctl", "restart", "xray"])
 
         # Всё хорошо — выходим без записей в лог (как в исходном bash-скрипте)
@@ -280,6 +282,8 @@ def _nginx_watchdog_run() -> None:
         if mode == "reality":
             # Reality: nginx перезапустился — пересоздаём unix-socket xray
             if _run(["systemctl", "reload", "xray"]) != 0:
+                # (start-limit-fix): reset-failed перед рестартом
+                _run(["systemctl", "reset-failed", "xray"])
                 _run(["systemctl", "restart", "xray"])
     else:
         _log("ERROR", "nginx не поднялся")

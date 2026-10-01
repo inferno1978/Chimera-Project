@@ -197,13 +197,25 @@ class TestDnscryptGeoResilientDefaults(unittest.TestCase):
 
 
 class TestAghFallbackQuad9(unittest.TestCase):
-    """AGH fallback_dns — Quad9 x2 вместо 1.1.1.1 (душится из РФ)."""
+    """AGH fallback_dns — параллельные DoH-апстримы вместо plain :53.
+
+    Эволюция: plain-:53 (Quad9/1.1.1.1) душится из РФ → fallback
+    переведён на DoH-список (cloudflare/adguard/dnsforge/doh.pub/
+    google, upstream_mode: parallel — см. aghome_setup.AGH_FALLBACK_DNS).
+    Тест обновлён вслед за дизайном: раньше ассертил Quad9 x2."""
 
     def test_fallback_dns_values(self):
         from chimera.modules.aghome_setup import AGH_FALLBACK_DNS
-        self.assertIn("9.9.9.9:53", AGH_FALLBACK_DNS)
-        self.assertIn("149.112.112.112:53", AGH_FALLBACK_DNS)
+        # все записи — DoH (plain :53 душится из РФ)
+        self.assertTrue(
+            all(u.startswith("https://") and u.endswith("/dns-query")
+                for u in AGH_FALLBACK_DNS),
+            f"fallback must be DoH-only, got: {AGH_FALLBACK_DNS}")
+        # несколько апстримов — параллельная устойчивость
+        self.assertGreaterEqual(len(AGH_FALLBACK_DNS), 3)
+        # plain-:53 в fallback больше не используется
         self.assertNotIn("1.1.1.1:53", AGH_FALLBACK_DNS)
+        self.assertNotIn("9.9.9.9:53", AGH_FALLBACK_DNS)
 
 
 class TestXrayDnsQuad9Fallback(unittest.TestCase):

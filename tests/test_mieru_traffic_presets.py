@@ -5,9 +5,10 @@ tests/test_mieru_traffic_presets.py
 Unit-тесты для chimera/modules/mieru_traffic_presets.py.
 
 Покрывает:
-  1. Эталонные base64-векторы из реального mieru proto (не self-reference)
-  2. Структура пресетов
-  3. unlockAll кодируется с явным presence (proto3 optional)
+  1. Эталонные base64-векторы: ЖИВОЙ `mita export traffic-pattern`
+     (прод-нода 45.151.182.204, 02.10.2026) + реальный mieru proto
+  2. Структура пресетов (= конфиги server.json mita, единый источник)
+  3. Семантика proto3-без-presence: false/0/отсутствующее НЕ пишется
 """
 from __future__ import annotations
 
@@ -79,11 +80,16 @@ class TestEncodeVarint(unittest.TestCase):
 
 
 class TestRealProtoVectors(unittest.TestCase):
-    """Эталонные base64-векторы из реального mieru proto.
+    """Эталонные base64-векторы: живой `mita export traffic-pattern`
+    (прод-нода 45.151.182.204, 02.10.2026) + base.proto mieru
+    (github.com/enfein/mieru/pkg/appctl/proto/base.proto).
 
-    Источник: github.com/enfein/mieru/pkg/appctl/proto/base.proto
-    + config_test.go TestEncodeDecode
-    + docs/traffic-pattern.md
+    Семантика сериализации (сверена с mita export, байт-в-байт):
+      - поле false/0/отсутствующее в JSON → НЕ сериализуется
+        (proto3 без presence: mita export для aggressive не содержит
+        ни unlockAll, ни applyToAllUDPPacket, ни seed);
+      - вложенный message без живых полей → опускается целиком;
+      - порядок полей — по номеру (совпадает с mita export).
 
     Эти векторы вычислены НЕ нашим кодом — они проверяют корректность
     protobuf-сериализатора против реального mieru.
@@ -92,69 +98,91 @@ class TestRealProtoVectors(unittest.TestCase):
     def setUp(self):
         _setup_core()
 
+    def test_aggressive_matches_live_mita_export(self):
+        """ЭТАЛОН (живая нода, 02.10.2026): aggressive →
+        GgQIARAUIgIIASoFCEAQgAE= байт-в-байт.
+
+        `mita export traffic-pattern` на 45.151.182.204 для конфига
+        aggressive: tcpFragment{enable,maxSleepMs=20} +
+        nonce{PRINTABLE} + padding{64,128}:
+          1a 04 08 01 10 14   tcpFragment {enable=1, maxSleepMs=20}
+          22 02 08 01         nonce {type=PRINTABLE(1)}
+          2a 05 08 40 10 80 01  padding {maxMiddle=64, maxEnd=128}
+        Ни unlockAll (1000/1001), ни seed — их нет в серверном JSON,
+        proto3-без-presence их НЕ пишет.
+        """
+        from chimera.modules.mieru_traffic_presets import get_preset_base64
+        self.assertEqual(get_preset_base64("aggressive"),
+                         "GgQIARAUIgIIASoFCEAQgAE=")
+
     def test_basic_preset_matches_known_vector(self):
-        """basic пресет: unlockAll=False + tcpFragment{enable=True, maxSleepMs=10}.
+        """basic = nonce{PRINTABLE} → 22 02 08 01 (base64 IgIIAQ==).
 
-        Эталон из mieru docs (client example с unlockAll:false):
-        base64 = EAAaBAgBEAo=
-        raw hex: 1000 1a04 0801 100a
-
-        Расшифровка:
-        - 10 00 → field 2 (unlockAll) = false (varint 0)
-        - 1a 04 08 01 10 0a → field 3 (tcpFragment) = {enable=true, maxSleepMs=10}
+        Живой вектор mita export для {"type":"NONCE_TYPE_PRINTABLE"}
+        → байты 22 02 08 01 (поле 4 nonce, type=1 PRINTABLE —
+        подтверждено на прод-ноде 02.10.2026).
         """
         from chimera.modules.mieru_traffic_presets import get_preset_base64
         result = get_preset_base64("basic")
-        # Декодируем для проверки структуры
+        self.assertEqual(result, "IgIIAQ==")
         raw = base64.b64decode(result)
-        # Должен содержать unlockAll=false (1000)
-        self.assertIn(b"\x10\x00", raw,
-                      f"unlockAll=false (1000) not found in basic preset, raw: {raw.hex()}")
-        # Должен содержать tcpFragment с enable=true
-        self.assertIn(b"\x08\x01", raw,
-                      f"tcpFragment.enable=true not found, raw: {raw.hex()}")
+        # nonce (field 4, tag 22) + type=PRINTABLE (08 01)
+        self.assertIn(b"\x22\x02\x08\x01", raw,
+                      f"nonce{{PRINTABLE}} not found in basic preset, raw: {raw.hex()}")
 
-    def test_unlock_all_false_is_serialized(self):
-        """unlockAll=False должен сериализоваться как 1000 (proto3 optional presence).
+    def test_unlock_all_false_not_serialized(self):
+        """unlockAll=False НЕ сериализуется (proto3 без presence).
 
-        До фикса unlockAll=False отбрасывался (if cfg.get("unlockAll") else None).
-        После фикса — кодируется явно (proto3 optional = явное presence).
+        mita export не пишет поле, когда серверный JSON его не задал
+        или задал false — раньше кодировалось 1000 (старая семантика
+        «явное presence», разошедшаяся с живым mita).
         """
-        from chimera.modules.mieru_traffic_presets import get_preset_base64
-        # disabled пресет: unlockAll=False (явно в config)
-        result = get_preset_base64("disabled")
-        raw = base64.b64decode(result)
-        # 1000 = field 2 (unlockAll), varint 0 (false)
-        self.assertIn(b"\x10\x00", raw,
-                      f"unlockAll=false must be serialized as 1000, raw: {raw.hex()}")
+        from chimera.modules.mieru_traffic_presets import encode_traffic_pattern
+        raw = base64.b64decode(encode_traffic_pattern(
+            {"nonce": {"type": "NONCE_TYPE_PRINTABLE"}, "unlockAll": False}))
+        self.assertNotIn(b"\x10\x00", raw,
+                         "unlockAll=false must NOT be serialized as 1000")
+        self.assertNotIn(b"\x10\x01", raw)
 
     def test_unlock_all_true_is_serialized(self):
-        """unlockAll=True должен сериализоваться как 1001."""
-        from chimera.modules.mieru_traffic_presets import get_preset_base64
-        result = get_preset_base64("aggressive")
-        raw = base64.b64decode(result)
-        # 1001 = field 2 (unlockAll), varint 1 (true)
+        """unlockAll=True сериализуется как 1001 — единственное значение
+        поля 2, которое mita export реально пишет."""
+        from chimera.modules.mieru_traffic_presets import encode_traffic_pattern
+        raw = base64.b64decode(encode_traffic_pattern({"unlockAll": True}))
         self.assertIn(b"\x10\x01", raw,
-                      f"unlockAll=true must be serialized as 1001, raw: {raw.hex()}")
+                      "unlockAll=true must be serialized as 1001")
+
+    def test_disabled_preset_returns_empty(self):
+        """disabled (config=None → trafficPattern нет) → '' — параметр/
+        поле в клиентскую выдачу не добавляется вовсе."""
+        from chimera.modules.mieru_traffic_presets import (
+            encode_traffic_pattern, get_preset_base64)
+        self.assertEqual(get_preset_base64("disabled"), "")
+        self.assertEqual(encode_traffic_pattern(None), "")
 
     def test_empty_traffic_pattern_is_valid_base64(self):
-        """disabled пресет (config=None → нет trafficPattern) — get_preset_base64
-        возвращает base64 пустого TrafficPattern (только unlockAll=False)."""
+        """disabled → '' (пустой паттерн); остальные — непустой валидный
+        base64 (декодируется без исключения)."""
         from chimera.modules.mieru_traffic_presets import get_preset_base64
         result = get_preset_base64("disabled")
-        raw = base64.b64decode(result)
-        # Минимум: unlockAll=false (1000)
-        self.assertIn(b"\x10\x00", raw)
+        self.assertEqual(result, "")
+        for name in ("basic", "medium", "aggressive"):
+            raw = base64.b64decode(get_preset_base64(name))
+            self.assertIsInstance(raw, bytes)
+            self.assertGreater(len(raw), 0)
 
     def test_all_presets_produce_valid_base64(self):
-        """Все 4 пресета дают валидный base64 (декодируется без исключения)."""
+        """Все 4 пресета: disabled → '', остальные — валидный base64."""
         from chimera.modules.mieru_traffic_presets import get_preset_base64
         for name in ("disabled", "basic", "medium", "aggressive"):
             with self.subTest(preset=name):
                 result = get_preset_base64(name)
                 raw = base64.b64decode(result)
                 self.assertIsInstance(raw, bytes)
-                self.assertGreater(len(raw), 0)
+                if name == "disabled":
+                    self.assertEqual(result, "")
+                else:
+                    self.assertGreater(len(raw), 0)
 
     def test_medium_has_nonce_fields(self):
         """medium пресет: nonce{type=PRINTABLE, applyToAllUDPPacket=true, minLen, maxLen}.
