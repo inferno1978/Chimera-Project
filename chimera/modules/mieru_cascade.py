@@ -1225,6 +1225,31 @@ def _apply_all(st: dict) -> bool:
 #  НАСТРОЙКА РОЛЕЙ
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _strategy_desc() -> dict:
+    """Короткие описания стратегий (единый источник для [S] и [1])."""
+    return {
+        "rr": "round-robin по соединениям (ядро iptables)",
+        "random": "равномерно случайно на соединение (ядро)",
+        "prio": "active-backup: только первый живой Exit",
+        "leastping": "доли ∝ 1/пинг (пересчёт каждые 2 мин)",
+        "leastload": "доли ∝ 1/(1+соединения на хопе)",
+        "smart": "score: пинг+TTFB+нагрузка — как VLESS",
+    }
+
+
+def _box_strategy_items(m, current: str) -> None:
+    """Список стратегий внутри бокса — [S] меню каскада и [1] настройка
+    Entry. ● = текущая, ★ = рекомендованная. Строки подогнаны под
+    _BOX_W=66 (с запасом ~10 колонок на маркеры)."""
+    desc = _strategy_desc()
+    for i, k in enumerate(BALANCE_STRATEGIES, 1):
+        mark = (f" {m.GREEN}●{m.NC}" if k == current else "") + \
+               (f" {m.GREEN}★{m.NC}" if k == "smart" else "")
+        m._box_item(str(i),
+                    f"{m.BOLD}{k}{m.NC}{mark} {m.DIM}— {desc[k]}{m.NC}")
+    m._box_row(f"  {m.DIM}● текущая    ★ рекомендованная (как VLESS){m.NC}")
+
+
 def _setup_entry(st: dict) -> None:
     m = _mieru()
     m._box_top("⬇  ENTRY  •  вход каскада (RU)")
@@ -1238,14 +1263,13 @@ def _setup_entry(st: dict) -> None:
     m._box_bot(); print()
 
     # стратегия (порт из smart_balancer VLESS + ядерные rr/prio)
-    print(f"  {m.CYAN}Балансировка нескольких Exit-ов:{m.NC}")
-    print(f"     {m.DIM}[1]{m.NC} rr         — round-robin по соединениям (по умолчанию)")
-    print(f"     {m.DIM}[2]{m.NC} random     — случайно на каждое соединение")
-    print(f"     {m.DIM}[3]{m.NC} prio       — active-backup (только первый живой)")
-    print(f"     {m.DIM}[4]{m.NC} leastping  — доли ∝ 1/пинг   {m.DIM}(health-пробы, 2 мин){m.NC}")
-    print(f"     {m.DIM}[5]{m.NC} leastload  — доли ∝ 1/(1+соединения на хопе)")
-    print(f"     {m.DIM}[6]{m.NC} smart      — score: пинг+TTFB+нагрузка  {m.GREEN}★ как VLESS Smart Balancer{m.NC}")
-    print(f"     {m.DIM}   весовые (4-6): все живые Exit-ы в ротации — агрегация каналов сохраняется{m.NC}")
+    m._box_top("⚖  Балансировка Exit-ов")
+    m._box_row()
+    _box_strategy_items(m, (st.get("strategy") or "rr").lower())
+    m._box_row(f"  {m.DIM}весовые (4-6): все живые Exit-ы в ротации —{m.NC}")
+    m._box_row(f"  {m.DIM}агрегация каналов сохраняется{m.NC}")
+    m._box_row()
+    m._box_bot(); print()
     raw = proto_ask(f"  {m.CYAN}Выбор [Enter=rr]: {m.NC}",
                     default="rr", c=True).strip().lower()
     by_num = {"1": "rr", "2": "random", "3": "prio",
@@ -2079,28 +2103,17 @@ def _change_strategy(st: dict) -> None:
     current = (st.get("strategy") or "rr").lower()
     m._box_top("⚖  Стратегия балансировки Exit-ов")
     m._box_row()
-    desc = {
-        "rr": "round-robin по соединениям (ядро iptables)",
-        "random": "равномерно случайно на каждое соединение (ядро)",
-        "prio": "active-backup: только первый живой Exit",
-        "leastping": "доли ∝ 1/пинг (health-пробы, пересчёт 2 мин)",
-        "leastload": "доли ∝ 1/(1+соединения на хопе)",
-        "smart": "score: пинг+TTFB+нагрузка — как VLESS Smart Balancer",
-    }
-    for i, k in enumerate(BALANCE_STRATEGIES, 1):
-        cur = f"  {m.GREEN}(текущая){m.NC}" if k == current else ""
-        star = f" {m.GREEN}★{m.NC}" if k == "smart" else ""
-        print(f"     {m.DIM}[{i}]{m.NC} {k:10s} — {desc[k]}{star}{cur}")
+    _box_strategy_items(m, current)
     bal = st.get("balance") or {}
     if bal.get("shares"):
         shares = "  ".join(
             f"{k} {v:.0%}" for k, v in
             sorted(bal["shares"].items(), key=lambda kv: -kv[1]))
-        print(f"     {m.DIM}доли последнего расчёта: {shares}{m.NC}")
+        m._box_info(f"доли последнего расчёта: {m.CYAN}{shares}{m.NC}")
     m._box_row()
+    m._box_bot(); print()
     raw = proto_ask(f"  {m.CYAN}Выбор [Enter=текущая]: {m.NC}",
                     default="", c=True).strip().lower()
-    m._box_bot()
     if not raw:
         return
     by_num = {str(i): k for i, k in enumerate(BALANCE_STRATEGIES, 1)}
