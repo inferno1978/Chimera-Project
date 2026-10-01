@@ -168,6 +168,14 @@ DEFAULT_HOP_USERNAME = "cascade_hop"
 #    leastload — доли ∝ 1/(1+established на хопе)
 #    smart     — доли ∝ 1/score (пинг+TTFB+нагрузка) ★ как VLESS
 #  Веса score и нормализация зеркальны smart_balancer.py (VLESS).
+#
+#  ПИННИНГ (порт CHAIN_PINNED_NODE_INDEX из dpi_detector/chain_nodes
+#  VLESS, 01.10): st['pinned_exit'] = id Exit-а — весь трафик каскада
+#  идёт ТОЛЬКО через него, стратегии игнорируются (как «pinned-режим»
+#  VLESS: «весь трафик → нода, балансировщик выключен»). При падении
+#  закреплённого Exit — fallback на первого живого (фаза B), при
+#  восстановлении — автоматический возврат (фаза A). Ссылки клиентов
+#  НЕ меняются — пиннинг меняет только egress-маршрутизацию на Entry.
 # ══════════════════════════════════════════════════════════════════════════════
 BALANCE_STRATEGIES = ("rr", "random", "prio", "leastping", "leastload", "smart")
 METRIC_STRATEGIES = ("leastping", "leastload", "smart")
@@ -531,6 +539,30 @@ def _active_exits(st: dict) -> list:
     return out
 
 
+def _effective_pinned(st: dict, act: list) -> tuple:
+    """Действующий закреплённый Exit с учётом fallback'а.
+
+    Порт pinned-механики из dpi_detector (VLESS), фазы A/B:
+      — закреплённый жив/включён → (он, None);
+      — закреплённый мёртв/отключён → (первый живой по списку,
+        id закреплённого) — фаза B, деградация;
+        восстановление (фаза A) происходит само: как только
+        закреплённый снова попадает в act, резолвер возвращает его;
+      — пиннинг не задан → (None, None).
+    Чистая функция: state не мутирует — и правила, и статус/меню
+    разрешают одно и то же состояние одинаково."""
+    pid = st.get("pinned_exit")
+    if not pid:
+        return None, None
+    by_id = {e["id"]: e for e in act}
+    pinned = by_id.get(pid)
+    if pinned is not None:
+        return pinned, None
+    for e in act:            # фаза B: первый живой по порядку списка
+        return e, pid
+    return None, pid         # живых нет — правила трогать нечем
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  МЕТРИКИ ВЕСОВЫХ СТРАТЕГИЙ (порт smart_balancer VLESS, 01.10)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -701,12 +733,23 @@ def _rule_specs(st: dict, bal: Optional[dict] = None) -> list:
     })
 
     act = _active_exits(st)
+    pin_eff, _fb = _effective_pinned(st, act)
     strategy = (st.get("strategy") or "rr").lower()
     if strategy not in BALANCE_STRATEGIES:
         strategy = "rr"
     n = len(act)
 
-    if strategy in METRIC_STRATEGIES:
+    if pin_eff is not None:
+        # pinned-режим (порт из VLESS): весь трафик → один Exit,
+        # балансировщик выключен; при падении health-тик перестроит
+        # правила на fallback-резолве (_effective_pinned, фаза B)
+        rp = pin_eff.get("redsocks_port")
+        if rp:
+            specs.append({"table": "nat", "chain": "OUTPUT",
+                          "rest": M + ["-p", "tcp",
+                                       "-j", "REDIRECT",
+                                       "--to-ports", str(rp)]})
+    elif strategy in METRIC_STRATEGIES:
         specs.extend(_metric_exit_specs(st, M, act, bal))
     else:
         for i, e in enumerate(act):
@@ -754,8 +797,10 @@ def _rules_apply(st: dict) -> bool:
           (survive ребута: rules.v4 вернёт ровно этот набор, а
           routing.sh и health-тик будут знать точный набор для -D)."""
     act = _active_exits(st)
+    pinned_now = bool(st.get("pinned_exit"))
     bal = (_balance_shares(st, act)
-           if (st.get("strategy") or "").lower() in METRIC_STRATEGIES else None)
+           if (st.get("strategy") or "").lower() in METRIC_STRATEGIES
+           and not pinned_now else None)
     specs = _rule_specs(st, bal)
 
     # 0) точные прежние
@@ -1864,9 +1909,11 @@ def health_tick(verbose: bool = False) -> dict:
     changed = [e["id"] for e in st.get("exits", [])
                if changed_before.get(e["id"]) is not e.get("healthy")]
 
-    # весовые стратегии: пересчёт долей; дрейф весов = ребаланс
+    # весовые стратегии: пересчёт долей; дрейф весов = ребаланс.
+    # При закреплённом Exit стратегии не действуют — проб не делаем
     weights_drift = False
-    if (st.get("strategy") or "").lower() in METRIC_STRATEGIES:
+    if ((st.get("strategy") or "").lower() in METRIC_STRATEGIES
+            and not st.get("pinned_exit")):
         try:
             bal = _balance_shares(st, _active_exits(st))
             result["balance"] = bal
@@ -1895,6 +1942,29 @@ def health_tick(verbose: bool = False) -> dict:
                 why.append(f"веса стратегии ({st.get('strategy')}) "
                            f"изменились{tail}")
             print(f"  {m.YELLOW}⟳{m.NC} правила перестроены ({'; '.join(why)})")
+            # пиннинг: переходы фаз A/B (порт dpi_detector VLESS)
+            if st.get("pinned_exit"):
+                pre_exits = [{**e,
+                              "healthy": changed_before.get(e["id"])}
+                             for e in st.get("exits", [])]
+                pre_st = {**st, "exits": pre_exits}
+                pin_pre = _effective_pinned(pre_st, _active_exits(pre_st))
+                pin_post = _effective_pinned(st, _active_exits(st))
+                if pin_pre[0] is not pin_post[0] and pin_post[0] is not None:
+                    labels = {e["id"]: (e.get("label") or e["id"])
+                              for e in st.get("exits", [])}
+                    pin_lbl = labels.get(st["pinned_exit"],
+                                         st["pinned_exit"])
+                    eff_lbl = pin_post[0].get("label") or pin_post[0]["id"]
+                    if pin_post[1]:      # фаза B — деградация
+                        print(f"  {m.YELLOW}📌{m.NC} пиннинг: {pin_lbl} "
+                              f"недоступен → трафик через {eff_lbl} "
+                              f"(fallback; возврат при восстановлении)")
+                    else:                # фаза A — восстановление
+                        pre_lbl = (pin_pre[0].get("label")
+                                   if pin_pre[0] else "—")
+                        print(f"  {m.GREEN}📌{m.NC} пиннинг: {pin_lbl} "
+                              f"восстановлен → возврат с {pre_lbl}")
     state_save(st)
     return result
 
@@ -2008,8 +2078,26 @@ def _show_status(st: dict) -> None:
     if st.get("role") == "entry":
         m._box_kv("Матчинг:", str(st.get("matcher")))
         m._box_kv("Стратегия:", str(st.get("strategy")))
+        if st.get("pinned_exit"):
+            labels = {e["id"]: (e.get("label") or e["id"])
+                      for e in st.get("exits", [])}
+            pin_lbl = labels.get(st["pinned_exit"], st["pinned_exit"])
+            pin_eff, fb_from = _effective_pinned(st, _active_exits(st))
+            if pin_eff is not None and not fb_from:
+                m._box_kv("Закреплён Exit:",
+                          f"{m.CYAN}{pin_eff.get('label')}{m.NC} "
+                          f"{m.DIM}(стратегия не действует){m.NC}")
+            elif pin_eff is not None:
+                m._box_kv("Закреплён Exit:",
+                          f"{pin_lbl} {m.RED}⚠ недоступен{m.NC}")
+                m._box_kv("Fallback:",
+                          f"{m.YELLOW}{pin_eff.get('label')}{m.NC} "
+                          f"{m.DIM}(возврат при восстановлении){m.NC}")
+            else:
+                m._box_kv("Закреплён Exit:",
+                          f"{pin_lbl} {m.RED}⚠ живых Exit-ов нет{m.NC}")
         bal = st.get("balance") or {}
-        if bal.get("shares"):
+        if bal.get("shares") and not st.get("pinned_exit"):
             shares = "  ".join(
                 f"{k}:{v:.0%}" for k, v in
                 sorted(bal["shares"].items(), key=lambda kv: -kv[1]))
@@ -2103,6 +2191,9 @@ def _change_strategy(st: dict) -> None:
     current = (st.get("strategy") or "rr").lower()
     m._box_top("⚖  Стратегия балансировки Exit-ов")
     m._box_row()
+    if st.get("pinned_exit"):
+        m._box_warn("закреплён Exit — стратегии не действуют; снять: [P]")
+        m._box_row()
     _box_strategy_items(m, current)
     bal = st.get("balance") or {}
     if bal.get("shares"):
@@ -2139,6 +2230,89 @@ def _change_strategy(st: dict) -> None:
     m._pause()
 
 
+def _change_pin(st: dict) -> None:
+    """Закрепление Exit-ноды ([P]) — порт pinned-режима из VLESS
+    (chain_nodes «Закрепить exit-ноду»): весь трафик каскада идёт
+    только через выбранный Exit, балансировка выключена. При падении
+    закреплённого — fallback на живой с автоматическим возвратом
+    (health-тик, фазы A/B). Меняет только правила — конфиги, сервисы
+    и ссылки клиентов не зависят от пиннинга."""
+    m = _mieru()
+    if st.get("role") != "entry":
+        print("  Закрепление имеет смысл только для Entry ([1]).")
+        m._pause()
+        return
+    exits = [e for e in st.get("exits", []) if e.get("enabled", True)]
+    if not exits:
+        print("  Нет включённых Exit-ов — добавьте через [3].")
+        m._pause()
+        return
+    current = st.get("pinned_exit")
+    eff, fb_from = _effective_pinned(st, _active_exits(st))
+    m._box_top("📌  Закрепить Exit-ноду  (0 = отключить)")
+    m._box_row()
+    m._box_info("Весь трафик каскада идёт только через выбранный Exit;")
+    m._box_info("балансировка выключена. При падении — fallback на")
+    m._box_info("живой Exit с автоматическим возвратом.")
+    m._box_row()
+    for i, e in enumerate(exits, 1):
+        mark = ""
+        if e["id"] == current:
+            mark = f" {m.GREEN}◀ закреплён{m.NC}"
+            if fb_from:
+                mark += f" {m.RED}⚠ недоступен{m.NC}"
+        elif eff is not None and e["id"] == eff["id"] and fb_from:
+            mark = f" {m.YELLOW}◀ действует (fallback){m.NC}"
+        elif e.get("healthy") is False:
+            mark = f" {m.DIM}(мёртв){m.NC}"
+        host = f"{e.get('host')}:{e.get('port')}"
+        m._box_item(str(i), f"{e.get('label')} → {host}{mark}")
+    m._box_item("0", "Отключить закрепление (вернуть балансировку)")
+    m._box_row()
+    m._box_bot(); print()
+    raw = proto_ask(f"  {m.CYAN}Выбор [Enter=выход]: {m.NC}",
+                    default="", c=True).strip().lower()
+    if not raw:
+        return
+    if raw == "0":
+        if not current:
+            print("  Закрепление и так не задано.")
+            m._pause()
+            return
+        lbl = next((e.get("label") for e in exits if e["id"] == current),
+                   current)
+        st.pop("pinned_exit", None)
+        state_save(st)
+        if st.get("exits"):
+            _rules_apply(st)
+            _ROUTING_SH.write_text(_routing_sh_text(st))
+            print(f"  {m.GREEN}✓{m.NC} закрепление снято ({lbl}) — активна "
+                  f"стратегия {st.get('strategy') or 'rr'}")
+        m._pause()
+        return
+    if not raw.isdigit() or not (1 <= int(raw) <= len(exits)):
+        print("  Неверный выбор.")
+        m._pause()
+        return
+    pick = exits[int(raw) - 1]
+    if pick["id"] == current:
+        print("  Этот Exit уже закреплён.")
+        m._pause()
+        return
+    st["pinned_exit"] = pick["id"]
+    state_save(st)
+    if pick.get("redsocks_port"):
+        _rules_apply(st)
+        _ROUTING_SH.write_text(_routing_sh_text(st))
+        print(f"  {m.GREEN}✓{m.NC} закреплён {pick.get('label')}: весь "
+              f"трафик → {pick.get('label')}; стратегия "
+              f"({st.get('strategy') or 'rr'}) не действует")
+    else:
+        print(f"  {m.GREEN}✓{m.NC} закреплён {pick.get('label')} "
+              f"(правила построятся после [4] Применить)")
+    m._pause()
+
+
 def do_mieru_cascade_menu() -> None:
     """Точка входа из mieru.py (меню standalone-Mieru → [C])."""
     m = _mieru()
@@ -2163,6 +2337,13 @@ def do_mieru_cascade_menu() -> None:
         m._box_item("3", f"🧩  Управление Exit-нодами {m.DIM}({n_exits}){m.NC}")
         m._box_item("4", "🔄  Применить (конфиги+сервисы+правила+порты)")
         m._box_item("S", "⚖  Стратегия балансировки (6 режимов)")
+        pin_lbl = ""
+        if st.get("pinned_exit"):
+            _pl = next((e.get("label") for e in st.get("exits", [])
+                        if e["id"] == st["pinned_exit"]),
+                       st["pinned_exit"])
+            pin_lbl = f" {m.DIM}[{_pl}]{m.NC}"
+        m._box_item("P", f"📌  Закрепить Exit-ноду{pin_lbl}")
         m._box_item("5", "🏥  Health check + ребаланс")
         m._box_item("6", "📊  Статус")
         m._box_item("L", "🔗  Ссылки для клиентов (Karing/Nekobox/JSON/QR)")
@@ -2199,6 +2380,8 @@ def do_mieru_cascade_menu() -> None:
                 m._pause()
         elif ch == "s":
             _change_strategy(st)
+        elif ch == "p":
+            _change_pin(st)
         elif ch == "5":
             r = health_tick(verbose=True)
             if not r.get("checked"):
