@@ -1160,12 +1160,15 @@ def _show_client_json(cfg: dict, username: str = "",
         _box_warn(f"Файл не записан: {e} — копируйте JSON из терминала.")
     _box_row()
     if nyamebox:
-        _box_row(f"  {DIM}Куда: NyameBox → Профили → Add Profile → Custom Config{NC}")
-        _box_row(f"  {DIM}→ вставить файл/текст. Конфиг — ПОД рамкой.{NC}")
+        _box_row(f"  {DIM}Куда: Профили → + (Add Profile) → тип{NC}")
+        _box_row(f"  {DIM}«Custom (sing-box config)» → поле Config ← вставить{NC}")
+        _box_row(f"  {DIM}файл/текст → имя → OK. Конфиг — ПОД рамкой.{NC}")
         _box_row()
         _box_row(f"  {YELLOW}⚠  НЕ через буфер/подписку: санитайз приложения{NC}")
         _box_row(f"  {YELLOW}вырезает mieru transport → FATAL «transport must{NC}")
-        _box_row(f"  {YELLOW}be TCP or UDP». Только Manual/Custom Config.{NC}")
+        _box_row(f"  {YELLOW}be TCP or UDP». Профили-жертвы помечены типом{NC}")
+        _box_row(f"  {YELLOW}«MIERU/JSON» — их удалить; лечится и правкой{NC}")
+        _box_row(f"  {YELLOW}профиля: вставить конфиг заново в поле Config.{NC}")
     else:
         _box_row(f"  {DIM}Куда: Karing → импорт конфига · sing-box → config.json ·{NC}")
         _box_row(f"  {DIM}NekoBox → профиль «Custom Config». Конфиг — ПОД рамкой.{NC}")

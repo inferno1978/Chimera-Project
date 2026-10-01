@@ -1,5 +1,37 @@
 # Changelog
 
+# Changelog new entry — Mieru+B4: повторный фейл активации NyameBox — доказан A/B, инструкция до точного пункта меню — 1 октября 2026
+
+
+
+## FIX(mieru_dpi): экран [3] — точный клик-пас импорта (Custom (sing-box config)) + лечение профилей-жертв MIERU/JSON
+
+**Контекст (повтор владельца):** исправленный JSON (тег «proxy»)
+при активации дал ту же ошибку «transport must be TCP or UDP».
+Разбор по исходникам приложения (версия совпадает: 5.11.28.3)
+закрыл вопрос: санитайз буфера/подписки вырезает mieru transport у
+ЛЮБОГО full-JSON — независимо от содержимого; ошибка «LoadConfig
+return error» всплывает при старте профиля (mainwindow_rpc.cpp),
+а ручной редактор Custom сохраняет config_simple дословно
+(P_SAVE_STRING_PLAIN, edit_custom.cpp). Пункт меню существует:
+Add Profile → тип «Custom (sing-box config)» (dialog_edit_profile,
+internal-full); нативный тип «Mieru» — отдельный редактор полей.
+
+- A/B-доказательство ядром юзера (scripts/nyamebox/
+  proof_clipboard_path.py): деливерабл как есть — check PASS,
+  старт ЖИВОЙ (mieru started); тот же JSON после порта санитайза
+  (transport вырезан) — FATAL «create service: initialize
+  outbound[0]: … transport must be TCP or UDP» ПОБУКВЕННО текст
+  юзера. Значит конфиг снова прошёл через буфер/подписку или
+  запущен старый профиль (в нём лежит санированный конфиг).
+- Экран [3]: инструкция уточнена до точного пункта — Профили → +
+  (Add Profile) → тип «Custom (sing-box config)» → поле Config ←
+  вставить JSON; добалено лечение профилей-жертв: «MIERU/JSON»
+  удалить ЛИБО открыть на правку и вставить правильный JSON заново
+  (правка сохраняет дословно).
+- FAQ: раздел «Активация NyameBox-профиля» дополнен A/B-фактом и
+  клик-пасом; таблица клиентов — точное имя пункта меню.
+
 # Changelog new entry — Mieru+B4: разбор активации NyameBox JSON — санитайз приложения и тег «proxy» — 1 октября 2026
 
 
