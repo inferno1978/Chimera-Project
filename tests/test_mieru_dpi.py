@@ -391,6 +391,32 @@ class TestNyameboxSplitConfig(unittest.TestCase):
             if s.get("detour"):
                 self.assertIn(s["detour"], tags)
 
+    def test_clash_api_dummy(self):
+        """Волна 4 активации: работающий Custom-профиль без clash_api
+        заспамлен «no clash server found» — ConnectionLister каждую
+        секунду зовёт ListConnections (настройка «Connection
+        statistics», дефолт ON), а full-конфиг приложение пускает
+        как есть, experimental не добавляя. Генератор теперь вставляет
+        dummy clash_api — ровно как приложение для нативных профилей
+        (ConfigBuilder.cpp:1725-1744): без external_controller (порт
+        не слушается), Karing-вариант не задет."""
+        st = mieru_dpi._load_state()
+        st["route_domains"] = ["youtube.com"]
+        mieru_dpi._save_state(st)
+        with patch.object(mieru_dpi, "_mieru",
+                          return_value=self._fake_mieru()):
+            nyame = mieru_dpi.build_nyamebox_split_config()
+            karing = mieru_dpi.build_karing_split_config()
+        self.assertIsNotNone(nyame)
+        # dummy на месте и ровно в форме приложения
+        self.assertEqual(nyame.get("experimental"),
+                         {"clash_api": {"default_mode": ""}})
+        # без external_controller — порт не слушается, конфликтов нет
+        clash = nyame["experimental"]["clash_api"]
+        self.assertNotIn("external_controller", clash)
+        # Karing-вариант не задет — блок только у NyameBox
+        self.assertNotIn("experimental", karing)
+
 
 class TestMierusLinksForState(unittest.TestCase):
     """_mierus_links_for_state: записи по юзерам с метками форматов.
