@@ -560,7 +560,7 @@ Karing/sing-box (проверено на рабочем конфиге), не д
 | Клиент | Поддержка Mieru | Формат импорта |
 |---|---|---|
 | **Karing** (sing-box core) | да | `mierus://`-ссылка (TCP — проверено живьём; UDP — только с IP, см. траблшутинг «UDP — 0 байт/с») или JSON-файл `/tmp/karing-mieru-hybrid-<транспорт>-<логин>.json` (запасной вариант для старых сборок Karing) |
-| **Nekobox / Nyamebox** | да | `mierus://`-ссылка (свой формат: порт через двоеточие, параметр `transport=`); NyameBox-сплит — JSON меню [6]→[3] (файл `/tmp/mieru-split-nyamebox.json`, импорт — ТОЛЬКО Add Profile → Custom Config; тег outbound — `proxy`, см. «Активация NyameBox-профиля» ниже) |
+| **Nekobox / Nyamebox** | да | `mierus://`-ссылка (свой формат: порт через двоеточие, параметр `transport=`); NyameBox-сплит — JSON меню [6]→[3] (файл `/tmp/mieru-split-nyamebox.json`, импорт — ТОЛЬКО вручную: Add Profile → тип «Custom (sing-box config)»; тег outbound — `proxy`, см. «Активация NyameBox-профиля» ниже) |
 | **sing-box CLI** | да | JSON (тот же, что для Karing) |
 | mihomo / FlClash / Clash-семейство | **нет** | — |
 | Xray-клиенты | нет | — |
@@ -604,7 +604,11 @@ to validate mieru options: transport must be TCP or UDP», лог
 «Не удалось запустить профиль [MIERU/JSON]». Разобрано по
 исходникам приложения (qr243vbi/nekobox) + воспроизведено на его
 же бинарнике ядра. Две независимые причины, обе на стороне
-ПРИЛОЖЕНИЯ (не ядра и не конфига):
+ПРИЛОЖЕНИЯ (не ядра и не конфига). ВАЖНО: санитайз вырезает
+transport у ЛЮБОГО full-JSON с mieru — даже правильный конфиг
+падает, будучи вставленным через буфер/подписку (доказано A/B-
+прогоном ядра: тот же JSON — PASS ручным путём, FATAL после
+санитайза).
 
 **1. Импорт не туда — санитайз вырезает `transport`.** Импорт
 полного JSON через буфер обмена/подписку (`RawUpdater::update` →
@@ -615,8 +619,12 @@ to validate mieru options: transport must be TCP or UDP», лог
 получает mieru без transport → FATAL «transport must be TCP or
 UDP» (ровно текст юзера). Тип профиля «MIERU/JSON» — ещё один
 маркер этого пути: приложение само так подписывает full-JSON
-импорт. **Лечение:** импортировать только Add Profile → Custom
-Config — этот путь хранит JSON без санитайза. В экране [6]→[3]
+импорт. **Лечение:** заводить профиль только вручную: Профили →
++ (Add Profile) → тип «**Custom (sing-box config)**» → вставить
+JSON в поле Config → имя → OK — этот путь хранит JSON без
+санитайза. Уже созданные профили «MIERU/JSON» удалить ЛИБО
+открыть на правку и вставить правильный JSON в поле Config
+заново (правка тоже сохраняет дословно). В экране [6]→[3]
 предупреждение встроено.
 
 **2. Тег outbound — «proxy», не «mieru-<юзер>».** При каждом
