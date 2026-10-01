@@ -1,5 +1,52 @@
 # Changelog
 
+# Changelog new entry — Mieru+B4: волна 4 — «no clash server found» = РАБОТАЮЩИЙ профиль + опрос вкладки «Подключения»; генератор [3] теперь вставляет experimental.clash_api dummy — 1 октября 2026
+
+
+
+## FIX(mieru_dpi): NyameBox JSON + clash_api dummy (форма приложения) — спам «ListConnections: no clash server found» устранён
+
+**Контекст (владелец):** юзер щёлкнул на профиль (без активации)
+— лог засыпало «[Error] Core: LibcoreService error: Internal
+error processing ListConnections: no clash server found» (раз в
+секунду). Ни одного фейла старта в логе нет.
+
+- **Диагноз по исходникам (это ХОРОШИЙ знак — профиль работает):**
+  ConnectionLister::Loop (connectionLister.cpp:28-41) — фоновый
+  поток, раз в секунду дёргает gRPC ListConnections, пока включена
+  настройка «Connection statistics» (connection_statistics,
+  DataStore.hpp:184, дефолт TRUE); server.go:416-420 отвечает
+  «no clash server found» ТОЛЬКО при ЗАПУЩЕННОМ box без
+  ClashServer в контексте. Фейл старта чистит BoxInstance (defer,
+  server.go:74) — молчал бы; URL-тесты — отдельный инстанс
+  (server.go:308-310, defer close); нативные профили получают
+  dummy clash_api от приложения (ConfigBuilder.cpp:1725-1744
+  «dummy to make sure it is created»). Остаётся единственный
+  источник: РАБОТАЮЩИЙ Custom full-конфиг — а full-JSON идёт в
+  ядро как есть (ConfigBuilder.cpp:433-437: подмена только
+  DNS/inbounds), без experimental.
+- **Фикс:** build_nyamebox_split_config теперь вставляет
+  `experimental: {clash_api: {default_mode: ""}}` — ровно форма
+  приложения для нативных профилей; БЕЗ external_controller —
+  порт не слушается, конфликт невозможен. Karing-вариант [2] не
+  тронут.
+- **Валидация ядром юзера (nekobox_core 5.11.28.3,
+  scripts/nyamebox/clash_api_fix.py + clash_api_retry.py):**
+  check PASS; PROOF-вариант с external_controller :19090 —
+  живой старт, mieru started, socks HTTP 200, curl
+  /connections отдаёт живой JSON (доказано создание ClashServer
+  из full-конфига); dummy-вариант — живой старт, mieru started,
+  HTTP 200 (первый прогон 000 — сетевой флейк, повтор 200).
+- **Деливерабл перегенерирован** (build_nyamebox_json.py, пункт
+  5): diff = ровно +блок experimental в конце, остальное
+  байт-в-байт; финальный check PASS + live PASS.
+- **FAQ:** строка в таблице триажа («хороший знак: профиль
+  РАБОТАЕТ») + причина 4 с механизмом и тремя вариантами лечения
+  (обновить JSON правкой Ctrl+E / снять галку «Connection
+  statistics» / игнорировать).
+- **Тесты:** +test_clash_api_dummy (experimental на месте, без
+  external_controller, Karing не задет) — сьют 37 passed.
+
 # Changelog new entry — Mieru+B4: волна 3 активации NyameBox — нативный тип «Mieru» в списке «Тип» — ловушка (спросит имя/пароль, FATAL «username is empty», тип при правке не меняется) — 1 октября 2026
 
 
