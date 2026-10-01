@@ -560,7 +560,7 @@ Karing/sing-box (проверено на рабочем конфиге), не д
 | Клиент | Поддержка Mieru | Формат импорта |
 |---|---|---|
 | **Karing** (sing-box core) | да | `mierus://`-ссылка (TCP — проверено живьём; UDP — только с IP, см. траблшутинг «UDP — 0 байт/с») или JSON-файл `/tmp/karing-mieru-hybrid-<транспорт>-<логин>.json` (запасной вариант для старых сборок Karing) |
-| **Nekobox / Nyamebox** | да | `mierus://`-ссылка (свой формат: порт через двоеточие, параметр `transport=`); NyameBox-сплит — JSON меню [6]→[3] (файл `/tmp/mieru-split-nyamebox.json`, импорт «Custom Config») |
+| **Nekobox / Nyamebox** | да | `mierus://`-ссылка (свой формат: порт через двоеточие, параметр `transport=`); NyameBox-сплит — JSON меню [6]→[3] (файл `/tmp/mieru-split-nyamebox.json`, импорт — ТОЛЬКО Add Profile → Custom Config; тег outbound — `proxy`, см. «Активация NyameBox-профиля» ниже) |
 | **sing-box CLI** | да | JSON (тот же, что для Karing) |
 | mihomo / FlClash / Clash-семейство | **нет** | — |
 | Xray-клиенты | нет | — |
@@ -570,8 +570,8 @@ Karing/sing-box (проверено на рабочем конфиге), не д
 ```
 Karing (в sing-box-JSON, из файла):
   "type": "mieru", "server": "<IP>", "server_port": <порт>,
-  "username": "...", "password": "...", "transport": "tcp",
-  "multiplexing": "high", "traffic_pattern": "<base64>"
+  "username": "...", "password": "...", "transport": "TCP",
+  "multiplexing": "MULTIPLEXING_HIGH", "traffic_pattern": "<base64>"
 
 Nekobox (mierus://):
   mierus://<логин>:<пароль>@<IP>:<порт>?transport=TCP&mtu=1400
@@ -594,6 +594,49 @@ Karing-совместимая mierus:// (query-параметры):
 5. Правила «что через какую ноду» — серверные, из Xray; клиентская
    сторона правил не видит (в отличие от mihomo-конфигов v9.x, где
    рулил клиент).
+
+### Активация NyameBox-профиля (разбор реального фейла 01.10.2026)
+
+Симптом: при активации JSON-профиля в NyameBox (Iblis 5.11.283,
+Windows) всплывает «LoadConfig return error: create service:
+initialize outbound[0]: failed to build mieru client config: failed
+to validate mieru options: transport must be TCP or UDP», лог
+«Не удалось запустить профиль [MIERU/JSON]». Разобрано по
+исходникам приложения (qr243vbi/nekobox) + воспроизведено на его
+же бинарнике ядра. Две независимые причины, обе на стороне
+ПРИЛОЖЕНИЯ (не ядра и не конфига):
+
+**1. Импорт не туда — санитайз вырезает `transport`.** Импорт
+полного JSON через буфер обмена/подписку (`RawUpdater::update` →
+`addFullJsonProxy`) прогоняет конфиг через
+`sanitizeSingBoxConfig` (GroupUpdater.cpp:588): она читает
+`out["transport"].toObject()` — у mieru transport это СТРОКА
+`"TCP"`, `toObject()` даёт пустой объект, и поле вырезается. Ядро
+получает mieru без transport → FATAL «transport must be TCP or
+UDP» (ровно текст юзера). Тип профиля «MIERU/JSON» — ещё один
+маркер этого пути: приложение само так подписывает full-JSON
+импорт. **Лечение:** импортировать только Add Profile → Custom
+Config — этот путь хранит JSON без санитайза. В экране [6]→[3]
+предупреждение встроено.
+
+**2. Тег outbound — «proxy», не «mieru-<юзер>».** При каждом
+старте Custom-профиля приложение заменяет ВСЕ не-fakeip DNS-серверы
+конфига на свой remote_dns с жёстко зашитым `detour: "proxy"`
+(`NormalizeFullConfigDnsForRuntime`, ConfigBuilder.cpp:118). Если
+mieru-outbound называется иначе — DNS-детур указывает в никуда.
+Генератор [6]→[3] теперь переименовывает тег mieru в `proxy` и
+перевешивает все ссылки (route-правила, DNS-detour); Karing-вариант
+[2] не тронут. Внутри приложения remote_dns настраивается в
+Settings → Route → Remote DNS (порт в адресе — через `;`, напр.
+`https://host;30443/dns-query`; значение по умолчанию —
+`tls://8.8.8.8`).
+
+Что происходит при активации исправленного профиля, по шагам:
+приложение подставляет свои inbounds (socks/TUN), прогоняет DNS
+через замену выше (итоговый вид проверен чеком ядра — PASS),
+ядро поднимает mieru-клиент (`outbound/mieru[proxy]: mieru client
+is started`), дальше маршрутка: домены из route.rules → через
+туннель, остальное → direct (route.final=direct).
 
 ### Важно про клиентский traffic_pattern
 

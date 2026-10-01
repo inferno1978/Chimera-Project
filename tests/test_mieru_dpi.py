@@ -263,7 +263,12 @@ class TestNyameboxSplitConfig(unittest.TestCase):
     Все три нюанса пойманы живым nekobox_core 5.11.28.3 (check/run/E2E,
     01.10.2026): strict-decode «unknown field mtu», FATAL «detour to an
     empty direct outbound» (run, не check), deprecation-WARN
-    default_domain_resolver."""
+    default_domain_resolver.
+
+    Тег mieru-outbound — «proxy»: конвенция ПРИЛОЖЕНИЯ, при старте
+    Custom-профиля оно заменяет DNS на свой remote_dns с жёстко
+    зашитым detour="proxy" (ConfigBuilder.cpp:118; разбор активации
+    01.10.2026 — скриншот юзера «transport must be TCP or UDP»)."""
 
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
@@ -316,7 +321,7 @@ class TestNyameboxSplitConfig(unittest.TestCase):
         self.assertEqual(servers[0]["server"], "dns.example.com")
         self.assertEqual(servers[0]["server_port"], 30443)
         self.assertEqual(servers[0]["path"], "/dns-query")
-        self.assertEqual(servers[0]["detour"], "mieru-alice")
+        self.assertEqual(servers[0]["detour"], "proxy")  # конвенция приложения
         self.assertEqual(servers[0]["domain_resolver"], "local")
         self.assertNotIn("address", servers[0])  # legacy-поля нет
         self.assertEqual(servers[1],
@@ -340,7 +345,11 @@ class TestNyameboxSplitConfig(unittest.TestCase):
         self.assertTrue(nyame["route"]["auto_detect_interface"])
         self.assertEqual(nyame["route"]["default_domain_resolver"],
                          "custom-dns")
-        self.assertEqual(nyame["route"]["rules"], karing["route"]["rules"])
+        # домены — 1:1 с Karing; outbound-ссылка — на «proxy» (не тег
+        # Karing-варианта): см. конвенцию в докстринге класса
+        self.assertEqual(nyame["route"]["rules"][0]["domain_suffix"],
+                         karing["route"]["rules"][0]["domain_suffix"])
+        self.assertEqual(nyame["route"]["rules"][0]["outbound"], "proxy")
         mieru_ob = next(o for o in nyame["outbounds"]
                         if o.get("type") == "mieru")
         self.assertNotIn("mtu", mieru_ob)  # релиз 5.11.28.3 не знает поля
@@ -352,6 +361,35 @@ class TestNyameboxSplitConfig(unittest.TestCase):
         mieru_dpi._MIERU_STATE.write_text(
             json.dumps({"installed": True, "users": []}))
         self.assertIsNone(mieru_dpi.build_nyamebox_split_config())
+
+    def test_proxy_tag_convention(self):
+        """Активация в приложении: тег mieru = "proxy" и НИ ОДНОЙ
+        висячей ссылки — детур DNS и route-правила указывают на
+        существующий outbound; Karing-вариант при этом не тронут
+        (его тег остаётся из генератора, напр. "mieru-alice")."""
+        st = mieru_dpi._load_state()
+        st["route_domains"] = ["youtube.com"]
+        mieru_dpi._save_state(st)
+        with patch.object(mieru_dpi, "_mieru",
+                          return_value=self._fake_mieru()):
+            nyame = mieru_dpi.build_nyamebox_split_config()
+            karing = mieru_dpi.build_karing_split_config()
+        self.assertIsNotNone(nyame)
+        mieru_ob = next(o for o in nyame["outbounds"]
+                        if o.get("type") == "mieru")
+        self.assertEqual(mieru_ob["tag"], "proxy")
+        # Karing-вариант не задет: тег из генератора на месте
+        karing_ob = next(o for o in karing["outbounds"]
+                         if o.get("type") == "mieru")
+        self.assertEqual(karing_ob["tag"], "mieru-alice")
+        # все ссылки в nyame-конфиге указывают на существующие теги
+        tags = {o["tag"] for o in nyame["outbounds"]}
+        for r in nyame["route"].get("rules") or []:
+            self.assertIn(r.get("outbound"), tags)
+        self.assertIn(nyame["route"]["final"], tags)
+        for s in nyame["dns"]["servers"]:
+            if s.get("detour"):
+                self.assertIn(s["detour"], tags)
 
 
 class TestMierusLinksForState(unittest.TestCase):
