@@ -892,47 +892,31 @@ def _live_cascade_rules(st: dict) -> Optional[dict]:
     return out
 
 
-def _specs_match(a: list, b: list) -> bool:
-    """argv-равенство правил; --probability — численно с допуском:
-    ядро хранит float32 и печатает шире нашего argv («0.3217» в спеке
-    против «0.32170000020» в -S) — строковое сравнение ложно
-    расходилось бы на каждом весовом правиле."""
-    if len(a) != len(b):
-        return False
-    for i in range(len(a)):
-        if a[i] == b[i]:
-            continue
-        if i > 0 and a[i - 1] == "--probability":
-            try:
-                if abs(float(a[i]) - float(b[i])) <= 1e-6:
-                    continue
-            except ValueError:
-                return False
-        return False
-    return True
-
-
 def _rules_in_sync(st: dict) -> Optional[bool]:
     """Живые правила == st['applied_rules']?
 
     True/False — сверка выполнена; None — iptables -S не ответил.
+    Двухступенчато (ядро печатает -S в КАНОНИЧЕСКОМ порядке — -d/-p до
+    матчеров, наш argv другой; токен-в-токен сравнение давало ложный
+    рассинхрон на каждом правиле — поймано первой живой сверкой на B):
+      1) счёт: живых правил каскада ровно столько, сколько в applied
+         (лишние сироты / потерянные ловятся расхождением количества);
+      2) наличие: каждый спек — iptables -C (структурная проверка ядра,
+         тот же матчинг, что у -D в _rules_apply; вероятности ядро
+         сравнивает численно — float32-печать -S не мешает).
     Ловит: потерянные/лишние правила (сбой apply, ручные правки,
     частичный flush), чужие вероятности, подмену порта (живой кейс
-    01.10: пин pl1 в ядре против пина fi1 в state). Порядок важен —
-    вероятности весовых стратегий условные; сравнение по таблицам."""
+    01.10: пин pl1 в ядре против пина fi1 в state)."""
     applied = st.get("applied_rules") or []
     live = _live_cascade_rules(st)
     if live is None:
         return None
-    for table in ("nat", "filter"):
-        want = [sp["rest"] for sp in applied
-                if sp.get("table") == table and sp.get("chain") == "OUTPUT"]
-        got = live.get(table) or []
-        if len(want) != len(got):
+    if sum(len(v) for v in live.values()) != len(applied):
+        return False
+    for sp in applied:
+        if not proto_ipt_rule_exists(sp["table"], sp["chain"],
+                                     sp["rest"]):
             return False
-        for w, g in zip(want, got):
-            if not _specs_match(list(w), list(g)):
-                return False
     return True
 
 
