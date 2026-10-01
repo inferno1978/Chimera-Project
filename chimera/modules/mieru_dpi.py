@@ -456,6 +456,23 @@ def build_nyamebox_split_config() -> Optional[dict]:
         remove) — потому в инструкции только ручной путь:
         ПКМ → «Новый профиль» → «Польз. (sing-box конфигурация)»
         (internal-full), хранящий JSON без санитайза.
+
+    experimental.clash_api (волна 4 активации 01.10.2026: спам
+    «no clash server found» при РАБОТАЮЩЕМ профиле):
+      • ConnectionLister::Loop (connectionLister.cpp:35) каждую
+        секунду зовёт ListConnections, пока включена настройка
+        «Connection statistics» (connection_statistics, дефолт
+        TRUE); server.go:419 отвечает ошибкой, если box запущен,
+        а ClashServer в контексте нет;
+      • full-конфиг приложение пускает КАК ЕСТЬ (ConfigBuilder.cpp:
+        433-437, подменяет только DNS/inbounds) — experimental не
+        добавляет; своим нативным профилям оно вставляет dummy
+        clash_api (:1725-1744, «dummy to make sure it is created»);
+      • форма та же: {"default_mode": ""} — без external_controller,
+        порт не слушается, конфликтов нет. Проверено ядром юзера
+        (nekobox_core 5.11.28.3): check PASS, живой старт — mieru
+        started, HTTP 200; PROOF-вариант с external_controller
+        отдаёт живой /connections JSON — ClashServer создаётся.
     """
     karing = build_karing_split_config()
     if karing is None:
@@ -491,6 +508,10 @@ def build_nyamebox_split_config() -> Optional[dict]:
         cfg["route"]["default_domain_resolver"] = first_tag
     if rules:
         cfg["route"]["rules"] = rules
+    # clash-сервер для вкладки «Подключения» — без него работающий
+    # профиль заспамлен «no clash server found» (см. докстринг);
+    # dummy-форма приложения: сервер создан, порт не слушается
+    cfg["experimental"] = {"clash_api": {"default_mode": ""}}
     return cfg
 
 def _mierus_links_for_state() -> list:
