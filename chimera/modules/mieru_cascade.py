@@ -153,6 +153,50 @@ _RE_HOST = re.compile(
 
 DEFAULT_HOP_USERNAME = "cascade_hop"
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  БАЛАНСИРОВКА EXIT-ОВ: стратегии (порт из smart_balancer VLESS, 01.10)
+#
+#  Ядерные (распределяет iptables, пересчёт не нужен):
+#    rr        — statistic nth, по очереди на соединение
+#    random    — statistic random, равномерно случайно на соединение
+#    prio      — active-backup, только первый живой Exit
+#  Весовые (доли ∝ 1/метрика, weighted random, пересчёт в health
+#  tick каждые 2 мин; все живые Exit-ы остаются в ротации —
+#  агрегация каналов сохраняется, в отличие от VLESS-балансировщика,
+#  где xray держит один активный outbound):
+#    leastping — доли ∝ 1/latency_ms (health-пробы)
+#    leastload — доли ∝ 1/(1+established на хопе)
+#    smart     — доли ∝ 1/score (пинг+TTFB+нагрузка) ★ как VLESS
+#  Веса score и нормализация зеркальны smart_balancer.py (VLESS).
+# ══════════════════════════════════════════════════════════════════════════════
+BALANCE_STRATEGIES = ("rr", "random", "prio", "leastping", "leastload", "smart")
+METRIC_STRATEGIES = ("leastping", "leastload", "smart")
+
+# Веса составной оценки — зеркально smart_balancer (VLESS)
+_B_W_LATENCY = 0.50
+_B_W_BANDWIDTH = 0.30
+_B_W_LOAD = 0.20
+_B_NORM_LAT_MS = 2000      # «худший» пинг, мс
+_B_NORM_TTFB_MS = 5000     # «худший» TTFB через хоп, мс
+_B_NORM_LOAD = 200         # «худшая» нагрузка, established
+_B_SHARE_FLOOR = 0.005     # квант доли: ниже 0.5% — Exit вне ротации
+_B_SCORE_FLOOR = 0.002     # флор score: кап соотношения весов 500:1
+                           # (анти-доминирование одного Exit; 0.02 сглаживал
+                           #  хорошие Exit-ы в равные доли — баг 01.10)
+_TTFB_URLS = (
+    "http://www.gstatic.com/generate_204",
+    "http://cp.cloudflare.com/generate_204",
+    "http://detectportal.firefox.com/success.txt",
+)
+
+
+def _prob_str(p: float) -> str:
+    """Единый формат вероятности iptables statistic --probability.
+    Один helper для создания, хранения (applied_rules) и зачистки —
+    строки идентичны, -D совпадает байт-в-байт."""
+    p = max(min(p, 1.0), 0.0001)
+    return f"{p:.4f}"
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  RUN + STATE
@@ -174,7 +218,7 @@ def state_load() -> dict:
     return proto_load_state(_MODULE_STATE, defaults={
         "role": "",                # "" | entry | exit
         "matcher": None,           # None | "cgroup" | "owner"  (entry)
-        "strategy": "rr",          # rr | prio                    (entry)
+        "strategy": "rr",          # rr | random | prio | leastping | leastload | smart   (entry)
         "strict_udp_block": False, # (entry)
         "exits": [],               # (entry)
         "exit": {},                # (exit-нода)
@@ -487,12 +531,159 @@ def _active_exits(st: dict) -> list:
     return out
 
 
-def _rule_specs(st: dict) -> list:
+# ══════════════════════════════════════════════════════════════════════════════
+#  МЕТРИКИ ВЕСОВЫХ СТРАТЕГИЙ (порт smart_balancer VLESS, 01.10)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _count_exit_load(exit_node: dict) -> int:
+    """Нагрузка Exit = established-соединения на его socks-порт
+    (подключения redsocks → mieru-hop на 127.0.0.1). Аналог
+    _probe_active_connections из smart_balancer (VLESS)."""
+    sp = exit_node.get("socks_port")
+    if not sp:
+        return _B_NORM_LOAD
+    r = _run(["ss", "-tnH", "state", "established"], capture=True)
+    n = 0
+    for line in (r.stdout or "").splitlines():
+        cols = line.split()
+        if len(cols) >= 4:
+            # точное совпадение порта: :24081 не матчит :240818
+            if cols[2].endswith(f":{sp}") or cols[3].endswith(f":{sp}"):
+                n += 1
+    return n
+
+
+def _probe_exit_ttfb(exit_node: dict, timeout: float = 5.0) -> Optional[float]:
+    """TTFB через socks-порт хопа (аналог _probe_bandwidth_ttfb из
+    smart_balancer VLESS). Лёгкая проба: 204-эндпоинты по очереди.
+    None = нет данных (как в VLESS — «худший» случай в score)."""
+    sp = exit_node.get("socks_port")
+    if not sp:
+        return None
+    for url in _TTFB_URLS:
+        try:
+            r = subprocess.run(
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{time_total}",
+                 "--max-time", str(int(timeout)),
+                 "-x", f"socks5h://127.0.0.1:{sp}", url],
+                capture_output=True, text=True, timeout=timeout + 2)
+            t = (r.stdout or "").strip()
+            if r.returncode == 0 and t:
+                return round(float(t) * 1000.0, 1)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            continue
+    return None
+
+
+def _balance_shares(st: dict, act: list) -> Optional[dict]:
+    """Доли Exit-ов для весовых стратегий: label → q, Σq = 1.
+
+      leastping: w ∝ 1/latency_ms   (health-пробы, 2 мин)
+      leastload: w ∝ 1/(1+нагрузка) (established на socks-порту хопа)
+      smart:     w ∝ 1/score, score = 0.5·норм(пинг) + 0.3·норм(TTFB)
+                                          + 0.2·норм(нагрузка) — веса и
+                 нормализация зеркально smart_balancer (VLESS)
+
+    None для ядерных стратегий (rr/random/prio) — их распределяет
+    iptables без пересчёта. Деградация всех метрик → равномерный
+    фолбэк (как rr). Доли < 0.5% отсекаются, остаток перенормируется."""
+    strategy = (st.get("strategy") or "rr").lower()
+    if strategy not in METRIC_STRATEGIES or not act:
+        return None
+    metrics: dict = {}
+    weights: dict = {}
+    for e in act:
+        lbl = e.get("label") or e["id"]
+        lat = e.get("latency_ms")
+        lat = float(lat) if lat is not None else None
+        mm: dict = {"lat_ms": lat}
+        if strategy in ("leastload", "smart"):
+            mm["load"] = _count_exit_load(e)
+        if strategy == "smart":
+            mm["ttfb_ms"] = _probe_exit_ttfb(e)
+        if strategy == "leastping":
+            w = (1.0 / max(lat, 1.0)) if lat is not None else 0.0
+        elif strategy == "leastload":
+            w = 1.0 / (1 + mm["load"])
+        else:  # smart — composite score, зеркально _compute_score (VLESS)
+            lat_n = min(1.0, (lat if lat is not None else _B_NORM_LAT_MS)
+                        / _B_NORM_LAT_MS)
+            ttfb = mm.get("ttfb_ms")
+            ttfb_n = min(1.0, (ttfb if ttfb is not None else _B_NORM_TTFB_MS)
+                         / _B_NORM_TTFB_MS)
+            load_n = min(1.0, mm["load"] / _B_NORM_LOAD)
+            score = round(_B_W_LATENCY * lat_n + _B_W_BANDWIDTH * ttfb_n
+                          + _B_W_LOAD * load_n, 4)
+            mm["score"] = score
+            w = 1.0 / max(score, _B_SCORE_FLOOR)
+        metrics[lbl] = mm
+        weights[lbl] = w
+    total = sum(weights.values())
+    if total <= 0:
+        q = {lbl: 1.0 / len(act) for lbl in weights}
+    else:
+        q = {lbl: w / total for lbl, w in weights.items()}
+    kept = {lbl: v for lbl, v in q.items() if v >= _B_SHARE_FLOOR}
+    if kept and len(kept) < len(q):
+        sk = sum(kept.values())
+        q = {lbl: v / sk for lbl, v in kept.items()}
+    return {"strategy": strategy, "ts": _ts(), "shares": q, "metrics": metrics}
+
+
+def _metric_exit_specs(st: dict, M: list, act: list,
+                       bal: Optional[dict]) -> list:
+    """Правила весовых стратегий: weighted random по долям.
+
+    Порядок Exit-ов — по убыванию доли (численно устойчивые
+    вероятности). Правило i получает p_i = q_i / (1 − Σ_{j<i} q_j);
+    последний (наименьшая доля) — catch-all без statistic. Все живые
+    Exit-ы в ротации: агрегация каналов сохраняется (гигабит у
+    клиента), метрика задаёт лишь веса."""
+    specs: list = []
+    if bal is None:
+        return specs
+    shares = bal.get("shares") or {}
+    order = sorted(
+        act,
+        key=lambda e: (-shares.get(e.get("label") or e["id"], 0.0),
+                       str(e.get("label") or e["id"])))
+    # catch-all достаётся последнему из УЧАСТВУЮЩИХ (если последний по
+    # порядку вылетел по floor/без порта — catch-all уходит не ему)
+    kept = [e for e in order
+            if e.get("redsocks_port")
+            and shares.get(e.get("label") or e["id"], 0.0) >= _B_SHARE_FLOOR]
+    tail = 0.0
+    for i, e in enumerate(kept):
+        rp = e.get("redsocks_port")
+        lbl = e.get("label") or e["id"]
+        q = shares.get(lbl, 0.0)
+        rest = M + ["-p", "tcp"]
+        if i < len(kept) - 1:
+            p = q / max(1.0 - tail, 0.01)
+            rest += ["-m", "statistic", "--mode", "random",
+                     "--probability", _prob_str(p)]
+        rest += ["-j", "REDIRECT", "--to-ports", str(rp)]
+        specs.append({"table": "nat", "chain": "OUTPUT", "rest": rest})
+        tail += q
+    return specs
+
+
+def _rule_specs(st: dict, bal: Optional[dict] = None) -> list:
     """Все правила каскада. Формат: {"table","chain","rest"}.
 
     rest — argv после `-A/-D <chain>`. Порядок в nat OUTPUT: guard, затем
-    statistic-правила по Exit-ам. Добавляются В КОНЕЦ OUTPUT (-A) — после
+    правила по Exit-ам. Добавляются В КОНЕЦ OUTPUT (-A) — после
     существующих правил Chimera (TG-REDIRECT и пр. сохраняют приоритет).
+
+    Стратегии (порт smart_balancer VLESS, 01.10):
+      rr        — statistic nth, равномерно по соединениям
+      random    — statistic random, равномерно случайно на соединение
+      prio      — active-backup: только первый живой Exit
+      leastping — доли ∝ 1/пинга (health), weighted random
+      leastload — доли ∝ 1/(1+нагрузка), weighted random
+      smart     — доли ∝ 1/score (пинг+TTFB+нагрузка), weighted random ★
+    Для весовых bal = _balance_shares(...) (проба load/TTFB на месте,
+    если не передан); ядерным bal не нужен.
     """
     M = _matcher_args(st)
     specs = []
@@ -511,21 +702,31 @@ def _rule_specs(st: dict) -> list:
 
     act = _active_exits(st)
     strategy = (st.get("strategy") or "rr").lower()
+    if strategy not in BALANCE_STRATEGIES:
+        strategy = "rr"
     n = len(act)
-    for i, e in enumerate(act):
-        rp = e.get("redsocks_port")
-        if not rp:
-            continue
-        rest = M + ["-p", "tcp"]
-        if strategy == "rr" and i < n - 1:
-            # классический round-robin: правило i срабатывает на каждом
-            # (n-i)-м соединении, последнее — без statistic (остаток)
-            rest += ["-m", "statistic", "--mode", "nth",
-                     "--every", str(n - i), "--packet", "0"]
-        elif strategy == "prio" and i > 0:
-            continue  # active-backup: правила только для первого живого
-        rest += ["-j", "REDIRECT", "--to-ports", str(rp)]
-        specs.append({"table": "nat", "chain": "OUTPUT", "rest": rest})
+
+    if strategy in METRIC_STRATEGIES:
+        specs.extend(_metric_exit_specs(st, M, act, bal))
+    else:
+        for i, e in enumerate(act):
+            rp = e.get("redsocks_port")
+            if not rp:
+                continue
+            rest = M + ["-p", "tcp"]
+            if strategy == "rr" and i < n - 1:
+                # классический round-robin: правило i срабатывает на каждом
+                # (n-i)-м соединении, последнее — без statistic (остаток)
+                rest += ["-m", "statistic", "--mode", "nth",
+                         "--every", str(n - i), "--packet", "0"]
+            elif strategy == "random" and i < n - 1:
+                # равномерно случайно на соединение: p_i = 1/(n-i)
+                rest += ["-m", "statistic", "--mode", "random",
+                         "--probability", _prob_str(1.0 / (n - i))]
+            elif strategy == "prio" and i > 0:
+                continue  # active-backup: правила только для первого живого
+            rest += ["-j", "REDIRECT", "--to-ports", str(rp)]
+            specs.append({"table": "nat", "chain": "OUTPUT", "rest": rest})
 
     if st.get("strict_udp_block"):
         specs.append({
@@ -542,23 +743,91 @@ def _spec_argv(spec: dict, add: bool) -> list:
 
 
 def _rules_apply(st: dict) -> bool:
-    """Пересобирает правила каскада атомарно: удалить все свои → добавить."""
-    specs = _rule_specs(st)
-    # 1) удалить все известные нам правила (старый набор мог отличаться)
+    """Пересобирает правила каскада атомарно:
+       0) удалить ТОЧНЫЕ ранее применённые (st['applied_rules'] —
+          вероятности весовых стратегий неперечислимы, только replay);
+       1) удалить legacy-варианты (смена стратегии/strict_udp/матчера);
+       2) добить сироты по сигнатуре (iptables -S скан — любые
+          поколения весов, включая чуждые этому запуску);
+       3) добавить актуальные (весовые — со свежими пробами метрик);
+       4) запомнить применённое в st['applied_rules'] и персистить
+          (survive ребута: rules.v4 вернёт ровно этот набор, а
+          routing.sh и health-тик будут знать точный набор для -D)."""
+    act = _active_exits(st)
+    bal = (_balance_shares(st, act)
+           if (st.get("strategy") or "").lower() in METRIC_STRATEGIES else None)
+    specs = _rule_specs(st, bal)
+
+    # 0) точные прежние
+    for sp in st.get("applied_rules") or []:
+        while True:
+            r = _run(_spec_argv(sp, add=False), capture=True)
+            if r.returncode != 0:
+                break
+    # 1) legacy-перечисление (старый набор мог отличаться)
     for sp in _rule_specs_all_variants(st):
         while True:
             r = _run(_spec_argv(sp, add=False), capture=True)
             if r.returncode != 0:
                 break
-    # 2) добавить текущие
+    # 2) сироты по сигнатуре
+    _purge_orphan_rules(st)
+    # 3) добавить текущие
     ok = True
     for sp in specs:
         r = _run(_spec_argv(sp, add=True), capture=True)
         if r.returncode != 0:
             print(f"  [!] iptables: {r.stderr.strip()[:200] if r.stderr else '?'}")
             ok = False
+    # 4) запомнить + персист
+    st["applied_rules"] = specs
+    st["balance"] = bal
     proto_ipt_persist()
+    state_save(st)
     return ok
+
+
+def _purge_orphan_rules(st: dict) -> None:
+    """Добить сироты по сигнатуре (iptables -S скан, nat+filter OUTPUT).
+
+    Ловит ЛЮБЫЕ наши правила прошлых поколений — взвешенные
+    вероятности неперечислимы, поэтому сигнатура: матчер каскада
+    (cgroup mita.service | owner uid=mita) + (REDIRECT на наш
+    redsocks-порт | guard RETURN 127/8 | REJECT strict-udp).
+    Чужие правила Chimera таких сочетаний не содержат."""
+    rps = set()
+    for e in st.get("exits", []):
+        rp = e.get("redsocks_port")
+        if rp:
+            rps.add(str(rp))
+    sigs = [f"-m cgroup --path {_MITA_CGROUP}"]
+    uid = _mita_uid()
+    if uid is not None:
+        sigs.append(f"-m owner --uid-owner {uid}")
+    for table in ("nat", "filter"):
+        r = _run(["iptables", "-t", table, "-S", "OUTPUT"], capture=True)
+        if r.returncode != 0:
+            continue
+        for line in (r.stdout or "").splitlines():
+            if not line.startswith("-A OUTPUT "):
+                continue
+            if not any(s in line for s in sigs):
+                continue
+            argv = line[len("-A OUTPUT "):].split()
+            ours = False
+            for i, tok in enumerate(argv):
+                if (tok == "--to-ports" and i + 1 < len(argv)
+                        and argv[i + 1] in rps):
+                    ours = True
+                    break
+            if not ours and "127.0.0.0/8" in argv and "RETURN" in argv:
+                ours = True
+            if (not ours and "REJECT" in argv
+                    and "icmp-port-unreachable" in argv):
+                ours = True
+            if ours:
+                _run(["iptables", "-t", table, "-D", "OUTPUT"] + argv,
+                     capture=True)
 
 
 def _rule_specs_all_variants(st: dict) -> list:
@@ -587,13 +856,17 @@ def _rule_specs_all_variants(st: dict) -> list:
             rp = e.get("redsocks_port")
             if not rp:
                 continue
-            # statistic-вариант и чистый вариант (смена стратегии)
-            for extra in (
-                ["-m", "statistic", "--mode", "nth", "--every", "2", "--packet", "0"],
-                ["-m", "statistic", "--mode", "nth", "--every", "3", "--packet", "0"],
-                ["-m", "statistic", "--mode", "nth", "--every", "4", "--packet", "0"],
-                [],
-            ):
+            # перечислимые варианты (смена стратегии/числа Exit-ов);
+            # взвешенные вероятимости неперечислимы — их ловят
+            # st['applied_rules'] (точный replay) и _purge_orphan_rules
+            extras: list = [[]]
+            for k in range(2, 9):    # rr: nth every 2..8
+                extras.append(["-m", "statistic", "--mode", "nth",
+                               "--every", str(k), "--packet", "0"])
+            for k in range(2, 9):    # random: равномерно 1/k, k=2..8
+                extras.append(["-m", "statistic", "--mode", "random",
+                               "--probability", _prob_str(1.0 / k)])
+            for extra in extras:
                 _add({"table": "nat", "chain": "OUTPUT",
                       "rest": M + ["-p", "tcp"] + extra +
                       ["-j", "REDIRECT", "--to-ports", str(rp)]})
@@ -604,24 +877,44 @@ def _rule_specs_all_variants(st: dict) -> list:
 
 
 def _routing_sh_text(st: dict) -> str:
-    """bash-скрипт пересборки правил при ребуте (генерируется из тех же
-    спеков — единственный источник истины _rule_specs)."""
+    """bash-скрипт пересборки правил при ребуте.
+
+    Единственный источник истины — st['applied_rules'] (точный набор
+    последнего apply, включая вероятности весовых стратегий — они
+    неперечислимы). Replay: удалить точные → удалить legacy-варианты →
+    добавить точные. Свежие пробы здесь НЕ нужны (и опасны на раннем
+    буте): правила восстанавливаются 1-в-1, следующий health-тик
+    (2 мин) пересчитает веса и при дрейфе перестроит."""
+    applied = st.get("applied_rules") or []
+    if not applied:
+        # стейт до-нового формата: сгенерить из текущих настроек
+        try:
+            applied = _rule_specs(st)
+        except Exception:
+            applied = []
     lines = [
         "#!/bin/bash",
         "# mieru-cascade routing — регенерируется mieru_cascade.py при каждом apply",
-        "# 1) зачистка своих правил (идемпотентно: restore из rules.v4 мог",
-        "#    вернуть старый вариант после смены стратегии/strict_udp)",
+        "# 0) удалить ТОЧНЫЕ правила последнего apply (веса/вероятности",
+        "#    неперечислимы — только точный replay по applied_rules)",
     ]
+    for sp in applied:
+        argv = _spec_argv(sp, add=False)
+        lines.append("while " + " ".join(argv) +
+                     " 2>/dev/null; do :; done")
+    lines.append("# 1) зачистка legacy-вариантов (идемпотентно; restore из")
+    lines.append("#    rules.v4 мог вернуть старый набор после смены стратегии)")
     for sp in _rule_specs_all_variants(st):
         argv = _spec_argv(sp, add=False)
         lines.append("while " + " ".join(argv) +
                      " 2>/dev/null; do :; done")
-    lines.append("# 2) добавить актуальные")
-    for sp in _rule_specs(st):
+    lines.append("# 2) добавить актуальные — точный replay применённого")
+    for sp in applied:
         argv = " ".join(_spec_argv(sp, add=True))
         lines.append(argv + " || echo \"mieru-cascade: WARN: правило не добавлено\"")
     lines.append('echo "mieru-cascade routing applied (matcher=' +
-                 str(st.get("matcher")) + ')"')
+                 str(st.get("matcher")) +
+                 ', strategy=' + str(st.get("strategy")) + ')"')
     return "\n".join(lines) + "\n"
 
 
@@ -937,13 +1230,22 @@ def _setup_entry(st: dict) -> None:
         m._box_bot(); m._pause(); return
     m._box_bot(); print()
 
-    # стратегия
+    # стратегия (порт из smart_balancer VLESS + ядерные rr/prio)
     print(f"  {m.CYAN}Балансировка нескольких Exit-ов:{m.NC}")
-    print(f"     {m.DIM}[1]{m.NC} rr  — round-robin по соединениям (по умолчанию)")
-    print(f"     {m.DIM}[2]{m.NC} prio — active-backup (только первый живой)")
+    print(f"     {m.DIM}[1]{m.NC} rr         — round-robin по соединениям (по умолчанию)")
+    print(f"     {m.DIM}[2]{m.NC} random     — случайно на каждое соединение")
+    print(f"     {m.DIM}[3]{m.NC} prio       — active-backup (только первый живой)")
+    print(f"     {m.DIM}[4]{m.NC} leastping  — доли ∝ 1/пинг   {m.DIM}(health-пробы, 2 мин){m.NC}")
+    print(f"     {m.DIM}[5]{m.NC} leastload  — доли ∝ 1/(1+соединения на хопе)")
+    print(f"     {m.DIM}[6]{m.NC} smart      — score: пинг+TTFB+нагрузка  {m.GREEN}★ как VLESS Smart Balancer{m.NC}")
+    print(f"     {m.DIM}   весовые (4-6): все живые Exit-ы в ротации — агрегация каналов сохраняется{m.NC}")
     raw = proto_ask(f"  {m.CYAN}Выбор [Enter=rr]: {m.NC}",
                     default="rr", c=True).strip().lower()
-    strategy = "prio" if raw == "2" or raw == "prio" else "rr"
+    by_num = {"1": "rr", "2": "random", "3": "prio",
+              "4": "leastping", "5": "leastload", "6": "smart"}
+    strategy = by_num.get(raw, raw)
+    if strategy not in BALANCE_STRATEGIES:
+        strategy = "rr"
 
     raw = proto_ask(
         f"  {m.CYAN}Блокировать UDP-нагрузку mita (strict)? [y/N]: {m.NC}",
@@ -1530,13 +1832,30 @@ def health_tick(verbose: bool = False) -> dict:
 
     changed = [e["id"] for e in st.get("exits", [])
                if changed_before.get(e["id"]) is not e.get("healthy")]
-    if changed:
+
+    # весовые стратегии: пересчёт долей; дрейф весов = ребаланс
+    weights_drift = False
+    if (st.get("strategy") or "").lower() in METRIC_STRATEGIES:
+        try:
+            bal = _balance_shares(st, _active_exits(st))
+            result["balance"] = bal
+            fresh = _rule_specs(st, bal)
+            weights_drift = fresh != (st.get("applied_rules") or [])
+        except Exception:
+            weights_drift = False
+
+    if changed or weights_drift:
         result["changed"] = changed
         result["rebalanced"] = True
         _rules_apply(st)
         _ROUTING_SH.write_text(_routing_sh_text(st))
         if verbose:
-            print(f"  {m.YELLOW}⟳{m.NC} правила перестроены: {', '.join(changed)}")
+            why = []
+            if changed:
+                why.append("health: " + ", ".join(changed))
+            if weights_drift:
+                why.append("веса стратегии изменились")
+            print(f"  {m.YELLOW}⟳{m.NC} правила перестроены ({'; '.join(why)})")
     state_save(st)
     return result
 
@@ -1560,6 +1879,12 @@ def _stop_units(st: dict) -> None:
 
 def _strip_rules(st: dict) -> None:
     """Удалить все свои правила (оба матчера — cgroup и owner)."""
+    # точные применённые (веса/вероятности неперечислимы)
+    for sp in st.get("applied_rules") or []:
+        while True:
+            r = _run(_spec_argv(sp, add=False), capture=True)
+            if r.returncode != 0:
+                break
     for mode in ("cgroup", "owner"):
         probe = dict(st)
         probe["matcher"] = mode
@@ -1570,6 +1895,9 @@ def _strip_rules(st: dict) -> None:
                 r = _run(_spec_argv(sp, add=False), capture=True)
                 if r.returncode != 0:
                     break
+    _purge_orphan_rules(st)
+    st["applied_rules"] = []
+    st["balance"] = None
     proto_ipt_persist()
 
 
@@ -1641,6 +1969,12 @@ def _show_status(st: dict) -> None:
     if st.get("role") == "entry":
         m._box_kv("Матчинг:", str(st.get("matcher")))
         m._box_kv("Стратегия:", str(st.get("strategy")))
+        bal = st.get("balance") or {}
+        if bal.get("shares"):
+            shares = "  ".join(
+                f"{k}:{v:.0%}" for k, v in
+                sorted(bal["shares"].items(), key=lambda kv: -kv[1]))
+            m._box_kv("Доли (посл. расчёт):", shares)
         m._box_kv("Strict UDP:", "вкл" if st.get("strict_udp_block") else "выкл")
         m._box_sep()
         for e in st.get("exits", []):
@@ -1711,6 +2045,65 @@ def get_backup_paths() -> list:
 #  ГЛАВНОЕ МЕНЮ
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _change_strategy(st: dict) -> None:
+    """Переключение стратегии балансировки (меню каскада → [S]).
+    Меняет только правила: конфиги инстансов и сервисы от стратегии
+    не зависят — полный [4] Применить не нужен."""
+    m = _mieru()
+    if st.get("role") != "entry":
+        print("  Стратегия имеет смысл только для Entry ([1]).")
+        m._pause()
+        return
+    current = (st.get("strategy") or "rr").lower()
+    m._box_top("⚖  Стратегия балансировки Exit-ов")
+    m._box_row()
+    desc = {
+        "rr": "round-robin по соединениям (ядро iptables)",
+        "random": "равномерно случайно на каждое соединение (ядро)",
+        "prio": "active-backup: только первый живой Exit",
+        "leastping": "доли ∝ 1/пинг (health-пробы, пересчёт 2 мин)",
+        "leastload": "доли ∝ 1/(1+соединения на хопе)",
+        "smart": "score: пинг+TTFB+нагрузка — как VLESS Smart Balancer",
+    }
+    for i, k in enumerate(BALANCE_STRATEGIES, 1):
+        cur = f"  {m.GREEN}(текущая){m.NC}" if k == current else ""
+        star = f" {m.GREEN}★{m.NC}" if k == "smart" else ""
+        print(f"     {m.DIM}[{i}]{m.NC} {k:10s} — {desc[k]}{star}{cur}")
+    bal = st.get("balance") or {}
+    if bal.get("shares"):
+        shares = "  ".join(
+            f"{k} {v:.0%}" for k, v in
+            sorted(bal["shares"].items(), key=lambda kv: -kv[1]))
+        print(f"     {m.DIM}доли последнего расчёта: {shares}{m.NC}")
+    m._box_row()
+    raw = proto_ask(f"  {m.CYAN}Выбор [Enter=текущая]: {m.NC}",
+                    default="", c=True).strip().lower()
+    m._box_bot()
+    if not raw:
+        return
+    by_num = {str(i): k for i, k in enumerate(BALANCE_STRATEGIES, 1)}
+    pick = by_num.get(raw, raw)
+    if pick not in BALANCE_STRATEGIES:
+        print("  Неизвестная стратегия.")
+        m._pause()
+        return
+    if pick == current:
+        print("  Стратегия не изменилась.")
+        m._pause()
+        return
+    st["strategy"] = pick
+    state_save(st)
+    if st.get("exits"):
+        ok = _rules_apply(st)
+        _ROUTING_SH.write_text(_routing_sh_text(st))
+        print(f"  {m.GREEN}✓{m.NC} стратегия: {current} → {pick}; правила "
+              f"{'перестроены' if ok else 'перестроены с ошибками'}")
+    else:
+        print(f"  {m.GREEN}✓{m.NC} стратегия: {current} → {pick} "
+              f"(правила построятся после добавления Exit-ов)")
+    m._pause()
+
+
 def do_mieru_cascade_menu() -> None:
     """Точка входа из mieru.py (меню standalone-Mieru → [C])."""
     m = _mieru()
@@ -1734,6 +2127,7 @@ def do_mieru_cascade_menu() -> None:
         m._box_item("2", "⬆  Настроить этот сервер как EXIT (выход)")
         m._box_item("3", f"🧩  Управление Exit-нодами {m.DIM}({n_exits}){m.NC}")
         m._box_item("4", "🔄  Применить (конфиги+сервисы+правила+порты)")
+        m._box_item("S", "⚖  Стратегия балансировки (6 режимов)")
         m._box_item("5", "🏥  Health check + ребаланс")
         m._box_item("6", "📊  Статус")
         m._box_item("L", "🔗  Ссылки для клиентов (Karing/Nekobox/JSON/QR)")
@@ -1768,6 +2162,8 @@ def do_mieru_cascade_menu() -> None:
                 _show_client_links(st)
             else:
                 m._pause()
+        elif ch == "s":
+            _change_strategy(st)
         elif ch == "5":
             r = health_tick(verbose=True)
             if not r.get("checked"):
