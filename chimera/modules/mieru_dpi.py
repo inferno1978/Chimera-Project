@@ -147,6 +147,11 @@ _SPLIT_CFG_PATH  = Path("/tmp/mieru-split-karing.json")
 # формат DNS/полей — отдельный файл, чтобы Karing/NyameBox не
 # перезатирали друг друга при scp
 _NYAME_CFG_PATH  = Path("/tmp/mieru-split-nyamebox.json")
+# Конвенция приложения NyameBox/Iblis (qr243vbi/nekobox): при старте
+# Custom-профиля ВСЕ не-fakeip DNS-серверы заменяются на remote_dns
+# приложения с жёстко зашитым detour="proxy" — главный outbound
+# ОБЯЗАН носить этот тег (ConfigBuilder.cpp:118, разбор 01.10.2026)
+_NYAMEBOX_PROXY_TAG = "proxy"
 
 # ── Ленивые импорты тяжёлых соседей (без циклов на уровне модуля) ─────────
 def _dpi():
@@ -430,33 +435,60 @@ def _nyamebox_dns_block(legacy_dns: dict, mieru_tag: str) -> dict:
 def build_nyamebox_split_config() -> Optional[dict]:
     """NyameBox-вариант split-конфига меню [6] (ядро sing-box 1.13.x).
 
-    Отличия от Karing-варианта — только формат; креды, traffic_pattern,
-    домены маршрутки, route.final=direct — идентичны (переиспользуем
-    build_karing_split_config и конвертируем). Валидация nekobox_core
-    5.11.28.3: sing-box check — PASS без ворнингов; E2E socks-харнесс —
-    маршрутка → mieru, финал → direct (HTTP 200). ВАЖНО: mieru-outbound
-    БЕЗ mtu — релизное ядро поля не знает (strict-decode «unknown
-    field»), дефолт mieru = 1400; поле есть только в master-ветке форка.
+    Отличия от Karing-варианта — формат И тег mieru-outbound.
+    Формат: валидация nekobox_core 5.11.28.3 — sing-box check PASS
+    без ворнингов; E2E socks-харнесс — маршрутка → mieru, финал →
+    direct (HTTP 200). mieru-outbound БЕЗ mtu — релизное ядро поля
+    не знает (strict-decode «unknown field»), дефолт mieru = 1400;
+    поле есть только в master-ветке форка.
+
+    Тег «proxy» — конвенция ПРИЛОЖЕНИЯ, не ядра (разбор активации
+    01.10.2026, скриншот юзера «LoadConfig return error … transport
+    must be TCP or UDP»):
+      • при старте Custom-профиля приложение заменяет ВСЕ не-fakeip
+        DNS-серверы на свой remote_dns с жёстко зашитым detour="proxy"
+        (NormalizeFullConfigDnsForRuntime, ConfigBuilder.cpp:118) —
+        тег из пасты («mieru-admin» и т.п.) оставил бы DNS в никуда;
+      • импорт полного JSON через БУФЕР/ПОДПИСКУ дополнительно гонит
+        конфиг через sanitizeSingBoxConfig (GroupUpdater.cpp:588),
+        который ВЫРЕЗАЕТ у mieru поле transport (строка → toObject()
+        → пусто → remove) — потому в инструкции только Add Profile →
+        Custom Config, хранящий JSON без санитайза.
     """
     karing = build_karing_split_config()
     if karing is None:
         return None
     mieru_tag = next(o["tag"] for o in karing["outbounds"]
                      if o.get("type") == "mieru")
-    dns = _nyamebox_dns_block(karing.get("dns") or {}, mieru_tag)
+    # переименовываем тег + перевешиваем все ссылки на него
+    outbounds = []
+    for o in karing["outbounds"]:
+        if o.get("type") == "mieru":
+            o = {**o, "tag": _NYAMEBOX_PROXY_TAG}
+        outbounds.append(o)
+    rules = []
+    for r in karing["route"].get("rules") or []:
+        if r.get("outbound") == mieru_tag:
+            r = {**r, "outbound": _NYAMEBOX_PROXY_TAG}
+        rules.append(r)
+    legacy_dns = karing.get("dns") or {}
+    for srv in legacy_dns.get("servers") or []:
+        if srv.get("detour") == mieru_tag:
+            srv["detour"] = _NYAMEBOX_PROXY_TAG
+    dns = _nyamebox_dns_block(legacy_dns, _NYAMEBOX_PROXY_TAG)
     first_tag = (dns.get("servers") or [{}])[0].get("tag", "")
     cfg = {
         "log": {"level": "info"},
         "dns": dns,
-        "outbounds": karing["outbounds"],
+        "outbounds": outbounds,
         "route": {"final": "direct", "auto_detect_interface": True},
     }
     if first_tag:
         # явная фиксация неявного дефолта (первый DNS-сервер): без поля
         # ядро 1.12+ сыплет deprecation-WARN; семантику не меняет
         cfg["route"]["default_domain_resolver"] = first_tag
-    if karing["route"].get("rules"):
-        cfg["route"]["rules"] = karing["route"]["rules"]
+    if rules:
+        cfg["route"]["rules"] = rules
     return cfg
 
 def _mierus_links_for_state() -> list:
@@ -1130,6 +1162,10 @@ def _show_client_json(cfg: dict, username: str = "",
     if nyamebox:
         _box_row(f"  {DIM}Куда: NyameBox → Профили → Add Profile → Custom Config{NC}")
         _box_row(f"  {DIM}→ вставить файл/текст. Конфиг — ПОД рамкой.{NC}")
+        _box_row()
+        _box_row(f"  {YELLOW}⚠  НЕ через буфер/подписку: санитайз приложения{NC}")
+        _box_row(f"  {YELLOW}вырезает mieru transport → FATAL «transport must{NC}")
+        _box_row(f"  {YELLOW}be TCP or UDP». Только Manual/Custom Config.{NC}")
     else:
         _box_row(f"  {DIM}Куда: Karing → импорт конфига · sing-box → config.json ·{NC}")
         _box_row(f"  {DIM}NekoBox → профиль «Custom Config». Конфиг — ПОД рамкой.{NC}")

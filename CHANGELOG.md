@@ -1,5 +1,51 @@
 # Changelog
 
+# Changelog new entry — Mieru+B4: разбор активации NyameBox JSON — санитайз приложения и тег «proxy» — 1 октября 2026
+
+
+
+## FIX(mieru_dpi): генератор [3] NyameBox JSON — тег mieru-outbound «proxy» + защита от импорта мимо Custom Config
+
+**Контекст (живой фейл владельца):** активация выданного JSON в
+NyameBox (Iblis 5.11.283, Windows) падала «LoadConfig return
+error: … transport must be TCP or UDP», лог «Не удалось запустить
+профиль [MIERU/JSON]». Разбор по исходникам приложения
+(qr243vbi/nekobox) + воспроизведение на его бинарнике ядра — ДВЕ
+независимые причины, обе на стороне приложения, не ядра:
+
+- **Санитайз вырезает mieru transport.** Импорт полного JSON через
+  буфер/подписку (RawUpdater::update → addFullJsonProxy →
+  sanitizeSingBoxConfig, GroupUpdater.cpp:588) читает
+  `out["transport"].toObject()` — у mieru это строка, toObject()
+  даёт пустоту, поле удаляется → ядро падает «transport must be
+  TCP or UDP». Тип «MIERU/JSON» в списке профилей — маркер именно
+  этого пути. Custom Config (Add Profile → Custom Config) хранит
+  JSON без санитайза — единственно правильный путь импорта; в
+  экран [6]→[3] встроено предупреждение.
+- **DNS runtime-замена требует тег «proxy».** При старте
+  Custom-профиля ВСЕ не-fakeip DNS-серверы заменяются на remote_dns
+  приложения с жёстко зашитым detour:"proxy"
+  (NormalizeFullConfigDnsForRuntime, ConfigBuilder.cpp:118) — тег
+  mieru-outbound обязан быть «proxy», иначе DNS-детур в никуда.
+
+**Изменения:**
+- build_nyamebox_split_config: переименование тега mieru →
+  _NYAMEBOX_PROXY_TAG («proxy») + перевешивание ссылок в
+  route-правилах и DNS-detour; Karing-вариант [2] не тронут;
+- _show_client_json(nyamebox=True): предупреждение «не через
+  буфер/подписку — санитайз вырежет transport»;
+- FAQ MIERU_FAQ.md: раздел «Активация NyameBox-профиля» (обе
+  причины, лечение, по шагам что происходит при старте) + правка
+  регистра transport/multiplexing в примере формата.
+
+**Валидация:** deliverable пересобран и проверен ядром 5.11.28.3 —
+check PASS, живой старт (mieru client started), прямая проба
+HTTP 200; матрица DNS-вариантов, которые может породить
+BuildDnsObject приложения (порт через `:` и через `;`,
+канонический) — все PASS. Тесты: +test_proxy_tag_convention
+(тег «proxy», ни одной висячей ссылки, Karing-вариант не задет);
+pytest tests/test_mieru_dpi.py — 36 passed.
+
 # Changelog new entry — Mieru+B4: NyameBox JSON в меню [6]→[3] — 1 октября 2026
 
 
