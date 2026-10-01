@@ -1120,6 +1120,8 @@ class Handler(BaseHTTPRequestHandler):
                     with open(tmp,"w") as sf: json.dump(state,sf,indent=2,ensure_ascii=False)
                     os.chmod(tmp,0o600); os.replace(tmp,"/var/lib/xray-installer/state.json")
                     # Restart xray to apply
+                    # (start-limit-fix): reset-failed перед рестартом
+                    subprocess.run(["systemctl","reset-failed","xray"],capture_output=True,timeout=15)
                     subprocess.run(["systemctl","restart","xray"],capture_output=True,timeout=30)
                     # Refresh nodes.json from state
                     try:
@@ -1150,6 +1152,8 @@ class Handler(BaseHTTPRequestHandler):
                         tmp="/var/lib/xray-installer/state.json.tmp"
                         with open(tmp,"w") as sf: json.dump(state,sf,indent=2,ensure_ascii=False)
                         os.chmod(tmp,0o600); os.replace(tmp,"/var/lib/xray-installer/state.json")
+                        # (start-limit-fix): reset-failed перед рестартом
+                        subprocess.run(["systemctl","reset-failed","xray"],capture_output=True,timeout=15)
                         subprocess.run(["systemctl","restart","xray"],capture_output=True,timeout=30)
                         try:
                             from chimera.modules.wpp_cascade_bridge import refresh_nodes_file

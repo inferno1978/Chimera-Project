@@ -317,11 +317,23 @@ def build_mieru_link_for_user(email_or_name: str,
 
     try:
         from chimera.modules.mieru import _gen_client_share_link
+        # адрес — как во всей остальной выдаче mieru: домен из
+        # client_server_addr (если выбран при установке) важнее сырого
+        # IP — ссылки переживают смену IP сервера. Раньше здесь был
+        # только public IP: QR/ТГ-ссылки расходились с остальной
+        # выдачей (починено 02.10.2026).
+        addr = (mieru_state.get("client_server_addr") or "").strip() \
+            or mieru_state.get("_server_ip", "") or _get_public_ip()
+        protocol = (mieru_state.get("protocol") or "TCP").upper()
+        # BOTH в ссылке недопустим (transport ровно один): отдаём TCP —
+        # первый транспорт пары, как и все остальные экраны выдачи
+        if protocol == "BOTH":
+            protocol = "TCP"
         return _gen_client_share_link(
-            server_ip=mieru_state.get("_server_ip", "") or _get_public_ip(),
+            server_ip=addr,
             port_start=mieru_state.get("port_start", 2012),
             port_end=mieru_state.get("port_end", 2022),
-            protocol=mieru_state.get("protocol", "TCP"),
+            protocol=protocol,
             username=user.get("username", ""),
             password=user.get("password", ""),
             traffic_preset=mieru_state.get("traffic_preset", "basic"),

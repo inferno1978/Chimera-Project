@@ -89,6 +89,7 @@ from chimera.modules.proto_common import (
     proto_ask, proto_gen_password, proto_ipt_persist, proto_ipt_rule_exists,
     proto_get_latest_version, proto_get_installed_version,
 )
+from chimera.modules.mieru_traffic_presets import PRESETS as _MTP_PRESETS
 from chimera.modules.mieru_mirrors import (
     get_mita_mirrors, get_mieru_mirrors, get_deb_mirrors, get_rpm_mirrors,
     MANUAL_UPLOAD_PATHS as _MIERU_MANUAL_PATHS,
@@ -711,23 +712,63 @@ def _gen_client_share_link(server_ip: str, port_start: int, port_end: int,
     if traffic_preset:
         from chimera.modules.mieru_traffic_presets import get_preset_base64
         pattern_b64 = get_preset_base64(traffic_preset)
-        link += f"&traffic-pattern={urllib.parse.quote(pattern_b64, safe='')}"
+        # disabled/пустой конфиг → '' — параметр не добавляем
+        # (иначе в ссылке окажется пустой traffic-pattern=)
+        if pattern_b64:
+            link += f"&traffic-pattern={urllib.parse.quote(pattern_b64, safe='')}"
     return link
 
 def _gen_client_share_link_nekobox(server_ip: str, port_start: int,
-                                    protocol: str, username: str, password: str) -> str:
+                                    protocol: str, username: str, password: str,
+                                    traffic_pattern: str = "",
+                                    port_end: int = None) -> str:
     """
     Генерирует mierus:// share link для Nekobox / Nyamebox.
-    Формат: mierus://user:pass@host:PORT?transport=TCP&mtu=1400
-    Отличия от Karing:
-      - порт через двоеточие после IP (не query-параметр port=)
-      - параметр transport= вместо protocol=
-      - только один конкретный порт (не диапазон)
+
+    Формат сверен с парсером приложения (Iblis/nekobox 5.11.28.3,
+    MieruBean.cpp TryParseLink): из query читаются ТОЛЬКО transport,
+    traffic_pattern, multiplexing и server_ports; сервер/порт — из
+    host:PORT в authority (From_Link::add_default_fields). Прочие
+    параметры (mtu=, port=, protocol=) приложение игнорирует.
+
+    Обязательные параметры (починено 02.10.2026 — раньше ссылки
+    СЛОМАЛИСЬ при импорте, доказано nekobox_core check):
+      • server_ports=<start>-<end> — БЕЗ него MieruBean делает
+        serverPorts = "".split(",") = [""], outbound получает
+        server_ports: [""], ядро падает FATAL «failed to validate
+        mieru options: invalid server_ports format». Формат значения —
+        ТОЛЬКО диапазон «2012-2012» / «2012-2022» (одиночное число
+        «2012» ядро тоже отвергает — проверено на живом ядре юзера);
+      • multiplexing=MULTIPLEXING_HIGH — дефолт приложения;
+      • traffic_pattern=<base64> — ПОДЧЁРКИВАНИЕ (MieruBean.cpp:24),
+        в отличие от Karing-формата, где дефис (живьём подтверждён).
+        Параметр опционален: '' → не добавляется (сервер без паттерна).
+
+    port_end — конец диапазона портов сервера (port hopping): None
+    или равен port_start → «PORT-PORT». Порт остаётся и в host:PORT
+    (приложение кладёт его в server_port).
     """
-    return (
+    import urllib.parse
+    pe = int(port_end) if port_end else int(port_start)
+    link = (
         f"mierus://{username}:{password}@{server_ip}:{port_start}"
         f"?transport={protocol.upper()}&mtu=1400"
+        f"&multiplexing=MULTIPLEXING_HIGH&server_ports={port_start}-{pe}"
     )
+    if traffic_pattern:
+        link += f"&traffic_pattern={urllib.parse.quote(traffic_pattern, safe='')}"
+    return link
+
+
+def _traffic_pattern_blob_for_links(preset_name: str) -> str:
+    """base64-блоб паттерна для клиентской выдачи (ссылки/JSON-конфиги).
+
+    Кодирует ТОТ ЖЕ конфиг, что mita применяет на сервере под этим
+    именем (единая таблица mieru_traffic_presets.PRESETS — источник и
+    для server.json, и для клиентской выдачи). '' — паттерн не задан
+    (disabled/пустой): параметр/поле в выдачу не добавляется."""
+    from chimera.modules.mieru_traffic_presets import get_preset_base64
+    return get_preset_base64(preset_name or "basic")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1420,6 +1461,7 @@ def _run_install_inner() -> None:
     pwd            = users[0]["password"]
     # BOTH — пары ссылок на каждый транспорт (TCP и UDP)
     _tp = state.get("traffic_preset", "basic")
+    _tp_blob = _traffic_pattern_blob_for_links(_tp)
     # Karing-ссылка UDP — с IP (баг ядра Karing: домен+UDP = 0 байт/с),
     # TCP и Nekobox/Nyamebox — домен, как выбран при установке
     _udp_ip_used = False
@@ -1430,7 +1472,9 @@ def _run_install_inner() -> None:
         link_pairs.append((p,
             _gen_client_share_link(k_addr, port_start, port_end, p, uname, pwd,
                                    traffic_preset=_tp),
-            _gen_client_share_link_nekobox(client_addr, port_start, p, uname, pwd)))
+            _gen_client_share_link_nekobox(client_addr, port_start, p, uname, pwd,
+                                           traffic_pattern=_tp_blob,
+                                           port_end=port_end)))
 
     os.system("clear")
     _box_top("✅  УСТАНОВКА ЗАВЕРШЕНА  •  MIERU")
@@ -1579,6 +1623,7 @@ def _add_user(state: dict) -> None:
     protocol   = state.get("protocol",   _DEFAULT_PROTOCOL)
     # BOTH — пары ссылок на каждый транспорт
     _tp = state.get("traffic_preset", "basic")
+    _tp_blob = _traffic_pattern_blob_for_links(_tp)
     # Karing-ссылка UDP — с IP (баг ядра Karing: домен+UDP = 0 байт/с)
     _udp_ip_used = False
     link_pairs = []
@@ -1588,7 +1633,9 @@ def _add_user(state: dict) -> None:
         link_pairs.append((p,
             _gen_client_share_link(k_addr, port_start, port_end, p, username, password,
                                    traffic_preset=_tp),
-            _gen_client_share_link_nekobox(server_ip, port_start, p, username, password)))
+            _gen_client_share_link_nekobox(server_ip, port_start, p, username, password,
+                                           traffic_pattern=_tp_blob,
+                                           port_end=port_end)))
 
     os.system("clear")
     _box_top("✅  ПОЛЬЗОВАТЕЛЬ ДОБАВЛЕН")
@@ -1633,6 +1680,7 @@ def _show_user_link(users: list, server_ip: str,
     _state = proto_load_state(_MODULE_STATE)
     # BOTH — пары ссылок на каждый транспорт
     _tp = _state.get("traffic_preset", "basic")
+    _tp_blob = _traffic_pattern_blob_for_links(_tp)
     # Karing-ссылка UDP — с IP (баг ядра Karing: домен+UDP = 0 байт/с)
     _udp_ip_used = False
     link_pairs = []
@@ -1644,7 +1692,9 @@ def _show_user_link(users: list, server_ip: str,
                                    user["username"], user["password"],
                                    traffic_preset=_tp),
             _gen_client_share_link_nekobox(server_ip, port_start, p,
-                                           user["username"], user["password"])))
+                                           user["username"], user["password"],
+                                           traffic_pattern=_tp_blob,
+                                           port_end=port_end)))
     os.system("clear")
     _box_top(f"🔗  {user['username']}  •  MIERU")
     _box_row()
@@ -1690,6 +1740,10 @@ def _show_singbox_json(users: list, server_ip: str,
     _state = proto_load_state(_MODULE_STATE)
     client_dns = (_state.get("client_dns", "") or "").strip()
     server_domain = server_ip if _dns_host_is_domain(server_ip) else ""
+    # паттерн обфускации — тот же, что на сервере (раньше JSON шёл БЕЗ
+    # traffic_pattern: клиент обфусцировал не тем паттерном, что mita)
+    _tp_blob = _traffic_pattern_blob_for_links(
+        _state.get("traffic_preset", "basic"))
     outbounds = []
     _udp_ip_used = False
     for p in _protocol_variants(protocol):
@@ -1700,6 +1754,9 @@ def _show_singbox_json(users: list, server_ip: str,
             k_addr, port_start, port_end, p,
             user["username"], user["password"],
         )
+        if _tp_blob:
+            # синхронизация обфускации клиент↔сервер (поле sing-box)
+            ob["traffic_pattern"] = _tp_blob
         if len(_protocol_variants(protocol)) > 1:
             ob["tag"] = f"{ob['tag']}-{p.lower()}"  # теги sing-box уникальны
         outbounds.append(ob)
@@ -2334,6 +2391,13 @@ def do_mieru_menu() -> None:
 # Формат: https://github.com/enfein/mieru/blob/main/docs/traffic-pattern.md
 # ВАЖНО: mita НЕ поддерживает hot-reload trafficPattern — нужен restart.
 _MIERU_TRAFFIC_PRESETS = {
+    # ЕДИНЫЙ ИСТОЧНИК КОНФИГОВ — chimera/modules/mieru_traffic_presets.py
+    # (PRESETS). Раньше здесь лежала СВОЯ таблица конфигов, а
+    # mieru_traffic_presets — ДРУГАЯ: клиентская выдача кодировала
+    # «свой» basic/aggressive, mita при этом работал с конфигом отсюда
+    # — паттерны клиента и сервера РАСХОДИЛИСЬ (починено 02.10.2026:
+    # конфиги одни, get_preset_base64 кодирует именно их; эталон
+    # совпадения — живой `mita export traffic-pattern`).
     "disabled": {
         "label": "🔓 Disabled (без обфускации)",
         "description": "Минимум оверхеда, максимальная скорость",
@@ -2342,26 +2406,17 @@ _MIERU_TRAFFIC_PRESETS = {
     "basic": {
         "label": "🔒 Basic (базовый)",
         "description": "Лёгкая обфускация: printable-нонсы. Рекомендуется по умолчанию.",
-        "config": {
-            "nonce": {"type": "NONCE_TYPE_PRINTABLE"},
-        },
+        "config": _MTP_PRESETS["basic"]["config"],
     },
     "medium": {
         "label": "🔒 Medium (средний)",
         "description": "Нонсы + TCP-фрагментация с задержкой 10мс",
-        "config": {
-            "nonce": {"type": "NONCE_TYPE_PRINTABLE"},
-            "tcpFragment": {"enable": True, "maxSleepMs": 10},
-        },
+        "config": _MTP_PRESETS["medium"]["config"],
     },
     "aggressive": {
         "label": "🔒 Aggressive (максимальный)",
         "description": "Нонсы + агрессивная фрагментация + паддинг",
-        "config": {
-            "nonce": {"type": "NONCE_TYPE_PRINTABLE"},
-            "tcpFragment": {"enable": True, "maxSleepMs": 20},
-            "padding": {"maxMiddlePaddingLen": 64, "maxEndPaddingLen": 128},
-        },
+        "config": _MTP_PRESETS["aggressive"]["config"],
     },
 }
 

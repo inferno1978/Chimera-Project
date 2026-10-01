@@ -449,8 +449,11 @@ class TestMierusLinksForState(unittest.TestCase):
         fake._gen_client_share_link.side_effect = \
             lambda ip, p1, p2, proto, u, pw, traffic_preset="": \
                 f"KARING|{u}|{proto}"
+        # сигнатура генератора Nekobox-ссылки: traffic_pattern (подчёркивание,
+        # MieruBean.cpp) + port_end (server_ports=START-END обязателен)
         fake._gen_client_share_link_nekobox.side_effect = \
-            lambda ip, p, proto, u, pw: f"NEKOBOX|{u}|{proto}"
+            lambda ip, p, proto, u, pw, traffic_pattern="", port_end=None: \
+                f"NEKOBOX|{u}|{proto}"
         return fake
 
     def test_entries_labeled_per_user(self):

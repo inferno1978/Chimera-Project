@@ -1945,12 +1945,17 @@ def _show_mieru_client_links(creds: dict, server_ip: str,
         karing_addr, karing_udp_ip = _karing_udp_addr(transport, server_ip)
         share_link = _gen_client_share_link(karing_addr, port, port, proto, login, password,
                                             traffic_preset="" if traffic_pattern_blob else "basic")
-        share_link_neko = _gen_client_share_link_nekobox(server_ip, port, proto, login, password)
+        # NekoBox/Nyamebox: ссылку строит генератор (server_ports обязателен,
+        # traffic_pattern ПОДЧЁРКИВАНИЕМ — MieruBean.cpp:24; дефис приложение
+        # молча теряло — починено 02.10.2026)
+        share_link_neko = _gen_client_share_link_nekobox(
+            server_ip, port, proto, login, password,
+            traffic_pattern=traffic_pattern_blob or "")
 
         if traffic_pattern_blob:
+            # Karing: паттерн ДЕФИСОМ — живьём подтверждён импортом
             tp_param = f"traffic-pattern={urllib.parse.quote(traffic_pattern_blob, safe='')}"
             share_link = f"{share_link}&{tp_param}"
-            share_link_neko = f"{share_link_neko}&{tp_param}"
 
         outbound = _gen_singbox_outbound(karing_addr, port, port, proto, login, password)
         if traffic_pattern_blob:

@@ -1295,8 +1295,14 @@ schema_version: 29
         self.assertIn("statistics:", text)
         self.assertIn("language: ru", text)
 
-        # 3. дефолты мастера вычищены
-        self.assertNotIn("dns.adguard-dns.com", text)
+        # 3. дефолты мастера вычищены: upstream_dns — своя цепочка
+        # (127.0.0.1:5300), wizard-дефолт dns.adguard-dns.com в upstream
+        # отсутствует. AdGuard DoH в fallback_dns — ЛЕГИТИМЕН: это
+        # параллельный DoH-лист AGH_FALLBACK_DNS (дизайн после ухода с
+        # plain-:53), а не wizard-дефолт.
+        self.assertNotRegex(
+            text, r"upstream_dns:\s*\n\s*- https://dns\.adguard-dns\.com")
+        self.assertIn("upstream_dns:\n    - 127.0.0.1:5300", text)
         self.assertNotIn("language: en", text)
 
         # 4. побочные эффекты

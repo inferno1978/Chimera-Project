@@ -333,12 +333,39 @@ def build_mieru_route_rules(mieru_tag: str, domains: list) -> list:
         "outbound": mieru_tag,
     }]
 
+def _cascade_active() -> bool:
+    """Серверный каскад mieru активен на ЭТОЙ ноде (Entry + Exit-ы).
+
+    Двухплечевой сплит (паритет с VLESS+B4, волна 01.10.2026): при
+    активном каскаде split-конфиги [2]/[3] меняют семантику — ВЕСЬ
+    трафик клиента уходит в туннель (route.final = mieru), а делит
+    СЕРВЕР: домены блок-листа (route.rules = b4-сеты) mita набирает
+    напрямую с RU-ноды (b4 ломает ТСПУ, цель видит RU-IP), остальное
+    каскад уводит в Exit-ноды (ipset-освобождение mieru_cascade,
+    секция B4-EXEMPT). Без каскада — прежняя семантика «блок-лист →
+    mieru, остальное → direct» (весь прочий трафик с IP клиента)."""
+    try:
+        from chimera.modules import mieru_cascade
+        cst = mieru_cascade.state_load()
+        if cst.get("role") != "entry":
+            return False
+        return any(e.get("enabled", True)
+                   for e in cst.get("exits") or [])
+    except Exception:
+        return False
+
+
 def build_karing_split_config() -> Optional[dict]:
     """Split-конфиг Karing/sing-box: домены b4 → mieru, остальное → direct.
 
     Собирается из state standalone-Mieru (порт/юзер/preset/адрес) теми
     же генераторами, что и обычная выдача mieru.py. None — Mieru не
-    установлен или юзеров нет."""
+    установлен или юзеров нет.
+
+    Двухплечевой режим (каскад активен, _cascade_active): final =
+    mieru — ВЕСЬ трафик в туннель, делит сервер (блок-лист → RU
+    direct+b4, остальное → Exit-ноды). Обычный режим: final = direct
+    — блок-лист через mieru, прочий трафик с IP клиента."""
     m = _mieru()
     st = _load_mieru_state()
     if not st.get("installed") or not (st.get("users") or []):
@@ -366,12 +393,13 @@ def build_karing_split_config() -> Optional[dict]:
         ob["domain_resolver"] = "local"
     domains = get_route_domains()
     rules = build_mieru_route_rules(ob["tag"], domains)
+    final = ob["tag"] if _cascade_active() else "direct"
     cfg = {
         "log": {"level": "info"},
         "dns": m._build_karing_dns_block(
             (st.get("client_dns") or "").strip(), ob["tag"], server_domain),
         "outbounds": [ob, {"type": "direct", "tag": "direct"}],
-        "route": {"final": "direct"},
+        "route": {"final": final},
     }
     if rules:
         cfg["route"]["rules"] = rules
@@ -496,11 +524,15 @@ def build_nyamebox_split_config() -> Optional[dict]:
             srv["detour"] = _NYAMEBOX_PROXY_TAG
     dns = _nyamebox_dns_block(legacy_dns, _NYAMEBOX_PROXY_TAG)
     first_tag = (dns.get("servers") or [{}])[0].get("tag", "")
+    # двухплечевой сплит: final наследует Karing-вариант (каскад →
+    # «proxy»: весь трафик в туннель, делит СЕРВЕР — см. _cascade_active)
+    k_final = ((karing.get("route") or {}).get("final") or "direct")
+    ny_final = _NYAMEBOX_PROXY_TAG if k_final == mieru_tag else "direct"
     cfg = {
         "log": {"level": "info"},
         "dns": dns,
         "outbounds": outbounds,
-        "route": {"final": "direct", "auto_detect_interface": True},
+        "route": {"final": ny_final, "auto_detect_interface": True},
     }
     if first_tag:
         # явная фиксация неявного дефолта (первый DNS-сервер): без поля
@@ -535,15 +567,27 @@ def _mierus_links_for_state() -> list:
     out = []
     addr = (st.get("client_server_addr") or "").strip() or m._get_server_ip()
     port = int(st.get("port_start") or 2012)
+    port_end = int(st.get("port_end") or port)
+    # паттерн обфускации — один на сервер и клиента (mita работает с
+    # конфигом этого же пресета; '' — disabled/не задан)
+    preset = st.get("traffic_preset") or ""
+    tp_blob = ""
+    if preset and preset != "disabled":
+        try:
+            from chimera.modules.mieru_traffic_presets import get_preset_base64
+            tp_blob = get_preset_base64(preset)
+        except Exception:
+            tp_blob = ""
     protos = ("TCP", "UDP") if (st.get("protocol") or "TCP").upper() == "BOTH" \
         else ((st.get("protocol") or "TCP").upper(),)
     for u in st.get("users", []):
         uname = u.get("username", "")
         passwd = u.get("password", "")
         for proto in protos:
-            link_addr = addr
             # UDP-транспорт в Karing — только IP (баг резолвера Karing,
-            # см. mieru._karing_link_addr)
+            # см. mieru._karing_link_addr); NekoBox/Nyamebox — домен
+            # как есть (его ядро домен резолвит)
+            link_addr = addr
             if proto == "UDP" and m._dns_host_is_domain(addr):
                 ip = m._karing_udp_server_ip()
                 if ip:
@@ -553,9 +597,10 @@ def _mierus_links_for_state() -> list:
                 "proto": proto,
                 "karing": m._gen_client_share_link(
                     link_addr, port, port, proto, uname, passwd,
-                    traffic_preset=(st.get("traffic_preset") or "")),
+                    traffic_preset=preset),
                 "nekobox": m._gen_client_share_link_nekobox(
-                    link_addr, port, proto, uname, passwd),
+                    addr, port, proto, uname, passwd,
+                    traffic_pattern=tp_blob, port_end=port_end),
             })
     return out
 
@@ -1066,7 +1111,12 @@ def _menu_client_configs() -> None:
 
         _box_top("📱  КЛИЕНТСКИЕ КОНФИГИ (SPLIT)")
         _box_row()
-        if domains:
+        casc = _cascade_active()
+        if domains and casc:
+            _box_row(f"  Маршрутка: {CYAN}{len(domains)} доменов{NC} → RU-нода")
+            _box_row(f"  (b4 дурит ТСПУ, цель видит RU-IP), остальное →")
+            _box_row(f"  {CYAN}каскад Exit-нод{NC}  (синк: {last})")
+        elif domains:
             _box_row(f"  Маршрутка: {CYAN}{len(domains)} доменов{NC} → mieru, "
                      f"остальное → direct  (синк: {last})")
         else:
@@ -1183,6 +1233,12 @@ def _show_client_json(cfg: dict, username: str = "",
         _box_warn(f"Файл не записан: {e} — копируйте JSON из терминала.")
     _box_row()
     if nyamebox:
+        if (cfg.get("route") or {}).get("final") == "proxy":
+            _box_row(f"  {DIM}Режим (каскад): ВЕСЬ трафик → туннель; сервер{NC}")
+            _box_row(f"  {DIM}делит сам: блок-лист → RU-нода (b4, RU-IP),{NC}")
+            _box_row(f"  {DIM}остальное → Exit-ноды. 2ip.ru покажет IP{NC}")
+            _box_row(f"  {DIM}Exit-а — это норма; ютуб — RU-IP (без рекламы).{NC}")
+            _box_row()
         _box_row(f"  {DIM}Куда: ПКМ по списку профилей → «Новый профиль» →{NC}")
         _box_row(f"  {DIM}«Тип» → в САМЫЙ НИЗ (3-й пункт с конца, над{NC}")
         _box_row(f"  {DIM}«Extra Core») → «Польз. (sing-box конфигурация)»{NC}")
@@ -1201,6 +1257,19 @@ def _show_client_json(cfg: dict, username: str = "",
         _box_row(f"  {YELLOW}спросит имя/пароль, FATAL «username is empty»,{NC}")
         _box_row(f"  {YELLOW}тип при правке не меняется — удалить (Del) и{NC}")
         _box_row(f"  {YELLOW}создать заново с правильным пунктом.{NC}")
+        _box_row()
+        _box_row(f"  {GREEN}✔  Запуск удался, если в логе видно:{NC}")
+        _box_row(f"  {GREEN}«mieru client is started» → «sing-box{NC}")
+        _box_row(f"  {GREEN}started» → (режим VPN) «tun-in started».{NC}")
+        _box_row(f"  {GREEN}«mieru[proxy] → outbound connection» к DNS{NC}")
+        _box_row(f"  {GREEN}(напр. 8.8.8.8:853) = DNS через туннель.{NC}")
+        if (cfg.get("route") or {}).get("final") == "proxy":
+            _box_row(f"  {GREEN}2ip.ru/speedtest покажут IP Exit-ноды —{NC}")
+            _box_row(f"  {GREEN}норма каскада; ютуб выходит с RU-IP (b4).{NC}")
+        else:
+            _box_row(f"  {GREEN}Строки «direct» и реальный IP на 2ip.ru —{NC}")
+            _box_row(f"  {GREEN}норма сплита: туннель = только блок-лист.{NC}")
+        _box_row(f"  {GREEN}Проверка — открыть сам youtube.com.{NC}")
     else:
         _box_row(f"  {DIM}Куда: Karing → импорт конфига · sing-box → config.json ·{NC}")
         _box_row(f"  {DIM}NekoBox → профиль «Custom Config». Конфиг — ПОД рамкой.{NC}")

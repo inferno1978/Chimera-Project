@@ -260,10 +260,17 @@ class TestGenClientShareLink(unittest.TestCase):
         self.assertNotEqual(tp_basic, tp_aggr)
 
     def test_nekobox_link_does_not_have_traffic_pattern(self):
-        """Nekobox-ссылка не должна содержать traffic-pattern (не поддерживается)."""
+        """Без traffic_pattern (сервер без паттерна) — параметра в ссылке нет.
+
+        Дефисная форма traffic-pattern= (Karing) в NekoBox-ссылке
+        отсутствует ВСЕГДА: приложение читает только подчёркивание
+        (MieruBean.cpp TryParseLink) — теперь паттерн передаётся
+        параметром traffic_pattern= (см. TestGenClientShareLinkNekobox).
+        """
         from chimera.modules.mieru import _gen_client_share_link_nekobox
         link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "TCP", "u", "p")
         self.assertNotIn("traffic-pattern", link)
+        self.assertNotIn("traffic_pattern", link)
 
     def test_share_link_uses_preset_from_state(self):
         """Integration: при traffic_preset='aggressive' в state — ссылка
@@ -303,7 +310,17 @@ class TestGenClientShareLink(unittest.TestCase):
 
 
 class TestGenClientShareLinkNekobox(unittest.TestCase):
-    """_gen_client_share_link_nekobox — Nekobox формат."""
+    """_gen_client_share_link_nekobox — формат, сверенный с парсером
+    приложения (Iblis/NekoBox 5.11.28.3, MieruBean.cpp TryParseLink).
+
+    Регрессии на живые FATAL ядра (02.10.2026, nekobox_core check):
+      • без server_ports → server_ports: [""] → «invalid server_ports
+        format»; формат — ТОЛЬКО диапазон «2012-2012», одиночное число
+        ядро тоже отвергает;
+      • multiplexing=MULTIPLEXING_HIGH — дефолт приложения;
+      • traffic_pattern — ПОДЧЁРКИВАНИЕМ (MieruBean.cpp:24), в отличие
+        от Karing-формата с дефисом.
+    """
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -323,6 +340,50 @@ class TestGenClientShareLinkNekobox(unittest.TestCase):
         from chimera.modules.mieru import _gen_client_share_link_nekobox
         link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "tcp", "u", "p")
         self.assertIn("transport=TCP", link)
+
+    def test_server_ports_range_required(self):
+        """server_ports обязателен и ТОЛЬКО диапазоном: без него
+        MieruBean даёт serverPorts=[""], ядро падает FATAL «invalid
+        server_ports format»; одиночное число тоже отвергается —
+        даже один порт пишется парой «2012-2012"."""
+        from chimera.modules.mieru import _gen_client_share_link_nekobox
+        link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "TCP", "u", "p")
+        self.assertIn("server_ports=2012-2012", link)
+        # одиночное число без дефиса — запрещённая форма
+        self.assertNotIn("server_ports=2012&", link)
+
+    def test_server_ports_range_with_port_end(self):
+        """port_end задан (port hopping) → server_ports=START-END."""
+        from chimera.modules.mieru import _gen_client_share_link_nekobox
+        link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "TCP", "u", "p",
+                                              port_end=2022)
+        self.assertIn("server_ports=2012-2022", link)
+
+    def test_multiplexing_present(self):
+        """multiplexing=MULTIPLEXING_HIGH — дефолт приложения, в ссылке
+        всегда."""
+        from chimera.modules.mieru import _gen_client_share_link_nekobox
+        link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "TCP", "u", "p")
+        self.assertIn("multiplexing=MULTIPLEXING_HIGH", link)
+
+    def test_traffic_pattern_underscore_param(self):
+        """Паттерн обфускации — параметром traffic_pattern= (ПОДЧЁРКИВАНИЕ,
+        MieruBean.cpp:24), URL-quoted; дефисной формы в ссылке нет."""
+        import urllib.parse
+        from chimera.modules.mieru import _gen_client_share_link_nekobox
+        blob = "GgQIARAUIgIIASoFCEAQgAE="  # живой etalon aggressive
+        link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "TCP", "u", "p",
+                                              traffic_pattern=blob)
+        expected = "traffic_pattern=" + urllib.parse.quote(blob, safe="")
+        self.assertIn(expected, link)
+        self.assertNotIn("traffic-pattern=", link)
+
+    def test_traffic_pattern_empty_omitted(self):
+        """traffic_pattern='' → параметр не добавляется (сервер без паттерна)."""
+        from chimera.modules.mieru import _gen_client_share_link_nekobox
+        link = _gen_client_share_link_nekobox("1.2.3.4", 2012, "TCP", "u", "p",
+                                              traffic_pattern="")
+        self.assertNotIn("traffic_pattern=", link)
 
 
 class TestIsAmd64(unittest.TestCase):

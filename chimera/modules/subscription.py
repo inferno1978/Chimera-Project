@@ -383,15 +383,26 @@ def _build_telemt_uri(user: dict, server_ip: str) -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════════
 
 def _gen_mieru_share_link(server_ip: str, port: int, protocol: str,
-                           username: str, password: str) -> str:
+                           username: str, password: str,
+                           traffic_pattern: str = "") -> str:
     """Точная копия формулы mieru._gen_client_share_link (без port_end —
     используем один порт: для standalone это port_start==port_end в
-    типичной установке, для hybrid — единственный tcp_port/udp_port)."""
-    return (
+    типичной установке, для hybrid — единственный tcp_port/udp_port).
+
+    traffic_pattern — base64-блоб обфускации (pattern_b64 из
+    _mieru_client_endpoints): ДОБАВЛЯЕТСЯ в ссылку, чтобы клиент
+    обфусцировал тем же паттерном, что работает сервер mita
+    (починено 02.10.2026 — раньше подписка отдавала mierus:// без
+    паттерна вовсе). '' — паттерн не задан, параметр не добавляется."""
+    link = (
         f"mierus://{username}:{password}@{server_ip}"
         f"?port={port}&protocol={protocol.upper()}&profile=default"
         f"&mtu=1400&multiplexing=MULTIPLEXING_HIGH"
     )
+    if traffic_pattern:
+        import urllib.parse as _up
+        link += f"&traffic-pattern={_up.quote(traffic_pattern, safe='')}"
+    return link
 
 def is_hybrid_mieru_active() -> bool:
     """True, если hybrid_addon.py переключил внешний VLESS-inbound на
@@ -403,6 +414,7 @@ def _build_mieru_uris(user: dict, server_ip: str) -> list[str]:
     for ep in _mieru_client_endpoints(user, server_ip):
         links.append(_gen_mieru_share_link(
             ep["addr"], ep["port"], ep["proto"], ep["username"], ep["password"],
+            traffic_pattern=ep.get("pattern_b64") or "",
         ))
     return links
 
