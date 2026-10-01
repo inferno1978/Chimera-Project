@@ -1861,7 +1861,15 @@ def health_tick(verbose: bool = False) -> dict:
             if changed:
                 why.append("health: " + ", ".join(changed))
             if weights_drift:
-                why.append("веса стратегии изменились")
+                # bal гарантированно определён: weights_drift=True только
+                # если try дошёл до сравнения fresh (после bal=...)
+                sh = " · ".join(
+                    f"{k} {v:.0%}" for k, v in
+                    sorted((bal.get("shares") or {}).items(),
+                           key=lambda kv: -kv[1]))
+                tail = f": {sh}" if sh else ""
+                why.append(f"веса стратегии ({st.get('strategy')}) "
+                           f"изменились{tail}")
             print(f"  {m.YELLOW}⟳{m.NC} правила перестроены ({'; '.join(why)})")
     state_save(st)
     return result
@@ -2004,11 +2012,18 @@ def _show_status(st: dict) -> None:
                        f"{m.DIM}(рекомендуется = пресету mita на Exit){m.NC}")
             if e.get("last_check"):
                 m._box_row(f"     {m.DIM}проверка: {e['last_check']}{m.NC}")
+        # весовые стратегии: вероятности неперечислимы без снапшота долей —
+        # честный счётчик по применённому набору (st['applied_rules'],
+        # точный replay); иначе статус показывал бы «1/1» вместо «5/5»
+        cnt_specs = (
+            st["applied_rules"]
+            if (st.get("strategy") or "").lower() in METRIC_STRATEGIES
+            and st.get("applied_rules") else _rule_specs(st))
         rules_now = sum(
-            1 for sp in _rule_specs(st)
+            1 for sp in cnt_specs
             if proto_ipt_rule_exists(sp["table"], sp["chain"], sp["rest"]))
         m._box_sep()
-        m._box_kv("Правил в системе:", f"{rules_now}/{len(_rule_specs(st))}")
+        m._box_kv("Правил в системе:", f"{rules_now}/{len(cnt_specs)}")
         r = _run(["systemctl", "is-active", "mieru-cascade-health.timer"],
                  capture=True)
         m._box_kv("Health-timer:", r.stdout.strip() or "—")
