@@ -37,6 +37,10 @@ MULTI-EXIT:
     стратегия 'prio' — active-backup (только первый живой Exit).
   • Health-timer (*/2 мин): TCP-проба + E2E `mieru test` на каждый Exit;
     падение (2 подряд) исключает Exit из правил, восстановление возвращает.
+  • Сериализация применений: flock (TUI-хендлеры ↔ health-тик) — гонка
+    01.10 оставляла state и ядро с РАЗНЫМИ пинами. Каждый тик сверяет
+    живые правила с applied_rules (iptables -S) и самозалечивает
+    рассинхрон (сбой apply, ручные правки, частичный flush).
 
 PORT_REGISTRY (требование владельца):
   • Активация/apply: port_register() на каждый loopback-порт
@@ -78,6 +82,8 @@ DOWNLOAD MANAGER (требование владельца):
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -785,6 +791,151 @@ def _spec_argv(spec: dict, add: bool) -> list:
     return ["iptables", "-t", spec["table"], flag, spec["chain"]] + spec["rest"]
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  СЕРИАЛИЗАЦИЯ ПРИМЕНЕНИЯ + СВЕРКА ЖИВЫХ ПРАВИЛ (фикс гонки 01.10)
+#
+#  Живой кейс на B: [P] в TUI и health-тик применяли правила
+#  одновременно — state сохранил пин fi1 (REDIRECT 23084), ядро — пин
+#  pl1 (23083); тик доверяет st['applied_rules'], рассинхрон жил бы
+#  вечно. Лечение: (1) flock — тик и TUI-хендлеры не пересобирают
+#  правила concurrently; (2) каждый тик сверяет живые правила с
+#  applied_rules (iptables -S скан) и перестраивает при расхождении.
+# ══════════════════════════════════════════════════════════════════════════
+
+_LOCK_PATH = _MODULE_STATE.parent / "mieru_cascade.lock"
+
+
+@contextlib.contextmanager
+def _cascade_lock(wait_hint: bool = False):
+    """flock-сериализация применений правил (TUI ↔ health-тик).
+
+    Держатели: health_tick (всё тело — load → пробы → apply → save) и
+    TUI-хендлеры ([S]/[P]/[4]/смена матчера/деактивация). flock
+    освобождается ядром при смерти процесса — зависший TUI не
+    заблокирует тик навсегда. wait_hint=True (TUI): если лок занят —
+    подсказка юзеру, затем ожидание (типично 3-15 с). Недоступность
+    lock-файла (нет прав — оффлайн-сьюты) — деградация без
+    блокировки: в проде каталог state заведомо доступен (сам state
+    лежит в нём), оффлайн-сьюты однопоточны."""
+    fd = None
+    try:
+        _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(_LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)
+        if wait_hint:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                print("  ⏳ ждём: параллельное применение правил "
+                      "(health-тик)…")
+                fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+        fd = None
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+
+def _live_cascade_rules(st: dict) -> Optional[dict]:
+    """Живые правила каскада из `iptables -S` (таблица → argv-список,
+    в порядке цепочки). None — скан не удался (правила наугад не
+    трогаем). Парсинг зеркален _purge_orphan_rules: декавычивание -S
+    (кавычки --path ломали сигнатурный поиск — бага 01.10)."""
+    rps = set()
+    for e in st.get("exits", []):
+        rp = e.get("redsocks_port")
+        if rp:
+            rps.add(str(rp))
+    sigs = [f"-m cgroup --path {_MITA_CGROUP}"]
+    uid = _mita_uid()
+    if uid is not None:
+        sigs.append(f"-m owner --uid-owner {uid}")
+    out: dict = {}
+    for table in ("nat", "filter"):
+        try:
+            r = _run(["iptables", "-t", table, "-S", "OUTPUT"],
+                     capture=True)
+        except OSError:
+            return None
+        if r.returncode != 0:
+            return None
+        rows = []
+        for raw_line in (r.stdout or "").splitlines():
+            if not raw_line.startswith("-A OUTPUT "):
+                continue
+            line = raw_line.replace('"', "")
+            if not any(s in line for s in sigs):
+                continue
+            argv = line[len("-A OUTPUT "):].split()
+            ours = False
+            for i, tok in enumerate(argv):
+                if (tok == "--to-ports" and i + 1 < len(argv)
+                        and argv[i + 1] in rps):
+                    ours = True
+                    break
+            if not ours and "127.0.0.0/8" in argv and "RETURN" in argv:
+                ours = True
+            if (not ours and "REJECT" in argv
+                    and "icmp-port-unreachable" in argv):
+                ours = True
+            if ours:
+                rows.append(argv)
+        out[table] = rows
+    return out
+
+
+def _specs_match(a: list, b: list) -> bool:
+    """argv-равенство правил; --probability — численно с допуском:
+    ядро хранит float32 и печатает шире нашего argv («0.3217» в спеке
+    против «0.32170000020» в -S) — строковое сравнение ложно
+    расходилось бы на каждом весовом правиле."""
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] == b[i]:
+            continue
+        if i > 0 and a[i - 1] == "--probability":
+            try:
+                if abs(float(a[i]) - float(b[i])) <= 1e-6:
+                    continue
+            except ValueError:
+                return False
+        return False
+    return True
+
+
+def _rules_in_sync(st: dict) -> Optional[bool]:
+    """Живые правила == st['applied_rules']?
+
+    True/False — сверка выполнена; None — iptables -S не ответил.
+    Ловит: потерянные/лишние правила (сбой apply, ручные правки,
+    частичный flush), чужие вероятности, подмену порта (живой кейс
+    01.10: пин pl1 в ядре против пина fi1 в state). Порядок важен —
+    вероятности весовых стратегий условные; сравнение по таблицам."""
+    applied = st.get("applied_rules") or []
+    live = _live_cascade_rules(st)
+    if live is None:
+        return None
+    for table in ("nat", "filter"):
+        want = [sp["rest"] for sp in applied
+                if sp.get("table") == table and sp.get("chain") == "OUTPUT"]
+        got = live.get(table) or []
+        if len(want) != len(got):
+            return False
+        for w, g in zip(want, got):
+            if not _specs_match(list(w), list(g)):
+                return False
+    return True
+
+
 def _rules_apply(st: dict) -> bool:
     """Пересобирает правила каскада атомарно:
        0) удалить ТОЧНЫЕ ранее применённые (st['applied_rules'] —
@@ -1248,21 +1399,25 @@ def _apply_all(st: dict) -> bool:
         _seed_hop_instance(e, _hop_pattern_cfg(e))
         (_ETC_DIR / f"redsocks-{e['id']}.conf").write_text(_redsocks_conf(e))
 
-    # 3) правила iptables + routing.sh + персист
-    ok_rules = _rules_apply(st)
-    _ROUTING_SH.write_text(_routing_sh_text(st))
-    _ROUTING_SH.chmod(0o755)
+    # 3+4) правила + сервисы + персист — под локом (сериализация с
+    # health-тиком, фикс гонки 01.10): state_save обязан попасть в ту
+    # же критическую секцию, что и _rules_apply
+    with _cascade_lock(wait_hint=True):
+        ok_rules = _rules_apply(st)
+        _ROUTING_SH.write_text(_routing_sh_text(st))
+        _ROUTING_SH.chmod(0o755)
 
-    # 4) сервисы
-    for e in st.get("exits", []):
-        for unit in (f"mieru-hop@{e['id']}", f"mieru-cascade-redsocks@{e['id']}"):
+        # сервисы
+        for e in st.get("exits", []):
+            for unit in (f"mieru-hop@{e['id']}",
+                         f"mieru-cascade-redsocks@{e['id']}"):
+                _run(["systemctl", "enable", unit])
+                _run(["systemctl", "restart", unit])
+        for unit in ("mieru-cascade-routing", "mieru-cascade-health.timer"):
             _run(["systemctl", "enable", unit])
             _run(["systemctl", "restart", unit])
-    for unit in ("mieru-cascade-routing", "mieru-cascade-health.timer"):
-        _run(["systemctl", "enable", unit])
-        _run(["systemctl", "restart", unit])
 
-    state_save(st)
+        state_save(st)
     return ok_rules
 
 
@@ -1343,10 +1498,11 @@ def _setup_entry(st: dict) -> None:
     old = st.get("matcher")
     st.update({"role": "entry", "strategy": strategy,
                "strict_udp_block": strict, "matcher": matcher})
-    state_save(st)
-    if old and old != matcher:
-        # смена матчера: зачистить правила старого режима
-        _rules_apply(st)
+    with _cascade_lock(wait_hint=True):
+        state_save(st)
+        if old and old != matcher:
+            # смена матчера: зачистить правила старого режима
+            _rules_apply(st)
 
     m._box_top("✅  ENTRY НАСТРОЕН")
     m._box_row()
@@ -1868,7 +2024,18 @@ def _ensure_local_services(st: dict) -> list:
 
 
 def health_tick(verbose: bool = False) -> dict:
-    """Проверка всех Exit-ов; при смене состояния — ребаланс правил."""
+    """Проверка всех Exit-ов; при смене состояния — ребаланс правил.
+
+    Всё тело — под _cascade_lock (сериализация с TUI-хендлерами,
+    фикс гонки 01.10). Каждый тик СВЕРЯЕТ живые правила с
+    st['applied_rules'] (iptables -S скан) и перестраивает при
+    расхождении — самозалечивание сбоев apply, ручных правок и
+    частичного flush."""
+    with _cascade_lock():
+        return _health_tick_locked(verbose)
+
+
+def _health_tick_locked(verbose: bool = False) -> dict:
     m = _mieru()
     st = state_load()
     result = {"checked": 0, "changed": [], "rebalanced": False}
@@ -1922,15 +2089,34 @@ def health_tick(verbose: bool = False) -> dict:
         except Exception:
             weights_drift = False
 
-    if changed or weights_drift:
+    # сверка живых правил с применёнными (фикс гонки 01.10: state
+    # говорил «пин fi1», ядро — «пин pl1» — и так до бесконечности).
+    # None (iptables -S не ответил) — не повод перестраивать наугад.
+    # Ядерные стратегии и пин: спеки детерминированы — сверяем и с
+    # ними (смена состава Exit-ов без [4] не оставляет хвостов).
+    out_of_sync = (_rules_in_sync(st) is False)
+    if (not out_of_sync and st.get("applied_rules")
+            and ((st.get("strategy") or "rr").lower() not in METRIC_STRATEGIES
+                 or st.get("pinned_exit"))):
+        try:
+            out_of_sync = _rule_specs(st) != st["applied_rules"]
+        except Exception:
+            out_of_sync = False
+
+    if changed or weights_drift or out_of_sync:
         result["changed"] = changed
         result["rebalanced"] = True
+        if out_of_sync and not (changed or weights_drift):
+            result["resynced"] = True
         _rules_apply(st)
         _ROUTING_SH.write_text(_routing_sh_text(st))
         if verbose:
             why = []
             if changed:
                 why.append("health: " + ", ".join(changed))
+            if out_of_sync:
+                why.append("правила не соответствуют state "
+                            "(сверка iptables -S)")
             if weights_drift:
                 # bal гарантированно определён: weights_drift=True только
                 # если try дошёл до сравнения fresh (после bal=...)
@@ -2016,8 +2202,18 @@ def deactivate(st: dict, keep_state: bool = True) -> None:
     role = st.get("role")
     if role == "entry":
         _stop_units(st)
-        _strip_rules(st)
-        _ROUTING_SH.unlink(missing_ok=True)
+        # под локом: снять правила и роль одним куском — тик между
+        # ними успел бы перестроить правила (state ещё считал роль
+        # entry, applied уже пуст)
+        with _cascade_lock():
+            _strip_rules(st)
+            _ROUTING_SH.unlink(missing_ok=True)
+            if keep_state:
+                st["role"] = ""
+                state_save(st)
+        if not keep_state:
+            _MODULE_STATE.unlink(missing_ok=True)
+        return
     elif role == "exit":
         ex = st.get("exit", {})
         uname = ex.get("hop_username")
@@ -2136,6 +2332,9 @@ def _show_status(st: dict) -> None:
             if proto_ipt_rule_exists(sp["table"], sp["chain"], sp["rest"]))
         m._box_sep()
         m._box_kv("Правил в системе:", f"{rules_now}/{len(cnt_specs)}")
+        if _rules_in_sync(st) is False:
+            m._box_kv("Сверка с ядром:",
+                      f"{m.RED}рассинхрон — тик исправит ≤2 мин{m.NC}")
         r = _run(["systemctl", "is-active", "mieru-cascade-health.timer"],
                  capture=True)
         m._box_kv("Health-timer:", r.stdout.strip() or "—")
@@ -2217,11 +2416,20 @@ def _change_strategy(st: dict) -> None:
         print("  Стратегия не изменилась.")
         m._pause()
         return
-    st["strategy"] = pick
-    state_save(st)
+    # ребаза под локом: за время промпта health-тик мог сохранить
+    # свои health-поля — перезагружаем state и не откатываем их (фикс
+    # гонки 01.10: TUI и тик применяли правила одновременно)
+    with _cascade_lock(wait_hint=True):
+        fresh = state_load()
+        fresh["strategy"] = pick
+        ok = True
+        if fresh.get("exits"):
+            ok = _rules_apply(fresh)
+            _ROUTING_SH.write_text(_routing_sh_text(fresh))
+        else:
+            state_save(fresh)
+        st.update(fresh)
     if st.get("exits"):
-        ok = _rules_apply(st)
-        _ROUTING_SH.write_text(_routing_sh_text(st))
         print(f"  {m.GREEN}✓{m.NC} стратегия: {current} → {pick}; правила "
               f"{'перестроены' if ok else 'перестроены с ошибками'}")
     else:
@@ -2281,13 +2489,17 @@ def _change_pin(st: dict) -> None:
             return
         lbl = next((e.get("label") for e in exits if e["id"] == current),
                    current)
-        st.pop("pinned_exit", None)
-        state_save(st)
-        if st.get("exits"):
-            _rules_apply(st)
-            _ROUTING_SH.write_text(_routing_sh_text(st))
-            print(f"  {m.GREEN}✓{m.NC} закрепление снято ({lbl}) — активна "
-                  f"стратегия {st.get('strategy') or 'rr'}")
+        with _cascade_lock(wait_hint=True):
+            fresh = state_load()          # ребаза (фикс гонки 01.10)
+            fresh.pop("pinned_exit", None)
+            if fresh.get("exits"):
+                _rules_apply(fresh)
+                _ROUTING_SH.write_text(_routing_sh_text(fresh))
+            else:
+                state_save(fresh)
+            st.update(fresh)
+        print(f"  {m.GREEN}✓{m.NC} закрепление снято ({lbl}) — активна "
+              f"стратегия {st.get('strategy') or 'rr'}")
         m._pause()
         return
     if not raw.isdigit() or not (1 <= int(raw) <= len(exits)):
@@ -2299,11 +2511,18 @@ def _change_pin(st: dict) -> None:
         print("  Этот Exit уже закреплён.")
         m._pause()
         return
-    st["pinned_exit"] = pick["id"]
-    state_save(st)
-    if pick.get("redsocks_port"):
-        _rules_apply(st)
-        _ROUTING_SH.write_text(_routing_sh_text(st))
+    with _cascade_lock(wait_hint=True):
+        fresh = state_load()              # ребаза (фикс гонки 01.10)
+        fresh["pinned_exit"] = pick["id"]
+        if pick.get("redsocks_port"):
+            _rules_apply(fresh)
+            _ROUTING_SH.write_text(_routing_sh_text(fresh))
+            applied_now = True
+        else:
+            state_save(fresh)
+            applied_now = False
+        st.update(fresh)
+    if applied_now:
         print(f"  {m.GREEN}✓{m.NC} закреплён {pick.get('label')}: весь "
               f"трафик → {pick.get('label')}; стратегия "
               f"({st.get('strategy') or 'rr'}) не действует")
