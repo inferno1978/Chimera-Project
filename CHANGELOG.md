@@ -1,5 +1,32 @@
 # Changelog
 
+# Changelog new entry — Mieru+B4: E2E-проба health check поднимает клиента (mieru test требует запущенный демон) — 1 октября 2026
+
+
+
+## FIX(mieru_dpi): _e2e_probe — `mieru start` перед `mieru test`
+
+**Контекст:** health check «MIERU + B4» ([4]) всегда ронял последний
+чек: «E2E mieru test: mieru client is not running». Причина — upstream-
+команда `mieru test <url>` работает ТОЛЬКО через запущенного клиента
+(RPC), а проба звала её сразу после `apply config`, без старта демона
+(живой репро на B 01.10: apply rc=0 → test = «client is not running»).
+
+**Флоу пробы теперь:** apply config (валидация профиля) → stop-гигиена
+(погасить зависший зонд прошлых прогонов; конфиг уже применён, поэтому
+stop бьёт только по RPC-порту зонда 39864, хопы каскада не задевает)
+→ `mieru start` (демон в фоне; у start известный форк-баг — родитель
+не выходит, поэтому Popen + явный reap) → ожидание готовности по
+socks5-порту 39865 (ss, ≤ `_E2E_START_TIMEOUT`=15 c) → `mieru test`
+(«Connected to …») → в finally `mieru stop` (RPC) + wait/kill родителя.
+
+**Диагностика:** если демон не поднялся — detail содержит вывод
+`mieru status` (например «not running»); таймауты apply/test прежние.
+
+**Тесты:** test_mieru_dpi.py — флоу apply→stop→start→ss→test→stop
+(порядок вызовов), не-подъём демона (available=True, ok=False, пояснение),
+kill застрявшего родителя; 28 passed; mieru-сьюты 223 passed + 234 subtests.
+
 # Changelog new entry — Mieru Cascade: серверный каскад Entry→Exit для standalone-Mieru (multi-exit, port_registry, download manager) — 1 октября 2026
 
 

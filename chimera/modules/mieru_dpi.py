@@ -139,6 +139,7 @@ _STATE_FILE      = Path("/var/lib/xray-installer/mieru_dpi.json")
 _MIERU_STATE     = Path("/var/lib/xray-installer/mieru.json")
 _MITA_SERVICE    = "mita"
 _MIERU_BIN       = Path("/usr/local/bin/mieru")
+_E2E_START_TIMEOUT = 15   # c: ожидание подъёма демона зонда (socks5-порт)
 
 # ── Ленивые импорты тяжёлых соседей (без циклов на уровне модуля) ─────────
 def _dpi():
@@ -402,10 +403,17 @@ def _e2e_probe(url: str = "https://www.youtube.com") -> dict:
     Поднимает ИЗОЛИРОВАННЫЙ клиент (HOME/XDG_CONFIG_HOME → temp,
     боевой конфиг ~/.config/mieru не трогается), применяет профиль с
     кредом первого юзера mita (trafficPattern — той же JSON-формой,
-    что в server.json mita), зовёт `mieru test <url>` — upstream-
-    команду проверки связки (docs/client-install.md: «Connected to …»
-    = клиент успешно соединился с сервером). Тест проходит через
-    mita → dial цели → NFQUEUE → b4 — проверяется ВСЯ цепочка.
+    что в server.json mita), затем `mieru start` (демон в фоне) и
+    `mieru test <url>` — upstream-команду проверки связки
+    (docs/client-install.md: «Connected to …» = клиент успешно
+    соединился с сервером). test работает ТОЛЬКО через запущенного
+    клиента — без start бинарник отвечает «mieru client is not
+    running» (живой фейл на B 01.10). У mieru start есть известный
+    форк-баг: родительский процесс не выходит после форка демона —
+    поэтому start запускается Popen'ом, а в finally зонд гасится
+    `mieru stop` (RPC) + явный reap родителя. Тест проходит через
+    клиент → mita → dial цели → NFQUEUE → b4 — проверяется ВСЯ
+    цепочка.
 
     Returns: {"available": bool, "ok": Optional[bool], "detail": str}
       available=False — клиентский бинарник не установлен / нет юзеров
@@ -448,9 +456,9 @@ def _e2e_probe(url: str = "https://www.youtube.com") -> dict:
     client_cfg = {
         "profiles": [profile],
         "activeProfile": "chimera-e2e-probe",
-        "rpcPort": 39864,          # незанятые высокие порты: test слушателей
-        "socks5Port": 39865,       # не поднимает, но конфиг должен быть
-        "httpProxyPort": 39866,    # валиден
+        "rpcPort": 39864,          # RPC: status/stop/test ходят через него
+        "socks5Port": 39865,       # слушает демон: по нему ждём готовность
+        "httpProxyPort": 39866,    # порты mieru идут тройкой, все — свободные
         "loggingLevel": "WARN",
     }
     with tempfile.TemporaryDirectory(prefix="mieru-e2e-") as td:
@@ -459,6 +467,7 @@ def _e2e_probe(url: str = "https://www.youtube.com") -> dict:
         env = dict(os.environ)
         env["HOME"] = td
         env["XDG_CONFIG_HOME"] = str(Path(td) / ".config")
+        start_proc = None
         try:
             # 1. apply config — валидация профиля клиентом
             r = subprocess.run([str(_MIERU_BIN), "apply", "config", str(cfg_path)],
@@ -468,7 +477,44 @@ def _e2e_probe(url: str = "https://www.youtube.com") -> dict:
                 res["detail"] = (f"apply config отклонён: "
                                  f"{(r.stderr or r.stdout or '').strip()[:200]}")
                 return res
-            # 2. mieru test — upstream E2E-команда
+            # 2. гигиена: погасить зависший зонд прошлых прогонов (конфиг
+            #    уже применён → stop бьёт по RPC-порту зонда 39864 и не
+            #    задевает чужие инстансы mieru — хопы каскада на своих)
+            try:
+                subprocess.run([str(_MIERU_BIN), "stop"], env=env,
+                               capture_output=True, timeout=15, check=False)
+            except Exception:
+                pass
+            # 3. mieru start — демон в фоне (родитель не выходит —
+            #    форк-баг mieru start, см. докстринг) → Popen + reap
+            start_proc = subprocess.Popen([str(_MIERU_BIN), "start"], env=env,
+                                          stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL)
+            # 4. готовность: socks5-порт зонда слушается (≤15 c)
+            socks_port = int(client_cfg["socks5Port"])
+            ready = False
+            deadline = time.monotonic() + _E2E_START_TIMEOUT
+            while time.monotonic() < deadline:
+                if _mita_port_listening(socks_port):
+                    ready = True
+                    break
+                time.sleep(0.5)
+            if not ready:
+                res["available"] = True
+                res["ok"] = False
+                st_out = ""
+                try:
+                    sr = subprocess.run([str(_MIERU_BIN), "status"], env=env,
+                                        capture_output=True, text=True,
+                                        check=False, timeout=10)
+                    st_out = ((sr.stdout or "") + (sr.stderr or "")).strip()
+                except Exception:
+                    pass
+                res["detail"] = ("mieru start: клиент не поднялся за 15 c"
+                                 + (f" ({st_out[:120]})" if st_out else ""))
+                return res
+            # 5. mieru test — upstream E2E-команда (через ЗАПУЩЕННОГО
+            #    клиента; без start отвечает «client is not running»)
             r = subprocess.run([str(_MIERU_BIN), "test", url],
                                capture_output=True, text=True, check=False,
                                timeout=40, env=env)
@@ -487,6 +533,22 @@ def _e2e_probe(url: str = "https://www.youtube.com") -> dict:
             res["detail"] = "mieru test: таймаут 40 c"
         except Exception as e:
             res["detail"] = f"запуск mieru: {e}"
+        finally:
+            # 6. уборка: stop по RPC гасит демона и застрявшего
+            #    родителя; kill — страховка от неисправимых
+            try:
+                subprocess.run([str(_MIERU_BIN), "stop"], env=env,
+                               capture_output=True, timeout=20, check=False)
+            except Exception:
+                pass
+            if start_proc is not None:
+                try:
+                    start_proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        start_proc.kill()
+                    except Exception:
+                        pass
     return res
 
 def health_check_mieru() -> dict:

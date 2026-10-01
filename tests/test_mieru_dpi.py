@@ -14,7 +14,9 @@ Unit-тесты для chimera/modules/mieru_dpi.py — модуля «Mieru + B
   6. build_mieru_route_rules: формат sing-box route.rules
   7. build_karing_split_config: split-конфиг (домены → mieru, final=direct)
   8. _e2e_probe: генерация клиентского конфига (изоляция HOME,
-     trafficPattern JSON-формой), недоступность = graceful skip
+     trafficPattern JSON-формой), недоступность = graceful skip,
+     флоу apply → start(Popen) → ss-готовность → test → stop,
+     не-подъём демона, kill застрявшего родителя (форк-баг start)
   9. Интеграция подписки (мульти-нодовая): mieru-outbound в selector +
      Streaming, route-правила ВЫШЕ geosite, protect домена mita
  10. Интеграция подписки (одиночная): route.rules → mieru-outbound
@@ -23,6 +25,7 @@ Unit-тесты для chimera/modules/mieru_dpi.py — модуля «Mieru + B
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import types
@@ -282,36 +285,66 @@ class TestE2EProbe(unittest.TestCase):
             mieru_dpi._MIERU_BIN = real_bin
         self.assertFalse(r["available"])
 
-    def test_client_config_structure(self):
-        """Побочно: проверяем содержимое конфига, который E2E скармливает
-        mieru apply config (генерация вынесена логикой _e2e_probe —
-        тестируем через подмену subprocess.run и чтение temp-файла)."""
+    def _probe_env(self, users=None):
+        """Общее для E2E-тестов: подмена бинарника + стейт с юзером."""
         self._old_bin = mieru_dpi._MIERU_BIN
         mieru_dpi._MIERU_BIN = Path("/bin/sh")
         mieru_dpi._MIERU_STATE.write_text(json.dumps({
             "installed": True, "port_start": 2012, "protocol": "TCP",
-            "users": [{"username": "bob", "password": "pw"}],
+            "users": users or [{"username": "bob", "password": "pw"}],
             "traffic_preset": "medium",
         }))
-        seen_cfg = {}
+
+    @staticmethod
+    def _fake_runner(seen_cfg=None, calls=None, socks_up=True,
+                     test_out="Connected to 1.2.3.4"):
+        """Фейковый subprocess.run: apply/stop/test/ss/status."""
 
         def fake_run(cmd, **kw):
-            # перехватываем apply config — читаем файл конфига
-            if len(cmd) > 3 and cmd[1] == "apply" and cmd[3].endswith("client.json"):
-                seen_cfg.update(json.loads(Path(cmd[3]).read_text()))
+            if calls is not None:
+                calls.append("ss" if cmd[0] == "ss" else cmd[1])
+            if (len(cmd) > 3 and cmd[1] == "apply"
+                    and cmd[3].endswith("client.json")):
+                if seen_cfg is not None:
+                    seen_cfg.update(json.loads(Path(cmd[3]).read_text()))
                 return MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[0] == "ss":
+                stdout = (f"LISTEN 0 128 127.0.0.1:39865 *:*"
+                          if socks_up else "")
+                return MagicMock(returncode=0, stdout=stdout, stderr="")
             if cmd[1] == "test":
-                return MagicMock(returncode=0,
-                                 stdout="Connected to 1.2.3.4", stderr="")
+                return MagicMock(returncode=0, stdout=test_out, stderr="")
+            if cmd[1] == "status":
+                return MagicMock(returncode=1,
+                                 stdout="mieru client is not running",
+                                 stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
+        return fake_run
+
+    def test_client_config_structure(self):
+        """Побочно: проверяем содержимое конфига, который E2E скармливает
+        mieru apply config, И полный флоу пробы: apply → stop-гигиена →
+        Popen(start) → ss-готовность → test → stop (генерация вынесена
+        логикой _e2e_probe — тестируем через подмену subprocess и чтение
+        temp-файла)."""
+        seen_cfg, calls = {}, []
+        self._probe_env()
+        popen = MagicMock()
         try:
-            with patch("subprocess.run", side_effect=fake_run):
+            with patch("subprocess.run",
+                       side_effect=self._fake_runner(seen_cfg, calls)), \
+                 patch("subprocess.Popen", popen), \
+                 patch("time.sleep"):
                 r = mieru_dpi._e2e_probe()
         finally:
             pass
         self.assertTrue(r["available"])
         self.assertTrue(r["ok"])
+        # флоу: apply → stop(гигиена) → [Popen start] → ss → test → stop
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(popen.call_args[0][0][1:], ["start"])
+        self.assertEqual(calls, ["apply", "stop", "ss", "test", "stop"])
         # структура клиентского конфига mieru
         self.assertIn("profiles", seen_cfg)
         prof = seen_cfg["profiles"][0]
@@ -321,6 +354,46 @@ class TestE2EProbe(unittest.TestCase):
         # trafficPattern — JSON-форма пресета medium
         self.assertIn("trafficPattern", prof)
         self.assertIn("tcpFragment", prof["trafficPattern"])
+
+    def test_not_ready_reports_failure(self):
+        """Демон не поднялся (ss не видит socks5-порт) → available=True,
+        ok=False, detail поясняет причину; родитель reap'ается."""
+        self._probe_env()
+        popen = MagicMock()
+        old_to = mieru_dpi._E2E_START_TIMEOUT
+        mieru_dpi._E2E_START_TIMEOUT = 0          # цикл готовности не крутится
+        try:
+            with patch("subprocess.run",
+                       side_effect=self._fake_runner(socks_up=False)), \
+                 patch("subprocess.Popen", popen), \
+                 patch("time.sleep"):
+                r = mieru_dpi._e2e_probe()
+        finally:
+            mieru_dpi._E2E_START_TIMEOUT = old_to
+        self.assertTrue(r["available"])
+        self.assertFalse(r["ok"])
+        self.assertIn("не поднялся", r["detail"])
+        self.assertIn("not running", r["detail"])
+        popen.return_value.wait.assert_called()   # reap родителя
+
+    def test_stuck_start_parent_killed(self):
+        """Форк-баг mieru start: родитель не вышел после stop →
+        wait(timeout=5) истекает → kill() страховкой."""
+        self._probe_env()
+        popen = MagicMock()
+        popen.return_value.wait.side_effect = subprocess.TimeoutExpired(
+            cmd="mieru start", timeout=5)
+        try:
+            with patch("subprocess.run",
+                       side_effect=self._fake_runner()), \
+                 patch("subprocess.Popen", popen), \
+                 patch("time.sleep"):
+                r = mieru_dpi._e2e_probe()
+        finally:
+            pass
+        self.assertTrue(r["available"])
+        self.assertTrue(r["ok"])                  # тест прошёл — уборка не мешает
+        popen.return_value.kill.assert_called_once()
 
 
 class TestMenuMarkers(unittest.TestCase):
