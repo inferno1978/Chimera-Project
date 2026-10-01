@@ -417,6 +417,67 @@ class TestNyameboxSplitConfig(unittest.TestCase):
         # Karing-вариант не задет — блок только у NyameBox
         self.assertNotIn("experimental", karing)
 
+    def test_two_arm_split_cascade_final(self):
+        """Двухплечевой сплит (каскад активен): final = mieru-тег.
+
+        Подтверждено юзером в бою 02.10.2026 на NyameBox (Mieru+B4,
+        ядро sing-box 1.13.19): при активном каскаде ВЕСЬ трафик
+        клиента уходит в туннель — speedtest видит IP exit-нод, а
+        YouTube открывается с RU-выхода (домены b4-сетов mita набирает
+        напрямую с RU-ноды). Делит СЕРВЕР, не клиент:
+          • каскад активен (role=entry + включённые exit-ноды):
+            route.final = mieru-тег (NyameBox: «proxy», Karing — тег
+            генератора) — правила доменов остаются, но решает сервер;
+          • каскад НЕ активен (exits выключены / роль не entry):
+            прежняя семантика «блок-лист → mieru, остальное → direct».
+        Оба плеча проверяются на ОДНОМ state — только каскад-файл
+        переключается, чтобы поймать рассинхрон ветвей."""
+        from chimera.modules import mieru_cascade
+        st = mieru_dpi._load_state()
+        st["route_domains"] = ["youtube.com", "t.me"]
+        mieru_dpi._save_state(st)
+        cascade_state = Path(self._td.name) / "mieru_cascade.json"
+        entry_active = {"role": "entry",
+                        "exits": [{"name": "exit-1", "enabled": True}]}
+
+        # --- плечо 1: каскад АКТИВЕН → весь трафик в туннель ---
+        cascade_state.write_text(json.dumps(entry_active))
+        with patch.object(mieru_dpi, "_mieru",
+                          return_value=self._fake_mieru()), \
+             patch.object(mieru_cascade, "_MODULE_STATE", cascade_state):
+            nyame = mieru_dpi.build_nyamebox_split_config()
+            karing = mieru_dpi.build_karing_split_config()
+        self.assertIsNotNone(nyame)
+        # NyameBox: конвенция приложения — final «proxy»
+        self.assertEqual(nyame["route"]["final"], "proxy")
+        # Karing: final = тег генератора, НЕ «direct»
+        self.assertEqual(karing["route"]["final"], "mieru-alice")
+        # доменные правила на месте (делит сервер, но клиент их шлёт)
+        self.assertEqual(nyame["route"]["rules"][0]["outbound"], "proxy")
+        self.assertEqual(karing["route"]["rules"][0]["outbound"],
+                         "mieru-alice")
+
+        # --- плечо 2: exit-ноды выключены → final = direct ---
+        cascade_state.write_text(json.dumps(
+            {"role": "entry",
+             "exits": [{"name": "exit-1", "enabled": False}]}))
+        with patch.object(mieru_dpi, "_mieru",
+                          return_value=self._fake_mieru()), \
+             patch.object(mieru_cascade, "_MODULE_STATE", cascade_state):
+            nyame2 = mieru_dpi.build_nyamebox_split_config()
+            karing2 = mieru_dpi.build_karing_split_config()
+        self.assertEqual(nyame2["route"]["final"], "direct")
+        self.assertEqual(karing2["route"]["final"], "direct")
+
+        # --- плечо 2b: роль не entry (exit-нода/standalone) → direct ---
+        cascade_state.write_text(json.dumps(
+            {"role": "exit", "exits": []}))
+        with patch.object(mieru_dpi, "_mieru",
+                          return_value=self._fake_mieru()), \
+             patch.object(mieru_cascade, "_MODULE_STATE", cascade_state):
+            nyame3 = mieru_dpi.build_nyamebox_split_config()
+        self.assertEqual(nyame3["route"]["final"], "direct")
+
 
 class TestMierusLinksForState(unittest.TestCase):
     """_mierus_links_for_state: записи по юзерам с метками форматов.
