@@ -140,6 +140,9 @@ _MIERU_STATE     = Path("/var/lib/xray-installer/mieru.json")
 _MITA_SERVICE    = "mita"
 _MIERU_BIN       = Path("/usr/local/bin/mieru")
 _E2E_START_TIMEOUT = 15   # c: ожидание подъёма демона зонда (socks5-порт)
+# split-JSON экрана [6]: сохраняется файлом (scp/sftp целиком, без
+# копирования из терминала); отдельная константа — для патчей в тестах
+_SPLIT_CFG_PATH  = Path("/tmp/mieru-split-karing.json")
 
 # ── Ленивые импорты тяжёлых соседей (без циклов на уровне модуля) ─────────
 def _dpi():
@@ -366,12 +369,24 @@ def build_karing_split_config() -> Optional[dict]:
     return cfg
 
 def _mierus_links_for_state() -> list:
-    """mierus://-ссылки (Karing/Nekobox) из state standalone-Mieru."""
+    """mierus://-выдача из state standalone-Mieru — по юзерам, с метками.
+
+    Раньше возвращала плоский список ссылок без подписей: Karing- и
+    Nekobox-форматы шли вперемешку, и на экране [6] было не понять,
+    какую ссылку в какое приложение вставлять («какую сунуть в
+    Nekobox?»). Теперь — запись на юзера×транспорт с обоими форматами
+    под явными ключами:
+
+    [{"user": "admin", "proto": "TCP",
+      "karing":  "mierus://…?port=…&protocol=…",   # query-параметры
+      "nekobox": "mierus://…:2012?transport=…"}, …]  # порт в host:порт
+
+    Форматы ссылок не менялись — генераторы mieru.py как были."""
     m = _mieru()
     st = _load_mieru_state()
     if not st.get("installed") or not (st.get("users") or []):
         return []
-    links = []
+    out = []
     addr = (st.get("client_server_addr") or "").strip() or m._get_server_ip()
     port = int(st.get("port_start") or 2012)
     protos = ("TCP", "UDP") if (st.get("protocol") or "TCP").upper() == "BOTH" \
@@ -387,12 +402,16 @@ def _mierus_links_for_state() -> list:
                 ip = m._karing_udp_server_ip()
                 if ip:
                     link_addr = ip
-            links.append(m._gen_client_share_link(
-                link_addr, port, port, proto, uname, passwd,
-                traffic_preset=(st.get("traffic_preset") or "")))
-            links.append(m._gen_client_share_link_nekobox(
-                link_addr, port, proto, uname, passwd))
-    return links
+            out.append({
+                "user": uname,
+                "proto": proto,
+                "karing": m._gen_client_share_link(
+                    link_addr, port, port, proto, uname, passwd,
+                    traffic_preset=(st.get("traffic_preset") or "")),
+                "nekobox": m._gen_client_share_link_nekobox(
+                    link_addr, port, proto, uname, passwd),
+            })
+    return out
 
 # ══════════════════════════════════════════════════════════════════════════
 #  HEALTH CHECK (+ E2E через реальный mieru-клиент)
@@ -868,38 +887,146 @@ def _menu_sync() -> None:
     input(f"\n{BOLD}Enter…{NC}")
 
 def _menu_client_configs() -> None:
-    """Split-конфиг + mierus://-ссылки из state standalone-Mieru."""
-    print()
-    _box_top("📱  КЛИЕНТСКИЕ КОНФИГИ (SPLIT)")
-    _box_row()
-    cfg = build_karing_split_config()
-    if cfg is None:
-        _box_warn("Mieru не установлен / нет юзеров — конфиг не собрать.")
+    """Split-конфиг + mierus://-ссылки из state standalone-Mieru.
+
+    Редизайн (фидбек владельца, 01.10): раньше экран печатал JSON
+    прямо посреди ОТКРЫТОЙ рамки — правая граница ║ ломалась на
+    каждой строке конфига, а mierus://-ссылки обоих форматов шли
+    без подписей, и было не понять, какую ссылку в какое приложение
+    вставлять. Теперь:
+      • внутри рамки — статус маршрутки + шпаргалка «что куда
+        вставлять» (главный вопрос «какую ссылку в Nekobox» снят
+        подписью «NekoBox», а не гаданием по виду ссылки);
+      • ссылки и JSON — ВНЕ рамок (паттерн hybrid_addon: ссылка
+        ОДНОЙ строкой под закрытой рамкой — мягкий перенос
+        терминала не вставляет \n при копировании);
+      • мини-меню [1]/[2]: ссылки и JSON на разных экранах, чтобы
+        длинный JSON не отталкивал ссылки за первый экран."""
+    while True:
+        os.system("clear")
+        cfg = build_karing_split_config()
+        if cfg is None:
+            _box_top("📱  КЛИЕНТСКИЕ КОНФИГИ (SPLIT)")
+            _box_row()
+            _box_warn("Mieru не установлен / нет юзеров — конфиг не собрать.")
+            _box_row()
+            _box_back()
+            _box_bottom()
+            input(f"\n{BOLD}Enter…{NC}")
+            return
+        entries = _mierus_links_for_state()
+        domains = get_route_domains()
+        last = (_load_state().get("last_sync") or "—")[:19].replace("T", " ")
+
+        _box_top("📱  КЛИЕНТСКИЕ КОНФИГИ (SPLIT)")
         _box_row()
-        input(f"\n{BOLD}Enter…{NC}")
-        return
-    domains = get_route_domains()
-    if domains:
-        _box_row(f"  Маршрутка: {CYAN}{len(domains)} доменов{NC} → mieru-outbound, "
-                 f"остальное → direct")
-    else:
-        _box_warn("Маршрутка пуста — весь трафик пойдёт direct (синк [5]).")
+        if domains:
+            _box_row(f"  Маршрутка: {CYAN}{len(domains)} доменов{NC} → mieru, "
+                     f"остальное → direct  (синк: {last})")
+        else:
+            _box_warn("Маршрутка пуста — весь трафик пойдёт direct (синк [5]).")
+        _box_row()
+
+        _box_row(f"  {BOLD}Что куда вставлять:{NC}")
+        _box_row(f"   {WHITE}Karing{NC} (Android/iOS/ПК) → [1] ссылка «Karing»")
+        _box_row(f"   {WHITE}NekoBox / Nyamebox{NC}      → [1] ссылка «NekoBox»")
+        _box_row(f"   {WHITE}sing-box CLI{NC}            → [2] JSON-конфиг")
+        _box_row()
+        _box_row(f"  {DIM}Ссылка даёт только прокси; маршрутку (домены → mieru){NC}")
+        _box_row(f"  {DIM}несёт подписка format=singbox (правила уже вшиты) или{NC}")
+        _box_row(f"  {DIM}JSON [2]; в NekoBox для сплита — «Custom Config» из [2].{NC}")
+        _box_row()
+
+        _box_sep()
+        _box_item("1", "🔗 mierus://-ссылки (по юзерам) — вне рамок")
+        _box_item("2", "📄 JSON split-конфиг (в файл + на экран) — вне рамок")
+        _box_row()
+        _box_back()
+        _box_bottom()
+
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            return
+        if ch in ("q", "0", ""):
+            return
+        if ch == "1":
+            if entries:
+                _show_client_links(entries)
+            else:
+                _warn("Нет юзеров в standalone-Mieru — ссылки не собрать.")
+                time.sleep(1)
+        elif ch == "2":
+            first_user = ((_load_mieru_state().get("users") or [{}])[0] or {})\
+                .get("username", "")
+            _show_client_json(cfg, first_user)
+        else:
+            _warn("Неверный выбор.")
+            time.sleep(1)
+
+def _show_client_links(entries: list) -> None:
+    """Экран [1] мини-меню [6]: mierus://-ссылки — ВНЕ рамок, по юзерам.
+
+    Каждая ссылка печатается ОДНОЙ строкой ПОД закрытой рамкой: мягкий
+    перенос терминала не вставляет перевод строки при копировании
+    (паттерн hybrid_addon._show_mieru_client_links). Форматы подписаны
+    явно: Karing (query-параметры port=/protocol=) и NekoBox/Nyamebox
+    (порт через двоеточие + transport=) — два РАЗНЫХ формата под
+    разные приложения, вперемешку их не показываем."""
+    print()
+    _box_top("🔗  MIERUS://-ССЫЛКИ (ПО ЮЗЕРАМ)")
     _box_row()
-    _box_row(f"  {DIM}Karing / sing-box / Nekobox — импорт JSON или ссылок:{NC}")
+    _box_row(f"  {DIM}Ссылки — ПОД рамкой, каждая ОДНОЙ строкой:{NC}")
+    _box_row(f"  {DIM}копируйте целиком, без склейки переносов.{NC}")
+    if any(e.get("proto") == "UDP" for e in entries):
+        _box_row(f"  {DIM}UDP-ссылка для Karing идёт с IP (баг ядра Karing —{NC}")
+        _box_row(f"  {DIM}с доменом UDP молчит, «0 байт/с»); NekoBox — домен.{NC}")
     _box_row()
+    _box_bottom()
+    for e in entries:
+        print()
+        print(f"  {BOLD}Юзер «{e['user']}» — {e['proto']}:{NC}")
+        print()
+        print(f"  {BOLD}Karing (sing-box core):{NC}")
+        print(f"  {YELLOW}{e['karing']}{NC}")
+        print()
+        print(f"  {BOLD}NekoBox / Nyamebox:{NC}")
+        print(f"  {YELLOW}{e['nekobox']}{NC}")
+    print()
+    input(f"{BOLD}Enter…{NC}")
+
+def _show_client_json(cfg: dict, username: str = "") -> None:
+    """Экран [2] мини-меню [6]: split-JSON — ВНЕ рамок + файл для scp.
+
+    JSON маршрутки длинный (все домены в route.rules) — внутри
+    открытой рамки он ломал границы ║ и был нечитаем. Теперь рамка
+    короткая (юзер, путь файла, куда вставлять), а конфиг печатается
+    целиком ПОД ней; дополнительно сохраняется в _SPLIT_CFG_PATH —
+    забрать на устройство scp/sftp целиком, без копирования из
+    терминала. Конфиг несёт креды ПЕРВОГО юзера standalone-Mieru
+    (build_karing_split_config) — имя юзера показываем в рамке."""
+    print()
+    _box_top("📄  JSON SPLIT-КОНФИГ (SING-BOX)")
+    _box_row()
+    if username:
+        _box_row(f"  Юзер: {CYAN}{username}{NC} {DIM}(креды вшиты в конфиг){NC}")
+    try:
+        _SPLIT_CFG_PATH.write_text(
+            json.dumps(cfg, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        _box_row(f"  Файл:  {CYAN}{_SPLIT_CFG_PATH}{NC}")
+        _box_row(f"  {DIM}Забрать целиком: scp <юзер>@<нода>:{_SPLIT_CFG_PATH}{NC}")
+    except OSError as e:
+        _box_warn(f"Файл не записан: {e} — копируйте JSON из терминала.")
+    _box_row()
+    _box_row(f"  {DIM}Куда: Karing → импорт конфига · sing-box → config.json ·{NC}")
+    _box_row(f"  {DIM}NekoBox → профиль «Custom Config». Конфиг — ПОД рамкой.{NC}")
+    _box_row()
+    _box_bottom()
+    print()
     print(json.dumps(cfg, indent=2, ensure_ascii=False))
     print()
-    links = _mierus_links_for_state()
-    if links:
-        _box_row(f"  {BOLD}mierus://-ссылки (по юзеру/транспорту):{NC}")
-        _box_row()
-        for l in links:
-            _box_link(l)
-        _box_row()
-    _box_row(f"  {DIM}В подписке format=singbox эти же правила уже вшиты "
-             f"(мульти-нодовая и одиночная ветки).{NC}")
-    _box_row()
-    input(f"\n{BOLD}Enter…{NC}")
+    input(f"{BOLD}Enter…{NC}")
 
 def _menu_b4_logs() -> None:
     print()
