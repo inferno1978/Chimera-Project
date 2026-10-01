@@ -808,9 +808,16 @@ def _purge_orphan_rules(st: dict) -> None:
         r = _run(["iptables", "-t", table, "-S", "OUTPUT"], capture=True)
         if r.returncode != 0:
             continue
-        for line in (r.stdout or "").splitlines():
-            if not line.startswith("-A OUTPUT "):
+        for raw_line in (r.stdout or "").splitlines():
+            if not raw_line.startswith("-A OUTPUT "):
                 continue
+            # iptables -S печатает строковые значения В КАВЫЧКАХ
+            # (--path "system.slice/mita.service"). Кавычки ломают и
+            # сигнатурный поиск, и -D («rule not found») — баг 01.10:
+            # взвешенные правила прошлых поколений переживали все
+            # зачистки. Декавычиваем строку ДО всех проверок (кавычки
+            # в значениях наших правил не встречаются).
+            line = raw_line.replace('"', "")
             if not any(s in line for s in sigs):
                 continue
             argv = line[len("-A OUTPUT "):].split()
