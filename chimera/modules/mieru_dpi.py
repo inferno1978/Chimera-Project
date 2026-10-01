@@ -143,6 +143,10 @@ _E2E_START_TIMEOUT = 15   # c: ожидание подъёма демона зо
 # split-JSON экрана [6]: сохраняется файлом (scp/sftp целиком, без
 # копирования из терминала); отдельная константа — для патчей в тестах
 _SPLIT_CFG_PATH  = Path("/tmp/mieru-split-karing.json")
+# NyameBox-вариант split-конфига (ядро 1.13.x): тот же сплит, другой
+# формат DNS/полей — отдельный файл, чтобы Karing/NyameBox не
+# перезатирали друг друга при scp
+_NYAME_CFG_PATH  = Path("/tmp/mieru-split-nyamebox.json")
 
 # ── Ленивые импорты тяжёлых соседей (без циклов на уровне модуля) ─────────
 def _dpi():
@@ -366,6 +370,93 @@ def build_karing_split_config() -> Optional[dict]:
     }
     if rules:
         cfg["route"]["rules"] = rules
+    return cfg
+
+def _nyamebox_dns_block(legacy_dns: dict, mieru_tag: str) -> dict:
+    """Karing-DNS (legacy address-формат) → DNS sing-box 1.12+ для
+    NyameBox-ядра (qr243vbi/nekobox, форк sing-box 1.13.19).
+
+    Семантика та же: кастомный DNS через mieru-туннель, local —
+    bootstrap напрямую. Отличия формата (пойманы живым nekobox_core
+    5.11.28.3 / sing-box 1.13.19, check+run+E2E 01.10.2026):
+      • type-серверы (https/udp) вместо address-строк — legacy
+        deprecated с 1.12, вырезан в 1.14;
+      • local БЕЗ detour: новый формат сам ходит direct, а явный
+        detour на пустой direct-outbound ядро отвергает ПРИ СТАРТЕ
+        (FATAL «detour to an empty direct outbound makes no sense»)
+        — sing-box check это НЕ ловит, только run;
+      • кастомный DNS: detour наследуется; при отсутствии (гугл-
+        дефолт старого формата = дефолтный outbound = mieru)
+        подставляем mieru_tag — в новом формате «без detour» =
+        direct, что утекло бы мимо туннеля.
+    """
+    from urllib.parse import urlparse
+    m = _mieru()
+    servers = []
+    for i, srv in enumerate(legacy_dns.get("servers") or []):
+        addr = (srv.get("address") or "").strip()
+        tag = srv.get("tag") or (f"custom-dns-{i + 1}" if i else "custom-dns")
+        if not addr:
+            continue
+        u = urlparse(addr if "://" in addr else "//" + addr)
+        is_local = srv.get("detour") == "direct" or tag == "local"
+        if is_local:
+            # bootstrap: direct по умолчанию, detour НЕ ставим (см. докстринг)
+            servers.append({"type": "udp", "tag": tag,
+                            "server": u.hostname or "1.1.1.1"})
+            continue
+        dtype = {"https": "https", "http": "http",
+                 "quic": "quic", "h3": "h3"}.get((u.scheme or "").lower(), "udp")
+        new = {"type": dtype, "tag": tag,
+               "detour": srv.get("detour") or mieru_tag}
+        if dtype == "udp":
+            new["server"] = u.hostname or addr
+        else:
+            new["server"] = u.hostname
+            if u.port:
+                new["server_port"] = u.port
+            if u.path and u.path != "/":
+                new["path"] = u.path
+            if m._dns_host_is_domain(u.hostname or ""):
+                new["domain_resolver"] = "local"
+        servers.append(new)
+    block = {"servers": servers}
+    if servers:
+        block["final"] = servers[0]["tag"]
+    if legacy_dns.get("rules"):
+        block["rules"] = legacy_dns["rules"]  # формат dns.rules 1.12+ совместим
+    return block
+
+def build_nyamebox_split_config() -> Optional[dict]:
+    """NyameBox-вариант split-конфига меню [6] (ядро sing-box 1.13.x).
+
+    Отличия от Karing-варианта — только формат; креды, traffic_pattern,
+    домены маршрутки, route.final=direct — идентичны (переиспользуем
+    build_karing_split_config и конвертируем). Валидация nekobox_core
+    5.11.28.3: sing-box check — PASS без ворнингов; E2E socks-харнесс —
+    маршрутка → mieru, финал → direct (HTTP 200). ВАЖНО: mieru-outbound
+    БЕЗ mtu — релизное ядро поля не знает (strict-decode «unknown
+    field»), дефолт mieru = 1400; поле есть только в master-ветке форка.
+    """
+    karing = build_karing_split_config()
+    if karing is None:
+        return None
+    mieru_tag = next(o["tag"] for o in karing["outbounds"]
+                     if o.get("type") == "mieru")
+    dns = _nyamebox_dns_block(karing.get("dns") or {}, mieru_tag)
+    first_tag = (dns.get("servers") or [{}])[0].get("tag", "")
+    cfg = {
+        "log": {"level": "info"},
+        "dns": dns,
+        "outbounds": karing["outbounds"],
+        "route": {"final": "direct", "auto_detect_interface": True},
+    }
+    if first_tag:
+        # явная фиксация неявного дефолта (первый DNS-сервер): без поля
+        # ядро 1.12+ сыплет deprecation-WARN; семантику не меняет
+        cfg["route"]["default_domain_resolver"] = first_tag
+    if karing["route"].get("rules"):
+        cfg["route"]["rules"] = karing["route"]["rules"]
     return cfg
 
 def _mierus_links_for_state() -> list:
@@ -930,6 +1021,7 @@ def _menu_client_configs() -> None:
         _box_row(f"  {BOLD}Что куда вставлять:{NC}")
         _box_row(f"   {WHITE}Karing{NC} (Android/iOS/ПК) → [1] ссылка «Karing»")
         _box_row(f"   {WHITE}NekoBox / Nyamebox{NC}      → [1] ссылка «NekoBox»")
+        _box_row(f"   {WHITE}NyameBox{NC} (ПК, ядро 1.13) → [3] JSON «Custom Config»")
         _box_row(f"   {WHITE}sing-box CLI{NC}            → [2] JSON-конфиг")
         _box_row()
         _box_row(f"  {DIM}Ссылка даёт только прокси; маршрутку (домены → mieru){NC}")
@@ -940,6 +1032,7 @@ def _menu_client_configs() -> None:
         _box_sep()
         _box_item("1", "🔗 mierus://-ссылки (по юзерам) — вне рамок")
         _box_item("2", "📄 JSON split-конфиг (в файл + на экран) — вне рамок")
+        _box_item("3", "📄 NyameBox JSON (ядро 1.13.x) — в файл + на экран")
         _box_row()
         _box_back()
         _box_bottom()
@@ -960,6 +1053,15 @@ def _menu_client_configs() -> None:
             first_user = ((_load_mieru_state().get("users") or [{}])[0] or {})\
                 .get("username", "")
             _show_client_json(cfg, first_user)
+        elif ch == "3":
+            nyame = build_nyamebox_split_config()
+            if nyame is None:
+                _warn("Конфиг NyameBox не собрался — Mieru/юзеры недоступны.")
+                time.sleep(1)
+            else:
+                first_user = ((_load_mieru_state().get("users") or [{}])[0] or {})\
+                    .get("username", "")
+                _show_client_json(nyame, first_user, nyamebox=True)
         else:
             _warn("Неверный выбор.")
             time.sleep(1)
@@ -995,32 +1097,42 @@ def _show_client_links(entries: list) -> None:
     print()
     input(f"{BOLD}Enter…{NC}")
 
-def _show_client_json(cfg: dict, username: str = "") -> None:
-    """Экран [2] мини-меню [6]: split-JSON — ВНЕ рамок + файл для scp.
+def _show_client_json(cfg: dict, username: str = "",
+                      nyamebox: bool = False) -> None:
+    """Экран [2]/[3] мини-меню [6]: split-JSON — ВНЕ рамок + файл для scp.
 
     JSON маршрутки длинный (все домены в route.rules) — внутри
     открытой рамки он ломал границы ║ и был нечитаем. Теперь рамка
     короткая (юзер, путь файла, куда вставлять), а конфиг печатается
-    целиком ПОД ней; дополнительно сохраняется в _SPLIT_CFG_PATH —
-    забрать на устройство scp/sftp целиком, без копирования из
-    терминала. Конфиг несёт креды ПЕРВОГО юзера standalone-Mieru
-    (build_karing_split_config) — имя юзера показываем в рамке."""
+    целиком ПОД ней; дополнительно сохраняется в файл — забрать на
+    устройство scp/sftp целиком, без копирования из терминала.
+    Конфиг несёт креды ПЕРВОГО юзера standalone-Mieru
+    (build_karing_split_config) — имя юзера показываем в рамке.
+    nyamebox=True — вариант для NyameBox (ядро sing-box 1.13.x):
+    файл _NYAME_CFG_PATH, инструкция импорта «Custom Config»."""
+    path = _NYAME_CFG_PATH if nyamebox else _SPLIT_CFG_PATH
+    title = "📄  NYAMEBOX SPLIT-КОНФИГ (SING-BOX 1.13)" if nyamebox \
+        else "📄  JSON SPLIT-КОНФИГ (SING-BOX)"
     print()
-    _box_top("📄  JSON SPLIT-КОНФИГ (SING-BOX)")
+    _box_top(title)
     _box_row()
     if username:
         _box_row(f"  Юзер: {CYAN}{username}{NC} {DIM}(креды вшиты в конфиг){NC}")
     try:
-        _SPLIT_CFG_PATH.write_text(
+        path.write_text(
             json.dumps(cfg, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8")
-        _box_row(f"  Файл:  {CYAN}{_SPLIT_CFG_PATH}{NC}")
-        _box_row(f"  {DIM}Забрать целиком: scp <юзер>@<нода>:{_SPLIT_CFG_PATH}{NC}")
+        _box_row(f"  Файл:  {CYAN}{path}{NC}")
+        _box_row(f"  {DIM}Забрать целиком: scp <юзер>@<нода>:{path}{NC}")
     except OSError as e:
         _box_warn(f"Файл не записан: {e} — копируйте JSON из терминала.")
     _box_row()
-    _box_row(f"  {DIM}Куда: Karing → импорт конфига · sing-box → config.json ·{NC}")
-    _box_row(f"  {DIM}NekoBox → профиль «Custom Config». Конфиг — ПОД рамкой.{NC}")
+    if nyamebox:
+        _box_row(f"  {DIM}Куда: NyameBox → Профили → Add Profile → Custom Config{NC}")
+        _box_row(f"  {DIM}→ вставить файл/текст. Конфиг — ПОД рамкой.{NC}")
+    else:
+        _box_row(f"  {DIM}Куда: Karing → импорт конфига · sing-box → config.json ·{NC}")
+        _box_row(f"  {DIM}NekoBox → профиль «Custom Config». Конфиг — ПОД рамкой.{NC}")
     _box_row()
     _box_bottom()
     print()

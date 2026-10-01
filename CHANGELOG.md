@@ -1,5 +1,44 @@
 # Changelog
 
+# Changelog new entry — Mieru+B4: NyameBox JSON в меню [6]→[3] — 1 октября 2026
+
+
+
+## FEAT(mieru_dpi): пункт [3] NyameBox JSON в экране [6] — split-конфиг под ядро sing-box 1.13.x — 1 октября 2026
+
+**Контекст (живой запрос владельца):** NyameBox (qr243vbi/nekobox,
+ПК) — ядро-форк sing-box 1.13.19; Karing-JSON экрана [6] проходит у
+него check, но сыплет deprecation-ворнингами и несёт поля, на
+которых релизное ядро падает. Теперь нода сама генерирует
+NyameBox-вариант: [6] → [3] → файл `/tmp/mieru-split-nyamebox.json`
++ scp-строка + инструкция «Add Profile → Custom Config».
+
+- Отличия от Karing-варианта — только формат, семантика идентична
+  (креды, traffic_pattern, домены маршрутки, route.final=direct
+  переносятся 1:1):
+  * DNS — формат sing-box 1.12+ (type-серверы `https`/`udp` +
+    `dns.final`); legacy-формат deprecated с 1.12, вырезан в 1.14;
+  * local-DNS без `detour` — явный `detour:"direct"` на пустой
+    direct-outbound ядро 1.13.19 отвергает ПРИ СТАРТЕ
+    (FATAL «detour to an empty direct outbound makes no sense») —
+    `sing-box check` это не ловит, только `run`;
+  * кастомный DNS без detour получает detour=mieru (в новом формате
+    «без detour» = direct — DNS утёк бы мимо туннеля);
+  * mieru-outbound БЕЗ `mtu` — релизное ядро 5.11.28.3 поля не
+    знает (strict-decode «unknown field»; поле есть только в
+    master-ветке форка), дефолт mieru = 1400;
+  * route + `auto_detect_interface` (TUN-гигиена десктопа) и
+    `default_domain_resolver` (явная фиксация дефолта — без поля
+    WARN deprecation).
+- Валидация на ядре пользователя (nekobox_core 5.11.28.3):
+  `sing-box check` — PASS без ворнингов; E2E через socks-харнесс —
+  домены маршрутки матчатся на mieru-outbound, финал → direct
+  (HTTP 200). Попутно сверена схема mieru-outbound по исходникам
+  форка (option/mieru.go).
+- Тесты: TestNyameboxSplitConfig — DNS 1.12+ (type-серверы, local
+  без detour, final), route-инварианты + паритет доменов/кредов с
+  Karing-вариантом, mieru без mtu, None без юзеров.
+
 # Changelog new entry — Mieru+B4: клиентские конфиги [6] — ссылки/JSON вне рамок, подписи форматов ссылок — 1 октября 2026
 
 
