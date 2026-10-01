@@ -13,14 +13,16 @@ Unit-тесты для chimera/modules/mieru_dpi.py — модуля «Mieru + B
   5. sync_b4_to_mieru: идемпотентность, метки changed
   6. build_mieru_route_rules: формат sing-box route.rules
   7. build_karing_split_config: split-конфиг (домены → mieru, final=direct)
-  8. _e2e_probe: генерация клиентского конфига (изоляция HOME,
+  8. _mierus_links_for_state: записи ПО ЮЗЕРАМ с метками форматов
+     (karing/nekobox) + редизайн [6]: ссылки/JSON ВНЕ рамок (маркеры)
+  9. _e2e_probe: генерация клиентского конфига (изоляция HOME,
      trafficPattern JSON-формой), недоступность = graceful skip,
      флоу apply → start(Popen) → ss-готовность → test → stop,
      не-подъём демона, kill застрявшего родителя (форк-баг start)
-  9. Интеграция подписки (мульти-нодовая): mieru-outbound в selector +
+ 10. Интеграция подписки (мульти-нодовая): mieru-outbound в selector +
      Streaming, route-правила ВЫШЕ geosite, protect домена mita
- 10. Интеграция подписки (одиночная): route.rules → mieru-outbound
- 11. Маркеры меню: пункт [MB] в _core.py рядом с [B]
+ 11. Интеграция подписки (одиночная): route.rules → mieru-outbound
+ 12. Маркеры меню: пункт [MB] в _core.py рядом с [B]
 """
 from __future__ import annotations
 
@@ -253,6 +255,69 @@ class TestKaringSplitConfig(unittest.TestCase):
         self.assertIsNone(mieru_dpi.build_karing_split_config())
 
 
+class TestMierusLinksForState(unittest.TestCase):
+    """_mierus_links_for_state: записи по юзерам с метками форматов.
+
+    Раньше функция возвращала плоский список ссылок без подписей
+    (Karing- и Nekobox-форматы вперемешку). После редизайна [6] —
+    запись на юзера×транспорт с ключами user/proto/karing/nekobox."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        _tmp_state_paths(self, self._td.name)
+
+    def tearDown(self):
+        mieru_dpi._STATE_FILE = self._old_state
+        mieru_dpi._MIERU_STATE = self._old_mieru_state
+        self._td.cleanup()
+
+    def _set_state(self, users, protocol="TCP"):
+        mieru_dpi._MIERU_STATE.write_text(json.dumps({
+            "installed": True, "port_start": 2012, "port_end": 2022,
+            "protocol": protocol, "users": users,
+            "traffic_preset": "basic", "client_server_addr": "1.2.3.4",
+        }))
+
+    @staticmethod
+    def _fake_mieru():
+        fake = MagicMock()
+        fake._get_server_ip.return_value = "1.2.3.4"
+        fake._dns_host_is_domain.return_value = False
+        fake._gen_client_share_link.side_effect = \
+            lambda ip, p1, p2, proto, u, pw, traffic_preset="": \
+                f"KARING|{u}|{proto}"
+        fake._gen_client_share_link_nekobox.side_effect = \
+            lambda ip, p, proto, u, pw: f"NEKOBOX|{u}|{proto}"
+        return fake
+
+    def test_entries_labeled_per_user(self):
+        """Юзер → запись с обоими форматами под явными ключами."""
+        self._set_state([{"username": "admin", "password": "a"},
+                         {"username": "user", "password": "b"}])
+        with patch.object(mieru_dpi, "_mieru",
+                          return_value=self._fake_mieru()):
+            entries = mieru_dpi._mierus_links_for_state()
+        self.assertEqual([e["user"] for e in entries], ["admin", "user"])
+        self.assertTrue(all(e["proto"] == "TCP" for e in entries))
+        self.assertEqual(entries[0]["karing"], "KARING|admin|TCP")
+        self.assertEqual(entries[0]["nekobox"], "NEKOBOX|admin|TCP")
+        self.assertEqual(entries[1]["karing"], "KARING|user|TCP")
+        self.assertEqual(entries[1]["nekobox"], "NEKOBOX|user|TCP")
+
+    def test_both_protocols_per_user(self):
+        """protocol=BOTH → по записи на каждый транспорт."""
+        self._set_state([{"username": "u1", "password": "p"}], protocol="BOTH")
+        with patch.object(mieru_dpi, "_mieru",
+                          return_value=self._fake_mieru()):
+            entries = mieru_dpi._mierus_links_for_state()
+        self.assertEqual([(e["user"], e["proto"]) for e in entries],
+                         [("u1", "TCP"), ("u1", "UDP")])
+
+    def test_empty_when_not_installed(self):
+        mieru_dpi._MIERU_STATE.write_text(json.dumps({"installed": False}))
+        self.assertEqual(mieru_dpi._mierus_links_for_state(), [])
+
+
 class TestE2EProbe(unittest.TestCase):
     """_e2e_probe: graceful skip, генерация изолированного конфига."""
 
@@ -448,6 +513,28 @@ class TestMenuMarkers(unittest.TestCase):
             "_route[\"rules\"] = _md_rules + _existing",
         ):
             self.assertIn(marker, src)
+
+    def test_client_configs_ux_outside_boxes(self):
+        """Редизайн [6]: мини-меню, шпаргалка «что куда», подписи форматов;
+        ссылки и JSON печатаются ПОСЛЕ закрытия рамки (_box_bottom
+        раньше вывода) — рамки больше не ломаются."""
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "mieru_dpi.py").read_text()
+        for marker in (
+            "def _show_client_links",
+            "def _show_client_json",
+            "_SPLIT_CFG_PATH",
+            "Что куда вставлять",
+            "Karing (sing-box core)",
+            "NekoBox / Nyamebox",
+        ):
+            self.assertIn(marker, src)
+        # JSON — ПОД закрытой рамкой: _box_bottom раньше печати конфига
+        fn_j = src[src.find("def _show_client_json"):src.find("def _menu_b4_logs")]
+        self.assertLess(fn_j.find("_box_bottom()"),
+                        fn_j.find("print(json.dumps(cfg"))
+        # ссылки — ПОД закрытой рамкой: _box_bottom раньше печати ссылок
+        fn_l = src[src.find("def _show_client_links"):src.find("def _show_client_json")]
+        self.assertLess(fn_l.find("_box_bottom()"), fn_l.find("e['karing']"))
 
 
 class TestMultinodeIntegration(unittest.TestCase):
