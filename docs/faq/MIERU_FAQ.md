@@ -560,7 +560,7 @@ Karing/sing-box (проверено на рабочем конфиге), не д
 | Клиент | Поддержка Mieru | Формат импорта |
 |---|---|---|
 | **Karing** (sing-box core) | да | `mierus://`-ссылка (TCP — проверено живьём; UDP — только с IP, см. траблшутинг «UDP — 0 байт/с») или JSON-файл `/tmp/karing-mieru-hybrid-<транспорт>-<логин>.json` (запасной вариант для старых сборок Karing) |
-| **Nekobox / Nyamebox** | да | `mierus://`-ссылка (свой формат: порт через двоеточие, параметр `transport=`) |
+| **Nekobox / Nyamebox** | да | `mierus://`-ссылка (свой формат: порт через двоеточие, параметр `transport=`); NyameBox-сплит — JSON меню [6]→[3] (файл `/tmp/mieru-split-nyamebox.json`, импорт «Custom Config») |
 | **sing-box CLI** | да | JSON (тот же, что для Karing) |
 | mihomo / FlClash / Clash-семейство | **нет** | — |
 | Xray-клиенты | нет | — |

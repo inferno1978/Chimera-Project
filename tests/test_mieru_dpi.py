@@ -255,6 +255,105 @@ class TestKaringSplitConfig(unittest.TestCase):
         self.assertIsNone(mieru_dpi.build_karing_split_config())
 
 
+class TestNyameboxSplitConfig(unittest.TestCase):
+    """build_nyamebox_split_config / _nyamebox_dns_block: формат 1.13.x.
+
+    NyameBox (qr243vbi/nekobox) — ядро sing-box 1.13.19: DNS в формате
+    1.12+ (type-серверы), local-DNS без detour, mieru-outbound без mtu.
+    Все три нюанса пойманы живым nekobox_core 5.11.28.3 (check/run/E2E,
+    01.10.2026): strict-decode «unknown field mtu», FATAL «detour to an
+    empty direct outbound» (run, не check), deprecation-WARN
+    default_domain_resolver."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        _tmp_state_paths(self, self._td.name)
+        mieru_dpi._MIERU_STATE.write_text(json.dumps({
+            "installed": True,
+            "port_start": 2012, "port_end": 2022, "protocol": "TCP",
+            "users": [{"username": "alice", "password": "secret"}],
+            "traffic_preset": "basic",
+            "client_dns": "https://dns.example.com:30443/dns-query",
+            "client_server_addr": "",
+        }))
+
+    def tearDown(self):
+        mieru_dpi._STATE_FILE = self._old_state
+        mieru_dpi._MIERU_STATE = self._old_mieru_state
+        self._td.cleanup()
+
+    @staticmethod
+    def _fake_mieru():
+        fake = MagicMock()
+        fake._get_server_ip.return_value = "1.2.3.4"
+        fake._dns_host_is_domain.return_value = True
+        fake._gen_singbox_outbound.return_value = {
+            "type": "mieru", "tag": "mieru-alice", "server": "1.2.3.4",
+            "server_port": 2012, "transport": "TCP",
+            "username": "alice", "password": "secret",
+            "multiplexing": "MULTIPLEXING_HIGH",
+        }
+        # legacy-DNS блок, как его собирает mieru._build_karing_dns_block
+        fake._build_karing_dns_block.return_value = {
+            "servers": [
+                {"tag": "custom-dns",
+                 "address": "https://dns.example.com:30443/dns-query",
+                 "detour": "mieru-alice", "address_resolver": "local"},
+                {"tag": "local", "address": "1.1.1.1", "detour": "direct"},
+            ],
+        }
+        return fake
+
+    def test_dns_modern_format(self):
+        """DNS: type-серверы 1.12+ (без address), local без detour,
+        final = первый сервер; домен резолвера bootstrap-ится local."""
+        with patch.object(mieru_dpi, "_mieru",
+                          return_value=self._fake_mieru()):
+            cfg = mieru_dpi.build_nyamebox_split_config()
+        self.assertIsNotNone(cfg)
+        servers = cfg["dns"]["servers"]
+        self.assertEqual(servers[0]["type"], "https")
+        self.assertEqual(servers[0]["server"], "dns.example.com")
+        self.assertEqual(servers[0]["server_port"], 30443)
+        self.assertEqual(servers[0]["path"], "/dns-query")
+        self.assertEqual(servers[0]["detour"], "mieru-alice")
+        self.assertEqual(servers[0]["domain_resolver"], "local")
+        self.assertNotIn("address", servers[0])  # legacy-поля нет
+        self.assertEqual(servers[1],
+                         {"type": "udp", "tag": "local", "server": "1.1.1.1"})
+        self.assertNotIn("detour", servers[1])  # иначе FATAL при старте
+        self.assertEqual(cfg["dns"]["final"], "custom-dns")
+
+    def test_route_and_parity(self):
+        """route: final=direct + auto_detect_interface +
+        default_domain_resolver=первый DNS; mieru БЕЗ mtu; домены
+        и креды маршрутки == Karing-варианту 1:1."""
+        st = mieru_dpi._load_state()
+        st["route_domains"] = ["youtube.com", "t.me"]
+        mieru_dpi._save_state(st)
+        with patch.object(mieru_dpi, "_mieru",
+                          return_value=self._fake_mieru()):
+            nyame = mieru_dpi.build_nyamebox_split_config()
+            karing = mieru_dpi.build_karing_split_config()
+        self.assertIsNotNone(nyame)
+        self.assertEqual(nyame["route"]["final"], "direct")
+        self.assertTrue(nyame["route"]["auto_detect_interface"])
+        self.assertEqual(nyame["route"]["default_domain_resolver"],
+                         "custom-dns")
+        self.assertEqual(nyame["route"]["rules"], karing["route"]["rules"])
+        mieru_ob = next(o for o in nyame["outbounds"]
+                        if o.get("type") == "mieru")
+        self.assertNotIn("mtu", mieru_ob)  # релиз 5.11.28.3 не знает поля
+        self.assertEqual(mieru_ob["username"], "alice")
+        self.assertEqual(mieru_ob["multiplexing"], "MULTIPLEXING_HIGH")
+
+    def test_none_when_not_installed(self):
+        """Mieru/юзеров нет → None (паритет с Karing-вариантом)."""
+        mieru_dpi._MIERU_STATE.write_text(
+            json.dumps({"installed": True, "users": []}))
+        self.assertIsNone(mieru_dpi.build_nyamebox_split_config())
+
+
 class TestMierusLinksForState(unittest.TestCase):
     """_mierus_links_for_state: записи по юзерам с метками форматов.
 
