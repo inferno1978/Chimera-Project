@@ -509,7 +509,21 @@ def _certbot_renew_and_notify() -> bool:
 
 
 def _certbot_install_monitor_cron() -> None:
-    """Cron дважды в день: certbot renew + проверка срока."""
+    """Cron дважды в день: certbot renew + проверка срока.
+
+    v2 (2026-10-02) — фикс инцидента со спамом в Telegram:
+      • send_tg уважает флаг events.cert_expire из telegram.json: если
+        администратор выключил событие в меню [5]→[3], алерты замолкают
+        немедленно (раньше bash-скрипт слал напрямую через curl, игнорируя
+        флаги — источник спама при «выключенных» алертах);
+      • анти-спам: «renew FAILED» — максимум 1 алерт в сутки; «истекает
+        через N дн.» — 1 алерт в сутки при смене дня; стампы сбрасываются
+        при успешном renew / продлении серта;
+      • домен читается из state.json при каждом запуске (смена домена в
+        меню подхватывается без переустановки cron'а);
+      • токен больше не запекается в скрипт — читается из telegram.json
+        при каждой отправке (смена токена в меню [5][1] действует сразу).
+    """
     core = _core_module()
     success   = core.success
     STATE_FILE = core.STATE_FILE
@@ -523,47 +537,84 @@ def _certbot_install_monitor_cron() -> None:
     sh = _CERTBOT_MONITOR_SCRIPT
     sh.write_text(textwrap.dedent(f"""\
         #!/bin/bash
-        # Certbot renew monitor (VLESS Installer)
+        # Certbot renew monitor (Chimera / VLESS Installer)
+        # v2 (2026-10-02): уважает events.cert_expire + анти-спам (1 алерт/сутки)
         LOG="/var/log/xray-certbot-monitor.log"
         DATE=$(date '+%Y-%m-%d %H:%M:%S')
-        DOMAIN="{domain}"
-        TG_CONFIG="/var/lib/xray-installer/telegram.json"
+        TODAY=$(date '+%Y-%m-%d')
+        STATE_JSON="/var/lib/xray-installer/state.json"
+        STAMP_FAIL="/var/lib/xray-installer/cert-renew-fail.stamp"
+        STAMP_EXP="/var/lib/xray-installer/cert-expire-alert.stamp"
 
+        # Домен — из state.json (актуален после смены домена в меню)
+        DOMAIN=$(python3 -c "import json; print(json.load(open('$STATE_JSON')).get('domain',''))" 2>/dev/null)
+        [ -z "$DOMAIN" ] && DOMAIN="{domain}"
+
+        # certbot: PATH cron'а минимален — ищем в стандартных местах
+        CERTBOT=$(command -v certbot 2>/dev/null)
+        [ -z "$CERTBOT" ] && [ -x /snap/bin/certbot ] && CERTBOT=/snap/bin/certbot
+        [ -z "$CERTBOT" ] && [ -x /usr/bin/certbot ] && CERTBOT=/usr/bin/certbot
+        [ -z "$CERTBOT" ] && CERTBOT=certbot
+
+        # Отправка в TG: только если token/chat_id заданы И событие
+        # cert_expire включено в telegram.json (меню [5]→[3]).
         send_tg() {{
-            python3 -c "
-import json, subprocess, sys
+            python3 -c '
+import json, socket, subprocess, sys
 from pathlib import Path
-msg=sys.argv[1]
+msg = sys.argv[1].replace("\\\\n", "\\n")
 try:
-    cfg=json.loads(Path('$TG_CONFIG').read_text())
-    t,c=cfg.get('token'),cfg.get('chat_id')
-    if t and c:
-        subprocess.run(['curl','-s','-o','/dev/null','-m','10',
-            f'https://api.telegram.org/bot{{t}}/sendMessage',
-            '-d',f'chat_id={{c}}','-d',f'text={{msg}}'],capture_output=True)
-except: pass
-" "$1"
+    cfg = json.loads(Path("/var/lib/xray-installer/telegram.json").read_text())
+    token, chat = cfg.get("token"), cfg.get("chat_id")
+    if not token or not chat:
+        sys.exit(0)
+    if not cfg.get("events", {{}}).get("cert_expire", True):
+        sys.exit(0)
+    host = socket.gethostname().split(".")[0]
+    ip = cfg.get("server_ip", "")
+    header = "[{{}} | {{}}]".format(host, ip) if ip else "[{{}}]".format(host)
+    subprocess.run(["curl", "-s", "-o", "/dev/null", "-m", "10",
+        "https://api.telegram.org/bot" + token + "/sendMessage",
+        "-d", "chat_id=" + chat,
+        "-d", "text=" + header + " " + msg,
+        "-d", "parse_mode=HTML"], capture_output=True)
+except Exception:
+    pass
+' "$1"
         }}
 
-        echo "[$DATE] Running certbot renew..." >> "$LOG"
-        if certbot renew --quiet --non-interactive >> "$LOG" 2>&1; then
-            echo "[$DATE] certbot renew OK" >> "$LOG"
-            # Проверяем срок
+        log() {{ echo "[$DATE] $1" >> "$LOG"; }}
+
+        log "Running certbot renew..."
+        if "$CERTBOT" renew --quiet --non-interactive >> "$LOG" 2>&1; then
+            log "certbot renew OK"
+            rm -f "$STAMP_FAIL"
             if [ -n "$DOMAIN" ]; then
                 CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
                 if [ -f "$CERT" ]; then
                     EXPIRY=$(openssl x509 -in "$CERT" -noout -enddate 2>/dev/null | cut -d= -f2)
                     EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || echo 0)
                     DAYS=$(( (EPOCH - $(date +%s)) / 86400 ))
-                    echo "[$DATE] SSL days left: $DAYS" >> "$LOG"
+                    log "SSL days left: $DAYS"
                     if [ "$DAYS" -lt 14 ]; then
-                        send_tg "⚠️ SSL сертификат истекает через $DAYS дн.! Домен: $DOMAIN"
+                        # Анти-спам: 1 алерт в сутки (метка меняется вместе с днём)
+                        TAG="$TODAY:$DAYS"
+                        if [ "$(cat "$STAMP_EXP" 2>/dev/null)" != "$TAG" ]; then
+                            echo "$TAG" > "$STAMP_EXP"
+                            send_tg "⚠️ <b>certbot renew OK</b>, но сертификат истекает через $DAYS дн.!\\nДомен: $DOMAIN"
+                        fi
+                    else
+                        rm -f "$STAMP_EXP"
                     fi
                 fi
             fi
         else
-            echo "[$DATE] certbot renew FAILED" >> "$LOG"
-            send_tg "❌ certbot renew FAILED для домена $DOMAIN. Проверьте логи!"
+            log "certbot renew FAILED"
+            # Анти-спам: FAILED-алерт максимум 1 раз в сутки
+            if [ "$(cat "$STAMP_FAIL" 2>/dev/null)" != "$TODAY" ]; then
+                echo "$TODAY" > "$STAMP_FAIL"
+                send_tg "❌ <b>certbot renew FAILED</b>\\nДомен: $DOMAIN\\nЛог: /var/log/letsencrypt/letsencrypt.log"
+            fi
         fi
         # Перезагружаем nginx после обновления
         systemctl reload nginx >> "$LOG" 2>&1 || true
@@ -596,6 +647,7 @@ def do_manage_certbot_monitor() -> None:
     YELLOW = core.YELLOW
     CYAN, NC, GREEN, RED, YELLOW, BLUE = (core.CYAN, core.NC, core.GREEN, core.RED,
                                           core.YELLOW, core.BLUE)
+    DIM = core.DIM
     # _certbot_renew_and_notify / _certbot_install_monitor_cron — модуль-локальные
     while True:
         os.system("clear")
@@ -616,6 +668,18 @@ def do_manage_certbot_monitor() -> None:
         except Exception:
             pass
 
+        # Статус TG-события cert_expire (меню [5]→[3]; bash-мониторы v2
+        # тоже читают этот флаг — выключенное событие глушит ВСЕ cert-алерты)
+        tg_cfg = {}
+        try:
+            _tgf = Path("/var/lib/xray-installer/telegram.json")
+            if _tgf.exists():
+                tg_cfg = json.loads(_tgf.read_text())
+        except Exception:
+            tg_cfg = {}
+        tg_ready = bool(tg_cfg.get("token") and tg_cfg.get("chat_id"))
+        cert_alerts_on = tg_ready and tg_cfg.get("events", {}).get("cert_expire", True)
+
         print()
         _box_top(f"Мониторинг SSL-сертификата")
         _box_row(f"  Домен:        {CYAN}{domain or '—'}{NC}")
@@ -623,10 +687,16 @@ def do_manage_certbot_monitor() -> None:
             col = GREEN if days_left > 30 else YELLOW if days_left > 14 else RED
             _box_row(f"  Срок:         {col}{days_left} дн. до истечения{NC}")
         _box_row(f"  Cron (2×день): {''+GREEN+'ВКЛЮЧЁН'+NC if cron_active else ''+YELLOW+'ОТКЛЮЧЁН'+NC}")
+        if tg_ready:
+            _box_row(f"  TG-алерты:    {GREEN+'ВКЛ (событие cert_expire)'+NC if cert_alerts_on else DIM+'ВЫКЛ — уведомления о серте не придут'+NC}")
+        else:
+            _box_row(f"  TG-алерты:    {DIM}не настроены (меню [5] Безопасность → Telegram){NC}")
         _box_item("1", f"{'Отключить' if cron_active else 'Включить'} авто-мониторинг (03:00 + 15:00)")
         _box_item("2", f"Запустить certbot renew прямо сейчас")
-        _box_item("3", f"Показать лог")
-        _box_item("Q", f"Назад")
+        if tg_ready:
+            _box_item("3", f"{'Выключить' if cert_alerts_on else 'Включить'} TG-алерты по сертификату (cert_expire)")
+        _box_item("4", f"Показать лог")
+        _box_back()
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
 
@@ -642,7 +712,21 @@ def do_manage_certbot_monitor() -> None:
             print()
             _certbot_renew_and_notify()
             input(f"{BLUE}Нажмите Enter...{NC}")
-        elif ch == "3":
+        elif ch == "3" and tg_ready:
+            # Toggle cert_expire в telegram.json — bash-мониторы v2 читают
+            # этот флаг при каждой отправке, действует немедленно.
+            events = tg_cfg.get("events", {})
+            events["cert_expire"] = not events.get("cert_expire", True)
+            tg_cfg["events"] = events
+            try:
+                _tgf = Path("/var/lib/xray-installer/telegram.json")
+                _tgf.write_text(json.dumps(tg_cfg, indent=2, ensure_ascii=False))
+                _tgf.chmod(0o600)
+                success(f"TG-алерты по сертификату: {'ВКЛЮЧЕНЫ' if events['cert_expire'] else 'ВЫКЛЮЧЕНЫ'}")
+            except Exception as e:
+                warn(f"Не удалось записать telegram.json: {e}")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "4":
             lp = Path("/var/log/xray-certbot-monitor.log")
             if lp.exists():
                 print()

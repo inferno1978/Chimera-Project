@@ -211,7 +211,20 @@ def tg_notify_event(event: str, detail: str = "") -> None:
 
 
 def _install_monitor_cron() -> None:
-    """Устанавливает cron-скрипт мониторинга Xray (xray_down/up, cert)."""
+    """Устанавливает cron-скрипт мониторинга Xray (xray_down/up, cert).
+
+    v2 (2026-10-02) — фикс инцидента со спамом cert-алертами:
+      • токен/chat_id/server_ip больше НЕ запекаются в скрипт — читаются
+        из telegram.json при каждом запуске (смена токена в меню [5][1]
+        подхватывается без переустановки cron'а);
+      • каждый send() проверяет флаг events.<event> — выключение события
+        в меню [5]→[3] глушит соответствующий алерт немедленно. Раньше
+        «Сертификат истекает через N дн.» летело при каждом запуске cron
+        (каждые 5 минут = до 288 алертов/сутки), игнорируя выключенные
+        алерты — источник «знатного» спама последнего месяца;
+      • анти-спам cert-алерта: максимум 1 алерт в сутки (stamp-файл),
+        сброс при продлении серта (>= 30 дней).
+    """
     cfg = tg_load()
     token   = cfg.get("token", "")
     chat_id = cfg.get("chat_id", "")
@@ -219,43 +232,65 @@ def _install_monitor_cron() -> None:
         _warn("Сначала настройте токен и Chat ID")
         return
 
-    # IP-адрес сервера из telegram.json (если задан — будет добавлен в
-    # каждое уведомление, для однозначной идентификации источника).
-    server_ip = cfg.get("server_ip", "")
-
-    # Экранируем через shlex.quote для безопасной вставки в bash-скрипт
-    import shlex
     script = Path("/usr/local/bin/xray-tg-monitor.sh")
-    # В bash используем переменную IP (может быть пустой — тогда
-    # формат вывода = "[$HOST]", иначе = "[$HOST | $IP]").
     script.write_text(
         "#!/bin/bash\n"
-        f"TOKEN={shlex.quote(token)}\n"
-        f"CHAT={shlex.quote(chat_id)}\n"
-        f"IP={shlex.quote(server_ip)}\n"
-        "send() { curl -s -o /dev/null -m 10 "
-        "\"https://api.telegram.org/bot$TOKEN/sendMessage\" "
-        "-d \"chat_id=$CHAT\" -d \"text=$1\" -d \"parse_mode=HTML\" || true; }\n"
-        "HOST=$(hostname -s)\n"
-        # HEADER: "[host]" или "[host | ip]" если IP задан
-        "if [ -n \"$IP\" ]; then HEADER=\"[$HOST | $IP]\"; else HEADER=\"[$HOST]\"; fi\n"
+        "# xray-tg-monitor (Chimera) — мониторинг Xray + срока сертификата\n"
+        "# v2 (2026-10-02): TG-конфиг читается из telegram.json при каждом\n"
+        "# запуске; каждый алерт проверяет events.<event>; cert — 1 алерт/сутки.\n"
+        "STAMP_CERT=/var/lib/xray-installer/tg-cert-alert.stamp\n"
+        "\n"
+        "# send <event> <message> — плейсхолдер {H} заменяется на [host | ip]\n"
+        "send() {\n"
+        "  python3 -c '\n"
+        "import json, socket, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "event, msg = sys.argv[1], sys.argv[2].replace(\"\\\\n\", \"\\n\")\n"
+        "try:\n"
+        "    cfg = json.loads(Path(\"/var/lib/xray-installer/telegram.json\").read_text())\n"
+        "    token, chat = cfg.get(\"token\"), cfg.get(\"chat_id\")\n"
+        "    if not token or not chat:\n"
+        "        sys.exit(0)\n"
+        "    if event and not cfg.get(\"events\", {}).get(event, True):\n"
+        "        sys.exit(0)\n"
+        "    host = socket.gethostname().split(\".\")[0]\n"
+        "    ip = cfg.get(\"server_ip\", \"\")\n"
+        "    header = \"[{} | {}]\".format(host, ip) if ip else \"[{}]\".format(host)\n"
+        "    subprocess.run([\"curl\", \"-s\", \"-o\", \"/dev/null\", \"-m\", \"10\",\n"
+        "        \"https://api.telegram.org/bot\" + token + \"/sendMessage\",\n"
+        "        \"-d\", \"chat_id=\" + chat,\n"
+        "        \"-d\", \"text=\" + msg.replace(\"{H}\", header),\n"
+        "        \"-d\", \"parse_mode=HTML\"], capture_output=True)\n"
+        "except Exception:\n"
+        "    pass\n"
+        "' \"$1\" \"$2\"\n"
+        "}\n"
+        "\n"
         "TS=$(date '+%d.%m.%Y %H:%M')\n"
+        "\n"
         "if ! systemctl is-active --quiet xray 2>/dev/null; then\n"
         "  STAMP=/tmp/xray-tg-down.stamp\n"
         "  if [ ! -f \"$STAMP\" ]; then touch \"$STAMP\";\n"
-        "    send \"🔴 <b>$HEADER</b> Xray не запущен!\\n<i>$TS</i>\"; fi\n"
+        "    send \"xray_down\" \"🔴 <b>{H}</b> Xray не запущен!\\n<i>$TS</i>\"; fi\n"
         "else\n"
         "  if [ -f /tmp/xray-tg-down.stamp ]; then rm -f /tmp/xray-tg-down.stamp;\n"
-        "    send \"🟢 <b>$HEADER</b> Xray восстановился.\\n<i>$TS</i>\"; fi\n"
+        "    send \"xray_up\" \"🟢 <b>{H}</b> Xray восстановился.\\n<i>$TS</i>\"; fi\n"
         "fi\n"
-        "# Проверка срока сертификата (< 30 дней)\n"
+        "# Проверка срока сертификата (< 30 дней; анти-спам: 1 алерт в сутки)\n"
         "CERT=$(find /etc/letsencrypt/live -name 'cert.pem' 2>/dev/null | head -1)\n"
         "if [ -n \"$CERT\" ]; then\n"
         "  EXP=$(openssl x509 -enddate -noout -in \"$CERT\" 2>/dev/null | cut -d= -f2)\n"
         "  if [ -n \"$EXP\" ]; then\n"
         "    DAYS=$(( ( $(date -d \"$EXP\" +%s) - $(date +%s) ) / 86400 ))\n"
         "    if [ \"$DAYS\" -lt 30 ]; then\n"
-        "      send \"🔒 <b>$HEADER</b> Сертификат истекает через $DAYS дн.\\n<i>$TS</i>\"; fi\n"
+        "      TAG=\"$(date '+%Y-%m-%d'):$DAYS\"\n"
+        "      if [ \"$(cat \"$STAMP_CERT\" 2>/dev/null)\" != \"$TAG\" ]; then\n"
+        "        echo \"$TAG\" > \"$STAMP_CERT\"\n"
+        "        send \"cert_expire\" \"🔒 <b>{H}</b> Сертификат истекает через $DAYS дн.\\n<i>$TS</i>\"\n"
+        "      fi\n"
+        "    else\n"
+        "      rm -f \"$STAMP_CERT\" 2>/dev/null\n"
+        "    fi\n"
         "  fi\n"
         "fi\n"
     )
@@ -267,7 +302,7 @@ def _install_monitor_cron() -> None:
         f"*/5 * * * * root {script} 2>/dev/null\n"
     )
     _ok(f"Cron-мониторинг установлен: {script}")
-    _log("INFO", "TG monitor cron installed")
+    _log("INFO", "TG monitor cron installed (v2: events-aware, cert anti-spam)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
