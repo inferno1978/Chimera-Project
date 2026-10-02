@@ -8,6 +8,16 @@
 # Flow: push to GitHub main → Actions triggers → force-push to
 # GitLab chimera-v5 + tags.
 #
+# v3 (2026-10-03):
+#   • schedule каждые 15 мин — страховка: push-события не триггерят
+#     workflow (остаточное ограничение после shadow ban аккаунта;
+#     ручной workflow_dispatch при этом работает). Если SHAs совпадают —
+#     джоба мгновенно завершается (no-op);
+#   • repository_dispatch (event_type=mirror) — мгновенный запуск через API:
+#     curl -X POST -H "Authorization: token <PAT>" \
+#       https://api.github.com/repos/inferno1978/Chimera-Project/dispatches \
+#       -d '{"event_type":"mirror"}'
+#
 # v2 (2026-10-03):
 #   • retry ×5 с паузой 15 с — транзиентные 403/сеть;
 #   • workflow_dispatch — ручной запуск (тест зеркала без коммита);
@@ -23,6 +33,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  repository_dispatch:
+    types: [mirror]
+  schedule:
+    - cron: '*/15 * * * *'
 
 concurrency:
   group: mirror-gitlab
@@ -54,6 +68,10 @@ jobs:
           BEFORE=$(git rev-parse refs/remotes/gitlab/chimera-v5 2>/dev/null || echo "нет")
           echo "GitHub main:              ${GITHUB_SHA}"
           echo "GitLab chimera-v5 (было): ${BEFORE}"
+          if [ "${BEFORE}" = "${GITHUB_SHA}" ]; then
+            echo "GitLab уже синхронен — nothing to do (no-op)"
+            exit 0
+          fi
           ok=0
           for i in 1 2 3 4 5; do
             echo "— попытка ${i}/5"
