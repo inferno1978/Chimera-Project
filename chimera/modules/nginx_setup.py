@@ -969,12 +969,17 @@ def setup_nginx_final(domain: Optional[str] = None,
 
     cfg = NGINX_CONF_DIR / PARAM_DOMAIN
     cfg.write_text(textwrap.dedent(f"""\
-        # HTTP → HTTPS redirect
+        # HTTP → HTTPS redirect (+ ACME-челлендж для certbot renew)
+        # ВАЖНО: return 301 обязан быть ВНУТРИ location /, а не на уровне
+        # server: server-level return выполняется ДО выбора location и
+        # редиректит и /.well-known/acme-challenge/ → renew падает с
+        # "Some challenges have failed" (инцидент 02.10.2026, нода 138.х).
         server {{
             listen 80;
             {f"listen [::]:80;" if core.IS_IPV6_AVAILABLE else ""}
             server_name {PARAM_DOMAIN};
-            return 301 https://$host$request_uri;
+            location /.well-known/acme-challenge/ {{ root {web_root}; }}
+            location / {{ return 301 https://$host$request_uri; }}
         }}
 
         # Main server: VLESS fallback via Unix socket
