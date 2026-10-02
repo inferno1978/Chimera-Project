@@ -23,6 +23,9 @@ Unit-тесты для chimera/modules/mieru_dpi.py — модуля «Mieru + B
      Streaming, route-правила ВЫШЕ geosite, protect домена mita
  11. Интеграция подписки (одиночная): route.rules → mieru-outbound
  12. Маркеры меню: пункт [MB] в _core.py рядом с [B]
+ 13. Подписка одиночная (format=singbox) + MB: rule.outbound — СТРОКА
+     (регрессия массив-вместо-строки, 02.10.2026) + нормализация тега
+     списком/кортежем в build_mieru_route_rules
 """
 from __future__ import annotations
 
@@ -205,6 +208,32 @@ class TestBuildRouteRules(unittest.TestCase):
         self.assertEqual(mieru_dpi.build_mieru_route_rules("", ["a.com"]), [])
         self.assertEqual(mieru_dpi.build_mieru_route_rules("tag", []), [])
         self.assertEqual(mieru_dpi.build_mieru_route_rules("", []), [])
+
+    def test_tag_list_normalized_to_string(self):
+        """Регрессия 02.10.2026 (живой прод, подписка format=singbox):
+        список тегов → ПЕРВЫЙ тег СТРОКОЙ. Схема sing-box требует в
+        rule.outbound строку — массив ломает ВЕСЬ конфиг (ядро:
+        cannot unmarshal array into Go value of type string), т.е.
+        Karing/NekoBox не грузили подписку целиком."""
+        rules = mieru_dpi.build_mieru_route_rules(
+            ["mieru-admin", "mieru-admin-udp"], ["youtube.com"])
+        self.assertEqual(len(rules), 1)
+        self.assertIsInstance(rules[0]["outbound"], str)
+        self.assertEqual(rules[0]["outbound"], "mieru-admin")
+
+    def test_tag_tuple_and_empty_list(self):
+        """Кортеж — как список (первый элемент); пустой список → []
+        (правило вешать не на что, вызывающий ничего не добавляет)."""
+        rules = mieru_dpi.build_mieru_route_rules(("mieru-a", "b"), ["a.com"])
+        self.assertEqual(rules[0]["outbound"], "mieru-a")
+        self.assertEqual(mieru_dpi.build_mieru_route_rules([], ["a.com"]), [])
+        self.assertEqual(mieru_dpi.build_mieru_route_rules((), ["a.com"]), [])
+
+    def test_string_tag_unchanged(self):
+        """Строка — прежнее поведение, байт-в-байт (нулевая регрессия
+        split-конфига и остальных вызывающих)."""
+        rules = mieru_dpi.build_mieru_route_rules("mieru-alice", ["a.com"])
+        self.assertEqual(rules[0]["outbound"], "mieru-alice")
 
 
 class TestKaringSplitConfig(unittest.TestCase):
@@ -872,6 +901,55 @@ class TestMultinodeIntegration(unittest.TestCase):
         cfg = json.loads(body)
         tags = [ob["tag"] for ob in cfg["outbounds"] if ob.get("type") == "mieru"]
         self.assertEqual(tags, [])
+
+
+class TestSubscriptionSingleBranch(unittest.TestCase):
+    """Одиночная подписка format=singbox + активный MB — ФУНКЦИОНАЛЬНАЯ
+    регрессия бага 02.10.2026 (пойман живьём на прод-ноде Entry):
+
+    subscription.py передавал в build_mieru_route_rules СПИСОК тегов,
+    ф-я клала его в правило как есть → route.rules[0].outbound =
+    ["mieru-admin"] (JSON-массив) → ядро sing-box (Karing по подписке
+    format=singbox — основной потребитель) отвергало ВЕСЬ конфиг:
+    cannot unmarshal array into Go value of type string.
+
+    Маркерный тест (test_subscription_single_branch_marker) баг не
+    ловил — строки в исходнике были на месте, а тип поля нет. Здесь —
+    настоящий build_subscription_singbox_config с подменёнными
+    источниками (collect/mieru_dpi), как TestMultinodeIntegration."""
+
+    def test_mieru_rule_outbound_is_string(self):
+        from chimera.modules import subscription
+        obs = [{"type": "mieru", "tag": "mieru-admin",
+                "server": "1.2.3.4", "server_port": 2012,
+                "transport": "TCP", "username": "admin",
+                "password": "pw", "multiplexing": "MULTIPLEXING_HIGH"}]
+        meta = {"client_dns": "", "server_domain": "",
+                "first_tag": "mieru-admin"}
+        with patch.object(subscription, "_collect_mieru_json_outbounds",
+                          return_value=(obs, meta)), \
+             patch.object(subscription, "is_hybrid_mieru_active",
+                          return_value=False), \
+             patch.object(mieru_dpi, "is_mieru_dpi_active",
+                          return_value=True), \
+             patch.object(mieru_dpi, "get_route_domains",
+                          return_value=["youtube.com", "t.me"]):
+            body = subscription.build_subscription_singbox_config(
+                {"uuid": "u-1", "email": "a@b.c", "name": "admin"})
+        cfg = json.loads(body)
+        rules = (cfg.get("route") or {}).get("rules") or []
+        mieru_rules = [r for r in rules
+                       if "youtube.com" in (r.get("domain_suffix") or [])]
+        self.assertTrue(mieru_rules,
+                        "route-правило mieru не попало в конфиг подписки")
+        ob = mieru_rules[0].get("outbound")
+        # ГЛАВНЫЙ АССЕРТ: строка, а не массив (регрессия)
+        self.assertIsInstance(ob, str)
+        self.assertEqual(ob, "mieru-admin")
+        # весь конфиг: каждое rule.outbound — строка (схема sing-box)
+        for r in rules:
+            self.assertIsInstance(r.get("outbound"), str,
+                                  f"rule.outbound не строка: {r.get('outbound')!r}")
 
 
 if __name__ == "__main__":
