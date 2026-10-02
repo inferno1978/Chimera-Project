@@ -473,8 +473,14 @@ def _certbot_renew_and_notify() -> bool:
         return False
 
     info("Запуск certbot renew...")
-    r = _run([str(certbot), "renew", "--quiet", "--non-interactive"],
-             check=False, capture=True)
+    # --no-random-sleep-on-renew: certbot 2.x в non-interactive режиме спит
+    # случайные 0-8 минут (анти-«гром стада» для cron-развёрток LE). Для
+    # ручного запуска из меню [9]→[2] это выглядит как зависание на
+    # «Запуск certbot renew...». Системный /etc/cron.d/certbot использует
+    # тот же флаг. Cron-монитор (_certbot_install_monitor_cron) сон
+    # сохраняет — там он уместен.
+    r = _run([str(certbot), "renew", "--quiet", "--non-interactive",
+              "--no-random-sleep-on-renew"], check=False, capture=True)
     ok = r.returncode == 0
 
     if ok:
