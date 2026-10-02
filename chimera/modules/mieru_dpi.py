@@ -320,11 +320,21 @@ def disable() -> bool:
 # ══════════════════════════════════════════════════════════════════════════
 #  КЛИЕНТСКИЕ КОНФИГИ
 # ══════════════════════════════════════════════════════════════════════════
-def build_mieru_route_rules(mieru_tag: str, domains: list) -> list:
+def build_mieru_route_rules(mieru_tag, domains: list) -> list:
     """sing-box route.rules: domain_suffix → mieru-outbound.
 
     Чистая функция — используется подпиской (обе ветки) и split-
-    конфигом. Пустые домены/тег → [] (вызывающий не добавляет ничего)."""
+    конфигом. Пустые домены/тег → [] (вызывающий не добавляет ничего).
+
+    mieru_tag: строка ИЛИ список (нормализуем): sing-box требует в
+    rule.outbound СТРОКУ — список в JSON-поле ломает ВЕСЬ конфиг
+    (ядро: cannot unmarshal array into Go value of type string).
+    Баг пойман живьём 02.10.2026: одиночная подписка format=singbox
+    передавала список тегов — Karing/NekoBox отвергали конфиг целиком.
+    При списке берём ПЕРВЫЙ тег: он же дефолт dns.detour и route.final
+    (конвенция _collect_mieru_json_outbounds: meta['first_tag'])."""
+    if isinstance(mieru_tag, (list, tuple)):
+        mieru_tag = mieru_tag[0] if mieru_tag else ""
     if not mieru_tag or not domains:
         return []
     return [{
