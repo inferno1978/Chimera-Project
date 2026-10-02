@@ -1,5 +1,72 @@
 # Changelog
 
+# Changelog new entry — Mieru: TG-монитор каскада — реплика бот-паттерна VLESS (node_health_monitor + xray-tg-monitor v2) на все 3 Entry-ноды + /status 🧅 — 3 октября 2026
+
+
+## FEAT(mieru_cascade): mieru_cascade_monitor.py — алерты в Telegram при смене состояния каскада; 6 новых событий; mieru-сегмент в /status admin-бота
+
+**Контекст (владелец):** на серверах проекта настроены боты для VLESS и
+VLESS-каскадов (admin-бот с multi-server /status, client-бот,
+xray-tg-monitor cron, node_health_monitor для exit-нод), но mieru-каскад
+(Entry→Exit, health-тик */1 мин) никакого TG-алертинга не имел: mieru
+падал молча. Репликация паттерна VLESS для mieru.
+
+- **Модуль `chimera/modules/mieru_cascade_monitor.py`** (аналог
+  node_health_monitor + v2-мониторов): читает mieru_cascade.json БЕЗ
+  сетевых проб (пробы уже делает health-тик каждую минуту — дублировать
+  сеть незачем), оценивает:
+  - `mita` (systemctl is-active) → mieru_down / mieru_up;
+  - Exit-ы: healthy из state (порог fail_streak ≥ 2 — тот же, что
+    в health_tick) → mieru_exit_down / mieru_exit_up по каждому Exit-у
+    (label+host+streak в сообщении);
+  - кризис «все Exit-ы down» → mieru_no_exits + recovery «N/M здоровы»;
+  - stall: mtime mieru_cascade.json + last_check старше 5 пропущенных
+    тиков (state_save перезаписывает файл КАЖДЫЙ тик — mtime = живость
+    таймера) → mieru_stalled + recovery «обновляется»;
+  - hop/redsocks-юниты: только в ЛОГ (self-healing тика + exit-пробы
+    ловят реальные отказы; отдельные алерты по юнитам спамили бы при
+    рестартах).
+- **Анти-спам по построению** (как node_health_monitor): алерт ТОЛЬКО
+  при смене состояния; первое наблюдение — молча; повторные проверки
+  без изменений молчат. Состояние — отдельный файл
+  mieru-cascade-monitor-state.json (не путать с mieru_cascade.json).
+- **События events.<event>** (как v2-мониторы): каждый алерт проверяет
+  флаг в telegram.json; отсутствующий ключ = ВКЛ — новые события
+  работают сразу. Ключи добавлены в telegram.json на всех нодах
+  (существующие значения не тронуты) + в оба списка меню
+  Уведомления [5]→[3] tg_bot.py (14 пунктов).
+- **Установка**: cron /etc/cron.d/mieru-cascade-monitor (*/5, как
+  xray-tg-monitor) + wrapper /usr/local/bin/mieru-cascade-monitor.sh
+  (PYTHONPATH=/opt/chimera, паттерн xray-node-health-check.sh);
+  install/uninstall/is_installed + TUI-меню
+  (do_cascade_monitor_menu), пункт [T] в каскад-меню mieru_cascade.
+- **/status admin-бота**: _local_status_dict собирает mieru-поля
+  (ok/total/mita/stalled), _format_status_line рисует сегмент
+  «🧅 Mieru: 4/4 ✓» (⚠️ частично, ✗ ноль, суффиксы [mita ✗] /
+  [tick ✗]); chimera-remote-status.py v2 отдаёт те же поля по SSH
+  (старые peers без mieru-полей просто не показывают сегмент —
+  обратная совместимость). Скрипт теперь версионирован в репо
+  (scripts/chimera-remote-status.py).
+- {H}-заголовок [host | ip] и токен из telegram.json при каждом
+  запуске — как v2: токены НЕ запечены ни в wrapper, ни в бота.
+- **Деплой (живой, все 3 Entry-ноды: primary + vds13195 +
+  bright-lynx; sudo-обёртка для non-root)**: модули в
+  /opt/chimera/chimera/modules/, cron+wrapper, ключи telegram.json,
+  remote-status v2, регенерация admin-бота на primary (бэкап старого
+  скрипта). Живые проверки: wrapper rc=0, state last_check 1.0с,
+  first-seen без алертов (молчание по построению), тест-сообщение
+  TG доставлено с каждой ноды с корректным [host | ip].
+- **Тесты:** +tests/test_mieru_cascade_monitor.py — 19 шт: переходы
+  состояний (down/up×3 вида, no_exits+recovery, stall+recovery),
+  анти-спам (повтор без изменений — молчим), events-фильтр (выкл /
+  отсутствующий=ВКЛ), {H}-подстановка через настоящий _tg_send с
+  подменой транспорта, install/uninstall (bash -n, компиляция
+  python-блока, «токен не запечён»), согласованность списков tg_bot;
+  фикс test_tgmon_v2 spy_chmod (chmod без файла в чистом окружении
+  падал FileNotFoundError — spy теперь перехватывает и chmod).
+  Сьюты: monitor 19 passed; mieru-семейство+боты 324 passed
+  (+22 subtests); tg-мониторы 73 passed (+15 subtests). Ноль фейлов.
+
 # Changelog new entry — Mieru+B4: health-тик каскада каждую минуту вместо каждых 2 мин — окно медленного пути для новых GGC-IP сужено вдвое — 2 октября 2026
 
 
