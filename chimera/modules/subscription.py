@@ -909,12 +909,15 @@ def build_subscription_singbox_config(user: dict) -> str:
     # mieru-outbound. Вставляются ПОВЕРХ правил inject_route_rulesets
     # (prepend): domain_suffix-правила кастомных ресурсов закреплены
     # админом и приоритетнее geosite-категорий rulesets.
+    # Тег — first_tag СТРОКОЙ: sing-box требует в rule.outbound строку;
+    # список (как передавался до 02.10.2026) разваливал ВЕСЬ конфиг
+    # подписки format=singbox у Karing/NekoBox (unmarshal array→string).
     if mieru_outbounds:
         try:
             from chimera.modules import mieru_dpi
             if mieru_dpi.is_mieru_dpi_active():
                 _md_rules = mieru_dpi.build_mieru_route_rules(
-                    [ob["tag"] for ob in mieru_outbounds],
+                    mieru_meta["first_tag"],
                     mieru_dpi.get_route_domains())
                 if _md_rules:
                     _route = config.setdefault("route", {})
