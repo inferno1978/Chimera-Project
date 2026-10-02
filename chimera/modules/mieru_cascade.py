@@ -2995,6 +2995,7 @@ def do_mieru_cascade_menu() -> None:
         m._box_item("5", "🏥  Health check + ребаланс")
         m._box_item("6", "📊  Статус")
         m._box_item("L", "🔗  Ссылки для клиентов (Karing/Nekobox/JSON/QR)")
+        m._box_item("T", "🔔  TG-монитор каскада (алерты mita/Exit-ов/health-тика)")
         m._box_sep()
         m._box_item("7", "⏸  Деактивировать (правила+сервисы; данные сохранить)")
         m._box_item("8", f"{m.RED}🗑   Полное удаление{m.NC}")
@@ -3039,6 +3040,9 @@ def do_mieru_cascade_menu() -> None:
             _show_status(st)
         elif ch == "l":
             _show_client_links(st, pick_user=True)
+        elif ch == "t":
+            from chimera.modules.mieru_cascade_monitor import do_cascade_monitor_menu
+            do_cascade_monitor_menu()
         elif ch == "7":
             deactivate(st, keep_state=True)
             print("  Деактивировано (данные сохранены)."); m._pause()

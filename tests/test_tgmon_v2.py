@@ -46,24 +46,38 @@ cfg = {"token": "TESTTOKEN", "chat_id": "12345",
 (OUT / "telegram.json").write_text(json.dumps(cfg))
 
 # Скрипт пишется по абсолютному пути /usr/local/bin/xray-tg-monitor.sh —
-# перехватываем Path.write_text для этого пути (реальная ФС не трогается).
+# перехватываем Path.write_text и Path.chmod для этого пути (реальная
+# ФС не трогается; chmod без файла в чистом окружении падал бы —
+# FileNotFoundError, фиксы окружения не зависят от порядка прогонов).
 real_write_text = Path.write_text
+real_chmod = Path.chmod
 captured = {}
+
+_TARGET = "/usr/local/bin/xray-tg-monitor.sh"
 
 
 def spy_write_text(self, data, *a, **kw):
-    if str(self) == "/usr/local/bin/xray-tg-monitor.sh":
+    if str(self) == _TARGET:
         captured[str(self)] = data
         (OUT / "xray-tg-monitor.sh").write_text(data)
         return len(data)
     return real_write_text(self, data, *a, **kw)
 
 
+def spy_chmod(self, mode, *a, **kw):
+    if str(self) == _TARGET:
+        (OUT / "xray-tg-monitor.sh").chmod(mode)
+        return None
+    return real_chmod(self, mode, *a, **kw)
+
+
 Path.write_text = spy_write_text
+Path.chmod = spy_chmod
 try:
     tg_bot._install_monitor_cron()
 finally:
     Path.write_text = real_write_text
+    Path.chmod = real_chmod
 
 sh = (OUT / "xray-tg-monitor.sh").read_text()
 cron = (OUT / "xray-tg-monitor.cron").read_text()

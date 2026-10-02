@@ -613,7 +613,7 @@ def _local_status_dict():
         up = subprocess.check_output(["uptime", "-p"], text=True, stderr=subprocess.DEVNULL).strip()
     except Exception:
         up = ""
-    return {{
+    d = {{
         "host":     host,
         # Локальные метаданные из bot_cfg — используются в выводе
         "name":     LOCAL_NAME or host,
@@ -625,6 +625,35 @@ def _local_status_dict():
         "uptime":   up,
         "local":    True,
     }}
+    # Mieru-каскад (Entry): mita + Exit-ы + живость health-тика.
+    # Поля добавляются только при настроенном каскаде (старые peers
+    # без mieru-полей просто не показывают сегмент — обратная совместимость).
+    try:
+        mcs = json.loads(Path("/var/lib/xray-installer/mieru_cascade.json").read_text())
+        exits = [e for e in mcs.get("exits", []) if e.get("enabled", True)]
+        if mcs.get("role") == "entry" and exits:
+            n_ok = sum(1 for e in exits if e.get("healthy"))
+            try:
+                r2 = subprocess.run(["systemctl", "is-active", "mita"],
+                                    capture_output=True, text=True, timeout=5)
+                mita = r2.stdout.strip() or "unknown"
+            except Exception:
+                mita = "unknown"
+            newest = 0.0
+            for e in exits:
+                v = e.get("last_check", "")
+                try:
+                    import datetime as _dt
+                    ts = _dt.datetime.strptime(str(v), "%Y-%m-%d %H:%M:%S").timestamp()
+                    newest = max(newest, ts)
+                except Exception:
+                    pass
+            stalled = newest and (time.time() - newest > 300)
+            d["mieru"] = {{"ok": n_ok, "total": len(exits), "mita": mita,
+                           "stalled": bool(stalled)}}
+    except Exception:
+        pass
+    return d
 
 def _remote_status_dict(peer):
     """Получает статус с удалённого сервера через SSH.
@@ -741,8 +770,20 @@ def _format_status_line(d, is_first=False):
     mode = d.get("mode", "?")
     up = d.get("uptime", "")
     up_str = f" | Апт: {{up}}" if up else ""
+    # Mieru-каскад: сегмент только если сервер отдал mieru-поля
+    # (старые chimera-remote-status.py без mieru — просто нет ключа).
+    mi = d.get("mieru")
+    mieru_str = ""
+    if isinstance(mi, dict):
+        ok, total = mi.get("ok", 0), mi.get("total", 0)
+        mark = "✓" if (total > 0 and ok == total) else ("⚠️" if ok > 0 else "✗")
+        mieru_str = f" | 🧅 Mieru: {{ok}}/{{total}} {{mark}}"
+        if mi.get("mita") not in (None, "active"):
+            mieru_str += " [mita ✗]"
+        if mi.get("stalled"):
+            mieru_str += " [tick ✗]"
     return (f"• <b>{{name}}</b> ({{host}}){{ip_part}}\\n"
-            f"   {{xray_emoji}} Xray={{xray}} | {{proto}}:{{port}} | М={{mode}}{{up_str}}")
+            f"   {{xray_emoji}} Xray={{xray}} | {{proto}}:{{port}} | М={{mode}}{{mieru_str}}{{up_str}}")
 
 
 def get_users_text():
@@ -1844,6 +1885,14 @@ def do_manage_telegram() -> None:
             "node_down":    "Exit-нода недоступна",
             "port_blocked": "Порт недоступен (ТСПУ/firewall/knocking)",
             "autoban":      "AutoBan — IP забанен автоматически",
+            # mieru-каскад (mieru_cascade_monitor.py; добавляются в
+            # telegram.json при первом toggle, отсутствующий = ВКЛ)
+            "mieru_down":     "Mieru: mita упал",
+            "mieru_up":       "Mieru: mita восстановился",
+            "mieru_exit_down": "Mieru: Exit недоступен (2+ фейла)",
+            "mieru_exit_up":  "Mieru: Exit восстановился",
+            "mieru_no_exits": "Mieru: все Exit-ы недоступны",
+            "mieru_stalled":  "Mieru: health-tick не обновляется",
         }
 
         print()
@@ -1901,11 +1950,16 @@ def do_manage_telegram() -> None:
 
         elif ch == "3":
             ev_keys = ["xray_down","xray_up","cert_expire","traffic_limit",
-                       "health_report","node_down","port_blocked","autoban"]
+                       "health_report","node_down","port_blocked","autoban",
+                       "mieru_down","mieru_up","mieru_exit_down",
+                       "mieru_exit_up","mieru_no_exits","mieru_stalled"]
             ev_labels = [
                 "Xray упал","Xray восстановился","Сертификат истекает",
                 "Лимит трафика","Daily health-отчёт","Exit-нода недоступна",
                 "Порт недоступен (ТСПУ/firewall/knocking)","AutoBan — IP забанен",
+                "Mieru: mita упал","Mieru: mita восстановился",
+                "Mieru: Exit недоступен","Mieru: Exit восстановился",
+                "Mieru: все Exit-ы недоступны","Mieru: health-tick не обновляется",
             ]
             events = cfg.get("events", {k: True for k in ev_keys})
             print()
