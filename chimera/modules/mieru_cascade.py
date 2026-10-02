@@ -82,6 +82,7 @@ DOWNLOAD MANAGER (требование владельца):
 """
 from __future__ import annotations
 
+import base64
 import concurrent.futures
 import contextlib
 import fcntl
@@ -154,6 +155,14 @@ _B4_IPSET_TMP = _B4_IPSET + "_new"
 _B4_RESOLVE_MAX_WORKERS = 16
 _B4_RESOLVE_OVERALL_S   = 25      # потолок фазы резолва (все виды, сек)
 _B4_CURL_TIMEOUT_S      = 4       # один DoH-запрос через hop-socks
+# querylog-harvest (клиентский вид, живой кейс 02.10.2026): AGH
+# ставится chimera-ой в /opt/AdGuardHome (aghome_setup.AGH_WORK_DIR);
+# /var/lib — фолбэк для ручных установок. Читаем ХВОСТ файла (90-дневный
+# retention может отращивать сотни МБ) и берём записи свежее окна.
+_B4_QLOG_PATHS    = (Path("/opt/AdGuardHome/data/querylog.json"),
+                     Path("/var/lib/AdGuardHome/data/querylog.json"))
+_B4_QLOG_TAIL_B   = 4 * 1024 * 1024   # хвост querylog.json за один тик
+_B4_QLOG_WINDOW_S = 24 * 3600         # окно свежести записей (сек)
 
 # Loopback-окна (запас 50 на тип; rpc/http — плейсхолдеры конфига,
 # слушаются только если mieru proxy поднимает их — проверяется на деплое)
@@ -462,7 +471,15 @@ def _seed_hop_instance(exit_node: dict, pattern_cfg: Optional[dict]) -> bool:
 #      для доменных назначений (socks5h/Karing с DoH
 #      cdn2.example:30443 = тот же AGH);
 #    • Exit-вид на каждый Exit: DoH-JSON 8.8.8.8 ЧЕРЕЗ hop-socks этого
-#      Exit — ровно то, что получит реальный клиент каскада.
+#      Exit — ровно то, что получит реальный клиент каскада;
+#    • Клиентский вид (querylog-harvest, живой кейс 02.10.2026):
+#      пер-видео имена rr*.googlevideo.com в route_domains НЕТ — их
+#      GGC-кэши (IP вне AS15169, у провайдера клиента) базовый
+#      резолв не видит, ~100% промах ipset → весь видеотрафик
+#      каскадился через Exit обратно к RU GGC → спиннеры. DoH
+#      клиента приходит на AGH самой Entry-ноды → хвост querylog.json
+#      суффикс-матчится по route_domains, A-записи ответов добираются
+#      в набор (окно 24ч, чтение локального файла, без DNS-трафика).
 #  Промах по всем видам = каскад (мягкая деградация, не поломка).
 #  Own-IP guard: сервисы самой ноды (DoH :30443, AGH :53) не должны
 #  ездить хэмпином Exit→Entry.
@@ -545,6 +562,169 @@ def _b4_resolve_via_socks(domain: str, socks_port: int) -> set:
         return set()
 
 
+def _b4_querylog_path() -> Optional[Path]:
+    """Первый существующий querylog.json AGH (нет AGH → None)."""
+    for p in _B4_QLOG_PATHS:
+        try:
+            if p.is_file():
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def _b4_qlog_epoch(t: str) -> Optional[float]:
+    """RFC3339 AGH (наносекунды, Z/смещение) → epoch; мусор → None."""
+    if not t:
+        return None
+    try:
+        return datetime.fromisoformat(t).timestamp()
+    except ValueError:
+        # python < 3.11 не ест наносекунды/Z — нормализуем вручную
+        m = re.match(
+            r"^(.*T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$", t)
+        if not m:
+            return None
+        base, frac, tz = m.groups()
+        tz = (tz or "").replace("Z", "+00:00")
+        if tz and ":" not in tz:          # +0300 → +03:00
+            tz = tz[:3] + ":" + tz[3:]
+        try:
+            return datetime.fromisoformat(
+                base + "." + ((frac or "") + "000000")[:6] + tz).timestamp()
+        except ValueError:
+            return None
+
+
+def _b4_qh_suffix_match(qh: str, domains: list) -> bool:
+    """QH — сам домен или его поддомен (строго по границе метки).
+
+    Граница метки обязательна: evilgooglevideo.com НЕ матчит
+    googlevideo.com — иначе чужие домены отклеились бы от каскада
+    и уехали с RU-IP (деанон). Самодостаточна: нормализует оба
+    аргумента (регистр/точки), безопасна для прямых вызовов."""
+    qh = (qh or "").strip().lower().rstrip(".")
+    if not qh:
+        return False
+    for d in domains:
+        d = (d or "").strip().lower().rstrip(".")
+        if d and (qh == d or qh.endswith("." + d)):
+            return True
+    return False
+
+
+def _b4_dns_skip_name(msg: bytes, i: int) -> int:
+    """Пропустить DNS-имя (метки/компрессия); выход за границы → -1."""
+    while i < len(msg):
+        n = msg[i]
+        if n == 0:
+            return i + 1
+        if (n & 0xC0) == 0xC0:          # указатель компрессии
+            return i + 2
+        i += 1 + n
+    return -1
+
+
+def _b4_dns_a_records(msg: bytes) -> set:
+    """Публичные IPv4 из A-записей DNS-ответа (wire); мусор → пусто.
+
+    CNAME/AAAA и прочие типы пропускаются; приватные/loopback
+    (0.0.0.0 «заблокировано» AGH, rebind-ответы) отсеивает _b4_ip_ok."""
+    out: set = set()
+    if len(msg) < 12:
+        return out
+    try:
+        qd = int.from_bytes(msg[4:6], "big")
+        an = int.from_bytes(msg[6:8], "big")
+        i = 12
+        for _ in range(qd):
+            i = _b4_dns_skip_name(msg, i)
+            if i < 0:
+                return out
+            i += 4                          # qtype + qclass
+        for _ in range(an):
+            i = _b4_dns_skip_name(msg, i)
+            if i < 0 or i + 10 > len(msg):
+                return out
+            rtype = int.from_bytes(msg[i:i + 2], "big")
+            rdl = int.from_bytes(msg[i + 8:i + 10], "big")
+            i += 10
+            if i + rdl > len(msg):
+                return out
+            if rtype == 1 and rdl == 4:
+                ip = ".".join(str(b) for b in msg[i:i + 4])
+                if _b4_ip_ok(ip):
+                    out.add(ip)
+            i += rdl
+    except Exception:
+        return out
+    return out
+
+
+def _b4_harvest_querylog(domains: list) -> tuple:
+    """Клиентский вид резолва: IP из querylog AGH (живой кейс 02.10).
+
+    Возвращает (set(ipv4), stats). Читает хвост querylog.json,
+    отбирает записи, чей QH суффикс-матчит domains (route_domains),
+    и добирает A-записи из Answer (base64 DNS-wire) — ровно те IP,
+    что AGH выдал клиентам. Критично для rr*.googlevideo.com:
+    пер-видео имена, в route_domains их нет, резолвятся в GGC-кэши
+    провайдера (вне AS15169) — базовые виды их не видят. Мисскост:
+    только чтение локального файла; любые сбои → пустой набор
+    (мягкая деградация до прежнего поведения)."""
+    stats = {"names": 0, "entries": 0, "ips": 0}
+    ips: set = set()
+    if not domains:
+        return ips, stats
+    path = _b4_querylog_path()
+    if path is None:
+        return ips, stats
+    try:
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - _B4_QLOG_TAIL_B))
+            data = f.read()
+    except Exception:
+        return ips, stats
+    if not data:
+        return ips, stats
+    if size > _B4_QLOG_TAIL_B:          # первая строка обрезана — выброс
+        nl = data.find(b"\n")
+        data = data[nl + 1:] if nl >= 0 else b""
+    lowered = [(d or "").strip().lower().rstrip(".") for d in domains]
+    floor = time.time() - _B4_QLOG_WINDOW_S
+    names: set = set()
+    for line in data.decode("utf-8", "replace").splitlines():
+        if '"QH"' not in line or '"Answer"' not in line:
+            continue                      # быстрый префильтр
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue                      # метаданные-шапка AGH / битые
+        qh = (rec.get("QH") or "").strip().lower().rstrip(".")
+        if not qh or not _b4_qh_suffix_match(qh, lowered):
+            continue
+        ts = _b4_qlog_epoch(rec.get("T") or "")
+        if ts is None or ts < floor:
+            continue                      # за окном свежести
+        b64 = rec.get("Answer") or ""
+        if not b64:
+            continue
+        try:
+            wire = base64.b64decode(b64 + "===")
+        except Exception:
+            continue
+        got = _b4_dns_a_records(wire)
+        if got:
+            names.add(qh)
+            stats["entries"] += 1
+            ips |= got
+    stats["names"] = len(names)
+    stats["ips"] = len(ips)
+    return ips, stats
+
+
 def _b4set_ensure() -> bool:
     """Создать оба ipset (-exist): боевой + временный для swap."""
     if not shutil.which("ipset"):
@@ -586,6 +766,18 @@ def _b4set_refresh(st: dict, verbose: bool = False) -> dict:
                     stats["failed"] += 1
         except concurrent.futures.TimeoutError:
             stats["failed"] += sum(1 for f in futs if not f.done())
+    # Клиентский вид (querylog AGH): добираем IP, которые реальные
+    # клиенты получили от AGH Entry-ноды (rr*.googlevideo.com → GGC).
+    # Мерж ДО guard'а пустого набора: резолв лег, но querylog жив —
+    # снапшот всё равно собирается (и наоборот); пусто ОБА — не трогаем.
+    try:
+        harvested, hstats = _b4_harvest_querylog(domains)
+    except Exception:
+        harvested, hstats = set(), {"names": 0, "entries": 0, "ips": 0}
+    stats["qlog_names"] = hstats["names"]
+    stats["qlog_entries"] = hstats["entries"]
+    stats["qlog_ips"] = hstats["ips"]
+    ips |= harvested
     if not ips:
         return stats           # полностью пустой набор — не трогаем старый
     _run(["ipset", "create", _B4_IPSET_TMP, "hash:ip", "maxelem",
@@ -605,7 +797,8 @@ def _b4set_refresh(st: dict, verbose: bool = False) -> dict:
     if verbose:
         print(f"  b4-exempt ipset: {len(ips)} IP из {stats['views']} "
               f"видов ({stats['domains']} доменов, промахов "
-              f"{stats['failed']})")
+              f"{stats['failed']}) + querylog {hstats['ips']} IP "
+              f"({hstats['names']} имён, {hstats['entries']} записей)")
     return stats
 
 
