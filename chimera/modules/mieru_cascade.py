@@ -35,7 +35,7 @@ MULTI-EXIT:
   • Несколько Exit-нод: по паре (redsocks + mieru-hop) на каждую.
   • Балансировка — iptables statistic (round-robin по соединениям),
     стратегия 'prio' — active-backup (только первый живой Exit).
-  • Health-timer (*/2 мин): TCP-проба + E2E `mieru test` на каждый Exit;
+  • Health-timer (*/1 мин): TCP-проба + E2E `mieru test` на каждый Exit;
     падение (2 подряд) исключает Exit из правил, восстановление возвращает.
   • Сериализация применений: flock (TUI-хендлеры ↔ health-тик) — гонка
     01.10 оставляла state и ядро с РАЗНЫМИ пинами. Каждый тик сверяет
@@ -191,7 +191,7 @@ DEFAULT_HOP_USERNAME = "cascade_hop"
 #    random    — statistic random, равномерно случайно на соединение
 #    prio      — active-backup, только первый живой Exit
 #  Весовые (доли ∝ 1/метрика, weighted random, пересчёт в health
-#  tick каждые 2 мин; все живые Exit-ы остаются в ротации —
+#  tick каждую минуту; все живые Exit-ы остаются в ротации —
 #  агрегация каналов сохраняется, в отличие от VLESS-балансировщика,
 #  где xray держит один активный outbound):
 #    leastping — доли ∝ 1/latency_ms (health-пробы)
@@ -738,7 +738,7 @@ def _b4set_ensure() -> bool:
 def _b4set_refresh(st: dict, verbose: bool = False) -> dict:
     """Пересобрать ipset блок-листа (все виды резолва, атомарный swap).
 
-    Вызывается из [4]/apply и health-тика (каждые 2 мин): TTL CDN
+    Вызывается из [4]/apply и health-тика (каждую минуту): TTL CDN
     60-300с — свежесть достаточная; пустой результат (сеть легла)
     НЕ трогает старый набор. Под локом — до ~25с сети, TUI ждёт
     честно (wait_hint)."""
@@ -997,7 +997,7 @@ def _probe_exit_ttfb(exit_node: dict, timeout: float = 5.0) -> Optional[float]:
 def _balance_shares(st: dict, act: list) -> Optional[dict]:
     """Доли Exit-ов для весовых стратегий: label → q, Σq = 1.
 
-      leastping: w ∝ 1/latency_ms   (health-пробы, 2 мин)
+      leastping: w ∝ 1/latency_ms   (health-пробы, 1 мин)
       leastload: w ∝ 1/(1+нагрузка) (established на socks-порту хопа)
       smart:     w ∝ 1/score, score = 0.5·норм(пинг) + 0.3·норм(TTFB)
                                           + 0.2·норм(нагрузка) — веса и
@@ -1487,7 +1487,7 @@ def _routing_sh_text(st: dict) -> str:
     неперечислимы). Replay: удалить точные → удалить legacy-варианты →
     добавить точные. Свежие пробы здесь НЕ нужны (и опасны на раннем
     буте): правила восстанавливаются 1-в-1, следующий health-тик
-    (2 мин) пересчитает веса и при дрейфе перестроит."""
+    (≤1 мин) пересчитает веса и при дрейфе перестроит."""
     applied = st.get("applied_rules") or []
     if not applied:
         # стейт до-нового формата: сгенерить из текущих настроек
@@ -1502,7 +1502,7 @@ def _routing_sh_text(st: dict) -> str:
         "#    неперечислимы — только точный replay по applied_rules)",
     ]
     # ipset блок-листа ДО правил: -m set требует существующий set. После
-    # ребута набор пуст до первого health-тика (≤2 мин мягкой деградации:
+    # ребута набор пуст до первого health-тика (≤1 мин мягкой деградации:
     # блок-лист уедет в каскад, не сломается).
     lines.append("ipset create " + _B4_IPSET +
                  " hash:ip maxelem 65536 -exist 2>/dev/null || true")
@@ -1730,7 +1730,8 @@ def _write_units() -> None:
         "Description=Mieru cascade health timer\n"
         "\n"
         "[Timer]\n"
-        "OnCalendar=*:0/2\n"
+        "OnCalendar=*:0/1\n"
+        "AccuracySec=10s\n"
         "Persistent=true\n"
         "\n"
         "[Install]\n"
@@ -1846,7 +1847,7 @@ def _strategy_desc() -> dict:
         "rr": "round-robin по соединениям (ядро iptables)",
         "random": "равномерно случайно на соединение (ядро)",
         "prio": "active-backup: только первый живой Exit",
-        "leastping": "доли ∝ 1/пинг (пересчёт каждые 2 мин)",
+        "leastping": "доли ∝ 1/пинг (пересчёт каждую минуту)",
         "leastload": "доли ∝ 1/(1+соединения на хопе)",
         "smart": "score: пинг+TTFB+нагрузка — как VLESS",
     }
