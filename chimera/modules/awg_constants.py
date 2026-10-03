@@ -30,6 +30,9 @@ AWGS_DEFAULT_MTU:      int  = 1280             # безопасный MTU для
 # ── Пути ─────────────────────────────────────────────────────────────────────
 AWGS_CONF_DIR:        Path = Path("/etc/amnezia/amneziawg")
 AWGS_SERVER_CONF:     Path = AWGS_CONF_DIR / "awg0.conf"
+# v5.5.3: конфиг каскадного туннеля awg1 на entry-ноде (RU → активный exit).
+# Константа (не литерал в коде) — тестируемость + единая точка правды.
+AWGS_AWG1_CONF:       Path = AWGS_CONF_DIR / "awg1.conf"
 AWGS_AWG_DIR:         Path = Path("/root/awg")
 AWGS_KEYS_DIR:        Path = AWGS_AWG_DIR / "keys"
 AWGS_INIT_FILE:       Path = AWGS_AWG_DIR / "awgsetup_cfg.init"
@@ -64,6 +67,24 @@ AWGS_CRON_RU_UPDATE_SCRIPT:  Path = Path("/usr/local/sbin/awg-cascade-ru-update.
 # Systemd-юниты
 AWGS_SYSTEMD_AWG_QUICK: str = "awg-quick@awg0.service"
 AWGS_SYSTEMD_CASCADE:   Path = Path("/etc/systemd/system/awg-cascade-routing.service")
+
+# ── Мульти-exit каскад + авто-failover (v5.5.3) ──────────────────────────────
+# Каскад RU (вход) → несколько зарубежных выходов. Активен один awg1-туннель;
+# failover-таймер раз в минуту проверяет handshake и при смерти активного
+# exit переключает awg1 на следующий по списку (порядок = приоритет).
+AWGS_CASCADE_EXITS_KEY:  str  = "cascade_exits"        # список exit-боксов в state
+AWGS_CASCADE_ACTIVE_KEY: str  = "cascade_active_exit"  # имя активного exit
+AWGS_FAILOVER_SCRIPT:     Path = Path("/usr/local/sbin/awg-cascade-failover.sh")
+AWGS_SYSTEMD_FAILOVER_SVC: Path = Path("/etc/systemd/system/awg-cascade-failover.service")
+AWGS_SYSTEMD_FAILOVER_TIMER: Path = Path("/etc/systemd/system/awg-cascade-failover.timer")
+# handshake старше N секунд = подозрение на мёртвый туннель. Keepalive 25с +
+# RejectAfterTime 161-216с (3.1) дают максимум ~4 мин между handshake при
+# живом туннеле — 300с = безопасный порог без ложных срабатываний.
+AWGS_FAILOVER_STALE_SEC: int = 300
+# Сколько секунд ждать handshake после переключения на exit-кандидата.
+AWGS_FAILOVER_PROBE_SEC: int = 18
+# Разумный верхний предел списка exit-нод.
+AWGS_FAILOVER_MAX_EXITS: int = 16
 
 # ── Бинарники ────────────────────────────────────────────────────────────────
 AWGS_BIN:       str = "awg"

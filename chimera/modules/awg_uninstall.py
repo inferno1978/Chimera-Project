@@ -80,7 +80,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     info("Остановка сервисов...")
     awgs_stop_systemd()
     if is_cascade:
-        # Каскад: останавливаем awg1 + routing
+        # Каскад: останавливаем awg1 + routing + failover-таймер (v5.5.3)
         core._run(["systemctl", "stop", "awg-quick@awg1"],
                   check=False, quiet=True)
         core._run(["systemctl", "disable", "awg-quick@awg1"],
@@ -89,6 +89,9 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
                   check=False, quiet=True)
         core._run(["systemctl", "disable", "awg-cascade-routing"],
                   check=False, quiet=True)
+        # v5.5.3: мульти-exit failover (таймер + сервис + wrapper)
+        from .awg_cascade import awgs_cascade_failover_teardown
+        awgs_cascade_failover_teardown()
     # NAT-юнит (если создавался при установке)
     core._run(["systemctl", "stop", "awg-nat.service"],
               check=False, quiet=True)
@@ -104,6 +107,11 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     awg_nat_unit.unlink(missing_ok=True)
     if AWGS_SYSTEMD_CASCADE.exists():
         AWGS_SYSTEMD_CASCADE.unlink(missing_ok=True)
+    # v5.5.3: failover-юниты (на случай запуска uninstall без cascade_role)
+    for _u in ("/etc/systemd/system/awg-cascade-failover.timer",
+               "/etc/systemd/system/awg-cascade-failover.service"):
+        Path(_u).unlink(missing_ok=True)
+    Path("/usr/local/sbin/awg-cascade-failover.sh").unlink(missing_ok=True)
     core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
 
     # 3. Удаляем cron-файлы
@@ -277,6 +285,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     if is_cascade:
         _box_row(f"    • awg-quick@awg1.service")
         _box_row(f"    • awg-cascade-routing.service")
+        _box_row(f"    • awg-cascade-failover.timer/.service (v5.5.3)")
         _box_row(f"    • ipset {AWGS_IPSET_NAME}")
         _box_row(f"    • {AWGS_CASCADE_DIR}/")
     _box_row(f"    • {AWGS_SERVER_CONF}")

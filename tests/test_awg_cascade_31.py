@@ -198,7 +198,8 @@ class TestSetupAwg0VersionValidation(unittest.TestCase):
              patch("chimera.modules.awg_cascade._awgs_cascade_create_routing_script"), \
              patch("chimera.modules.awg_cascade._awgs_cascade_create_systemd_unit"), \
              patch("chimera.modules.awg_cascade._awgs_cascade_setup_cron"), \
-             patch.object(Path, "write_text"), patch.object(Path, "chmod"):
+             patch.object(Path, "write_text"), patch.object(Path, "chmod"), \
+             patch.object(Path, "mkdir"):
             ok = awg_cascade.awgs_cascade_setup_awg0(
                 exit_host="1.2.3.4",
                 exit_port=51820,

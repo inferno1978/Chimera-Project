@@ -1320,6 +1320,15 @@ def awgs_build_nat_unit_content() -> str:
     """v5.4.5: содержимое awg-nat.service — ExecStart/ExecStop вызывают
     helper-скрипт БЕЗ shell-кавычек (инлайн `bash -c '...awk '{...}'...'`
     разрывался systemd-токенизатором — NAT умирал после каждой перезагрузки).
+
+    v5.5.3 FIX-F: WantedBy+=awg-quick@awg0.service — старт туннеля тянет
+    за собой NAT-юнит (wants-симлинк). Раньше было только multi-user.target:
+    `systemctl stop awg-quick@awg0 && start` (и даже restart!) гасил awg-nat
+    через Requires (ExecStop удалял MASQUERADE), а повторный старт туннеля
+    NAT НЕ поднимал → exit-нода после рестарта awg0 = живой handshake при
+    чёрной дыре каскадного трафика (E2E 2026-10-03: failover-тест fi1,
+    probe FAIL после stop/start). Теперь: stop awg0 → NAT down (Requires),
+    start/restart awg0 → NAT up (WantedBy-симлинк).
     """
     from .awg_constants import AWGS_SYSTEMD_AWG_QUICK
     return f"""[Unit]
@@ -1334,7 +1343,7 @@ ExecStart=/usr/local/sbin/awg-nat-rules.sh up
 ExecStop=/usr/local/sbin/awg-nat-rules.sh down
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=multi-user.target {AWGS_SYSTEMD_AWG_QUICK}
 """
 
 
