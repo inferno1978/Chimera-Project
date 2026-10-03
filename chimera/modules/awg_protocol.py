@@ -42,6 +42,20 @@ AWG_VERSION_20: str = "2.0"
 AWG_VERSION_31: str = "3.1"
 AWG_VERSIONS: tuple = (AWG_VERSION_20, AWG_VERSION_31)
 
+# ── Официальные форматы значений AWG 3.1 (amneziawg-tools/src/type.c) ─────────
+# u32_range_from_string / u16_range_from_string принимают КАК одиночное
+# число «N», так и диапазон «N-M» (hi >= lo). Это касается H1-H4 (u32) и
+# ВСЕХ шести диапазонных директив 3.1 (u16): ContentPaddingAddition,
+# RekeyAfterTime, RekeyTimeout, RejectAfterTime, KeepaliveTimeout,
+# MaxHandshakeAttempts.
+# RandomTrailers / DisableCookies — parse_bool: «on»/«off» (без учёта
+# регистра) или «0»/«1» (цифры; parse_bool трактует любое ненулевое число
+# как true). Генерация по-прежнему пишет «on» и диапазоны «N-M» — это
+# канонический вид; валидатор принимает весь официальный синтаксис, чтобы
+# конфиги из внешних генераторов (ARCHITECT, 3x-ui, вручную по wiki)
+# импортировались без правок.
+_RANGE_OR_SINGLE_RE = re.compile(r"^(\d+)(?:-(\d+))?$")
+
 
 def awg_normalize_version(version) -> str:
     """Нормализует обозначение версии протокола к "2.0" | "3.1".
@@ -184,11 +198,17 @@ def awg31_generate_extra_params(rng: Optional[random.Random] = None) -> dict:
 def awg31_validate_extra_params(params: dict) -> tuple:
     """Валидирует 9 дополнительных параметров AWG 3.1.
 
-    Возвращает (ok, error_message). Правила:
-      • HeaderProtectionKey — непустая строка 43-44 символа base64;
-      • диапазонные параметры — строка "N-M", обе компоненты в допустимых
-        границах, N <= M;
-      • флаговые (RandomTrailers/DisableCookies) — ровно "on".
+    Возвращает (ok, error_message). Правила (официальный синтаксис
+    amneziawg-tools/src/config.c + type.c, сверено с amneziawg-go uapi.go):
+      • HeaderProtectionKey — непустая строка 43-44 символа base64 (32 байта;
+        парсится тем же parse_key, что и PrivateKey);
+      • диапазонные параметры — «N» ИЛИ «N-M» (обе формы официальные),
+        обе компоненты в допустимых границах, N <= M;
+      • флаговые (RandomTrailers/DisableCookies) — «on»/«off»/«0»/«1»
+        (parse_bool amneziawg-tools; генерация пишет «on»);
+      • кросс-проверки таймеров (ARCHITECT, «сессия должна прожить дольше
+        окна keepalive+rekey»): RejectAfterTime.lo > KeepaliveTimeout.hi +
+        RekeyTimeout.hi и RekeyAfterTime.hi < RejectAfterTime.lo.
     """
     if not isinstance(params, dict):
         return False, "params должен быть dict"
@@ -204,25 +224,58 @@ def awg31_validate_extra_params(params: dict) -> tuple:
     except Exception:
         return False, "HeaderProtectionKey: не является валидным base64"
 
+    # Диапазонные параметры: официально «N» или «N-M» (type.c)
+    parsed_ranges: dict = {}
     for key, (lo, hi) in AWG31_RANGE_KEYS.items():
         v = params.get(key, "")
+        if isinstance(v, int):
+            v = str(v)
         if not isinstance(v, str):
-            return False, f"{AWG31_DIRECTIVE_NAMES[key]} должен быть строкой 'N-M'"
-        m = _RANGE_RE.match(v.strip())
+            return False, f"{AWG31_DIRECTIVE_NAMES[key]} должен быть числом или строкой 'N'/'N-M'"
+        m = _RANGE_OR_SINGLE_RE.match(v.strip())
         if not m:
-            return False, (f"{AWG31_DIRECTIVE_NAMES[key]}='{v}' не в формате 'N-M'")
-        n, m_hi = int(m.group(1)), int(m.group(2))
+            return False, (f"{AWG31_DIRECTIVE_NAMES[key]}='{v}' не в формате "
+                           f"'N' или 'N-M'")
+        n = int(m.group(1))
+        m_hi = int(m.group(2)) if m.group(2) is not None else n
         if not (lo <= n <= hi and lo <= m_hi <= hi):
             return False, (f"{AWG31_DIRECTIVE_NAMES[key]}='{v}' вне диапазона "
                            f"({lo}-{hi})")
         if n > m_hi:
             return False, (f"{AWG31_DIRECTIVE_NAMES[key]}='{v}': N > M")
+        parsed_ranges[key] = (n, m_hi)
 
+    # Флаговые параметры: parse_bool — «on»/«off»/«0»/«1» (регистронезависимо)
     for key in AWG31_FLAG_KEYS:
         v = params.get(key, "")
-        if v != "on":
-            return False, (f"{AWG31_DIRECTIVE_NAMES[key]} должен быть 'on' "
-                           f"(фактически: {v!r})")
+        if isinstance(v, int):
+            v = str(v)
+        if not isinstance(v, str) or v.strip().lower() not in (
+                "on", "off", "0", "1"):
+            return False, (f"{AWG31_DIRECTIVE_NAMES[key]} должен быть "
+                           f"'on'/'off'/'0'/'1' (фактически: {v!r})")
+
+    # Кросс-валидация таймеров (сверка с генератором ARCHITECT —
+    # «RejectAfterTime должен быть больше KeepaliveTimeout + RekeyTimeout,
+    # иначе сессия умрёт раньше, чем успеет обновиться» и
+    # «RekeyAfterTime < RejectAfterTime»).
+    if all(k in parsed_ranges for k in ("reject_after_time",
+                                        "keepalive_timeout",
+                                        "rekey_timeout")):
+        rej_lo = parsed_ranges["reject_after_time"][0]
+        keep_hi = parsed_ranges["keepalive_timeout"][1]
+        rkey_hi = parsed_ranges["rekey_timeout"][1]
+        if rej_lo <= keep_hi + rkey_hi:
+            return False, (f"RejectAfterTime (от {rej_lo}с) должен быть больше "
+                           f"KeepaliveTimeout + RekeyTimeout "
+                           f"({keep_hi}+{rkey_hi}={keep_hi + rkey_hi}с), иначе "
+                           f"сессия умрёт раньше, чем успеет обновиться")
+    if all(k in parsed_ranges for k in ("rekey_after_time", "reject_after_time")):
+        rekey_hi = parsed_ranges["rekey_after_time"][1]
+        rej_lo = parsed_ranges["reject_after_time"][0]
+        if rekey_hi >= rej_lo:
+            return False, (f"RekeyAfterTime (до {rekey_hi}с) должен быть меньше "
+                           f"RejectAfterTime (от {rej_lo}с)")
 
     return True, ""
 

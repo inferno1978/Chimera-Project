@@ -202,9 +202,75 @@ class TestValidate31ExtraParams(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("KeepaliveTimeout", err)
 
-    def test_flag_off_rejected(self):
+    # ── v5.5.1: официальные формы «N» (одиночное число, amneziawg-tools
+    # type.c u16_range_from_string) + кросс-валидации таймеров ──────────
+
+    def test_single_number_forms_accepted(self):
+        # Официально все диапазонные директивы принимают и «N», и «N-M»
         p = self._valid()
-        p["random_trailers"] = "off"
+        p["content_padding_addition"] = "5"
+        p["rekey_after_time"] = "110"
+        p["rekey_timeout"] = "5"
+        p["reject_after_time"] = "200"
+        p["keepalive_timeout"] = "10"
+        p["max_handshake_attempts"] = "20"
+        ok, err = awg31_validate_extra_params(p)
+        self.assertTrue(ok, msg=err)
+
+    def test_single_number_int_type_accepted(self):
+        p = self._valid()
+        p["content_padding_addition"] = 3   # int из state/JSON
+        ok, err = awg31_validate_extra_params(p)
+        self.assertTrue(ok, msg=err)
+
+    def test_content_padding_zero_allowed(self):
+        # ContentPaddingAddition = 0 — доп. паддинг отключён (валидно)
+        p = self._valid()
+        p["content_padding_addition"] = "0"
+        ok, err = awg31_validate_extra_params(p)
+        self.assertTrue(ok, msg=err)
+
+    def test_reject_vs_keepalive_plus_rekey_crosscheck(self):
+        # ARCHITECT: RejectAfterTime должен быть > Keepalive + RekeyTimeout.
+        # При текущих границах (reject ≥ 130 > keep_hi+rkey_hi ≤ 30) конфликт
+        # внутри bounds невозможен — но проверка защищает при расширении
+        # границ в будущем. Тест: недостижимые значения reject ниже окна
+        # keepalive+rekey отбрасываются (хотя бы границами).
+        p = self._valid()
+        p["keepalive_timeout"] = "18-20"
+        p["rekey_timeout"] = "8-10"
+        p["reject_after_time"] = "25-30"   # вне bounds и ниже keep+rekey
+        ok, err = awg31_validate_extra_params(p)
+        self.assertFalse(ok)
+        self.assertIn("RejectAfterTime", err)
+
+    def test_rekey_after_time_not_less_than_reject_rejected(self):
+        # ARCHITECT: RekeyAfterTime < RejectAfterTime
+        p = self._valid()
+        p["rekey_after_time"] = "180-200"
+        p["reject_after_time"] = "160-170"   # rekey_hi(200) >= rej_lo(160)
+        ok, err = awg31_validate_extra_params(p)
+        self.assertFalse(ok)
+        self.assertIn("RekeyAfterTime", err)
+
+    def test_default_generation_passes_cross_validation(self):
+        # Сгенерированный по умолчанию набор проходит кросс-валидации
+        for _ in range(20):
+            ok, err = awg31_validate_extra_params(awg31_generate_extra_params())
+            self.assertTrue(ok, msg=err)
+
+    def test_flag_official_bool_forms_accepted(self):
+        # v5.5.1: parse_bool amneziawg-tools — официально «on»/«off»/«0»/«1»
+        # (генерация пишет «on», но конфиги с off/0/1 — валидные)
+        for v in ("on", "off", "0", "1", "ON", "Off"):
+            p = self._valid()
+            p["random_trailers"] = v
+            ok, err = awg31_validate_extra_params(p)
+            self.assertTrue(ok, msg=f"{v}: {err}")
+
+    def test_flag_invalid_rejected(self):
+        p = self._valid()
+        p["random_trailers"] = "maybe"
         ok, err = awg31_validate_extra_params(p)
         self.assertFalse(ok)
         self.assertIn("RandomTrailers", err)

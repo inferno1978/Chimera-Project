@@ -592,52 +592,60 @@ AWGS_PARAMS_SPEC = [
      "Доп. junk в under-load пакетах (при загрузке сервера). 0 = выключено."),
     ("s4", "S4 (Transport packet junk size)",
      0, 32, 0,
-     "Доп. junk в transport-пакетах. 0 = выключено."),
-    ("h1", "H1 (Init packet magic header)",
-     0, 255, 1,
-     "Magic header для init-пакета (0-255). "
-     "Стандартные значения: H1=1, H2=2, H3=3, H4=4 (как в upstream)."),
-    ("h2", "H2 (Response packet magic header)",
-     0, 255, 2,
-     "Magic header для response-пакета."),
-    ("h3", "H3 (Under-load packet magic header)",
-     0, 255, 3,
-     "Magic header для under-load пакетов."),
-    ("h4", "H4 (Transport packet magic header)",
-     0, 255, 4,
-     "Magic header для transport-пакетов."),
+     "Доп. junk в transport-пакетах. 0 = выключено. Протокольный лимит — 32 байта."),
 ]
 
-# I1-I5 — опциональные, hex-строки (не числа)
+# H1-H4 — отдельный блок ввода (v5.5.1): официальный формат AWG 2.0+ —
+# «N» ИЛИ диапазон «N-M» в 0..INT32_MAX (wiki.amnezia.host: одиночные
+# числа — формат legacy 1.0; amneziawg-tools config.c →
+# u32_range_from_string). Диапазоны НЕ должны пересекаться — пакеты из
+# зоны перекрытия не классифицируются и молча дропаются
+# (device/receive.go DeterminePacketTypeAndPadding).
+AWGS_H_UPPER_LIMIT = 2147483647  # INT32_MAX
+
+# I1-I5 — опциональные CPS-цепочки (мини-язык тегов amneziawg-go).
 AWGS_PARAMS_SPEC_HEX = [
     # (key, label, recommended, description)
-    ("i1", "I1 (Init packet junk allowed IP)",
+    ("i1", "I1 (Init packet junk — CPS-цепочка)",
      "random",
-     "Hex-строка (48-64 hex chars = 24-32 байта). "
-     "Опционально — оставьте пустым если не уверены. "
+     "CPS-цепочка из тегов amneziawg-go: <b 0xHEX>, <t>, <r N>, <rc N>, "
+     "<rd N>, <d>, <ds>, <dz N> (+ <c> — только kernel-module, "
+     "НЕ для клиентов-приложений). Шорткаты: auto = <r N>, "
+     "quic = QUIC Initial (RFC 9000, порт 443), dns = DNS A-запрос "
+     "(RFC 1035, порт 53), tls = TLS ClientHello (RFC 8446). "
      "Tele2 Красноярск/Мегафон: ОСТАВИТЬ ПУСТЫМ (иначе блокировка). "
-     "Введите 'auto' для случайной генерации, или hex вручную."),
-    ("i2", "I2 (Response packet junk allowed IP)",
+     "Голый hex — формат AWG 1.5, принимается, но НЕ рекомендуется."),
+    ("i2", "I2 (Response packet junk — CPS-цепочка)",
      "",
      "Опционально. Рекомендуется пустым."),
-    ("i3", "I3 (Under-load packet junk allowed IP)",
+    ("i3", "I3 (Under-load packet junk — CPS-цепочка)",
      "",
      "Опционально. Рекомендуется пустым."),
-    ("i4", "I4 (Transport packet junk allowed IP)",
+    ("i4", "I4 (Transport packet junk — CPS-цепочка)",
      "",
      "Опционально. Рекомендуется пустым."),
-    ("i5", "I5 (Transport packet junk IPv6 allowed IP)",
+    ("i5", "I5 (Transport packet junk IPv6 — CPS-цепочка)",
      "",
      "Опционально. Рекомендуется пустым."),
 ]
 
 
-def awgs_prompt_custom_params() -> dict:
+def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
     """
-    Интерактивный ввод всех параметров обфускации AWG 2.0.
+    Интерактивный ввод ВСЕХ параметров обфускации AWG (2.0 или 3.1).
     Для каждого параметра показывает: описание, диапазон, рекомендуемое значение.
     Пользователь может Enter (значение по умолчанию) или ввести своё.
-    Возвращает dict с ключами jc/jmin/jmax/s1-s4/h1-h4/i1-i5.
+
+    v5.5.1 — полная поддержка официального синтаксиса:
+      • H1-H4 — «N» или диапазон «N-M» (0..INT32_MAX, без пересечений);
+      • I1-I5 — CPS-цепочки всех тегов amneziawg-go + шорткаты профилей
+        мимикрии (auto/quic/dns/tls);
+      • 3.1 — ручной ввод и 9 транспортных директив (HeaderProtectionKey,
+        ContentPaddingAddition «N»/«N-M», таймеры, RandomTrailers/
+        DisableCookies «on»/«off»).
+
+    Возвращает dict с ключами jc/jmin/jmax/s1-s4/h1-h4/i1-i5 (+ 9 ключей
+    3.1 при protocol_version="3.1"), либо None при провале валидации.
     """
     core = _core_module()
     info = core.info
@@ -646,6 +654,17 @@ def awgs_prompt_custom_params() -> dict:
         core.CYAN, core.NC, core.GREEN, core.YELLOW, core.DIM, core.BOLD
     )
     import random
+    from .awg_protocol import (
+        awg_is_31, awg_protocol_label, awg31_generate_extra_params,
+        AWG31_DIRECTIVE_NAMES,
+    )
+    from .awg_presets import (
+        _generate_non_overlapping_h_values, _generate_non_overlapping_h_values_31,
+        awg_i1_mimicry_generate, _is_valid_cps_or_legacy_hex,
+        _cps_has_kernel_only_tags,
+    )
+
+    is_31 = awg_is_31(protocol_version)
 
     print()
     _box_top = core._box_top
@@ -653,17 +672,19 @@ def awgs_prompt_custom_params() -> dict:
     _box_sep = core._box_sep
     _box_bottom = core._box_bottom
 
-    _box_top(f"Ручная настройка параметров обфускации AWG 2.0")
+    _box_top(f"Ручная настройка параметров обфускации {awg_protocol_label(protocol_version)}")
     _box_row()
     _box_row(f"  {DIM}Для каждого параметра укажите значение или Enter для рекомендуемого.{NC}")
-    _box_row(f"  {DIM}Рекомендации основаны на тестах bivlked/amneziawg-installer.{NC}")
+    _box_row(f"  {DIM}Рекомендации основаны на тестах bivlked/amneziawg-installer{NC}")
+    if is_31:
+        _box_row(f"  {DIM}и констрейнтах официальной AWG 3.1 (wiki.amnezia.host).{NC}")
     _box_row()
     _box_bottom()
     print()
 
     params = {}
 
-    # Числовые параметры
+    # Числовые параметры (Jc/Jmin/Jmax/S1-S4)
     for key, label, vmin, vmax, recommended, desc in AWGS_PARAMS_SPEC:
         print(f"{BOLD}{label}{NC}")
         print(f"  {DIM}{desc}{NC}")
@@ -688,35 +709,185 @@ def awgs_prompt_custom_params() -> dict:
         params[key] = val
         print()
 
-    # Hex-параметры (I1-I5)
-    print(f"{BOLD}Опциональные параметры (I1-I5):{NC}")
+    # H1-H4 — официальный формат «N» / «N-M» (v5.5.1)
+    print(f"{BOLD}H1-H4 — magic headers (официальный формат AWG 2.0+: «N» или «N-M» до {AWGS_H_UPPER_LIMIT}){NC}")
+    print(f"  {DIM}Диапазоны скрывают заголовок от DPI; не должны пересекаться между собой.{NC}")
+    print(f"  {DIM}Значения 1-4 не используйте — это узнаваемые vanilla-WireGuard типы сообщений.{NC}")
+    print(f"  {GREEN}Рекомендуется:{NC} auto — непересекающиеся диапазоны" +
+          (f" (узкие ~20k, фикс бага amneziawg-go в 3.1)" if is_31 else ""))
+    _h_vals = None
+    while True:
+        _h_auto = input(f"  {CYAN}H1-H4 ['auto' или четыре значения через пробел, напр. "
+                        f"'2135087609-2135093954 2147225277 2147461177 2147478893-2147482205']: {NC}").strip()
+        if not _h_auto or _h_auto.lower() == "auto":
+            _h_gen = (_generate_non_overlapping_h_values_31() if is_31
+                      else _generate_non_overlapping_h_values())
+            _h_vals = [str(v) for v in _h_gen]
+            info(f"  Сгенерированы H1-H4: {' '.join(_h_vals)}")
+            break
+        parts = _h_auto.split()
+        if len(parts) != 4:
+            print(f"  {YELLOW}Нужно 4 значения (H1 H2 H3 H4) или 'auto'{NC}")
+            continue
+        ok_h = True
+        for p in parts:
+            if not (p.isdigit() or ("-" in p and p.split("-", 1)[0].isdigit()
+                                    and p.split("-", 1)[1].isdigit())):
+                print(f"  {YELLOW}'{p}' не «N» и не «N-M»{NC}")
+                ok_h = False
+                break
+            _lo = int(p.split("-")[0])
+            _hi = int(p.split("-")[-1])
+            if _lo > _hi or _hi > AWGS_H_UPPER_LIMIT:
+                print(f"  {YELLOW}'{p}': lo>hi или превышает INT32_MAX{NC}")
+                ok_h = False
+                break
+            if 1 <= _lo <= 4 or 1 <= _hi <= 4:
+                warn(f"  '{p}' содержит значения 1-4 — узнаваемые vanilla-WireGuard "
+                     f"типы сообщений; рекомендуется диапазон от 5")
+        if not ok_h:
+            continue
+        # Проверка пересечений
+        _h_parsed = []
+        for p in parts:
+            if "-" in p:
+                _lo, _hi = p.split("-", 1)
+                _h_parsed.append((int(_lo), int(_hi)))
+            else:
+                _iv = int(p)
+                _h_parsed.append((_iv, _iv))
+        _overlap = False
+        for _i in range(4):
+            for _j in range(_i + 1, 4):
+                if _h_parsed[_i][0] <= _h_parsed[_j][1] and _h_parsed[_j][0] <= _h_parsed[_i][1]:
+                    print(f"  {YELLOW}H{_i+1} и H{_j+1} пересекаются — пакеты из зоны "
+                          f"перекрытия не классифицируются и дропаются{NC}")
+                    _overlap = True
+        if _overlap:
+            continue
+        _h_vals = parts
+        break
+    params["h1"], params["h2"], params["h3"], params["h4"] = _h_vals
+    print()
+
+    # CPS-параметры (I1-I5)
+    print(f"{BOLD}Опциональные параметры (I1-I5) — CPS-цепочки:{NC}")
     print(f"  {DIM}Оставьте пустым (Enter) если не уверены — большинство операторов не требуют.{NC}")
     print()
     for key, label, recommended, desc in AWGS_PARAMS_SPEC_HEX:
         print(f"{BOLD}{label}{NC}")
         print(f"  {DIM}{desc}{NC}")
         if recommended == "random":
-            print(f"  {GREEN}Рекомендуется:{NC} auto (случайная генерация 24-32 байта)")
+            print(f"  {GREEN}Рекомендуется:{NC} auto — нейтральный <r N> (безопасен для всех клиентов)")
         elif recommended:
             print(f"  {GREEN}Рекомендуется:{NC} {recommended}")
         else:
             print(f"  {GREEN}Рекомендуется:{NC} пусто")
-        val = input(f"  {CYAN}Значение (Enter=пусто, 'auto'=случайный): {NC}").strip()
-        if val.lower() == "auto":
-            # Генерируем случайный hex 28 байт (56 hex chars)
-            i1_len = random.randint(24, 32)
-            val = "".join(random.choices("0123456789abcdef", k=i1_len * 2))
-            info(f"  Сгенерирован {key}: {val[:32]}...")
-        elif val and not all(c in "0123456789abcdefABCDEF" for c in val):
-            warn(f"  '{val}' не hex — игнорирую (оставляю пустым)")
-            val = ""
+        while True:
+            val = input(f"  {CYAN}Значение (Enter=пусто, auto/quic/dns/tls/CPS-цепочка): {NC}").strip()
+            if not val:
+                val = ""
+                break
+            _low = val.lower()
+            if _low == "auto":
+                val = awg_i1_mimicry_generate("random")
+                info(f"  Сгенерирован {key}: {val}")
+                break
+            if _low in ("quic", "dns", "tls"):
+                val = awg_i1_mimicry_generate(_low + "_mimicry")
+                info(f"  Сгенерирован {key} (профиль {_low}): {val}")
+                if _low in ("quic", "dns"):
+                    info(f"  Под маскировку {_low.upper()} желательно подходящее "
+                         f"значение AWG-порта (QUIC — 443, DNS — 53)")
+                break
+            if not _is_valid_cps_or_legacy_hex(val):
+                warn(f"  Не похоже на CPS-цепочку (<b 0x...>, <t>, <r N>, <rc N>, "
+                     f"<rd N>, <d>, <ds>, <dz N>) и не hex — попробуйте ещё раз")
+                continue
+            if _cps_has_kernel_only_tags(val):
+                warn(f"  В цепочке есть <c> — тег ТОЛЬКО модуля ядра Linux; "
+                     f"клиентские приложения Amnezia (Android/iOS/Windows/macOS) "
+                     f"отвергнут весь junk-пакет. Продолжаем только для "
+                     f"kernel-module клиентов")
+            if all(c in "0123456789abcdefABCDEF" for c in val) and "<" not in val:
+                warn(f"  Голый hex — формат AWG 1.5; на Keenetic/amneziawg-go "
+                     f"может не работать. Рекомендуется CPS-формат, напр. "
+                     f"'<r {len(val)//2}>'")
+            break
         params[key] = val
         print()
+
+    # AWG 3.1: 9 транспортных директив (v5.5.1 — полный ручной контроль)
+    if is_31:
+        _defaults_31 = awg31_generate_extra_params()
+        _short = {
+            "header_protection_key":
+                "base64 32 байта (44 символа). Общий для сервера и клиента — "
+                "шифрование заголовков ChaCha20; nonce берётся из S-паддинга "
+                "(поэтому S1-S4 >= 12).",
+            "content_padding_addition":
+                "Число или «N-M» (0-64). Случайный паддинг транспортных "
+                "пакетов; 0 = выкл; 2-10 при низкой скорости.",
+            "rekey_after_time":
+                "Число или «N-M» секунд (100-200) — рандомизация rekey.",
+            "rekey_timeout":
+                "Число или «N-M» секунд (3-10) — таймаут handshake-попытки.",
+            "reject_after_time":
+                "Число или «N-M» секунд (130-300); должен быть больше "
+                "KeepaliveTimeout + RekeyTimeout и больше RekeyAfterTime.",
+            "keepalive_timeout":
+                "Число или «N-M» секунд (8-20) — keepalive-интервал.",
+            "max_handshake_attempts":
+                "Число или «N-M» (15-50) — попыток handshake до отказа.",
+            "random_trailers":
+                "on/off — дописывать пакеты до MTU случайными байтами (3.1).",
+            "disable_cookies":
+                "on/off — не отвечать cookiereply на порту WireGuard (3.1; "
+                "ломает keepalive за NAT под нагрузкой — включать осознанно).",
+        }
+        print(f"{BOLD}Транспортная защита AWG 3.1 (9 директив):{NC}")
+        print(f"  {DIM}Enter — рекомендованное значение (генерация по констрейнтам 3.1).{NC}")
+        print()
+        for _k31 in _defaults_31:
+            _dir = AWG31_DIRECTIVE_NAMES[_k31]
+            _def = _defaults_31[_k31]
+            print(f"{BOLD}{_dir}{NC}")
+            print(f"  {DIM}{_short.get(_k31, '')}{NC}")
+            while True:
+                v31 = input(f"  {CYAN}Значение [{_def}]: {NC}").strip()
+                if not v31:
+                    v31 = _def
+                    break
+                if _k31 in ("random_trailers", "disable_cookies"):
+                    if v31.lower() not in ("on", "off", "0", "1"):
+                        print(f"  {YELLOW}Допустимо: on / off / 0 / 1{NC}")
+                        continue
+                    break
+                # диапазонные: «N» или «N-M» — проверка ниже общей валидацией
+                if _k31 == "header_protection_key":
+                    import base64 as _b64
+                    try:
+                        if len(_b64.b64decode(v31, validate=True)) < 30:
+                            raise ValueError
+                    except Exception:
+                        print(f"  {YELLOW}Нужен base64-ключ 32 байта (44 символа, как wg genkey){NC}")
+                        continue
+                    break
+                if not (v31.isdigit() or ("-" in v31 and
+                                          v31.split("-", 1)[0].isdigit() and
+                                          v31.split("-", 1)[1].isdigit())):
+                    print(f"  {YELLOW}Формат: число «N» или диапазон «N-M»{NC}")
+                    continue
+                break
+            params[_k31] = v31
+            print()
 
     # Итоговая сводка
     _box_top(f"Итоговые параметры")
     _box_row()
     for key, label, _, _, _, _ in AWGS_PARAMS_SPEC:
+        _box_row(f"  {CYAN}{key.upper():<6}{NC} = {params[key]}")
+    for _i, key in enumerate(("h1", "h2", "h3", "h4")):
         _box_row(f"  {CYAN}{key.upper():<6}{NC} = {params[key]}")
     for key, label, _, _ in AWGS_PARAMS_SPEC_HEX:
         val = params[key]
@@ -724,10 +895,14 @@ def awgs_prompt_custom_params() -> dict:
             _box_row(f"  {CYAN}{key.upper():<6}{NC} = {val[:40]}{'...' if len(val) > 40 else ''}")
         else:
             _box_row(f"  {CYAN}{key.upper():<6}{NC} = {DIM}(пусто){NC}")
+    if is_31:
+        for _k31 in _defaults_31:
+            _box_row(f"  {CYAN}{AWG31_DIRECTIVE_NAMES[_k31]:<24}{NC} = "
+                     f"{params.get(_k31, '')}")
     _box_bottom()
 
     # Валидация
-    ok, err = awgs_presets_validate_params(params)
+    ok, err = awgs_presets_validate_params(params, protocol_version=protocol_version)
     if not ok:
         warn(f"Валидация: {err}")
         return None
@@ -1653,8 +1828,9 @@ def _awgs_menu_custom_params(protocol_version: str = "2.0") -> None:
 
     endpoint = input(f"{CYAN}Endpoint (если за NAT, иначе пусто) []: {NC}").strip()
 
-    # Теперь — параметры обфускации
-    custom_params = awgs_prompt_custom_params()
+    # Теперь — параметры обфускации (v5.5.1: с версией протокола — для 3.1
+    # промпт охватывает и 9 транспортных директив)
+    custom_params = awgs_prompt_custom_params(protocol_version=protocol_version)
     if custom_params is None:
         warn("Параметры не валидны — отмена")
         return

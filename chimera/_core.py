@@ -948,7 +948,7 @@ PARAM_USER_EMAIL:      str  = ""
 PARAM_USER_NAME:       str  = ""
 PARAM_SPIDERX:         str  = ""
 PARAM_SOCKET_PATH:     str  = ""
-PARAM_REALITY_DEST:    str  = ""   # dest/sni для REALITY при AWG-транспорте (чужой сайт, напр. www.cloudflare.com)
+PARAM_REALITY_DEST:    str  = ""   # dest/sni для REALITY при AWG-транспорте. v5.5.1: приоритет — СВОЙ домен (Self-SNI: dest=nginx-сокет, serverNames=домен); чужой домен — явный выбор пользователя (sni_hygiene.py, ToS РФ-хостингов/РКН)
 PARAM_DOMAIN_STRATEGY: str  = ""
 PARAM_SITE_TEMPLATE:   str  = "0"   # индекс шаблона сайта (0-15), дефолт "0" — должен быть int-конвертируемой строкой
 PARAM_FINGERPRINT:     str  = "chrome"   # TLS/uTLS fingerprint, выбирается при установке
@@ -2732,6 +2732,22 @@ def _assert_reality_dest_sane() -> None:
             "reality_dest в state.json."
         )
 
+    # v5.5.1 Self-SNI (Mode B): dest = свой домен → xray обязан работать
+    # через ЛОКАЛЬНЫЙ nginx-сокет (иначе петля: domain:443 указывает на этот
+    # же сервер, чей inbound снова лезет на domain:443). Сокет нужен
+    # обязательно; пустой PARAM_SOCKET_PATH при self-SNI = ловим здесь.
+    from chimera.modules.sni_hygiene import reality_self_sni as _rsn
+    if (AWG_EXIT_ENABLED and PARAM_REALITY_DEST and PARAM_DOMAIN
+            and _rsn(PARAM_REALITY_DEST, PARAM_DOMAIN)
+            and not PARAM_SOCKET_PATH):
+        die(
+            "Self-SNI: reality_dest совпадает с вашим доменом, но "
+            "PARAM_SOCKET_PATH пуст (в state.json нет ключа 'socket') — "
+            "без nginx-сокета возникнет петля маршрутизации "
+            "(xray → domain:443 → этот же xray). Пересоздайте установку "
+            "или укажите сокет в state.json."
+        )
+
 
 # (Chain/Nodes — generate_xray_config_chain_entry — вынесены в
 #  chimera.modules.chain_nodes; импорт — в верхней секции этого файла.)
@@ -3119,8 +3135,13 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
     # и перезапустить nginx чтобы он подхватил его.
     # BUGFIX: nginx создаёт unix-сокет при своём bind; ждать сокет ДО restart nginx —
     # deadlock. Сначала перезапускаем nginx, потом ждём подтверждения сокета.
+    # v5.5.1: self-SNI Mode B (reality_dest = свой домен) тоже использует
+    # nginx-сокет как dest — синхронизируем nginx с новым сокетом и здесь.
+    from chimera.modules.sni_hygiene import reality_self_sni as _rsn_chk
+    _self_sni_b = bool(AWG_EXIT_ENABLED and PARAM_DOMAIN
+                       and _rsn_chk(PARAM_REALITY_DEST, PARAM_DOMAIN))
     if PROTOCOL_MODE in ("reality", "xhttp_reality") \
-            and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
+            and PARAM_SOCKET_PATH and (not AWG_EXIT_ENABLED or _self_sni_b):
         rn = _run(["systemctl", "is-active", "nginx"], capture=True, check=False)
         if rn.stdout.strip() == "active":
             _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
@@ -3212,8 +3233,13 @@ def do_rebuild_xray_config() -> None:
     info("Параметры загружены из state.json.")
     info(f"  Режим: {INSTALL_MODE}, протокол: {PROTOCOL_MODE}, домен: {PARAM_DOMAIN}")
     # Если PARAM_SOCKET_PATH пустой — что-то не так с state.json.
+    # (v5.5.1: self-SNI Mode B тоже требует сокет — проверка ниже.)
+    from chimera.modules.sni_hygiene import reality_self_sni as _rsn_chk2
+    _self_sni_b = bool(AWG_EXIT_ENABLED and PARAM_DOMAIN
+                       and _rsn_chk2(PARAM_REALITY_DEST, PARAM_DOMAIN))
     if PROTOCOL_MODE in ("reality", "xhttp_reality") \
-            and not AWG_EXIT_ENABLED and not PARAM_SOCKET_PATH:
+            and not (AWG_EXIT_ENABLED and not _self_sni_b) \
+            and not PARAM_SOCKET_PATH:
         warn("PARAM_SOCKET_PATH пуст — в state.json нет ключа 'socket'.")
         warn("Проверьте: jq '.socket' /var/lib/xray-installer/state.json")
         return
@@ -4167,11 +4193,15 @@ def do_full_install() -> None:
     _run(["systemctl", "start", "nginx"], check=False, quiet=True)
     nginx_ok = _wait_service_active("nginx", 15)
 
-    # Проверка сокета — только в классическом REALITY (не AWG, не xHTTP).
-    # В AWG-режиме Xray слушает напрямую TCP-порт, unix-сокета нет.
-    # В xHTTP-режиме Xray слушает loopback backend, unix-сокета нет.
+    # Проверка сокета — в классическом REALITY и в v5.5.1 self-SNI Mode B
+    # (reality_dest = свой домен → dest = nginx-сокет). В AWG-режиме с ЧУЖИМ
+    # dest Xray слушает напрямую TCP-порт, unix-сокета нет.
+    from chimera.modules.sni_hygiene import reality_self_sni as _rsn_chk3
+    _self_sni_b = bool(AWG_EXIT_ENABLED and PARAM_DOMAIN
+                       and _rsn_chk3(PARAM_REALITY_DEST, PARAM_DOMAIN))
     if PROTOCOL_MODE in ("reality", "xhttp_reality") \
-            and nginx_ok and PARAM_SOCKET_PATH and not AWG_EXIT_ENABLED:
+            and nginx_ok and PARAM_SOCKET_PATH \
+            and (not AWG_EXIT_ENABLED or _self_sni_b):
         # Nginx уже запущен выше — он создаёт сокет при bind (listen unix:).
         # Ждём подтверждения (обычно <1 сек, но даём 20 сек как в
         # _nginx_restart_if_reality для надёжности на медленных VPS).
@@ -4183,8 +4213,10 @@ def do_full_install() -> None:
         else:
             warn(f"  Сокет {PARAM_SOCKET_PATH} не появился после запуска nginx — "
                  f"проверьте: journalctl -u nginx -n 20")
-    elif AWG_EXIT_ENABLED:
+    elif AWG_EXIT_ENABLED and not _self_sni_b:
         info("  AWG-режим: unix socket не используется, Xray слушает TCP напрямую")
+    elif AWG_EXIT_ENABLED and _self_sni_b:
+        info("  Self-SNI (Mode B): dest = свой домен через nginx-сокет")
 
     if nginx_ok:
         success("  Nginx активен")
