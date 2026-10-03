@@ -500,6 +500,16 @@ class TestAwgsNatHelperV545(unittest.TestCase):
                          "инлайн bash -c '<...>' в ExecStart разрывается "
                          "systemd-токенизатором (баг v5.4.4, E2E de1)")
 
+    def test_nat_unit_wanted_by_awg_quick(self):
+        """v5.5.3 FIX-F: WantedBy содержит awg-quick@awg0.service — старт
+        туннеля тянет за собой NAT (иначе stop/start awg0 = чёрная дыра:
+        Requires гасит NAT, повторный старт его не поднимает)."""
+        from chimera.modules.awg_standalone import awgs_build_nat_unit_content
+        unit = awgs_build_nat_unit_content()
+        self.assertIn("WantedBy=multi-user.target awg-quick@awg0.service", unit)
+        # стоп-направление сохранено
+        self.assertIn("Requires=awg-quick@awg0.service", unit)
+
     def test_nat_helper_body_contract(self):
         """helper-скрипт: шебанг, up/down, WAN-детект, идемпотентные правила."""
         from chimera.modules.awg_standalone import awgs_build_nat_helper_body
