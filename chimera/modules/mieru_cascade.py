@@ -2544,6 +2544,30 @@ def _ensure_local_services(st: dict) -> list:
     return restarted
 
 
+# Гистерезис дрейфа весов (v5.5.4): без порога микро-джиттер метрик
+# каждый тик давал «новые» вероятности — и health-тик ежеминутно делал
+# полную пересборку правил каскада + persist rules.v4 (живой кейс
+# entry-ноды с leastping, октябрь 2026).
+WEIGHTS_HYSTERESIS = 0.05   # 5 процентных пунктов по доле Exit-а
+
+
+def _shares_materially_changed(old_bal: Optional[dict],
+                               new_bal: Optional[dict]) -> bool:
+    """Доли Exit-ов изменились МАТЕРИАЛЬНО? (гистерезис ребаланса)
+
+    False — джиттер: состав Exit-ов тот же и все доли в пределах
+    WEIGHTS_HYSTERESIS от последней ПРИМЕНЁННОЙ (st['balance']).
+    True — смена состава Exit-ов или чья-то доля ушла больше порога:
+    ребаланс обязателен. old_bal=None/пусто (не применяли / stale) →
+    True — самовыправится первым apply."""
+    old = (old_bal or {}).get("shares") or {}
+    new = (new_bal or {}).get("shares") or {}
+    if set(old) != set(new):
+        return True
+    return any(abs(new[i] - old.get(i, 0.0)) > WEIGHTS_HYSTERESIS
+               for i in new)
+
+
 def health_tick(verbose: bool = False) -> dict:
     """Проверка всех Exit-ов; при смене состояния — ребаланс правил.
 
@@ -2597,8 +2621,8 @@ def _health_tick_locked(verbose: bool = False) -> dict:
     changed = [e["id"] for e in st.get("exits", [])
                if changed_before.get(e["id"]) is not e.get("healthy")]
 
-    # весовые стратегии: пересчёт долей; дрейф весов = ребаланс.
-    # При закреплённом Exit стратегии не действуют — проб не делаем
+    # весовые стратегии: пересчёт долей; МАТЕРИАЛЬНЫЙ дрейф = ребаланс.
+    # При закреплённом Exit стратегии не действуют — проб не делаем.
     weights_drift = False
     if ((st.get("strategy") or "").lower() in METRIC_STRATEGIES
             and not st.get("pinned_exit")):
@@ -2606,7 +2630,13 @@ def _health_tick_locked(verbose: bool = False) -> dict:
             bal = _balance_shares(st, _active_exits(st))
             result["balance"] = bal
             fresh = _rule_specs(st, bal)
-            weights_drift = fresh != (st.get("applied_rules") or [])
+            # Гистерезис (v5.5.4): джиттер метрик (доли в пределах
+            # WEIGHTS_HYSTERESIS от последней применённой) — НЕ повод
+            # для пересборки: без порога тик перестраивал правила
+            # (~90 вызовов iptables) и персистил rules.v4 каждую минуту.
+            weights_drift = (
+                _shares_materially_changed(st.get("balance"), bal)
+                and fresh != (st.get("applied_rules") or []))
         except Exception:
             weights_drift = False
 
