@@ -1028,6 +1028,56 @@ def _prompt_h1_h4_unique(
     return h1, h2, h3, h4
 
 
+def _prompt_known_sni_domain(core) -> str:
+    """Меню выбора домена-донора из справочника известных ресурсов.
+
+    v5.5.1 (sni_hygiene): ТОЛЬКО для явной кастомизации — пользователь
+    осознанно берёт чужой популярный домен, видя предупреждение о ToS
+    РФ-хостингов / РКН. Возвращает домен или '' (отмена).
+    """
+    from chimera.modules import sni_hygiene
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_item   = core._box_item
+    _box_desc   = core._box_desc
+    _box_sep    = core._box_sep
+    _box_bottom = core._box_bottom
+    warn = core.warn
+    CYAN, NC, YELLOW, DIM = core.CYAN, core.NC, core.YELLOW, core.DIM
+
+    _box_top("Известные домены-доноры (НЕ рекомендуется для РФ-хостингов)")
+    _box_row()
+    _box_desc(f"{YELLOW}SNI известного ресурса на VPS-IP = маскарад под чужой "
+              f"сайт — триггер ToS-блокировок РФ-хостингов и эвристик РКН. "
+              f"Приоритет — свой домен (Self-SNI).{NC}")
+    _box_row()
+    for i, (dom, cat, note) in enumerate(sni_hygiene.KNOWN_SNI_DOMAINS, 1):
+        _box_item(str(i), f"{dom}  {DIM}· {cat}{NC}"
+                  + (f" {YELLOW}[REALITY-баг: Cert>8192]{NC}"
+                     if sni_hygiene.is_broken_reality_dest(dom) else ""))
+    _box_sep()
+    _box_item("Q", "← Отмена (вернуться к вводу своего домена)")
+    _box_bottom()
+    try:
+        ch = input(f"  {CYAN}Выбор [1-{len(sni_hygiene.KNOWN_SNI_DOMAINS)}/Q]: {NC}").strip()
+    except KeyboardInterrupt:
+        print()
+        return ""
+    if ch.lower() == "q" or not ch.isdigit():
+        return ""
+    idx = int(ch) - 1
+    if not (0 <= idx < len(sni_hygiene.KNOWN_SNI_DOMAINS)):
+        return ""
+    dom = sni_hygiene.KNOWN_SNI_DOMAINS[idx][0]
+    warn("  " + sni_hygiene.warn_known_domain_text(dom))
+    try:
+        confirm = input(f"  {CYAN}Всё равно использовать {dom}? [y/N]: {NC}").strip().lower()
+    except KeyboardInterrupt:
+        print()
+        return ""
+    return dom if confirm in ("y", "yes", "д", "да") else ""
+
+
 def prompt_awg_exit_mode() -> None:
     """
     Спрашивает пользователя: использовать ли AWG как транспорт exit-ноды.
@@ -1083,16 +1133,22 @@ def prompt_awg_exit_mode() -> None:
     _box_item("1", f"{GREEN}VLESS{NC}        — через цепочку VLESS-нод (классика, текущий режим)")
     _box_item("2", f"{CYAN}AmneziaWG 2.0{NC} — через AWG-туннель на зарубежный VPS (рекомендуется)")
     _box_item("3", f"{YELLOW}Hysteria2{NC}     — через QUIC/UDP туннель на зарубежный VPS")
+    _box_item("4", f"{CYAN}AmneziaWG 3.1{NC} — transport protection (новое, для жёсткого DPI)")
     _box_row()
     _box_wrap_msg(f"  {DIM}", 2,
-        f"AWG: устойчив к DPI, обфусцирован, не требует VLESS на exit-ноде.{NC}")
+        f"AWG 2.0: устойчив к DPI, обфусцирован, не требует VLESS на exit-ноде.{NC}")
+    _box_wrap_msg(f"  {DIM}", 2,
+        f"AWG 3.1: + шифрование заголовков, паддинг, рандомизация таймеров — "
+        f"против поведенческого AI-анализа. Инструменты на exit-VPS "
+        f"обновляются автоматически; старые amneziawg-tools НЕ поймут "
+        f"3.1-конфиг (обновите PPA amnezia/ppa).{NC}")
     _box_wrap_msg(f"  {DIM}", 2,
         f"H2: QUIC/UDP, высокая скорость, устойчив к потерям пакетов.{NC}")
     _box_bottom()
 
     while True:
         try:
-            choice = input(f"  {CYAN}Выбор транспорта [1/2/3, Enter=1]:{NC} ").strip()
+            choice = input(f"  {CYAN}Выбор транспорта [1/2/3/4, Enter=1]:{NC} ").strip()
         except KeyboardInterrupt:
             print()
             raise
@@ -1103,12 +1159,18 @@ def prompt_awg_exit_mode() -> None:
             setattr(core, "H2_EXIT_ENABLED", H2_EXIT_ENABLED)
             success("Транспорт: VLESS (стандарт)")
             return
-        if choice == "2":
+        if choice in ("2", "4"):
+            # v5.5: 2 = AmneziaWG 2.0, 4 = AmneziaWG 3.1 (transport protection)
+            from chimera.modules.awg_protocol import (
+                awg_normalize_version, awg_protocol_label,
+            )
+            AWG_PROTOCOL_VERSION = awg_normalize_version("3.1" if choice == "4" else "2.0")
+            setattr(core, "AWG_PROTOCOL_VERSION", AWG_PROTOCOL_VERSION)
             AWG_EXIT_ENABLED = True
             setattr(core, "AWG_EXIT_ENABLED", AWG_EXIT_ENABLED)
             H2_EXIT_ENABLED  = False
             setattr(core, "H2_EXIT_ENABLED", H2_EXIT_ENABLED)
-            success("Транспорт: AmneziaWG 2.0")
+            success(f"Транспорт: {awg_protocol_label(AWG_PROTOCOL_VERSION)}")
             break
         if choice == "3":
             AWG_EXIT_ENABLED = False
@@ -1132,55 +1194,105 @@ def prompt_awg_exit_mode() -> None:
             _box_bottom()
             input(f"  {CYAN}Нажмите Enter для продолжения установки...{NC}")
             return
-        warn("Введите 1, 2 или 3")
+        warn("Введите 1, 2, 3 или 4")
 
     # --- Домен маскировки REALITY (dest/sni) ---
-    _box_top("Домен маскировки REALITY (dest/sni)")
+    # v5.5.1 SNI-гигиена (sni_hygiene.py): ПРИОРИТЕТ — свой домен (Self-SNI).
+    # Почему сменили политику (прежняя: «чужой популярный сайт, свой домен
+    # нельзя — петля»):
+    #   • РФ-хостинги вносят в ToS блокировку серверов, у которых SNI/dest
+    #     содержит домены известных ресурсов (маскарад под чужой сайт при
+    #     несовпадении IP-владельца); РКН фиксирует то же несоответствие.
+    #   • Петля возникала только при dest = domain:443 (xray ходит сам в
+    #     себя на 443). Self-SNI паттерн (wiki.amnezia.host) берёт dest =
+    #     ЛОКАЛЬНЫЙ nginx-сокет с LE-сертификатом СВОЕГО домена (как Mode A)
+    #     — петли нет, IP↔домен↔сертификат совпадают, снаружи выглядит
+    #     максимально естественно. Генераторы (xray_install v5.5.1) выбирают
+    #     сокет автоматически, когда reality_dest == PARAM_DOMAIN.
+    from chimera.modules import sni_hygiene
+    PARAM_DOMAIN_L = (getattr(core, "PARAM_DOMAIN", "") or "").strip().lower()
+    _box_top("Домен маскировки REALITY (dest/sni) — Self-SNI")
+    _box_row()
+    _box_wrap_msg(f"  {GREEN}", 2,
+        f"Рекомендуется СВОЙ домен ({PARAM_DOMAIN_L or 'укажите ниже'}): "
+        f"IP, домен и сертификат совпадают — никакого маскарада.{NC}")
+    _box_wrap_msg(f"  {DIM}", 2,
+        f"Xray возьмёт dest = локальный nginx-сокет с LE-сертификатом "
+        f"вашего домена; SNI клиентов = ваш домен. Петли нет, "
+        f"известных ресурсов в SNI/dest нет (ToS РФ-хостингов / РКН).{NC}")
     _box_row()
     _box_wrap_msg(f"  {YELLOW}", 2,
-        f"Укажите чужой популярный сайт с TLS 1.3 для маскировки.{NC}")
-    _box_wrap_msg(f"  {DIM}", 2,
-        f"Не используйте собственный домен — это создаст петлю маршрутизации.{NC}")
+        f"Чужой популярный сайт (напр. www.cloudflare.com) — вариант "
+        f"только если своего домена нет: замаскированный SNI известного "
+        f"ресурса на VPS-IP триггерит ToS блокировки и палится РКН.{NC}")
     _box_row()
-    # ВНИМАНИЕ: www.microsoft.com НЕЛЬЗЯ использовать как REALITY dest!
-    # Баг в TLS-парсере REALITY (xtls/reality, github.com/XTLS/Xray-core):
-    # жёсткий лимит 8192 байта на TLS Certificate record. У www.microsoft.com
-    # (Akamai CDN) Certificate с цепочкой/OCSP stapling сейчас 8273 байта —
-    # на 81 байт больше лимита. REALITY обрывает разбор и валит соединение
-    # с "handshake did not complete successfully" для ЛЮБОГО клиента.
-    # Это НЕ связано с MTU/AWG — лимит внутри самого TLS-парсера REALITY,
-    # до всякой маршрутизации. Прямой TLS к microsoft.com (curl/openssl)
-    # при этом работает нормально.
-    # Cloudflare использует ECDSA-сертификаты с минимальной цепочкой —
-    # Certificate record гарантированно укладывается в 8192 байта.
-    # Баг воспроизведён на Xray 26.3.27 (issue открыт ~2 недели назад).
-    # Cloudflare исторически рекомендуемый target для REALITY — не только
-    # из-за анонимности (слишком большой CDN, чтобы блокировать), но и из-за
-    # предсказуемо маленького TLS-хендшейка.
-    _box_wrap_msg(f"  {YELLOW}", 2,
-        f"⚠️  ВНИМАНИЕ: НЕ используйте www.microsoft.com как REALITY dest!{NC}")
-    _box_wrap_msg(f"  {DIM}", 2,
-        f"Баг в TLS-парсере REALITY (Xray-core): лимит 8192 байт на "
-        f"Certificate record, у microsoft.com — 8273 байта → handshake "
-        f"падает для любого клиента. Cloudflare (ECDSA, компактная цепочка) "
-        f"работает стабильно. Баг не связан с AWG/MTU — это лимит внутри "
-        f"самого REALITY-парсера.{NC}")
-    _box_row()
-    try:
-        _rd = input(f"  {CYAN}Домен маскировки REALITY [www.cloudflare.com]: {NC}").strip()
-    except KeyboardInterrupt:
-        print()
-        raise
-    # Дефолт — www.cloudflare.com (Certificate record укладывается в лимит REALITY).
-    # Если пользователь явно ввёл microsoft.com — предупреждаем, но не блокируем.
-    PARAM_REALITY_DEST = _rd if _rd else "www.cloudflare.com"
-    if "microsoft.com" in PARAM_REALITY_DEST.lower():
-        warn(f"  ⚠️  {PARAM_REALITY_DEST} НЕ рекомендуется: баг REALITY "
-             f"(лимит 8192 байт на Certificate, у microsoft.com — 8273). "
-             f"Handshake будет падать для всех клиентов. Рекомендуется "
-             f"www.cloudflare.com.")
+    if not PARAM_DOMAIN_L:
+        _box_wrap_msg(f"  {CYAN}", 2, sni_hygiene.FREE_DOMAIN_HINT + f"{NC}")
+        _box_row()
+    _box_bottom()
+
+    _default_dest = PARAM_DOMAIN_L or ""
+    while True:
+        try:
+            _rd = input(
+                f"  {CYAN}Домен маскировки REALITY"
+                f"{f' [{_default_dest}] — свой домен (рекомендуется)' if _default_dest else ' — свой домен (рекомендуется)'}: {NC}"
+            ).strip()
+        except KeyboardInterrupt:
+            print()
+            raise
+        if not _rd:
+            _rd = _default_dest
+        if not _rd:
+            # Нет своего домена и ничего не введено — предлагаем выбор:
+            # известный домен (явное кастомизирование) или возврат.
+            _box_top("Свой домен не указан")
+            _box_row()
+            _box_wrap_msg(f"  {DIM}", 2,
+                f"Enter ещё раз — ввести свой домен вручную; 'L' — выбрать "
+                f"из списка известных доменов (не рекомендуется для "
+                f"РФ-хостингов); 'B' — вернуться и ввести домен в параметрах.{NC}")
+            _box_row()
+            _box_bottom()
+            try:
+                _alt = input(f"  {CYAN}[Enter=свой домен / L=список / B=назад]: {NC}").strip().lower()
+            except KeyboardInterrupt:
+                print()
+                raise
+            if _alt == "l":
+                _rd = _prompt_known_sni_domain(core)
+                if not _rd:
+                    continue
+            elif _alt == "b":
+                warn("REALITY dest обязателен для AWG-транспорта — вернитесь и укажите домен")
+                continue
+            else:
+                continue
+        break
+
+    # Дефолт/ввод — свой домен: Self-SNI (генераторы возьмут nginx-сокет).
+    # Цикл выше гарантирует непустое _rd (break только с значением);
+    # пустое значение отсюда невозможно, а _assert_reality_dest_sane()
+    # дополнительно поймает его в генераторах.
+    PARAM_REALITY_DEST = _rd
+    if sni_hygiene.is_known_resource_domain(PARAM_REALITY_DEST):
+        # Явный выбор известного ресурса — предупреждаем, но не блокируем
+        # (максимальная кастомизация — осознанное решение владельца).
+        warn("  " + sni_hygiene.warn_known_domain_text(PARAM_REALITY_DEST))
+    if PARAM_DOMAIN_L and sni_hygiene.reality_self_sni(PARAM_REALITY_DEST, PARAM_DOMAIN_L):
+        success(f"   Self-SNI: dest/sni = {PARAM_REALITY_DEST} "
+                f"(свой домен, dest = nginx-сокет с LE-сертификатом)")
+    else:
+        if PARAM_DOMAIN_L and PARAM_REALITY_DEST.lower() != PARAM_DOMAIN_L:
+            info(f"   REALITY dest/sni: {PARAM_REALITY_DEST} (чужой домен — "
+                 f"осознанный выбор; свой домен {PARAM_DOMAIN_L} рекомендуется)")
+        else:
+            success(f"   REALITY dest/sni: {PARAM_REALITY_DEST}")
     setattr(core, "PARAM_REALITY_DEST", PARAM_REALITY_DEST)
-    success(f"   REALITY dest/sni: {PARAM_REALITY_DEST}")
+    # (v5.5.1: прежний блок с дефолтом www.cloudflare.com и запретом своего
+    # домена удалён — см. sni_hygiene.py. Техническое предупреждение о
+    # microsoft.com (баг REALITY: Certificate 8273 > 8192) теперь входит в
+    # sni_hygiene.warn_known_domain_text и показывается при явном выборе.)
 
     # --- Ввод IP зарубежного VPS ---
     _box_top("Параметры AWG exit-ноды")
@@ -1258,7 +1370,25 @@ def prompt_awg_exit_mode() -> None:
     elif _obf_ch == "2":
         # Авто-генерация полного набора через awgs_generate_full_manual_params()
         from chimera.modules.awg_presets import awgs_generate_full_manual_params
-        _p = awgs_generate_full_manual_params()  # без overrides = полный авто-рандом
+        # v5.5: генерация учитывает версию протокола (3.1 → полный набор
+        # с HeaderProtectionKey и таймерами, диапазоны GenerateObfuscation31)
+        _awg_pv = getattr(core, "AWG_PROTOCOL_VERSION", "2.0")
+        _p = awgs_generate_full_manual_params(None, protocol_version=_awg_pv)
+        if _awg_pv == "3.1":
+            from chimera.modules.awg_protocol import AWG31_EXTRA_KEYS
+            _DIR_MAP = {
+                "header_protection_key": "AWG_HEADER_PROTECTION_KEY",
+                "content_padding_addition": "AWG_CONTENT_PADDING_ADDITION",
+                "rekey_after_time": "AWG_REKEY_AFTER_TIME",
+                "rekey_timeout": "AWG_REKEY_TIMEOUT",
+                "reject_after_time": "AWG_REJECT_AFTER_TIME",
+                "keepalive_timeout": "AWG_KEEPALIVE_TIMEOUT",
+                "max_handshake_attempts": "AWG_MAX_HANDSHAKE_ATTEMPTS",
+                "random_trailers": "AWG_RANDOM_TRAILERS",
+                "disable_cookies": "AWG_DISABLE_COOKIES",
+            }
+            for _k31 in AWG31_EXTRA_KEYS:
+                setattr(core, _DIR_MAP[_k31], _p.get(_k31, ""))
         AWG_JC, AWG_JMIN, AWG_JMAX = _p["jc"], _p["jmin"], _p["jmax"]
         AWG_S1, AWG_S2, AWG_S3, AWG_S4 = _p["s1"], _p["s2"], _p["s3"], _p["s4"]
         AWG_H1, AWG_H2, AWG_H3, AWG_H4 = _p["h1"], _p["h2"], _p["h3"], _p["h4"]
@@ -1378,7 +1508,24 @@ def prompt_awg_exit_mode() -> None:
         if not (0 <= _pidx < len(_presets)):
             _pidx = 0
         _preset_name = _presets[_pidx]
-        _p = awgs_presets_generate(_preset_name)
+        # v5.5: пресет с версией протокола (3.1 → GenerateObfuscation31-набор)
+        _awg_pv = getattr(core, "AWG_PROTOCOL_VERSION", "2.0")
+        _p = awgs_presets_generate(_preset_name, protocol_version=_awg_pv)
+        if _awg_pv == "3.1":
+            from chimera.modules.awg_protocol import AWG31_EXTRA_KEYS
+            _DIR_MAP = {
+                "header_protection_key": "AWG_HEADER_PROTECTION_KEY",
+                "content_padding_addition": "AWG_CONTENT_PADDING_ADDITION",
+                "rekey_after_time": "AWG_REKEY_AFTER_TIME",
+                "rekey_timeout": "AWG_REKEY_TIMEOUT",
+                "reject_after_time": "AWG_REJECT_AFTER_TIME",
+                "keepalive_timeout": "AWG_KEEPALIVE_TIMEOUT",
+                "max_handshake_attempts": "AWG_MAX_HANDSHAKE_ATTEMPTS",
+                "random_trailers": "AWG_RANDOM_TRAILERS",
+                "disable_cookies": "AWG_DISABLE_COOKIES",
+            }
+            for _k31 in AWG31_EXTRA_KEYS:
+                setattr(core, _DIR_MAP[_k31], _p.get(_k31, ""))
         AWG_JC, AWG_JMIN, AWG_JMAX = _p["jc"], _p["jmin"], _p["jmax"]
         AWG_S1, AWG_S2, AWG_S3, AWG_S4 = _p["s1"], _p["s2"], _p["s3"], _p["s4"]
         AWG_H1, AWG_H2, AWG_H3, AWG_H4 = _p["h1"], _p["h2"], _p["h3"], _p["h4"]
@@ -1444,6 +1591,7 @@ def prompt_awg_exit_mode() -> None:
         warn("Введите 1 или 2")
 
     _box_row()
+    _box_row(f"  Протокол AWG:  {getattr(core, 'AWG_PROTOCOL_VERSION', '2.0')}")
     _box_row(f"  AWG exit:      {AWG_EXIT_HOST}:{AWG_EXIT_PORT}/udp")
     _box_row(f"  SSH auth:      {AWG_SSH_AUTH_METHOD}")
     _box_row(f"  Jc/Jmin/Jmax:  {AWG_JC}/{AWG_JMIN}/{AWG_JMAX}")

@@ -288,10 +288,11 @@ def awgs_supports_i2_i5(force_refresh: bool = False) -> bool:
 
 
 def _reset_supports_cache() -> None:
-    """Сбрасывает кэш awgs_supports_i2_i5() и awgs_supports_h_ranges().
-    Для тестов."""
+    """Сбрасывает кэш awgs_supports_i2_i5()/awgs_supports_h_ranges()/
+    awgs_supports_awg31(). Для тестов."""
     _SUPPORTS_I2_I5_CACHE.clear()
     _SUPPORTS_H_RANGES_CACHE.clear()
+    _SUPPORTS_AWG31_CACHE.clear()
 
 
 def _set_supports_cache(value: bool) -> None:
@@ -398,3 +399,124 @@ def _reset_old_tools_warn_flag() -> None:
     """Сбрасывает флаг 'показан ли warn про старый awg-tools'. Для тестов."""
     global _OLD_AWG_TOOLS_WARN_SHOWN
     _OLD_AWG_TOOLS_WARN_SHOWN = False
+
+
+# ── Проверка поддержки директив AWG 3.1 (v5.5) ───────────────────────────────
+
+# Кэш на процесс (тот же паттерн, что _SUPPORTS_I2_I5_CACHE).
+_SUPPORTS_AWG31_CACHE: dict = {}
+
+# Имена 3.1-директив для классификации stderr (генерируются из
+# awg_protocol.AWG31_DIRECTIVE_NAMES — единый источник правды).
+def _awg31_directive_tokens() -> tuple:
+    try:
+        from .awg_protocol import AWG31_DIRECTIVE_NAMES
+        return tuple(v.lower() for v in AWG31_DIRECTIVE_NAMES.values())
+    except Exception:
+        return ("headerprotectionkey", "contentpaddingaddition", "rekeyaftertime",
+                "rekeytimeout", "rejectaftertime", "keepalivetimeout",
+                "maxhandshakeattempts", "randomtrailers", "disablecookies")
+
+
+def awg_is_31_directive_error(output: str) -> bool:
+    """Классифицирует stderr/stdout от awg setconf как «инструменты не
+    знают директиву AWG 3.1» (Line unrecognized: HeaderProtectionKey= и т.п.).
+
+    Используется в awg_apply (self-heal осведомлённость: 3.1-ошибка НЕ
+    лечится переписыванием I2-I5 — нужно обновить amneziawg-tools) и в
+    диагностике.
+    """
+    if not output:
+        return False
+    output_lower = output.lower()
+    if not any(t in output_lower for t in ("line unrecognized",
+                                           "configuration parsing error")):
+        return False
+    return any(tok in output_lower for tok in _awg31_directive_tokens())
+
+
+def awgs_supports_awg31(force_refresh: bool = False) -> bool:
+    """Проверяет, поддерживает ли локальный amneziawg-tools директивы
+    AWG 3.1 (HeaderProtectionKey, ContentPaddingAddition, Rekey*,
+    RejectAfterTime, KeepaliveTimeout, MaxHandshakeAttempts,
+    RandomTrailers, DisableCookies).
+
+    Механизм — тот же, что awgs_supports_i2_i5: реальный `awg setconf`
+    на ВРЕМЕННОМ интерфейсе awgprobe<uuid> (единственный надёжный
+    детект; awg-quick strip — текстовый фильтр, даёт False Positive).
+
+    Safe default: True. Если проба невозможна (нет awg, нет CAP_NET_ADMIN,
+    unrelated error) — считаем, что поддерживает: установка 3.1 пойдёт,
+    а реальную ошибку покажет awgs_apply с точным stderr + подсказкой
+    обновить amneziawg-tools. Это соответствует философии существующего
+    детекта I2-I5 (лучше попробовать и откатиться, чем молча выкинуть
+    фичи).
+
+    Возвращает False ТОЛЬКО при явном «Line unrecognized: <3.1-директива>».
+    """
+    if not force_refresh and "result" in _SUPPORTS_AWG31_CACHE:
+        return _SUPPORTS_AWG31_CACHE["result"]
+
+    from .awg_protocol import awg31_generate_extra_params, awg_render_31_lines
+
+    # Sample conf: базовый 2.0-набор + полный блок 3.1-директив.
+    # PrivateKey — 32-байтный base64 (all-zeros валиден как Curve25519
+    # identity element), ListenPort = 0 (ephemeral, не конфликтует с awg0).
+    # 3.1-параметры генерируются РЕАЛЬНЫЕ (валидные диапазоны/ключ) —
+    # чтобы ошибка была именно про незнание директивы, а не про формат
+    # значения.
+    extra = awg31_generate_extra_params()
+    sample_conf = (
+        "[Interface]\n"
+        "PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n"
+        "ListenPort = 0\n"
+        "Jc = 3\n"
+        "Jmin = 40\n"
+        "Jmax = 70\n"
+        "S1 = 15\n"
+        "S2 = 20\n"
+        "S3 = 12\n"
+        "S4 = 12\n"
+        "H1 = 1000000000\n"
+        "H2 = 1200000000\n"
+        "H3 = 1400000000\n"
+        "H4 = 1600000000\n"
+        "I1 = <r 32>\n"
+        "# I2 = \n"
+        "# I3 = \n"
+        "# I4 = \n"
+        "# I5 = \n"
+        + awg_render_31_lines(extra)
+        + "\n"
+    )
+
+    ok, output = _run_setconf_check(sample_conf)
+
+    if not ok:
+        # Явная ошибка про 3.1-директиву → точно не поддерживается.
+        if awg_is_31_directive_error(output):
+            _SUPPORTS_AWG31_CACHE["result"] = False
+            return False
+        # Ошибка по другой причине (нет бинарника, нет прав, битый
+        # privkey и т.п.) — safe default True (даём установке шанс,
+        # реальный apply покажет точный stderr).
+        try:
+            core = _core_module()
+            core.log_to_file(
+                "WARN",
+                f"awgs_supports_awg31: awg setconf failed for "
+                f"non-3.1 reason, defaulting to True. stderr: {output[:300]}"
+            )
+        except Exception:
+            pass
+        _SUPPORTS_AWG31_CACHE["result"] = True
+        return True
+
+    # setconf прошёл — 3.1-директивы поддерживаются.
+    _SUPPORTS_AWG31_CACHE["result"] = True
+    return True
+
+
+def _set_supports_awg31_cache_for_tests(value: bool) -> None:
+    """Принудительно устанавливает кэш awgs_supports_awg31(). Для тестов."""
+    _SUPPORTS_AWG31_CACHE["result"] = value

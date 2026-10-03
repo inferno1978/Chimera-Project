@@ -62,7 +62,9 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     _box_bottom = core._box_bottom
     GREEN, NC, YELLOW, DIM = core.GREEN, core.NC, core.YELLOW, core.DIM
 
-    _box_top(f"Удаление AmneziaWG 2.0 (standalone)")
+    from .awg_state import awgs_state_get_protocol_version
+    from .awg_protocol import awg_protocol_label
+    _box_top(f"Удаление {awg_protocol_label(awgs_state_get_protocol_version())} (standalone)")
     _box_row()
     _box_bottom()
 
@@ -78,7 +80,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     info("Остановка сервисов...")
     awgs_stop_systemd()
     if is_cascade:
-        # Каскад: останавливаем awg1 + routing
+        # Каскад: останавливаем awg1 + routing + failover-таймер (v5.5.3)
         core._run(["systemctl", "stop", "awg-quick@awg1"],
                   check=False, quiet=True)
         core._run(["systemctl", "disable", "awg-quick@awg1"],
@@ -87,6 +89,9 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
                   check=False, quiet=True)
         core._run(["systemctl", "disable", "awg-cascade-routing"],
                   check=False, quiet=True)
+        # v5.5.3: мульти-exit failover (таймер + сервис + wrapper)
+        from .awg_cascade import awgs_cascade_failover_teardown
+        awgs_cascade_failover_teardown()
     # NAT-юнит (если создавался при установке)
     core._run(["systemctl", "stop", "awg-nat.service"],
               check=False, quiet=True)
@@ -102,6 +107,11 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     awg_nat_unit.unlink(missing_ok=True)
     if AWGS_SYSTEMD_CASCADE.exists():
         AWGS_SYSTEMD_CASCADE.unlink(missing_ok=True)
+    # v5.5.3: failover-юниты (на случай запуска uninstall без cascade_role)
+    for _u in ("/etc/systemd/system/awg-cascade-failover.timer",
+               "/etc/systemd/system/awg-cascade-failover.service"):
+        Path(_u).unlink(missing_ok=True)
+    Path("/usr/local/sbin/awg-cascade-failover.sh").unlink(missing_ok=True)
     core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
 
     # 3. Удаляем cron-файлы
@@ -267,7 +277,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     # Пользователь может удалить отдельно: apt remove amneziawg-dkms
 
     print()
-    success("Удаление AmneziaWG 2.0 завершено!")
+    success("Удаление AmneziaWG завершено!")
     print()
     _box_top(f"Готово")
     _box_row(f"  {GREEN}Удалено:{NC}")
@@ -275,6 +285,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     if is_cascade:
         _box_row(f"    • awg-quick@awg1.service")
         _box_row(f"    • awg-cascade-routing.service")
+        _box_row(f"    • awg-cascade-failover.timer/.service (v5.5.3)")
         _box_row(f"    • ipset {AWGS_IPSET_NAME}")
         _box_row(f"    • {AWGS_CASCADE_DIR}/")
     _box_row(f"    • {AWGS_SERVER_CONF}")
@@ -373,7 +384,9 @@ def do_awg_uninstall_menu() -> None:
     CYAN, NC, YELLOW, RED = core.CYAN, core.NC, core.YELLOW, core.RED
 
     print()
-    _box_top(f"Удаление AmneziaWG 2.0 (standalone)")
+    from .awg_state import awgs_state_get_protocol_version
+    from .awg_protocol import awg_protocol_label
+    _box_top(f"Удаление {awg_protocol_label(awgs_state_get_protocol_version())} (standalone)")
     _box_row()
     _box_row(f"  {YELLOW}Внимание!{NC} Это удалит:")
     _box_row(f"    • Все клиенты и их конфиги")

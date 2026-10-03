@@ -644,6 +644,7 @@ def do_manage_certbot_monitor() -> None:
     _box_row    = core._box_row
     _box_item   = core._box_item
     _box_bottom = core._box_bottom
+    _box_back   = core._box_back   # FIX: не был забинден — NameError на выходе
     STATE_FILE  = core.STATE_FILE
     BLUE = core.BLUE
     CYAN = core.CYAN

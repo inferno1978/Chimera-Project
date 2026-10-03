@@ -2385,43 +2385,64 @@ def _select_domain(telemt_port: int = 8443):
         _box_top("ВЫБОР FAKE TLS ДОМЕНА")
         _box_row()
         _box_info("Telemt маскируется под HTTPS сайта — DPI меньше подозревает.")
+        # v5.5.1 (sni_hygiene): ПРИОРИТЕТ — свой домен (own-site: nginx +
+        # LE-сертификат, IP↔домен↔сертификат совпадают). Маскарад под
+        # известные ресурсы (microsoft.com, yandex и т.п.) — триггер ToS
+        # РФ-хостингов и эвристик РКН; остаётся как явная кастомизация.
         _box_row(); _box_sep()
-        for k, (label, _) in _DOMAINS.items():
-            _box_item(k.rjust(2), label)
+        _box_item("1", "✅  Свой домен + свой сайт (nginx + Let's Encrypt)  ✓ рекомендуется")
+        _box_item("2", "📁  Известные домены (категории — осторожно: ToS РФ-хостингов)")
         _box_sep()
-        _box_item("99", "✏️   Свой домен")
-        _box_item(" Q", "← Назад (ivi.ru)")
+        _box_item(" Q", "← Назад")
         _box_bot(); print()
 
-        cat = proto_ask(f"{CYAN}Категория: {NC}", c=True).strip()
-        if cat.lower() == "q" or not cat:
+        cat = proto_ask(f"{CYAN}Выбор [1 — свой домен]: {NC}", c=True).strip() or "1"
+        if cat.lower() == "q":
             return "ivi.ru"
-        if cat == "99":
+        if cat == "1":
             return _select_own_domain_submenu(telemt_port)
-        if cat in _DOMAINS:
-            label, doms = _DOMAINS[cat]
-            _banner(); _box_top(label); _box_row()
-            any_marked = False
-            for i, d in enumerate(doms, 1):
-                if d in _PQ_RISKY:
-                    _box_item(str(i), f"{d}  {RED}[!]{NC}"); any_marked = True
-                elif d in _PQ_CONFIRMED:
-                    _box_item(str(i), f"{d}  {GREEN}✓{NC}"); any_marked = True
-                else:
-                    _box_item(str(i), d)
-            if any_marked:
-                _box_row()
-                _box_row(f"  {DIM}{RED}возможен блок iOS без OpenSSL 3.5+, "
-                         f"{GREEN}✓{NC}{DIM} подтверждено (не проверено нами){NC}")
-            _box_sep(); _box_item("Q", "← Назад"); _box_bot(); print()
-            p = proto_ask(f"{CYAN}Выбор [1-{len(doms)}]: {NC}", c=True).strip()
-            if p.lower() == "q": continue
-            try:
-                idx = int(p) - 1
-                if 0 <= idx < len(doms): return doms[idx]
-            except ValueError:
-                pass
-            return doms[0]
+        if cat in ("2",) or cat in _DOMAINS:
+            _banner()
+            _box_top("ИЗВЕСТНЫЕ DOMAINS — ВНИМАНИЕ")
+            _box_row()
+            _box_info("Маскировка под известный ресурс на VPS-IP = несоответствие")
+            _box_info("SNI и владельца IP — триггер ToS-блокировок РФ-хостингов")
+            _box_info("и эвристик РКН. Рекомендуется СВОЙ домен (пункт 1).")
+            _box_row(); _box_sep()
+            for k, (label, _) in _DOMAINS.items():
+                _box_item(k.rjust(2), label)
+            _box_sep()
+            _box_item(" Q", "← Назад")
+            _box_bot(); print()
+            cat = proto_ask(f"{CYAN}Категория: {NC}", c=True).strip()
+            if cat.lower() == "q" or not cat:
+                continue
+            if cat == "99":
+                return _select_own_domain_submenu(telemt_port)
+            if cat in _DOMAINS:
+                label, doms = _DOMAINS[cat]
+                _banner(); _box_top(label); _box_row()
+                any_marked = False
+                for i, d in enumerate(doms, 1):
+                    if d in _PQ_RISKY:
+                        _box_item(str(i), f"{d}  {RED}[!]{NC}"); any_marked = True
+                    elif d in _PQ_CONFIRMED:
+                        _box_item(str(i), f"{d}  {GREEN}✓{NC}"); any_marked = True
+                    else:
+                        _box_item(str(i), d)
+                if any_marked:
+                    _box_row()
+                    _box_row(f"  {DIM}{RED}возможен блок iOS без OpenSSL 3.5+, "
+                             f"{GREEN}✓{NC}{DIM} подтверждено (не проверено нами){NC}")
+                _box_sep(); _box_item("Q", "← Назад"); _box_bot(); print()
+                p = proto_ask(f"{CYAN}Выбор [1-{len(doms)}]: {NC}", c=True).strip()
+                if p.lower() == "q": continue
+                try:
+                    idx = int(p) - 1
+                    if 0 <= idx < len(doms): return doms[idx]
+                except ValueError:
+                    pass
+                return doms[0]
 
 
 def _select_own_domain_submenu(telemt_port: int):
@@ -2448,7 +2469,10 @@ def _select_own_domain_submenu(telemt_port: int):
     _box_sep(); _box_item("Q", "← Назад")
     _box_bot(); print()
 
-    mode = proto_ask(f"{CYAN}Режим [1/2] (Enter=1): {NC}", default="1", c=True).strip() or "1"
+    # v5.5.1: дефолт — own-site (2): IP↔домен↔сертификат совпадают,
+    # никаких известных ресурсов (sni_hygiene).
+    mode = proto_ask(f"{CYAN}Режим [1/2] (Enter=2 — рекомендуется): {NC}",
+                     default="2", c=True).strip() or "2"
 
     # ── Ввод домена (общий для обоих режимов) ──────────────────────────────
     try:
