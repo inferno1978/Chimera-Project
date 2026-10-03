@@ -184,7 +184,7 @@ def generate_fragment_client_config(
     uuid_val      = state.get("uuid", "")
     pub_key       = state.get("public_key", "")
     short_id      = state.get("short_id", "")
-    reality_dest  = state.get("reality_dest", "www.cloudflare.com")
+    reality_dest  = state.get("reality_dest", "")
     xtls_flow     = state.get("xtls_flow", "xtls-rprx-vision")
 
     if not server_host or not uuid_val:
@@ -267,8 +267,13 @@ def generate_fragment_client_config(
             },
         }
     else:
-        # REALITY
-        sni = reality_dest.split(":")[0] if ":" in reality_dest else reality_dest
+        # REALITY — v5.5.1: канонический SNI-рул (sni_hygiene.client_sni_for_state):
+        # Mode B + AWG-exit + reality_dest → reality_dest (совпадает с
+        # serverNames сервера), иначе — domain (свой домен). Прежний
+        # безусловный reality_dest с фолбэком www.cloudflare.com ломал Mode A
+        # (SNI не совпадал с serverNames=[domain]) и светил известный домен.
+        from chimera.modules.sni_hygiene import client_sni_for_state
+        sni = client_sni_for_state(state) or server_host
         outbound = {
             "tag":      "proxy",
             "protocol": "vless",

@@ -21,7 +21,7 @@ chimera/modules/singbox_config.py
       "listen_port": 8443,
       "version": 3,
       "users": [{"password": "...", "name": "..."}],
-      "handshake": {"server": "www.cloudflare.com", "server_port": 443},
+      "handshake": {"server": "<свой домен (sni_hygiene)>", "server_port": 443},
       "detour": "trojan-in",
       "tls": {
         "certificate": ["/etc/letsencrypt/live/example.com/fullchain.pem"],
@@ -113,6 +113,15 @@ def _build_shadowtls_inbound(state_ib: dict) -> dict:
     sb_users = [{"password": u["password"], "name": u.get("name", u.get("uuid", "")[:8])}
                 for u in users if u.get("password")]
 
+    # v5.5.1 (sni_hygiene): фолбэк handshake-домена — СВОЙ домен из
+    # state.json (Self-SNI: handshake к себе → xray→nginx с LE-сертификатом),
+    # не известный ресурс; константа — только последний резорт.
+    try:
+        from chimera.modules.singbox_common import shadowtls_handshake_default
+        _hs_fallback = shadowtls_handshake_default()
+    except Exception:
+        _hs_fallback = "www.cloudflare.com"
+
     inbound = {
         "type":         "shadowtls",
         "tag":          "shadowtls-in",
@@ -121,7 +130,7 @@ def _build_shadowtls_inbound(state_ib: dict) -> dict:
         "version":      state_ib.get("version", 3),
         "users":        sb_users,
         "handshake": {
-            "server":      handshake.get("server", "www.cloudflare.com"),
+            "server":      handshake.get("server") or _hs_fallback,
             "server_port": handshake.get("server_port", 443),
         },
         "detour":       state_ib.get("detour", "trojan-in"),

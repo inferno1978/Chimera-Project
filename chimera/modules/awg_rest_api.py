@@ -188,6 +188,23 @@ def awg_handle_get(handler, path: str, query: dict) -> bool:
                 "endpoint": state.get("endpoint_host") or state.get("endpoint", ""),
                 "peers_count": len(state.get("peers", [])),
                 "installed": True,
+                # v5.5 (AWG 3.1): версия протокола установки ("2.0" | "3.1";
+                # отсутствие ключа в старых state = "2.0")
+                "protocol_version": state.get("protocol_version", "2.0"),
+                # v5.5.3 (мульти-exit каскад): роль + список выходов.
+                # ТОЛЬКО имена/эндпоинты/версии — приватные ключи exit
+                # никогда не покидают state (инвариант модуля).
+                "cascade_role": state.get("cascade_role", ""),
+                "cascade_active_exit": state.get("cascade_active_exit", ""),
+                "cascade_exits": [
+                    {
+                        "name": e.get("name", ""),
+                        "endpoint": e.get("endpoint", ""),
+                        "port": e.get("port", 0),
+                        "protocol_version": e.get("protocol_version", "2.0"),
+                    }
+                    for e in (state.get("cascade_exits") or [])
+                ],
             })
         except Exception as e:
             handler._send_json({"error": str(e)}, 500)

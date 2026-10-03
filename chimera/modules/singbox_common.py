@@ -57,8 +57,32 @@ DEFAULT_PORT_TUIC_ALTERNATIVE = 443  # UDP/443 — параллельно с TCP
 # Маскировочные домены для ShadowTLS (по умолчанию).
 # ShadowTLS v3 делает честный TLS-handshake к этому домену, после чего
 # переключается на внутренний Trojan. Цензор видит «настоящий» TLS-ответ.
+#
+# v5.5.1 (sni_hygiene): ПРИОРИТЕТ — СВОЙ домен (см. shadowtls_handshake_default):
+# handshake к own domain:443 → xray REALITY (не-аутентичный клиент) → nginx
+# decoy-сокет с LE-сертификатом — честный TLS локально, БЕЗ внешних коннектов
+# к известным ресурсам (ToS РФ-хостингов / РКН). Константа ниже — последний
+# фолбэк (когда своего домена нет и пользователь ничего не выбрал).
 DEFAULT_SHADOWTLS_HANDSHAKE_HOST = "www.cloudflare.com"
 DEFAULT_SHADOWTLS_HANDSHAKE_PORT = 443
+
+
+def shadowtls_handshake_default() -> str:
+    """Приоритетный handshake-домен ShadowTLS: свой домен из state.json.
+
+    Свой домен → сервер делает TLS-handshake к самому себе (xray REALITY
+    не-аутентичный путь → nginx decoy с LE-сертификатом) — SNI на проводе
+    = свой домен, никаких известных ресурсов. Нет домена → старый дефолт
+    (явный выбор пользователя через меню пресетов остаётся доступен).
+    """
+    try:
+        from chimera.modules.sni_hygiene import own_masking_domain
+        own = own_masking_domain(_load_main_state())
+        if own:
+            return own
+    except Exception:
+        pass
+    return DEFAULT_SHADOWTLS_HANDSHAKE_HOST
 
 # SNI-пресеты для ShadowTLS (адаптировано из HYDRA-ULTIMATE, gr33nimax)
 # Курируемый список TLS 1.3 доменов для маскировки.

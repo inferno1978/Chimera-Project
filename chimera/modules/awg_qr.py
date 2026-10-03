@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Optional
 
 from .awg_constants import AWGS_KEYS_DIR
+from .awg_protocol import (
+    awg_is_31, awg_render_31_lines, awg_vpn_uri_protocol_version,
+    AWG31_DIRECTIVE_NAMES, AWG31_EXTRA_KEYS,
+)
 
 
 def _core_module():
@@ -36,6 +40,9 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     server_pubkey = server_state.get("server_pubkey", "")
     mtu = server_state.get("mtu", 1280)
     allow_ipv6 = server_state.get("allow_ipv6_tunnel", False)
+    # v5.5: версия протокола из state (отсутствие = "2.0" = прежнее
+    # поведение байт-в-байт; "3.1" — 9 транспортных директив в [Interface])
+    is_31 = awg_is_31(server_state.get("protocol_version", "2.0"))
 
     client_ip = peer.get("client_ip", "")
     client_ipv6 = peer.get("client_ipv6", "")
@@ -89,6 +96,13 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
             lines.append(f"{key.upper()} = {val}")
         else:
             lines.append(f"# {key.upper()} = ")
+    # v5.5 — AWG 3.1: 9 транспортных директив сразу после I1-I5
+    # (HeaderProtectionKey, ContentPaddingAddition, таймеры, RandomTrailers,
+    # DisableCookies) — в [Interface], тем же блоком что и в серверном
+    # конфиге (awg_standalone.awgs_build_server_conf). Единое правило
+    # v5.4.5: пустые комментируются «# Key = ».
+    if is_31:
+        lines.append(awg_render_31_lines(params))
     lines.append("")
     lines.append("[Peer]")
     lines.append(f"PublicKey = {server_pubkey}")
@@ -169,6 +183,14 @@ def awgs_qr_build_vpn_uri(peer: dict, server_state: dict) -> str:
         v = params.get(k, "")
         if v:
             inner[k.upper()] = str(v)
+    # v5.5 — AWG 3.1: 9 транспортных параметров в inner JSON (строками,
+    # как остальные значения — контракт формата Amnezia Client).
+    # HeaderProtectionKey и прочие директивы клиентского .conf.
+    if awg_is_31(server_state.get("protocol_version", "2.0")):
+        for k in AWG31_EXTRA_KEYS:
+            v = params.get(k, "")
+            if v:
+                inner[AWG31_DIRECTIVE_NAMES[k]] = str(v)
     inner["allowed_ips"] = ["0.0.0.0/0"]
     inner["client_ip"] = client_ip
     inner["client_ipv6"] = client_ipv6 or ""
@@ -191,7 +213,11 @@ def awgs_qr_build_vpn_uri(peer: dict, server_state: dict) -> str:
                 "isThirdPartyConfig": True,
                 "last_config": inner_json,
                 "port": str(port),
-                "protocol_version": "2",
+                # v5.5: версия протокола из state — "2" для 2.0
+                # (историческое значение), "3" для 3.1 (AmneziaVPN
+                # 5.0.1.5+ ожидает мажор протокола в этом поле).
+                "protocol_version": awg_vpn_uri_protocol_version(
+                    server_state.get("protocol_version", "2.0")),
                 "transport_proto": "udp",
             },
             "container": "amnezia-awg",

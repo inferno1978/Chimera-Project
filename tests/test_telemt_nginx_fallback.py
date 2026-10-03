@@ -1930,12 +1930,15 @@ class TestSelectDomainReturns(unittest.TestCase):
 
     def test_known_category_returns_str(self):
         """Выбор домена из категории '1' (Поисковики) возвращает строку.
-        Категория '1' — ['yandex.ru', 'ya.ru', 'mail.ru', ...]; выбор '1' → yandex.ru.
+
+        v5.5.1 (sni_hygiene): меню переработано — свой домен теперь пункт 1
+        и дефолт; известные домены — пункт 2 → категории. Последовательность:
+        "2" (известные домены) → "1" (категория Поисковики) → "1" (yandex.ru).
         """
         from chimera.modules import mtproto
-        # Мокаем proto_ask: сначала ввод "1" (категория), затем "1" (домен).
+        # Мокаем proto_ask: "2" (раздел известных), "1" (категория), "1" (домен).
         with patch("chimera.modules.mtproto.proto_ask",
-                   side_effect=["1", "1"]), \
+                   side_effect=["2", "1", "1"]), \
              patch("chimera.modules.mtproto._banner"), \
              patch("chimera.modules.mtproto._box_top"), \
              patch("chimera.modules.mtproto._box_row"), \

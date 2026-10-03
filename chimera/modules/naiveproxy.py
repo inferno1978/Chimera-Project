@@ -143,7 +143,26 @@ _GITHUB_API      = "https://api.github.com/repos/klzgrad/naiveproxy/releases/lat
 # и перебираются автоматически через fetch_package(NAIVEPROXY_SPEC).
 
 _DEFAULT_PORT    = 443
-_DEFAULT_FAKE    = "https://www.bing.com"
+# v5.5.1 (sni_hygiene): прежний дефолт https://www.bing.com — домен
+# известного ресурса: probe_resistance редиректит чужие подключения на
+# этот URL (Location-заголовок = bing.com) — маскарад под чужой сайт на
+# нашем IP. Теперь дефолт — свой домен из state.json (https://<domain>/ —
+# редирект на СВОЙ decoy-сайт максимально естественен); bing — только
+# если своего домена нет (модуль просит домен в любом случае — дефолт
+# почти всегда перекрывается).
+def _fake_url_default() -> str:
+    try:
+        import json as _json
+        _ms = {}
+        _msp = _MODULE_STATE.parent / "state.json"
+        if _msp.exists():
+            _ms = _json.loads(_msp.read_text()) or {}
+        _dom = str(_ms.get("domain") or "").strip().lower()
+        if _dom:
+            return f"https://{_dom}/"
+    except Exception:
+        pass
+    return "https://www.bing.com"
 _BOX_W           = 66
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -649,7 +668,7 @@ def _run_install_inner() -> None:
     state = proto_load_state(_MODULE_STATE)
     old_domain    = state.get("domain", "")
     old_port      = state.get("port", _DEFAULT_PORT)
-    old_fake      = state.get("fake_url", _DEFAULT_FAKE)
+    old_fake      = state.get("fake_url") or _fake_url_default()
     old_upstream  = state.get("upstream", "")
 
     os.system("clear")
@@ -1003,7 +1022,7 @@ def _add_user(state: dict) -> None:
     # Применяем новый конфиг
     err = _apply_config(
         state["domain"], state["port"], users,
-        state.get("fake_url", _DEFAULT_FAKE),
+        state.get("fake_url") or _fake_url_default(),
         state.get("probe_secret", ""),
         state.get("upstream", ""),
     )
@@ -1103,7 +1122,7 @@ def _delete_user(users: list, state: dict) -> None:
 
     _apply_config(
         state["domain"], state["port"], users,
-        state.get("fake_url", _DEFAULT_FAKE),
+        state.get("fake_url") or _fake_url_default(),
         state.get("probe_secret", ""),
         state.get("upstream", ""),
     )
@@ -1187,7 +1206,7 @@ def ensure_user_full(user: dict) -> bool:
             state.get("domain", ""),
             state.get("port", _DEFAULT_PORT),
             users,
-            state.get("fake_url", _DEFAULT_FAKE),
+            state.get("fake_url") or _fake_url_default(),
             state.get("probe_secret", ""),
             state.get("upstream", ""),
         )
@@ -1223,7 +1242,7 @@ def remove_user_full(user: dict) -> bool:
             state.get("domain", ""),
             state.get("port", _DEFAULT_PORT),
             new_users,
-            state.get("fake_url", _DEFAULT_FAKE),
+            state.get("fake_url") or _fake_url_default(),
             state.get("probe_secret", ""),
             state.get("upstream", ""),
         )
@@ -1293,7 +1312,7 @@ def set_password_full(user: dict, password: Optional[str] = None) -> Optional[st
             state.get("domain", ""),
             state.get("port", _DEFAULT_PORT),
             users,
-            state.get("fake_url", _DEFAULT_FAKE),
+            state.get("fake_url") or _fake_url_default(),
             state.get("probe_secret", ""),
             state.get("upstream", ""),
         )
@@ -1355,7 +1374,7 @@ def _cascade_menu() -> None:
         proto_save_state(_MODULE_STATE, state)
         err = _apply_config(
             state["domain"], state["port"], state.get("users", []),
-            state.get("fake_url", _DEFAULT_FAKE),
+            state.get("fake_url") or _fake_url_default(),
             state.get("probe_secret", ""),
             new_upstream,
         )
@@ -1368,7 +1387,7 @@ def _cascade_menu() -> None:
         proto_save_state(_MODULE_STATE, state)
         _apply_config(
             state["domain"], state["port"], state.get("users", []),
-            state.get("fake_url", _DEFAULT_FAKE),
+            state.get("fake_url") or _fake_url_default(),
             state.get("probe_secret", ""),
             "",
         )

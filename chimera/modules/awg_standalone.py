@@ -31,6 +31,7 @@ from .awg_constants import (
     AWGS_BIN, AWGS_QUICK_BIN, AWGS_SYSTEMD_AWG_QUICK,
     AWGS_DEFAULT_PARAMS,
     AWGS_PORT_MIN, AWGS_PORT_MAX,
+    AWGS_DEFAULT_PROTOCOL_VERSION,
 )
 from .awg_state import (
     awgs_state_load, awgs_state_save, awgs_state_init,
@@ -205,6 +206,11 @@ def awgs_install_dkms() -> bool:
     # v5.4.5: быстрый путь — всё уже установлено (идемпотентность +
     # устойчивость к недоступному PPA/keyserver при готовых пакетах)
     if awgs_kmod_already_ready():
+        # v5.5.2 (E2E fi1): даже при готовых пакетах userspace-стабы
+        # от Mode B эпохи затемняют which awg → syncconf уходит в
+        # amneziawg-go (не умеет show/syncconf) → пиры применяются в
+        # conf, но НЕ к живому интерфейсу — handshake молча не сходится
+        _awgs_remove_shadowing_stubs()
         core.success("AmneziaWG уже установлен (awg/awg-quick + kmod найдены) — "
                      "переустановка пакетов не требуется")
         return True
@@ -381,6 +387,17 @@ def awgs_install_dkms() -> bool:
         # apt update (толерантный к кратковременному outage PPA)
         r = core._run(["apt-get", "update", "-y"], capture=True, check=False)
         if r.returncode != 0:
+            # v5.5.2 (E2E fi1): висячий apt.systemd.daily держит lock →
+            # update молча проваливается, PPA-индексы не обновляются.
+            # Лечим (TERM→KILL зависших системных apt) и ретраим.
+            stderr = r.stderr or ""
+            if ("could not get lock" in stderr.lower()
+                    or "held by process" in stderr.lower()):
+                if _awgs_apt_lock_heal():
+                    time.sleep(1)
+                    r = core._run(["apt-get", "update", "-y"],
+                                  capture=True, check=False)
+        if r.returncode != 0:
             # Если ошибка только на PPA Amnezia — продолжаем (issue #68 bivlked)
             stderr = r.stderr or ""
             if "amnezia" in stderr.lower():
@@ -391,11 +408,21 @@ def awgs_install_dkms() -> bool:
                 core.log_to_file("WARN", f"apt update: {stderr[-500:]}")
 
         # Проверяем, что пакет amneziawg-dkms появился в apt-cache
-        r = core._run(["apt-cache", "show", "amneziawg-dkms"],
-                      capture=True, check=False)
-        if r.returncode != 0 or not r.stdout.strip():
+        def _cache_has_dkms() -> bool:
+            rr = core._run(["apt-cache", "show", "amneziawg-dkms"],
+                           capture=True, check=False)
+            return rr.returncode == 0 and bool(rr.stdout.strip())
+
+        if not _cache_has_dkms():
+            # v5.5.2 (E2E fi1): вторая попытка после лечения лока —
+            # индексы PPA могли не обновиться из-за apt-lock.
+            if _awgs_apt_lock_heal():
+                core._run(["apt-get", "update", "-y"],
+                          check=False, quiet=True)
+            if _cache_has_dkms():
+                core.success("amneziawg-dkms найден в apt-cache после ретрая")
+        if not _cache_has_dkms():
             core.warn("Пакет amneziawg-dkms не найден в apt-cache после обновления PPA")
-            core.warn(f"apt-cache stderr: {r.stderr[-300:] if r.stderr else '(пусто)'}")
             core.warn("Возможно PPA amnezia/ppa временно недоступен или GPG-ключ не подошёл")
             return _awgs_install_dkms_fallback()
 
@@ -416,6 +443,10 @@ def awgs_install_dkms() -> bool:
                     core.warn(f"  {line.strip()}")
             core.warn("→ Пробуем Go-версию (userspace) как fallback")
             return _awgs_install_dkms_fallback()
+
+        # v5.5.2 (E2E fi1): пакеты установлены — убрать userspace-стабы,
+        # затемняющие пакетные awg/awg-quick (наследие Mode B эпохи)
+        _awgs_remove_shadowing_stubs()
     except Exception as e:
         core.log_to_file("ERROR", f"awgs_install_dkms exception: {e}")
         core.warn(f"Исключение при установке DKMS: {e}")
@@ -468,10 +499,168 @@ def _awgs_install_dkms_fallback() -> bool:
         from .awg_transport import _awg_install_go_version
         if _awg_install_go_version():
             core.success("amneziawg Go-версия установлена (userspace)")
+            # v5.5.2 (E2E fi1): без пакетного amneziawg-tools юнита
+            # awg-quick@.service не существует → сервис not-found,
+            # туннель не поднимается. Ставим userspace-юнит.
+            if not _awgs_install_userspace_unit():
+                core.warn("userspace: юнит awg-quick@.service создать "
+                          "не удалось — сервис не поднимется")
+            core.warn("userspace-режим (amneziawg-go): производительность "
+                      "ниже kernel-модуля. При возможности установите "
+                      "amneziawg-dkms из PPA amnezia/ppa")
             return True
     except Exception as e:
         core.log_to_file("ERROR", f"awgs_install_dkms_fallback: {e}")
     return False
+
+
+def _awgs_install_userspace_unit() -> bool:
+    """v5.5.2: юнит awg-quick@.service для userspace (go) standalone.
+
+    Пакет amneziawg-tools приносит /lib/systemd/system/awg-quick@.service;
+    в userspace-режиме (go-fallback) пакет не ставится — создаём
+    /etc/systemd/system-юнит на стаб-обёртку awg-quick. Юнит создаём
+    ТОЛЬКО если юнита ещё нигде нет (иначе перекрыли бы пакетный).
+    """
+    core = _core_module()
+    for unit_path in (
+        "/lib/systemd/system/awg-quick@.service",
+        "/usr/lib/systemd/system/awg-quick@.service",
+        "/etc/systemd/system/awg-quick@.service",
+    ):
+        if Path(unit_path).exists():
+            core.info(f"Юнит awg-quick@.service уже существует: {unit_path}")
+            return True
+    content = (
+        "[Unit]\n"
+        "Description=AmneziaWG userspace (amneziawg-go) for %i\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        "ExecStart=/usr/local/bin/awg-quick up %i\n"
+        "ExecStop=/usr/local/bin/awg-quick down %i\n"
+        "TimeoutStartSec=30\n\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+    try:
+        Path("/etc/systemd/system/awg-quick@.service").write_text(content)
+        core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
+        core.success("Юнит awg-quick@.service создан (userspace-режим)")
+        return True
+    except Exception as e:
+        core.log_to_file("ERROR", f"_awgs_install_userspace_unit: {e}")
+        return False
+
+
+def _awgs_remove_shadowing_stubs(paths: dict | None = None) -> None:
+    """v5.5.2 (E2E fi1): убрать userspace-стабы, затемняющие пакетный AWG.
+
+    Наследие userspace-эпохи Mode B: /usr/local/bin/awg и awg-quick
+    (обёртки над amneziawg-go) стоят ВЫШЕ /usr/bin в PATH. При
+    установленных пакетах amneziawg-tools все вызовы which awg → стаб
+    → amneziawg-go, который не умеет show/syncconf: пиры применяются
+    в .conf и state, но НЕ к живому kernel-интерфейсу — handshake
+    молча не сходится (E2E fi1 2026-10-03: cascade_entry в conf,
+    latest-handshakes = 0).
+
+    Удаляем ТОЛЬКО при наличии пакетного аналога (чистый userspace-режим
+    без пакетов не трогаем). Также убираем /etc/systemd/system/
+    awg-quick@.service (userspace-юнит), если есть пакетный юнит —
+    иначе /etc перекрывает /lib.
+
+    paths — DI для тестов (словарь путей); по умолчанию системные пути.
+    """
+    core = _core_module()
+    P = paths or {
+        "stub_awg": "/usr/local/bin/awg",
+        "pkg_awg": "/usr/bin/awg",
+        "stub_quick": "/usr/local/bin/awg-quick",
+        "pkg_quick": "/usr/bin/awg-quick",
+        "etc_unit": "/etc/systemd/system/awg-quick@.service",
+        "lib_unit": "/lib/systemd/system/awg-quick@.service",
+        "usr_unit": "/usr/lib/systemd/system/awg-quick@.service",
+    }
+    removed = []
+    for stub_key, pkg_key in (("stub_awg", "pkg_awg"),
+                              ("stub_quick", "pkg_quick")):
+        stub, pkg = Path(P[stub_key]), Path(P[pkg_key])
+        if stub.exists() and pkg.exists():
+            try:
+                stub.unlink()
+                removed.append(str(stub))
+            except OSError as e:
+                core.log_to_file("WARN", f"unlink {stub}: {e}")
+    etc_unit = Path(P["etc_unit"])
+    pkg_unit = any(Path(P[k]).exists() for k in ("lib_unit", "usr_unit"))
+    if etc_unit.exists() and pkg_unit:
+        try:
+            etc_unit.unlink()
+            removed.append(str(etc_unit))
+        except OSError as e:
+            core.log_to_file("WARN", f"unlink {etc_unit}: {e}")
+    if removed:
+        core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
+        core.warn("Удалены userspace-остатки, затемнявшие пакетный "
+                  f"AmneziaWG: {', '.join(removed)}")
+
+
+def _awgs_apt_lock_heal() -> bool:
+    """v5.5.2: лечение висячих apt-локов перед установкой пакетов.
+
+    Реальный кейс (E2E fi1 2026-10-03): apt.systemd.daily update завис
+    (недоступный репозиторий, http-метод без таймаута) и держит
+    /var/lib/apt/lists/lock сутками → apt-get update инсталлера молча
+    проваливается → PPA-индексы не обновляются → ложный fallback на
+    userspace-go. Держателя локa определяем через fuser; если это
+    системное apt-обслуживание (apt.systemd.daily) или apt-get,
+    висящий дольше 30 минут — завершаем (TERM, затем KILL) и логируем.
+    Чужие/свежие apt-процессы НЕ трогаем.
+    Возвращает True, если что-то было завершено.
+    """
+    core = _core_module()
+    r = core._run(
+        ["bash", "-c",
+         "fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend "
+         "/var/lib/dpkg/lock /var/cache/apt/archives/lock 2>/dev/null"],
+        capture=True, check=False)
+    pids = set()
+    for tok in (r.stdout or "").split():
+        tok = tok.strip().strip(":")
+        if tok.isdigit():
+            pids.add(tok)
+    killed = []
+    for pid in sorted(pids):
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = (f.read().decode("utf-8", "replace")
+                       .replace("\0", " ").strip())
+            et = core._run(["ps", "-o", "etimes=", "-p", pid],
+                           capture=True, check=False).stdout.strip()
+            etime = int(et) if et.isdigit() else 0
+        except (OSError, ValueError):
+            continue
+        is_daily = "apt.systemd.daily" in cmd
+        is_stale_aptget = "apt-get" in cmd and etime > 1800
+        if not (is_daily or is_stale_aptget):
+            continue
+        core.warn(f"Зависший apt-процесс (pid {pid}, {etime}s): "
+                  f"{cmd[:80]}")
+        core._run(
+            ["bash", "-c",
+             f"pkill -TERM -P {pid} 2>/dev/null; kill -TERM {pid} 2>/dev/null; "
+             f"sleep 2; "
+             f"pkill -KILL -P {pid} 2>/dev/null; kill -KILL {pid} 2>/dev/null; "
+             f"true"],
+            check=False, quiet=True)
+        killed.append(pid)
+    if killed:
+        core.warn(f"Зависшие apt-процессы завершены: {', '.join(killed)} "
+                  "(системное apt-обслуживание блокировало установку)")
+        time.sleep(1)
+    return bool(killed)
 
 
 # ============================================================================
@@ -591,52 +780,60 @@ AWGS_PARAMS_SPEC = [
      "Доп. junk в under-load пакетах (при загрузке сервера). 0 = выключено."),
     ("s4", "S4 (Transport packet junk size)",
      0, 32, 0,
-     "Доп. junk в transport-пакетах. 0 = выключено."),
-    ("h1", "H1 (Init packet magic header)",
-     0, 255, 1,
-     "Magic header для init-пакета (0-255). "
-     "Стандартные значения: H1=1, H2=2, H3=3, H4=4 (как в upstream)."),
-    ("h2", "H2 (Response packet magic header)",
-     0, 255, 2,
-     "Magic header для response-пакета."),
-    ("h3", "H3 (Under-load packet magic header)",
-     0, 255, 3,
-     "Magic header для under-load пакетов."),
-    ("h4", "H4 (Transport packet magic header)",
-     0, 255, 4,
-     "Magic header для transport-пакетов."),
+     "Доп. junk в transport-пакетах. 0 = выключено. Протокольный лимит — 32 байта."),
 ]
 
-# I1-I5 — опциональные, hex-строки (не числа)
+# H1-H4 — отдельный блок ввода (v5.5.1): официальный формат AWG 2.0+ —
+# «N» ИЛИ диапазон «N-M» в 0..INT32_MAX (wiki.amnezia.host: одиночные
+# числа — формат legacy 1.0; amneziawg-tools config.c →
+# u32_range_from_string). Диапазоны НЕ должны пересекаться — пакеты из
+# зоны перекрытия не классифицируются и молча дропаются
+# (device/receive.go DeterminePacketTypeAndPadding).
+AWGS_H_UPPER_LIMIT = 2147483647  # INT32_MAX
+
+# I1-I5 — опциональные CPS-цепочки (мини-язык тегов amneziawg-go).
 AWGS_PARAMS_SPEC_HEX = [
     # (key, label, recommended, description)
-    ("i1", "I1 (Init packet junk allowed IP)",
+    ("i1", "I1 (Init packet junk — CPS-цепочка)",
      "random",
-     "Hex-строка (48-64 hex chars = 24-32 байта). "
-     "Опционально — оставьте пустым если не уверены. "
+     "CPS-цепочка из тегов amneziawg-go: <b 0xHEX>, <t>, <r N>, <rc N>, "
+     "<rd N>, <d>, <ds>, <dz N> (+ <c> — только kernel-module, "
+     "НЕ для клиентов-приложений). Шорткаты: auto = <r N>, "
+     "quic = QUIC Initial (RFC 9000, порт 443), dns = DNS A-запрос "
+     "(RFC 1035, порт 53), tls = TLS ClientHello (RFC 8446). "
      "Tele2 Красноярск/Мегафон: ОСТАВИТЬ ПУСТЫМ (иначе блокировка). "
-     "Введите 'auto' для случайной генерации, или hex вручную."),
-    ("i2", "I2 (Response packet junk allowed IP)",
+     "Голый hex — формат AWG 1.5, принимается, но НЕ рекомендуется."),
+    ("i2", "I2 (Response packet junk — CPS-цепочка)",
      "",
      "Опционально. Рекомендуется пустым."),
-    ("i3", "I3 (Under-load packet junk allowed IP)",
+    ("i3", "I3 (Under-load packet junk — CPS-цепочка)",
      "",
      "Опционально. Рекомендуется пустым."),
-    ("i4", "I4 (Transport packet junk allowed IP)",
+    ("i4", "I4 (Transport packet junk — CPS-цепочка)",
      "",
      "Опционально. Рекомендуется пустым."),
-    ("i5", "I5 (Transport packet junk IPv6 allowed IP)",
+    ("i5", "I5 (Transport packet junk IPv6 — CPS-цепочка)",
      "",
      "Опционально. Рекомендуется пустым."),
 ]
 
 
-def awgs_prompt_custom_params() -> dict:
+def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
     """
-    Интерактивный ввод всех параметров обфускации AWG 2.0.
+    Интерактивный ввод ВСЕХ параметров обфускации AWG (2.0 или 3.1).
     Для каждого параметра показывает: описание, диапазон, рекомендуемое значение.
     Пользователь может Enter (значение по умолчанию) или ввести своё.
-    Возвращает dict с ключами jc/jmin/jmax/s1-s4/h1-h4/i1-i5.
+
+    v5.5.1 — полная поддержка официального синтаксиса:
+      • H1-H4 — «N» или диапазон «N-M» (0..INT32_MAX, без пересечений);
+      • I1-I5 — CPS-цепочки всех тегов amneziawg-go + шорткаты профилей
+        мимикрии (auto/quic/dns/tls);
+      • 3.1 — ручной ввод и 9 транспортных директив (HeaderProtectionKey,
+        ContentPaddingAddition «N»/«N-M», таймеры, RandomTrailers/
+        DisableCookies «on»/«off»).
+
+    Возвращает dict с ключами jc/jmin/jmax/s1-s4/h1-h4/i1-i5 (+ 9 ключей
+    3.1 при protocol_version="3.1"), либо None при провале валидации.
     """
     core = _core_module()
     info = core.info
@@ -645,6 +842,17 @@ def awgs_prompt_custom_params() -> dict:
         core.CYAN, core.NC, core.GREEN, core.YELLOW, core.DIM, core.BOLD
     )
     import random
+    from .awg_protocol import (
+        awg_is_31, awg_protocol_label, awg31_generate_extra_params,
+        AWG31_DIRECTIVE_NAMES,
+    )
+    from .awg_presets import (
+        _generate_non_overlapping_h_values, _generate_non_overlapping_h_values_31,
+        awg_i1_mimicry_generate, _is_valid_cps_or_legacy_hex,
+        _cps_has_kernel_only_tags,
+    )
+
+    is_31 = awg_is_31(protocol_version)
 
     print()
     _box_top = core._box_top
@@ -652,17 +860,19 @@ def awgs_prompt_custom_params() -> dict:
     _box_sep = core._box_sep
     _box_bottom = core._box_bottom
 
-    _box_top(f"Ручная настройка параметров обфускации AWG 2.0")
+    _box_top(f"Ручная настройка параметров обфускации {awg_protocol_label(protocol_version)}")
     _box_row()
     _box_row(f"  {DIM}Для каждого параметра укажите значение или Enter для рекомендуемого.{NC}")
-    _box_row(f"  {DIM}Рекомендации основаны на тестах bivlked/amneziawg-installer.{NC}")
+    _box_row(f"  {DIM}Рекомендации основаны на тестах bivlked/amneziawg-installer{NC}")
+    if is_31:
+        _box_row(f"  {DIM}и констрейнтах официальной AWG 3.1 (wiki.amnezia.host).{NC}")
     _box_row()
     _box_bottom()
     print()
 
     params = {}
 
-    # Числовые параметры
+    # Числовые параметры (Jc/Jmin/Jmax/S1-S4)
     for key, label, vmin, vmax, recommended, desc in AWGS_PARAMS_SPEC:
         print(f"{BOLD}{label}{NC}")
         print(f"  {DIM}{desc}{NC}")
@@ -687,35 +897,185 @@ def awgs_prompt_custom_params() -> dict:
         params[key] = val
         print()
 
-    # Hex-параметры (I1-I5)
-    print(f"{BOLD}Опциональные параметры (I1-I5):{NC}")
+    # H1-H4 — официальный формат «N» / «N-M» (v5.5.1)
+    print(f"{BOLD}H1-H4 — magic headers (официальный формат AWG 2.0+: «N» или «N-M» до {AWGS_H_UPPER_LIMIT}){NC}")
+    print(f"  {DIM}Диапазоны скрывают заголовок от DPI; не должны пересекаться между собой.{NC}")
+    print(f"  {DIM}Значения 1-4 не используйте — это узнаваемые vanilla-WireGuard типы сообщений.{NC}")
+    print(f"  {GREEN}Рекомендуется:{NC} auto — непересекающиеся диапазоны" +
+          (f" (узкие ~20k, фикс бага amneziawg-go в 3.1)" if is_31 else ""))
+    _h_vals = None
+    while True:
+        _h_auto = input(f"  {CYAN}H1-H4 ['auto' или четыре значения через пробел, напр. "
+                        f"'2135087609-2135093954 2147225277 2147461177 2147478893-2147482205']: {NC}").strip()
+        if not _h_auto or _h_auto.lower() == "auto":
+            _h_gen = (_generate_non_overlapping_h_values_31() if is_31
+                      else _generate_non_overlapping_h_values())
+            _h_vals = [str(v) for v in _h_gen]
+            info(f"  Сгенерированы H1-H4: {' '.join(_h_vals)}")
+            break
+        parts = _h_auto.split()
+        if len(parts) != 4:
+            print(f"  {YELLOW}Нужно 4 значения (H1 H2 H3 H4) или 'auto'{NC}")
+            continue
+        ok_h = True
+        for p in parts:
+            if not (p.isdigit() or ("-" in p and p.split("-", 1)[0].isdigit()
+                                    and p.split("-", 1)[1].isdigit())):
+                print(f"  {YELLOW}'{p}' не «N» и не «N-M»{NC}")
+                ok_h = False
+                break
+            _lo = int(p.split("-")[0])
+            _hi = int(p.split("-")[-1])
+            if _lo > _hi or _hi > AWGS_H_UPPER_LIMIT:
+                print(f"  {YELLOW}'{p}': lo>hi или превышает INT32_MAX{NC}")
+                ok_h = False
+                break
+            if 1 <= _lo <= 4 or 1 <= _hi <= 4:
+                warn(f"  '{p}' содержит значения 1-4 — узнаваемые vanilla-WireGuard "
+                     f"типы сообщений; рекомендуется диапазон от 5")
+        if not ok_h:
+            continue
+        # Проверка пересечений
+        _h_parsed = []
+        for p in parts:
+            if "-" in p:
+                _lo, _hi = p.split("-", 1)
+                _h_parsed.append((int(_lo), int(_hi)))
+            else:
+                _iv = int(p)
+                _h_parsed.append((_iv, _iv))
+        _overlap = False
+        for _i in range(4):
+            for _j in range(_i + 1, 4):
+                if _h_parsed[_i][0] <= _h_parsed[_j][1] and _h_parsed[_j][0] <= _h_parsed[_i][1]:
+                    print(f"  {YELLOW}H{_i+1} и H{_j+1} пересекаются — пакеты из зоны "
+                          f"перекрытия не классифицируются и дропаются{NC}")
+                    _overlap = True
+        if _overlap:
+            continue
+        _h_vals = parts
+        break
+    params["h1"], params["h2"], params["h3"], params["h4"] = _h_vals
+    print()
+
+    # CPS-параметры (I1-I5)
+    print(f"{BOLD}Опциональные параметры (I1-I5) — CPS-цепочки:{NC}")
     print(f"  {DIM}Оставьте пустым (Enter) если не уверены — большинство операторов не требуют.{NC}")
     print()
     for key, label, recommended, desc in AWGS_PARAMS_SPEC_HEX:
         print(f"{BOLD}{label}{NC}")
         print(f"  {DIM}{desc}{NC}")
         if recommended == "random":
-            print(f"  {GREEN}Рекомендуется:{NC} auto (случайная генерация 24-32 байта)")
+            print(f"  {GREEN}Рекомендуется:{NC} auto — нейтральный <r N> (безопасен для всех клиентов)")
         elif recommended:
             print(f"  {GREEN}Рекомендуется:{NC} {recommended}")
         else:
             print(f"  {GREEN}Рекомендуется:{NC} пусто")
-        val = input(f"  {CYAN}Значение (Enter=пусто, 'auto'=случайный): {NC}").strip()
-        if val.lower() == "auto":
-            # Генерируем случайный hex 28 байт (56 hex chars)
-            i1_len = random.randint(24, 32)
-            val = "".join(random.choices("0123456789abcdef", k=i1_len * 2))
-            info(f"  Сгенерирован {key}: {val[:32]}...")
-        elif val and not all(c in "0123456789abcdefABCDEF" for c in val):
-            warn(f"  '{val}' не hex — игнорирую (оставляю пустым)")
-            val = ""
+        while True:
+            val = input(f"  {CYAN}Значение (Enter=пусто, auto/quic/dns/tls/CPS-цепочка): {NC}").strip()
+            if not val:
+                val = ""
+                break
+            _low = val.lower()
+            if _low == "auto":
+                val = awg_i1_mimicry_generate("random")
+                info(f"  Сгенерирован {key}: {val}")
+                break
+            if _low in ("quic", "dns", "tls"):
+                val = awg_i1_mimicry_generate(_low + "_mimicry")
+                info(f"  Сгенерирован {key} (профиль {_low}): {val}")
+                if _low in ("quic", "dns"):
+                    info(f"  Под маскировку {_low.upper()} желательно подходящее "
+                         f"значение AWG-порта (QUIC — 443, DNS — 53)")
+                break
+            if not _is_valid_cps_or_legacy_hex(val):
+                warn(f"  Не похоже на CPS-цепочку (<b 0x...>, <t>, <r N>, <rc N>, "
+                     f"<rd N>, <d>, <ds>, <dz N>) и не hex — попробуйте ещё раз")
+                continue
+            if _cps_has_kernel_only_tags(val):
+                warn(f"  В цепочке есть <c> — тег ТОЛЬКО модуля ядра Linux; "
+                     f"клиентские приложения Amnezia (Android/iOS/Windows/macOS) "
+                     f"отвергнут весь junk-пакет. Продолжаем только для "
+                     f"kernel-module клиентов")
+            if all(c in "0123456789abcdefABCDEF" for c in val) and "<" not in val:
+                warn(f"  Голый hex — формат AWG 1.5; на Keenetic/amneziawg-go "
+                     f"может не работать. Рекомендуется CPS-формат, напр. "
+                     f"'<r {len(val)//2}>'")
+            break
         params[key] = val
         print()
+
+    # AWG 3.1: 9 транспортных директив (v5.5.1 — полный ручной контроль)
+    if is_31:
+        _defaults_31 = awg31_generate_extra_params()
+        _short = {
+            "header_protection_key":
+                "base64 32 байта (44 символа). Общий для сервера и клиента — "
+                "шифрование заголовков ChaCha20; nonce берётся из S-паддинга "
+                "(поэтому S1-S4 >= 12).",
+            "content_padding_addition":
+                "Число или «N-M» (0-64). Случайный паддинг транспортных "
+                "пакетов; 0 = выкл; 2-10 при низкой скорости.",
+            "rekey_after_time":
+                "Число или «N-M» секунд (100-200) — рандомизация rekey.",
+            "rekey_timeout":
+                "Число или «N-M» секунд (3-10) — таймаут handshake-попытки.",
+            "reject_after_time":
+                "Число или «N-M» секунд (130-300); должен быть больше "
+                "KeepaliveTimeout + RekeyTimeout и больше RekeyAfterTime.",
+            "keepalive_timeout":
+                "Число или «N-M» секунд (8-20) — keepalive-интервал.",
+            "max_handshake_attempts":
+                "Число или «N-M» (15-50) — попыток handshake до отказа.",
+            "random_trailers":
+                "on/off — дописывать пакеты до MTU случайными байтами (3.1).",
+            "disable_cookies":
+                "on/off — не отвечать cookiereply на порту WireGuard (3.1; "
+                "ломает keepalive за NAT под нагрузкой — включать осознанно).",
+        }
+        print(f"{BOLD}Транспортная защита AWG 3.1 (9 директив):{NC}")
+        print(f"  {DIM}Enter — рекомендованное значение (генерация по констрейнтам 3.1).{NC}")
+        print()
+        for _k31 in _defaults_31:
+            _dir = AWG31_DIRECTIVE_NAMES[_k31]
+            _def = _defaults_31[_k31]
+            print(f"{BOLD}{_dir}{NC}")
+            print(f"  {DIM}{_short.get(_k31, '')}{NC}")
+            while True:
+                v31 = input(f"  {CYAN}Значение [{_def}]: {NC}").strip()
+                if not v31:
+                    v31 = _def
+                    break
+                if _k31 in ("random_trailers", "disable_cookies"):
+                    if v31.lower() not in ("on", "off", "0", "1"):
+                        print(f"  {YELLOW}Допустимо: on / off / 0 / 1{NC}")
+                        continue
+                    break
+                # диапазонные: «N» или «N-M» — проверка ниже общей валидацией
+                if _k31 == "header_protection_key":
+                    import base64 as _b64
+                    try:
+                        if len(_b64.b64decode(v31, validate=True)) < 30:
+                            raise ValueError
+                    except Exception:
+                        print(f"  {YELLOW}Нужен base64-ключ 32 байта (44 символа, как wg genkey){NC}")
+                        continue
+                    break
+                if not (v31.isdigit() or ("-" in v31 and
+                                          v31.split("-", 1)[0].isdigit() and
+                                          v31.split("-", 1)[1].isdigit())):
+                    print(f"  {YELLOW}Формат: число «N» или диапазон «N-M»{NC}")
+                    continue
+                break
+            params[_k31] = v31
+            print()
 
     # Итоговая сводка
     _box_top(f"Итоговые параметры")
     _box_row()
     for key, label, _, _, _, _ in AWGS_PARAMS_SPEC:
+        _box_row(f"  {CYAN}{key.upper():<6}{NC} = {params[key]}")
+    for _i, key in enumerate(("h1", "h2", "h3", "h4")):
         _box_row(f"  {CYAN}{key.upper():<6}{NC} = {params[key]}")
     for key, label, _, _ in AWGS_PARAMS_SPEC_HEX:
         val = params[key]
@@ -723,10 +1083,14 @@ def awgs_prompt_custom_params() -> dict:
             _box_row(f"  {CYAN}{key.upper():<6}{NC} = {val[:40]}{'...' if len(val) > 40 else ''}")
         else:
             _box_row(f"  {CYAN}{key.upper():<6}{NC} = {DIM}(пусто){NC}")
+    if is_31:
+        for _k31 in _defaults_31:
+            _box_row(f"  {CYAN}{AWG31_DIRECTIVE_NAMES[_k31]:<24}{NC} = "
+                     f"{params.get(_k31, '')}")
     _box_bottom()
 
     # Валидация
-    ok, err = awgs_presets_validate_params(params)
+    ok, err = awgs_presets_validate_params(params, protocol_version=protocol_version)
     if not ok:
         warn(f"Валидация: {err}")
         return None
@@ -749,11 +1113,23 @@ def awgs_build_server_conf(
     endpoint_host: str = "",
     cascade_role: str = "",
     cascade_peer: dict = None,
+    protocol_version: str = "",
 ) -> str:
     """
     Генерирует содержимое awg0.conf (серверная сторона).
+
+    protocol_version (v5.5): "" | "2.0" — формат AWG 2.0 (обратная
+    совместимость, байт-в-байт как раньше); "3.1" — после I1-I5
+    добавляются 9 директив AWG 3.1 (HeaderProtectionKey/
+    ContentPaddingAddition/Rekey*/RejectAfterTime/KeepaliveTimeout/
+    MaxHandshakeAttempts/RandomTrailers/DisableCookies — см.
+    awg_protocol.awg_render_31_lines; пустые комментируются по правилу
+    v5.4.5). Все существующие вызовы без версии получают 2.0-конфиг
+    без изменений.
     """
     peers = peers or []
+
+    from .awg_protocol import awg_is_31, awg_render_31_lines
 
     # Серверный IP в подсети (первый адрес).
     # ВАЖНО: используем префикс подсети из аргумента (например /24), НЕ /32.
@@ -799,6 +1175,13 @@ def awgs_build_server_conf(
             lines.append(f"{key.upper()} = {val}")
         else:
             lines.append(f"# {key.upper()} = ")
+
+    # AWG 3.1 (v5.5): 9 транспортных директив сразу после I1-I5 —
+    # HeaderProtectionKey, ContentPaddingAddition, таймеры, RandomTrailers,
+    # DisableCookies. Единое правило v5.4.5: непустые — «Key = value»,
+    # пустые — «# Key = » (голое «Key = » валит awg setconf).
+    if awg_is_31(protocol_version):
+        lines.append(awg_render_31_lines(params))
 
     # Cascade: если это AWG0 (entry), добавляем peer к AWG1
     if cascade_role == "entry" and cascade_peer:
@@ -937,6 +1320,15 @@ def awgs_build_nat_unit_content() -> str:
     """v5.4.5: содержимое awg-nat.service — ExecStart/ExecStop вызывают
     helper-скрипт БЕЗ shell-кавычек (инлайн `bash -c '...awk '{...}'...'`
     разрывался systemd-токенизатором — NAT умирал после каждой перезагрузки).
+
+    v5.5.3 FIX-F: WantedBy+=awg-quick@awg0.service — старт туннеля тянет
+    за собой NAT-юнит (wants-симлинк). Раньше было только multi-user.target:
+    `systemctl stop awg-quick@awg0 && start` (и даже restart!) гасил awg-nat
+    через Requires (ExecStop удалял MASQUERADE), а повторный старт туннеля
+    NAT НЕ поднимал → exit-нода после рестарта awg0 = живой handshake при
+    чёрной дыре каскадного трафика (E2E 2026-10-03: failover-тест fi1,
+    probe FAIL после stop/start). Теперь: stop awg0 → NAT down (Requires),
+    start/restart awg0 → NAT up (WantedBy-симлинк).
     """
     from .awg_constants import AWGS_SYSTEMD_AWG_QUICK
     return f"""[Unit]
@@ -951,7 +1343,7 @@ ExecStart=/usr/local/sbin/awg-nat-rules.sh up
 ExecStop=/usr/local/sbin/awg-nat-rules.sh down
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=multi-user.target {AWGS_SYSTEMD_AWG_QUICK}
 """
 
 
@@ -1140,11 +1532,21 @@ def awgs_install(
     skip_hw_tuning: bool = False,
     force: bool = False,
     custom_params: dict = None,
+    protocol_version: str = AWGS_DEFAULT_PROTOCOL_VERSION,
 ) -> bool:
     """
-    Полный цикл установки standalone AWG.
+    Полный цикл установки standalone AWG (2.0 или 3.1).
     Возвращает True при успехе.
+
+    protocol_version="3.1" (v5.5): генерация параметров по констрейнтам
+    GenerateObfuscation31 (S1-S4 ≥ 12, Jmax ≤ 339, I1 = <r 32-256> + 9
+    транспортных параметров), awg0.conf с 3.1-директивами, state с
+    protocol_version="3.1". Перед установкой предупреждает о поддержке
+    клиентами (AmneziaVPN 5.0.1.5+; роутеры 3.1 НЕ поддерживают).
     """
+    from .awg_protocol import (
+        awg_is_31, awg_protocol_label, awg_vpn_uri_protocol_version,
+    )
     core = _core_module()
     info = core.info
     success = core.success
@@ -1153,10 +1555,24 @@ def awgs_install(
     _box_row = core._box_row
     _box_bottom = core._box_bottom
     _box_item = core._box_item
-    GREEN, NC, CYAN, BOLD = core.GREEN, core.NC, core.CYAN, core.BOLD
+    GREEN, NC, CYAN, BOLD, YELLOW, DIM = (
+        core.GREEN, core.NC, core.CYAN, core.BOLD, core.YELLOW, core.DIM,
+    )
 
-    _box_top(f"Установка AmneziaWG 2.0 (standalone)")
+    is_31 = awg_is_31(protocol_version)
+    _version_label = awg_protocol_label(protocol_version)
+
+    _box_top(f"Установка {_version_label} (standalone)")
     _box_row()
+    if is_31:
+        _box_row(f"  {YELLOW}AWG 3.1: transport protection — шифрование заголовков,"
+                 f" паддинг, рандомизация таймеров.{NC}")
+        _box_row(f"  {DIM}Клиенты: AmneziaVPN 5.0.1.5+ (Windows/macOS/Linux/"
+                 f"Android/iOS). Роутеры (Keenetic/GL-INet) 3.1 НЕ "
+                 f"поддерживают — им выдавайте 2.0-конфиг с другого "
+                 f"сервера.{NC}")
+        _box_row(f"  {DIM}При проблемах с большими пакетами снизьте MTU "
+                 f"до 1100 (WPP-профили используют именно его).{NC}")
     _box_bottom()
 
     # 1. Валидация
@@ -1165,12 +1581,16 @@ def awgs_install(
         return False
     # Если переданы custom_params — валидируем их, иначе проверяем пресет
     if custom_params:
-        ok, err = awgs_presets_validate_params(custom_params)
+        ok, err = awgs_presets_validate_params(custom_params,
+                                               protocol_version=protocol_version)
         if not ok:
             warn(f"Пользовательские параметры: {err}")
             return False
     else:
-        ok, err = awgs_presets_validate_params(awgs_presets_generate(carrier_preset))
+        ok, err = awgs_presets_validate_params(
+            awgs_presets_generate(carrier_preset,
+                                   protocol_version=protocol_version),
+            protocol_version=protocol_version)
         if not ok:
             warn(f"Пресет '{carrier_preset}': {err}")
             return False
@@ -1222,7 +1642,7 @@ def awgs_install(
     if not endpoint:
         warn("Не удалось определить публичный IP — клиентские конфиги будут без endpoint")
 
-    # 8. Параметры обфускации
+    # 8. Параметры обфускации (по версии протокола)
     if custom_params:
         info("Используются пользовательские параметры обфускации...")
         params = custom_params
@@ -1231,14 +1651,23 @@ def awgs_install(
              f"H1={params['h1']}, H2={params['h2']}, H3={params['h3']}, H4={params['h4']}")
         if params.get("i1"):
             info(f"  I1={'задан' if params['i1'] else 'отсутствует'}")
+        if is_31:
+            info(f"  HeaderProtectionKey={'задан' if params.get('header_protection_key') else 'ОТСУТСТВУЕТ'}"
+                 f", RandomTrailers={params.get('random_trailers', '?')}")
     else:
-        info(f"Генерация параметров обфускации (preset: {carrier_preset})...")
-        params = awgs_presets_generate(carrier_preset)
+        info(f"Генерация параметров обфускации (preset: {carrier_preset}, "
+             f"протокол: {_version_label})...")
+        params = awgs_presets_generate(carrier_preset,
+                                        protocol_version=protocol_version)
         preset_info = awgs_presets_get(carrier_preset)
         if preset_info:
             info(f"  Пресет: {preset_info['label']}")
         info(f"  Jc={params['jc']}, Jmin={params['jmin']}, Jmax={params['jmax']}, "
              f"I1={'задан' if params['i1'] else 'отсутствует'}")
+        if is_31:
+            info("  + HeaderProtectionKey, ContentPaddingAddition, "
+                 "Rekey*/RejectAfterTime/KeepaliveTimeout/MaxHandshakeAttempts, "
+                 "RandomTrailers, DisableCookies")
 
     # 9. Генерация awg0.conf
     info("Генерация awg0.conf...")
@@ -1251,6 +1680,7 @@ def awgs_install(
         params=params,
         peers=[],
         endpoint_host=endpoint,
+        protocol_version=protocol_version,
     )
     if not awgs_write_server_conf(conf_content):
         warn("Не удалось записать awg0.conf")
@@ -1263,8 +1693,15 @@ def awgs_install(
     # 11. Systemd
     info("Запуск awg-quick@awg0.service...")
     if not awgs_setup_systemd():
-        warn("Не удалось запустить сервис — проверьте journalctl")
-        # Не возвращаем False — конфиг создан, можно дебажить
+        # v5.5.2 (E2E fi1 2026-10-03): честный контракт установки —
+        # успех = поднятый туннель. Раньше здесь был только warn:
+        # userspace-go без юнита давал «Установка завершена» при
+        # мёртвом awg0 (systemctl not-found), каскад получал бокс
+        # данных от неработающего exit. Конфиг сохранён в
+        # /etc/amnezia/amneziawg/awg0.conf — дебаг: journalctl -u awg-quick@awg0.
+        warn("Не удалось запустить awg-quick@awg0 — установка НЕ завершена. "
+             "Конфиг сохранён для дебага: journalctl -u awg-quick@awg0")
+        return False
 
     # 11.1 NAT / маршрутизация — КРИТИЧНО для standalone AWG
     # Без MASQUERADE + ip_forward + FORWARD правил клиенты подключаются,
@@ -1286,6 +1723,7 @@ def awgs_install(
         params=params,
         carrier_preset=carrier_preset,
         allow_ipv6_tunnel=allow_ipv6_tunnel,
+        protocol_version=protocol_version,
     )
 
     # v4.25: bulk-provisioning всех существующих VLESS-пользователей в AWG.
@@ -1310,15 +1748,19 @@ def awgs_install(
     # 13. Создание cron для --expires (если ещё нет)
     awgs_setup_expires_cron()
 
-    success("Установка AmneziaWG 2.0 завершена!")
+    success(f"Установка {_version_label} завершена!")
     print()
     _box_top(f"Готово")
+    _box_row(f"  {GREEN}Протокол:{NC}         {_version_label}")
     _box_row(f"  {GREEN}Интерфейс:{NC}        {AWGS_INTERFACE}")
     _box_row(f"  {GREEN}UDP-порт:{NC}         {port}")
     _box_row(f"  {GREEN}Подсеть:{NC}           {subnet}")
     if allow_ipv6_tunnel:
         _box_row(f"  {GREEN}IPv6 подсеть:{NC}     {subnet_v6}")
     _box_row(f"  {GREEN}Пресет:{NC}            {carrier_preset}")
+    if is_31:
+        _box_row(f"  {GREEN}VPN URI version:{NC}   {awg_vpn_uri_protocol_version(protocol_version)} "
+                 f"(AmneziaVPN 5.0.1.5+)")
     _box_row(f"  {GREEN}Endpoint:{NC}          {endpoint or '(не определён)'}")
     _box_row(f"  {GREEN}Server pubkey:{NC}     {server_pub[:32]}...")
     _box_row(f"  {GREEN}Конфиг:{NC}            {AWGS_SERVER_CONF}")
@@ -1416,19 +1858,28 @@ def do_manage_awg_standalone() -> None:
         import os
         os.system("clear")
         print()
-        _box_top(f"AmneziaWG 2.0 (standalone VPN)")
+        # v5.5: заголовок показывает ФАКТИЧЕСКУЮ версию установленного
+        # протокола (2.0/3.1) из state — «AmneziaWG (standalone VPN)» до
+        # установки, когда версия ещё не определена.
+        from .awg_protocol import awg_protocol_label
+        from .awg_state import awgs_state_get_protocol_version
+        _installed_version = awgs_state_get_protocol_version() if awgs_state_is_installed() else ""
+        _menu_title = (awg_protocol_label(_installed_version)
+                       if _installed_version else "AmneziaWG 2.0/3.1") + " (standalone VPN)"
+        _box_top(f"{_menu_title}")
         _box_row()
 
         # Статус установки
         installed = awgs_state_is_installed()
         if installed:
             st = awgs_state_load()
-            _box_row(f"  {GREEN}● Установлен{NC}  (порт {st.get('port', '?')}, "
+            _box_row(f"  {GREEN}● Установлен{NC}  ({awg_protocol_label(_installed_version)}, "
+                     f"порт {st.get('port', '?')}, "
                      f"пиры: {len(st.get('peers', []))})")
         else:
             _box_row(f"  {YELLOW}○ Не установлен{NC}")
         _box_row()
-        _box_item("1", f"Установить standalone AWG")
+        _box_item("1", f"Установить standalone AWG (выбор протокола: 2.0 / 3.1)")
         _box_item("2", f"Управление клиентами (пиры)")
         _box_item("3", f"Каскад из 2 серверов (RU→зарубеж)")
         _box_item("4", f"Диагностика (kernel/sysctl/UFW + carrier-compare)")
@@ -1467,8 +1918,42 @@ def do_manage_awg_standalone() -> None:
             time.sleep(1)
 
 
+def _awgs_prompt_protocol_version() -> str:
+    """v5.5: выбор версии протокола AWG перед установкой (TUI).
+
+    Возвращает "2.0" или "3.1" (нормализовано через awg_protocol).
+    """
+    from .awg_protocol import AWG_VERSION_20, AWG_VERSION_31, awg_normalize_version
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_item = core._box_item
+    _box_desc = core._box_desc
+    _box_bottom = core._box_bottom
+    CYAN, NC, GREEN, YELLOW, DIM = core.CYAN, core.NC, core.GREEN, core.YELLOW, core.DIM
+
+    print()
+    _box_top(f"Версия протокола AmneziaWG")
+    _box_row()
+    _box_item("1", f"AmneziaWG 2.0 {GREEN}(Enter — по умолчанию){NC}")
+    _box_desc("Максимальная совместимость: роутеры Keenetic/GL-INet, все клиенты.")
+    _box_item("2", f"AmneziaWG 3.1 {YELLOW}(новое, transport protection){NC}")
+    _box_desc("Шифрование заголовков + паддинг + рандомизация таймеров — ответ "
+              "на поведенческий AI-анализ трафика (лето 2026). Клиенты: "
+              "AmneziaVPN 5.0.1.5+. Роутеры 3.1 НЕ поддерживают.")
+    _box_row()
+    _box_bottom()
+    while True:
+        ch = input(f"{CYAN}Версия протокола [1/2, Enter=1]:{NC} ").strip()
+        if ch in ("", "1"):
+            return AWG_VERSION_20
+        if ch == "2":
+            return AWG_VERSION_31
+        core.warn("Введите 1 или 2")
+
+
 def _awgs_menu_install() -> None:
-    """Подменю установки standalone AWG."""
+    """Подменю установки standalone AWG (2.0 / 3.1)."""
     core = _core_module()
     _box_top = core._box_top
     _box_row = core._box_row
@@ -1477,8 +1962,12 @@ def _awgs_menu_install() -> None:
     _box_desc = core._box_desc
     CYAN, NC, GREEN, DIM = core.CYAN, core.NC, core.GREEN, core.DIM
 
+    # v5.5: сначала — выбор версии протокола (2.0 / 3.1), она пробрасывается
+    # во ВСЕ пути установки ниже (пресеты, advanced, custom params).
+    protocol_version = _awgs_prompt_protocol_version()
+
     print()
-    _box_top(f"Установка AmneziaWG 2.0")
+    _box_top(f"Установка {awg_protocol_label_static(protocol_version)}")
     _box_row()
     _box_item("1", f"Default preset (проводной интернет) {GREEN}(рекомендуется){NC}")
     _box_desc("Универсальный пресет, работает в большинстве сетей.")
@@ -1489,27 +1978,35 @@ def _awgs_menu_install() -> None:
     _box_item("4", f"Расширенные параметры (порт, подсеть, MTU, IPv6, endpoint)")
     _box_desc("Тонкая настройка под конкретный сервер.")
     _box_item("5", f"Ручная настройка ВСЕХ параметров обфускации {GREEN}(эксперт){NC}")
-    _box_desc("Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5 — каждый параметр вручную с рекомендациями.")
+    _box_desc("Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5 — каждый параметр вручную с рекомендациями. "
+              "Для 3.1 транспортные параметры генерируются автоматически.")
     _box_item("Q", f"Назад")
     _box_bottom()
     ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
 
     if ch == "1":
-        awgs_install(carrier_preset="default")
+        awgs_install(carrier_preset="default", protocol_version=protocol_version)
     elif ch == "2":
-        awgs_install(carrier_preset="mobile")
+        awgs_install(carrier_preset="mobile", protocol_version=protocol_version)
     elif ch == "3":
-        _awgs_menu_carrier()
+        _awgs_menu_carrier(protocol_version=protocol_version)
     elif ch == "4":
-        _awgs_menu_advanced()
+        _awgs_menu_advanced(protocol_version=protocol_version)
     elif ch == "5":
-        _awgs_menu_custom_params()
+        _awgs_menu_custom_params(protocol_version=protocol_version)
     elif ch in ("q", ""):
         return
 
 
-def _awgs_menu_custom_params() -> None:
-    """Подменю ручной настройки параметров обфускации."""
+def awg_protocol_label_static(version: str) -> str:
+    """Локальный хелпер-обёртка (без циклического импорта в TUI-пути)."""
+    from .awg_protocol import awg_protocol_label
+    return awg_protocol_label(version)
+
+
+def _awgs_menu_custom_params(protocol_version: str = "2.0") -> None:
+    """Подменю ручной настройки параметров обфускации (2.0 или 3.1)."""
+    from .awg_protocol import awg31_merge_into_params, awg_is_31
     core = _core_module()
     info = core.info
     warn = core.warn
@@ -1535,11 +2032,21 @@ def _awgs_menu_custom_params() -> None:
 
     endpoint = input(f"{CYAN}Endpoint (если за NAT, иначе пусто) []: {NC}").strip()
 
-    # Теперь — параметры обфускации
-    custom_params = awgs_prompt_custom_params()
+    # Теперь — параметры обфускации (v5.5.1: с версией протокола — для 3.1
+    # промпт охватывает и 9 транспортных директив)
+    custom_params = awgs_prompt_custom_params(protocol_version=protocol_version)
     if custom_params is None:
         warn("Параметры не валидны — отмена")
         return
+
+    # AWG 3.1: ручной ввод охватывает базовый 2.0-набор; 9 транспортных
+    # параметров 3.1 генерируются автоматически (GenerateObfuscation31-
+    # констрейнты, см. awg_protocol.awg31_generate_extra_params).
+    if awg_is_31(protocol_version):
+        custom_params = awg31_merge_into_params(custom_params)
+        info("AWG 3.1: транспортные параметры (HeaderProtectionKey, "
+             "ContentPaddingAddition, таймеры, RandomTrailers, "
+             "DisableCookies) сгенерированы автоматически")
 
     print()
     confirm = input(f"{CYAN}Начать установку с этими параметрами? [Y/n]: {NC}").strip().lower()
@@ -1555,10 +2062,11 @@ def _awgs_menu_custom_params() -> None:
         endpoint_host=endpoint,
         allow_ipv6_tunnel=allow_ipv6,
         custom_params=custom_params,
+        protocol_version=protocol_version,
     )
 
 
-def _awgs_menu_carrier() -> None:
+def _awgs_menu_carrier(protocol_version: str = "2.0") -> None:
     """Подменю выбора оператора."""
     core = _core_module()
     _box_top = core._box_top
@@ -1585,12 +2093,13 @@ def _awgs_menu_carrier() -> None:
     try:
         idx = int(ch) - 1
         if 0 <= idx < len(presets):
-            awgs_install(carrier_preset=presets[idx])
+            awgs_install(carrier_preset=presets[idx],
+                         protocol_version=protocol_version)
     except ValueError:
         pass
 
 
-def _awgs_menu_advanced() -> None:
+def _awgs_menu_advanced(protocol_version: str = "2.0") -> None:
     """Подменю расширенных параметров."""
     core = _core_module()
     info = core.info
@@ -1635,6 +2144,7 @@ def _awgs_menu_advanced() -> None:
         carrier_preset=carrier,
         endpoint_host=endpoint,
         allow_ipv6_tunnel=allow_ipv6,
+        protocol_version=protocol_version,
     )
 
 
@@ -1673,12 +2183,16 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
     from .awg_state import awgs_state_load, awgs_state_update
     from .awg_presets import awgs_presets_generate, awgs_presets_list
     from .awg_peers import awg_peer_rebuild_conf
+    from .awg_protocol import awg_is_31
 
     # Проверяем что AWG установлен
     if not awgs_state_is_installed():
         return False, "Standalone AWG не установлен"
 
     state = awgs_state_load()
+    # v5.5: ротация соблюдает версию протокола из state (3.1 → полный
+    # 3.1-набор, включая новые HeaderProtectionKey и таймеры)
+    protocol_version = state.get("protocol_version", "2.0")
 
     # Определяем пресет для генерации
     if not preset_name:
@@ -1688,9 +2202,10 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
 
     info(f"Ротация параметров обфускации (пресет: {preset_name})...")
 
-    # Генерируем новые параметры
+    # Генерируем новые параметры (по версии протокола из state)
     try:
-        new_params = awgs_presets_generate(preset_name)
+        new_params = awgs_presets_generate(preset_name,
+                                            protocol_version=protocol_version)
     except ValueError as e:
         return False, str(e)
 
@@ -1742,6 +2257,8 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
         msg = (f"Параметры обновлены: Jc={new_params['jc']} "
                f"Jmin={new_params['jmin']} Jmax={new_params['jmax']} "
                f"I1={i1_display}")
+        if awg_is_31(protocol_version):
+            msg += " (+ новые HeaderProtectionKey/таймеры AWG 3.1)"
         success(msg)
         core.log_to_file("INFO", f"awgs_rotate_obfuscation: {msg}")
         return True, msg

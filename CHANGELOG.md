@@ -1,5 +1,79 @@
 # Changelog
 
+# Changelog new entry — AWG каскад v5.5.3: МУЛЬТИ-EXIT (все зарубежные выходы в одном каскаде) + авто-failover + FIX-E — 4 октября 2026
+
+
+## FEAT(awg_cascade): мульти-exit каскад — несколько exit-нод с приоритетами, переключение в один клик и авто-failover при смерти активного выхода
+
+**Контекст (владелец):** каскад RU → зарубеж поддерживал ровно один exit
+(плоские поля cascade_peer_* в state). При его смерти/блокировке каскад
+умирал молча до ручного вмешательства. Флот проекта = 4 exit-ноды
+(fi1/de/nl1/pl1) — все должны работать в каскаде одновременно.
+
+- **State**: `cascade_exits` — упорядоченный список exit-боксов (порядок
+  = приоритет failover), `cascade_active_exit` — имя активного. Каждый
+  бокс: name/endpoint/port/server_pubkey/peer_privkey/peer_psk/peer_ip/
+  subnet/protocol_version/params/mtu. Леничная миграция legacy-каскада
+  (v5.4.x/v5.5.2): при первом обращении плоские поля синтезируются в
+  список из 1 бокса, плоские поля остаются зеркалом активного exit.
+- **`awgs_cascade_register_exit()`** — регистрация exit из бокса AWG1
+  с полным набором валидаций setup_awg0 (версия протокола/подсеть/
+  self-loop), дедупом по имени И endpoint:port (обновление, не клон),
+  лимитом AWGS_FAILOVER_MAX_EXITS=16 и slug-именованием.
+- **`awgs_cascade_activate_exit(name)`** — переключение awg1 на exit:
+  awg1.conf строится из бокса (обфускация/3.1-директивы синхронны с
+  exit), routing-скрипт перегенерируется под подсеть exit, рестарт
+  awg-quick@awg1 (+PartOf routing-юнит пересоздаёт table 2000), state
+  обновляется (активный + зеркало legacy-полей). Опциональная проба
+  живости (handshake≤30с | ping шлюза) до probe_timeout.
+- **`awgs_cascade_failover_check()`** — health-тик (таймер каждую
+  минуту, OnCalendar=*:0/1 + AccuracySec=10s + Persistent): двухступен-
+  чатая защита от ложных срабатываний (свежий handshake → ok; несвежий
+  но ping-шлюза-через-awg1 жив → ok-probe) и перебор кандидатов ПО
+  ПОРЯДКУ СПИСКА при смерти активного; TG-уведомление awg_failover о
+  переключении и о «все exit недоступны» (best-effort, как v2-мониторы).
+  Все кандидаты молчат → восстановление исходного (стабильность
+  приоритетов). Возвращает строку-действие для логов/тестов.
+- **`awgs_cascade_failover_setup()/teardown()`** — systemd-юниты
+  awg-cascade-failover.service/.timer + PYTHONPATH-safe wrapper
+  (паттерн cron-оберток v5.1: bare python3 -c из-под systemd падает с
+  ModuleNotFoundError); teardown встроен в awgs_uninstall_full.
+- **TUI**: меню каскада → пункт [5] «Мульти-exit: все выходы +
+  авто-failover» (добавить/обновить exit, переключить активный, удалить,
+  failover on/off) + статус показывает все exit-ноды (● активный /
+  ○ резервный), возраст handshake awg1 и состояние failover-таймера.
+- **REST**: GET /api/awg/status — cascade_role, cascade_active_exit,
+  cascade_exits[{name,endpoint,port,protocol_version}] (БЕЗ ключей —
+  инвариант «секреты не покидают state» сохранён).
+- **FIX-E (баг TUI-флоу каскада)**: бокс данных AWG1 не содержал
+  privkey пира cascade_entry, а промпт AWG0 его не спрашивал — setup_awg0
+  молча генерировал НОВЫЙ ключ, exit ждал чужой pubkey, handshake
+  никогда не сходился (E2E-прогоны обходили это Python-драйвером с
+  явным peer_privkey). Теперь бокс AWG1 печатает «Cascade peer
+  privkey», промпт AWG0 запрашивает его (с предупреждением при пустом),
+  register_exit требует непустым.
+- **Константы**: AWGS_AWG1_CONF (единая точка правды пути awg1.conf +
+  тестируемость), AWGS_FAILOVER_STALE_SEC=300 (keepalive 25с +
+  RejectAfterTime 161-216с дают ~4 мин между handshake живого туннеля —
+  порог без ложных срабатываний), AWGS_FAILOVER_PROBE_SEC=18.
+- **FIX-F (продуктовый баг exit-нод, найден живым failover-E2E)**:
+  awg-nat.service имел Requires=awg-quick@awg0 + WantedBy=multi-user.target —
+  `systemctl stop ... && start` (и даже restart!) awg0 гасил NAT через
+  Requires (ExecStop удалял MASQUERADE), а повторный старт туннеля NAT НЕ
+  поднимал → exit-нода = живой handshake при чёрной дыре каскадного трафика
+  (E2E: failover-тест fi1, probe FAIL после stop/start awg0). Фикс:
+  WantedBy+=awg-quick@awg0.service (wants-симлинк — старт туннеля тянет NAT;
+  стоп-направление сохранено через Requires). Задеплоено на все 5 нод,
+  валидировано BOTH stop/start и restart путями (probe OK).
+- **Тесты**: tests/test_awg_cascade_multiexit.py — 40 тестов: парсер
+  handshake-возраста, legacy-миграция, register (валидации/дедуп/лимит/
+  slug), activate (конфиг из бокса/routing-скрипт/state), remove
+  (авто-переключение), failover_check (полная таблица решений: ok /
+  ok-probe / failover / all-dead / single-exit / not-entry), setup/
+  teardown юнитов, регресс setup_awg0 (регистрирует exit) + FIX-E.
+  + FIX-F тест в test_awg_standalone.py (WantedBy-контракт NAT-юнита).
+  Регресс смежных сьютов — 0 падений, AWG 2.0 байт-в-байт не тронута.
+
 # Changelog new entry — Mieru: TG-монитор каскада — реплика бот-паттерна VLESS (node_health_monitor + xray-tg-monitor v2) на все 3 Entry-ноды + /status 🧅 — 3 октября 2026
 
 
