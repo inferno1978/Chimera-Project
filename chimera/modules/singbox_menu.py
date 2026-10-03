@@ -405,7 +405,14 @@ def _shadowtls_menu() -> None:
         listen = ib.get("listen", "127.0.0.1")
         port = ib.get("listen_port", DEFAULT_PORT_SHADOWTLS)
         handshake = ib.get("handshake", {})
-        hs_server = handshake.get("server", DEFAULT_SHADOWTLS_HANDSHAKE_HOST)
+        # v5.5.1 (sni_hygiene): фолбэк — СВОЙ домен из state.json (Self-SNI),
+        # не известный ресурс; старая константа — только последний резорт.
+        try:
+            from chimera.modules.singbox_common import shadowtls_handshake_default
+            _hs_fb = shadowtls_handshake_default()
+        except Exception:
+            _hs_fb = DEFAULT_SHADOWTLS_HANDSHAKE_HOST
+        hs_server = handshake.get("server") or _hs_fb
         hs_port = handshake.get("server_port", DEFAULT_SHADOWTLS_HANDSHAKE_PORT)
         n_users = len(ib.get("users", []))
 
@@ -525,37 +532,56 @@ def _enable_shadowtls_custom() -> None:
         return
 
     # SNI-пресеты для handshake-домена (адаптировано из HYDRA-ULTIMATE)
+    # v5.5.1 (sni_hygiene): СВОЙ домен — пункт [1] и рекомендация; пресеты
+    # известных ресурсов — явный выбор с предупреждением (ToS РФ-хостингов).
+    try:
+        from chimera.modules.singbox_common import shadowtls_handshake_default
+        _own_hs = shadowtls_handshake_default()
+    except Exception:
+        _own_hs = DEFAULT_SHADOWTLS_HANDSHAKE_HOST
     print()
     _box_top("🌐  SNI ДЛЯ SHADOWTLS")
-    _box_row(f"  {DIM}Выберите маскировочный домен (TLS 1.3):{NC}")
+    _box_row(f"  {DIM}Рекомендуется СВОЙ домен — IP↔домен↔сертификат совпадают{NC}")
+    _box_row(f"  {DIM}(handshake к своему домену:443 = xray→nginx с LE-сертификатом).{NC}")
     _box_sep()
-    for idx, (domain, label) in enumerate(SHADOWTLS_SNI_PRESETS, start=1):
+    _box_item("1", f"{GREEN}Свой домен  {_own_hs}{NC} {DIM}(рекомендуется){NC}")
+    _box_sep()
+    _box_row(f"  {DIM}Известные домены (явная кастомизация — осторожно с РФ-хостингами):{NC}")
+    for idx, (domain, label) in enumerate(SHADOWTLS_SNI_PRESETS, start=2):
         _box_item(str(idx), f"{label} {CYAN}{domain}{NC}")
     _box_sep()
-    custom_key = str(len(SHADOWTLS_SNI_PRESETS) + 1)
-    _box_item(custom_key, f"Свой домен {DIM}ввести вручную{NC}")
+    custom_key = str(len(SHADOWTLS_SNI_PRESETS) + 2)
+    _box_item(custom_key, f"Другой домен {DIM}ввести вручную{NC}")
     _box_row()
     _box_item_exit("0", "← Отмена")
     _box_bottom()
 
     try:
-        ch = input(f"{CYAN}Выбор:{NC} ").strip()
+        ch = input(f"{CYAN}Выбор [1 — свой домен]:{NC} ").strip()
     except KeyboardInterrupt:
         return
 
-    if ch == "0" or not ch:
+    if ch == "0":
         return
+    if not ch:
+        ch = "1"
 
-    if ch == custom_key:
+    if ch == "1":
+        hs_server = _own_hs
+        info(f"Self-SNI: handshake-домен = {hs_server} (свой домен)")
+    elif ch == custom_key:
         try:
             hs_server = input(
                 f"{CYAN}Введите TLS 1.3 домен:{NC} "
-            ).strip().lower() or DEFAULT_SHADOWTLS_HANDSHAKE_HOST
+            ).strip().lower() or _own_hs
         except KeyboardInterrupt:
             return
+        from chimera.modules import sni_hygiene as _snih
+        if _snih.is_known_resource_domain(hs_server):
+            warn("  " + _snih.warn_known_domain_text(hs_server))
     else:
         try:
-            hs_server = SHADOWTLS_SNI_PRESETS[int(ch) - 1][0]
+            hs_server = SHADOWTLS_SNI_PRESETS[int(ch) - 2][0]
         except (ValueError, IndexError):
             error("Неверный выбор")
             input(f"\n{BLUE}Нажмите Enter...{NC}")
@@ -664,27 +690,41 @@ def _change_handshake_domain() -> None:
     # Показываем меню пресетов
     os.system("clear")
     print()
+    # v5.5.1 (sni_hygiene): свой домен — первый пункт и рекомендация
+    try:
+        from chimera.modules.singbox_common import shadowtls_handshake_default
+        _own_hs = shadowtls_handshake_default()
+    except Exception:
+        _own_hs = DEFAULT_SHADOWTLS_HANDSHAKE_HOST
     _box_top("🌐  SNI ДЛЯ SHADOWTLS")
-    _box_row(f"  {DIM}Выберите маскировочный домен (TLS 1.3):{NC}")
+    _box_row(f"  {DIM}Рекомендуется СВОЙ домен — IP↔домен↔сертификат совпадают{NC}")
     _box_sep()
-    for idx, (domain, label) in enumerate(SHADOWTLS_SNI_PRESETS, start=1):
+    _box_item("1", f"{GREEN}Свой домен  {_own_hs}{NC} {DIM}(рекомендуется){NC}")
+    _box_sep()
+    _box_row(f"  {DIM}Известные домены (явная кастомизация — осторожно с РФ-хостингами):{NC}")
+    for idx, (domain, label) in enumerate(SHADOWTLS_SNI_PRESETS, start=2):
         _box_item(str(idx), f"{label} {CYAN}{domain}{NC}")
     _box_sep()
-    custom_key = str(len(SHADOWTLS_SNI_PRESETS) + 1)
-    _box_item(custom_key, f"Свой домен {DIM}ввести вручную{NC}")
+    custom_key = str(len(SHADOWTLS_SNI_PRESETS) + 2)
+    _box_item(custom_key, f"Другой домен {DIM}ввести вручную{NC}")
     _box_row()
     _box_item_exit("0", "← Отмена")
     _box_bottom()
 
     try:
-        ch = input(f"{CYAN}Выбор:{NC} ").strip()
+        ch = input(f"{CYAN}Выбор [1 — свой домен]:{NC} ").strip()
     except KeyboardInterrupt:
         return
 
-    if ch == "0" or not ch:
+    if ch == "0":
         return
+    if not ch:
+        ch = "1"
 
-    if ch == custom_key:
+    if ch == "1":
+        new_host = _own_hs
+        info(f"Self-SNI: handshake-домен = {new_host} (свой домен)")
+    elif ch == custom_key:
         try:
             new_host = input(
                 f"{CYAN}Введите TLS 1.3 домен:{NC} "
@@ -694,9 +734,12 @@ def _change_handshake_domain() -> None:
         if not new_host:
             info("Отменено")
             return
+        from chimera.modules import sni_hygiene as _snih
+        if _snih.is_known_resource_domain(new_host):
+            warn("  " + _snih.warn_known_domain_text(new_host))
     else:
         try:
-            idx = int(ch) - 1
+            idx = int(ch) - 2
             new_host = SHADOWTLS_SNI_PRESETS[idx][0]
         except (ValueError, IndexError):
             error("Неверный выбор")
@@ -2087,7 +2130,13 @@ def _gen_shadowtls_client_uri(state_ib: dict, public_ip: str, port: int,
     Если передан user_record — использует его name для тэга (#name) вместо users[0].
     """
     handshake = state_ib.get("handshake", {})
-    sni = handshake.get("server", "www.cloudflare.com")
+    # v5.5.1 (sni_hygiene): фолбэк — свой домен, не известный ресурс
+    try:
+        from chimera.modules.singbox_common import shadowtls_handshake_default
+        _sni_fb = shadowtls_handshake_default()
+    except Exception:
+        _sni_fb = "www.cloudflare.com"
+    sni = handshake.get("server") or _sni_fb
     if user_record:
         name = user_record.get("name", "shadowtls-user")
     else:
@@ -2221,7 +2270,13 @@ def _gen_singbox_client_json(protocol: str, state_ib: dict,
 
     if protocol == "shadowtls":
         handshake = state_ib.get("handshake", {})
-        sni = handshake.get("server", "www.cloudflare.com")
+        # v5.5.1 (sni_hygiene): фолбэк — свой домен, не известный ресурс
+        try:
+            from chimera.modules.singbox_common import shadowtls_handshake_default
+            _sni_fb = shadowtls_handshake_default()
+        except Exception:
+            _sni_fb = "www.cloudflare.com"
+        sni = handshake.get("server") or _sni_fb
         password = _get_effective_password(state_ib)
         # v4.23.16: правильная схема для sing-box 1.12+
         # shadowtls outbound — НЕ имеет detour (конечный outbound, делает

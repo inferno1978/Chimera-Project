@@ -65,28 +65,47 @@ class TestPresetsGenerate31(unittest.TestCase):
             self.assertGreaterEqual(p["jmax"], p["jmin"])
             self.assertLessEqual(p["jmax"], 339)
 
-    def test_h_values_int_bands_31(self):
-        # 3.1: одиночные int в бандах от 5 (НЕ диапазоны 'N-M')
+    def test_h_values_narrow_ranges_31(self):
+        # v5.5.1: 3.1 — ОФИЦИАЛЬНЫЙ диапазонный формат «N-M» (как 2.0),
+        # но УЗКИЕ диапазоны (~15-20k, H4 ~25-30k) — фикс бага amneziawg-go
+        # (широкие диапазоны в 3.1 + HeaderProtectionKey = misclassify/CPU)
         for _ in range(10):
             p = awgs_presets_generate("default", "3.1")
             hs = [p[f"h{i}"] for i in range(1, 5)]
+            parsed = []
             for h in hs:
-                # 3.1: одиночные int (GenerateObfuscation31/wpp-стиль),
-                # НЕ диапазоны 'N-M' как в 2.0
-                self.assertIsInstance(h, int, msg=repr(h))
-                self.assertGreaterEqual(h, 5)
-                self.assertLessEqual(h, 2147483647)
-            # Непересекающиеся банда → все разные
-            self.assertEqual(len(set(hs)), 4)
+                self.assertIsInstance(h, str, msg=repr(h))
+                self.assertRegex(h, r"^\d+-\d+$", msg=repr(h))
+                lo, hi = (int(x) for x in h.split("-"))
+                self.assertGreaterEqual(lo, 5)          # не vanilla-WG 1-4
+                self.assertLessEqual(hi, 2147483647)   # INT32_MAX
+                width = hi - lo + 1
+                if h is hs[3]:
+                    # H4 (transport) — шире: 25-30k
+                    self.assertTrue(25000 <= width <= 30000, width)
+                else:
+                    self.assertTrue(15000 <= width <= 20000, width)
+                parsed.append((lo, hi))
+            # Непересекающиеся
+            for i in range(4):
+                for j in range(i + 1, 4):
+                    self.assertTrue(parsed[i][1] < parsed[j][0] or
+                                    parsed[j][1] < parsed[i][0],
+                                    msg=f"H{i+1}/H{j+1} пересекаются: {hs}")
 
-    def test_i1_always_r_tag_31(self):
-        # 3.1: I1 всегда «<r N>» (N 32-256), даже для absent-пресетов
+    def test_i1_mode_respected_31(self):
+        # v5.5.1: 3.1 поддерживает ВЕСЬ официальный CPS-язык — i1_mode
+        # пресета больше НЕ игнорируется (random/absent → <r 32-256>,
+        # binary → <b 0x...>; «только <r N>» был констрейнтом 3x-ui)
         for preset in awgs_presets_list():
             p = awgs_presets_generate(preset, "3.1")
-            self.assertTrue(p["i1"].startswith("<r "), msg=f"{preset}: {p['i1']}")
-            self.assertTrue(p["i1"].endswith(">"))
-            n = int(p["i1"][3:-1])
-            self.assertTrue(32 <= n <= 256, n)
+            i1 = p["i1"]
+            self.assertTrue(i1, msg=f"{preset}: I1 пуст для 3.1")
+            if i1.startswith("<r "):
+                n = int(i1[3:-1])
+                self.assertTrue(32 <= n <= 256, (preset, n))
+            else:
+                self.assertTrue(i1.startswith("<b 0x"), msg=f"{preset}: {i1}")
 
     def test_all_presets_valid_31(self):
         for preset in awgs_presets_list():
@@ -124,13 +143,45 @@ class TestPresetsValidate31(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("339", err)
 
-    def test_i1_binary_rejected_for_31(self):
-        # binary-blob — 2.0-специфика, в 3.1 I1 обязан быть «<r N>»
+    def test_i1_binary_valid_for_31(self):
+        # v5.5.1: <b 0x...> — официальный тег, валиден и в 3.1
+        # (прежде «только <r N>» — был констрейнтом GenerateObfuscation31/3x-ui)
         p = self._valid_31()
         p["i1"] = "<b 0xdeadbeef>"
         ok, err = awgs_presets_validate_params(p, "3.1")
+        self.assertTrue(ok, msg=err)
+
+    def test_i1_mimicry_valid_for_31(self):
+        # Профили мимикрии (QUIC/DNS/TLS) — официальные CPS-цепочки, валидны в 3.1
+        from chimera.modules.awg_presets import awg_i1_mimicry_generate
+        for mode in ("quic_mimicry", "dns_mimicry", "tls_mimicry"):
+            p = self._valid_31()
+            p["i1"] = awg_i1_mimicry_generate(mode)
+            ok, err = awgs_presets_validate_params(p, "3.1")
+            self.assertTrue(ok, msg=f"{mode}: {err}")
+
+    def test_i1_unknown_tag_rejected_for_31(self):
+        p = self._valid_31()
+        p["i1"] = "<x 5>"  # неизвестный тег — вся цепочка невалидна (obf.go)
+        ok, err = awgs_presets_validate_params(p, "3.1")
         self.assertFalse(ok)
         self.assertIn("I1", err)
+
+    def test_h_overlap_rejected(self):
+        # Пересечение H-диапазонов = неоднозначная классификация = дроп
+        p = self._valid_31()
+        p["h1"] = "100-200"
+        p["h2"] = "150-300"  # пересекается с h1
+        ok, err = awgs_presets_validate_params(p, "3.1")
+        self.assertFalse(ok)
+        self.assertIn("пересекаются", err)
+
+    def test_s1_plus_56_eq_s2_rejected(self):
+        p = self._valid_31()
+        p["s1"], p["s2"] = 40, 96  # 40+56 == 96 — одинаковая длина init/response
+        ok, err = awgs_presets_validate_params(p, "3.1")
+        self.assertFalse(ok)
+        self.assertIn("S1+56", err)
 
     def test_missing_31_params_rejected(self):
         p = self._valid_31()
@@ -221,10 +272,18 @@ class TestHValues31(unittest.TestCase):
         for _ in range(15):
             hs = _generate_non_overlapping_h_values_31()
             self.assertEqual(len(hs), 4)
-            h_low, h_band = 5, (2147483647 - 5 + 1) // 4
-            for i, h in enumerate(hs):
-                self.assertGreaterEqual(h, h_low + i * h_band)
-                self.assertLessEqual(h, h_low + (i + 1) * h_band - 1)
+            parsed = []
+            for h in hs:
+                self.assertRegex(h, r"^\d+-\d+$", msg=repr(h))
+                lo, hi = (int(x) for x in h.split("-"))
+                self.assertGreaterEqual(lo, 5)
+                self.assertLessEqual(hi, 2147483647)
+                parsed.append((lo, hi))
+            for i in range(4):
+                for j in range(i + 1, 4):
+                    self.assertTrue(parsed[i][1] < parsed[j][0] or
+                                    parsed[j][1] < parsed[i][0],
+                                    msg=f"H{i+1}/H{j+1}: {hs}")
 
 
 if __name__ == "__main__":
