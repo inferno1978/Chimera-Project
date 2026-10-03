@@ -479,5 +479,74 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
         )
 
 
+class TestAwgsNatHelperV545(unittest.TestCase):
+    """v5.4.5: NAT-персистентность — helper-скрипт вместо сломанного инлайна.
+
+    E2E 2026-10-03 (de1): инлайн `ExecStart=/bin/bash -c '...awk '{print $5}'...'`
+    разрывался systemd-токенизатором на вложенной кавычке, $WAN разворачивал
+    systemd (пусто) → NAT умирал после каждой перезагрузки.
+    """
+
+    def test_nat_unit_no_inline_bash_c(self):
+        """awg-nat.service вызывает helper-скрипт, НЕ bash -c с кавычками."""
+        from chimera.modules.awg_standalone import awgs_build_nat_unit_content
+        unit = awgs_build_nat_unit_content()
+        self.assertIn("ExecStart=/usr/local/sbin/awg-nat-rules.sh up", unit)
+        self.assertIn("ExecStop=/usr/local/sbin/awg-nat-rules.sh down", unit)
+        # Инлайн-баш с кавычками ЗАПРЕЩЁН (systemd разрывает аргумент)
+        self.assertNotIn("bash -c '", unit,
+                         "инлайн bash -c '<...>' в ExecStart разрывается "
+                         "systemd-токенизатором (баг v5.4.4, E2E de1)")
+
+    def test_nat_helper_body_contract(self):
+        """helper-скрипт: шебанг, up/down, WAN-детект, идемпотентные правила."""
+        from chimera.modules.awg_standalone import awgs_build_nat_helper_body
+        body = awgs_build_nat_helper_body("10.66.66.0/24", "awg0")
+        self.assertTrue(body.startswith("#!/bin/bash"))
+        # WAN-детект тем же способом, что и раньше
+        self.assertIn("ip route show default | awk '{print $5; exit}'", body)
+        # up: идемпотентное добавление (с -o $WAN — иначе дубли правил)
+        self.assertIn("-C POSTROUTING -s 10.66.66.0/24 -o $WAN -j MASQUERADE", body)
+        self.assertIn("-t nat -A POSTROUTING -s 10.66.66.0/24 -o $WAN -j MASQUERADE", body)
+        # down: удаление с -o $WAN (симметрия с установкой — баг v5.4.4
+        # в uninstall: -D без -o НЕ матчил правило)
+        self.assertIn("-D POSTROUTING -s 10.66.66.0/24 -o $WAN -j MASQUERADE", body)
+        # кейс-структура
+        self.assertIn('case "$CMD" in', body)
+        self.assertIn("up)", body)
+        self.assertIn("down)", body)
+
+
+class TestUninstallNatParityV545(unittest.TestCase):
+    """v5.4.5: uninstall удаляет NAT правилА теми же спеками, что ставил.
+
+    E2E 2026-10-03 (de1): MASQUERADE пережила uninstall — -D был без -o WAN.
+    """
+
+    def test_cleanup_shell_masq_deletes_with_wan(self):
+        """build_nat_cleanup_shell: MASQ -D включает -o $WAN (парity с -A)."""
+        from chimera.modules.awg_net_common import build_nat_cleanup_shell
+        cleanup = build_nat_cleanup_shell("10.66.66.0/24", "awg0", "$WAN")
+        self.assertIn(
+            "iptables -t nat -D POSTROUTING -s 10.66.66.0/24 -o $WAN -j MASQUERADE",
+            cleanup,
+            "-D без -o $WAN НЕ матчит правило с -o (MASQUERADE остаётся, E2E de1)")
+
+    def test_uninstall_uses_cleanup_shell(self):
+        """source-contract: uninstall вызывает build_nat_cleanup_shell +
+        удаляет helper/wrapper/PPA (не только ручные -D без -o)."""
+        src = Path(_PROJECT_ROOT / "chimera" / "modules" / "awg_uninstall.py").read_text()
+        self.assertIn("build_nat_cleanup_shell", src,
+                      "uninstall должен использовать cleanup-сниппет (v5.4.5)")
+        self.assertIn("awg-nat-rules.sh", src,
+                      "uninstall должен удалять helper awg-nat-rules.sh (v5.4.5)")
+        self.assertIn("awg-expires-check.sh", src,
+                      "uninstall должен удалять wrapper awg-expires-check.sh (v5.4.5)")
+        self.assertIn("amnezia-ppa.sources", src,
+                      "uninstall должен удалять PPA sources (v5.4.5)")
+        self.assertIn("amnezia-ppa.gpg", src,
+                      "uninstall должен удалять PPA keyring (v5.4.5)")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

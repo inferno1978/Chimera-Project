@@ -73,12 +73,22 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     lines.append(f"H2 = {params.get('h2', 2)}")
     lines.append(f"H3 = {params.get('h3', 3)}")
     lines.append(f"H4 = {params.get('h4', 4)}")
-    # v5.4.2: I1-I5 для КЛИЕНТСКОГО конфига — пишем ВСЕГДА без комментария
-    # (даже пустые). Подтверждено zvshka: рабочая конфигурация Amnezia
-    # имеет I1-I5 без '#' на клиенте, и '# I1-I5' на сервере.
+    # v5.4.5: I1-I5 в КЛИЕНТСКОМ конфиге — непустые пишем как есть,
+    # ПУСТЫЕ комментируем (# I2 = ).
+    # E2E 2026-10-03 (de1→nl1, ubuntu 24.04, amneziawg-tools
+    # 1.0.20210914-0~202608130144 из PPA): Linux-клиент awg-quick падает
+    # на голой пустой строке 'I2 = ' — "Line unrecognized: I2="
+    # (awg setconf требует значение после '='). '# I2 = ' принимается
+    # и сервером, и клиентом; приложения (Keenetic/Amnezia Client)
+    # комментарии игнорируют, поэтому правило безопасно для всех.
+    # (v5.4.2 правило "клиенту без #" касалось только приложений и
+    # ломало awg-quick на Linux — см. test_client_i1_to_i5_empty_commented_v545)
     for key in ("i1", "i2", "i3", "i4", "i5"):
         val = params.get(key, "")
-        lines.append(f"{key.upper()} = {val}")
+        if val:
+            lines.append(f"{key.upper()} = {val}")
+        else:
+            lines.append(f"# {key.upper()} = ")
     lines.append("")
     lines.append("[Peer]")
     lines.append(f"PublicKey = {server_pubkey}")

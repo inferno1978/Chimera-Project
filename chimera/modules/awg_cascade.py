@@ -139,6 +139,8 @@ def awgs_cascade_setup_awg0(
     exit_subnet: str = "172.16.61.0/24",
     exit_peer_privkey: str = "",
     exit_peer_psk: str = "",
+    exit_peer_ip: str = "",
+    exit_params: dict = None,
 ) -> bool:
     """
     Настраивает AWG0 (вход каскада):
@@ -147,11 +149,44 @@ def awgs_cascade_setup_awg0(
       • Применяет iptables-маршрутизацию
       • Создаёт awg-routing.sh + systemd-юнит
       • Cron для обновления ru.zone
+
+    v5.4.5:
+      • exit_peer_ip — IP пира cascade_entry на стороне AWG1 (из бокса
+        «Cascade peer IP»). Раньше хардкодился base.2 — если у exit уже
+        были пиры (например VLESS-юзеры), cascade_entry получал .3+ →
+        address mismatch → handshake никогда не сходился.
+      • exit_params — параметры обфускации AWG1 (Jc/Jmin/Jmax/S1-S4/
+        H1-H4/I1-I5 из бокса «Obfuscation»). КРИТИЧНО: обфускация
+        должна совпадать на обеих сторонах — раньше awg1.conf брал
+        параметры из СОБСТВЕННОГО state entry (случайные значения
+        пресета) → handshake никогда не сходился (E2E 2026-10-03:
+        transfer 0 B received при живом туннеле с обеих сторон).
+      • Валидация: exit_subnet не должен совпадать с подсетью awg0 entry
+        и exit_host не должен быть собственным IP (self-loop).
     """
     core = _core_module()
     info = core.info
     success = core.success
     warn = core.warn
+
+    # v5.4.5: валидация подсети и self-loop (E2E: у юзера exit_subnet
+    # мог совпасть с 10.66.66.0/24 entry — маршрутная каша)
+    _own_state = awgs_state_load()
+    _own_subnet = _own_state.get("subnet", "")
+    if _own_subnet and _own_subnet == exit_subnet:
+        warn(f"Подсеть AWG1 ({exit_subnet}) совпадает с подсетью awg0 на "
+             f"этом сервере ({_own_subnet}) — маршруты конфликтуют!")
+        warn("Установите standalone AWG на AWG1 с ДРУГОЙ подсетью "
+             "(например 172.16.61.0/24) и повторите.")
+        return False
+    try:
+        _own_ip = core.get_server_ip("4")
+    except Exception:
+        _own_ip = ""
+    if _own_ip and _own_ip == exit_host:
+        warn("exit_host указывает на этот же сервер (self-loop) — каскад "
+             "не имеет смысла")
+        return False
 
     if not exit_peer_privkey:
         # Генерируем клиентский ключ для подключения к AWG1
@@ -184,18 +219,30 @@ def awgs_cascade_setup_awg0(
 
     # 1. Создаём конфиг awg1 (туннель к AWG1)
     info("Создание конфига awg1 (туннель к AWG1)...")
+    if exit_params:
+        info("Обфускация: используются параметры AWG1 (синхронизация)")
+    else:
+        warn("Параметры обфускации AWG1 не переданы — используются "
+             "параметры ЭТОГО сервера. Если пресет AWG1 отличается, "
+             "handshake не сойдётся!")
     awg1_conf = _awgs_cascade_build_awg1_conf(
         exit_host, exit_port, exit_pubkey,
         exit_peer_privkey, exit_peer_psk, exit_subnet,
+        exit_peer_ip=exit_peer_ip,
+        exit_params=exit_params,
     )
     awg1_path = Path("/etc/amnezia/amneziawg/awg1.conf")
     awg1_path.write_text(awg1_conf)
     awg1_path.chmod(0o600)
 
     # 2. Запускаем awg1 (отдельный сервис awg-quick@awg1)
-    info("Запуск awg-quick@awg1...")
+    # v5.4.5: RESTART, а не start — при повторной настройке каскада юнит
+    # уже активен и start = no-op: интерфейс продолжал жить со СТАРЫМ
+    # конфигом (E2E: перезаписали awg1.conf с правильной обфускацией, но
+    # handshake так и не появился — параметры не перечитались).
+    info("Запуск awg-quick@awg1 (restart для перечитывания конфига)...")
     core._run(["systemctl", "enable", "awg-quick@awg1"], check=False, quiet=True)
-    r = core._run(["systemctl", "start", "awg-quick@awg1"],
+    r = core._run(["systemctl", "restart", "awg-quick@awg1"],
                   capture=True, check=False)
     if r.returncode != 0:
         warn(f"awg1 не запустился: {r.stderr}")
@@ -205,6 +252,15 @@ def awgs_cascade_setup_awg0(
     info("Загрузка ru.zone в ipset...")
     awgs_cascade_download_ru_zone()
     awgs_cascade_load_ipset()
+    # v5.4.5: пустой ipset = весь клиентский трафик уйдёт НАПРЯМУЮ
+    # с entry-сервера (mangle MARK не сработает — правило ссылается на
+    # несуществующий set и не добавится) — каскад молча не каскадирует.
+    # Проверяем и предупреждаем ЯВНО (E2E: у юзера именно так и было).
+    r = core._run(["ipset", "list", AWGS_IPSET_NAME], capture=True, check=False)
+    if r.returncode != 0 or "Number of entries: 0" in (r.stdout or ""):
+        warn(f"ipset {AWGS_IPSET_NAME} пуст/отсутствует — ru.zone не загружен!")
+        warn("Без ru.zone НЕ-RU трафик клиентов пойдёт напрямую с этого "
+             "сервера, а не через AWG1. Проверьте /etc/awg-cascade/ru.zone.")
 
     # 4. Применяем iptables-маршрутизацию
     info("Применение iptables-маршрутизации...")
@@ -219,11 +275,12 @@ def awgs_cascade_setup_awg0(
     info("Создание cron для обновления ru.zone...")
     _awgs_cascade_setup_cron()
 
-    # 7. Запуск routing-юнита
+    # 7. Запуск routing-юнита (v5.4.5: restart — при повторной настройке
+    # юнит уже активен, start = no-op, скрипт не перезапускался)
     core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
     core._run(["systemctl", "enable", "awg-cascade-routing"],
               check=False, quiet=True)
-    r = core._run(["systemctl", "start", "awg-cascade-routing"],
+    r = core._run(["systemctl", "restart", "awg-cascade-routing"],
                   capture=True, check=False)
     if r.returncode != 0:
         warn(f"awg-cascade-routing не запустился: {r.stderr}")
@@ -239,15 +296,35 @@ def _awgs_cascade_build_awg1_conf(
     client_privkey: str,
     psk: str,
     exit_subnet: str,
+    exit_peer_ip: str = "",
+    exit_params: dict = None,
 ) -> str:
-    """Генерирует awg1.conf — клиентский туннель к AWG1."""
-    # IP клиента в подсети exit (обычно .2)
-    base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
-    client_ip = f"{base}.2/32"
+    """Генерирует awg1.conf — клиентский туннель к AWG1.
 
-    # Параметры AWG 2.0 — берём из state (должны совпадать с AWG1)
+    v5.4.5:
+      • exit_peer_ip — фактический IP пира cascade_entry на AWG1
+        (раньше хардкод base.2 — при занятых IP на exit получали mismatch).
+      • exit_params — параметры обфускации AWG1 (dict с ключами
+        jc/jmin/jmax/s1-s4/h1-h4/i1-i5). Обфускация ОБЯЗАНА совпадать
+        на обеих сторонах туннеля: раньше брались из state entry →
+        случайные значения пресета не совпадали с exit → handshake
+        никогда не сходился (E2E: 0 B received).
+      • I1-I5 добавлены (правило v5.4.5: непустые как есть, пустые
+        комментируются) — раньше отсутствовали полностью, что ломало
+        handshake с exit-серверами, использующими I1 (default preset).
+    """
+    base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
+    # v5.4.5: приоритет — явно переданный peer IP, fallback — base.2
+    peer_addr = exit_peer_ip if exit_peer_ip else f"{base}.2"
+    client_ip = f"{peer_addr}/32"
+
+    # Параметры AWG 2.0: приоритет — exit_params (синхронизация с AWG1),
+    # fallback — собственный state (legacy, НЕ гарантирует handshake)
     state = awgs_state_load()
-    params = state.get("params", {})
+    params = exit_params if exit_params else state.get("params", {})
+
+    def _p(key, default):
+        return params.get(key, default)
 
     lines = [
         "[Interface]",
@@ -260,18 +337,28 @@ def _awgs_cascade_build_awg1_conf(
         # сессия обрывается. Маршрутизация управляется через iptables +
         # policy routing (table 2000, fwmark) в _awgs_cascade_apply_iptables.
         "Table = off",
-        # Параметры обфускации (должны совпадать с сервером AWG1)
-        f"Jc = {params.get('jc', 4)}",
-        f"Jmin = {params.get('jmin', 40)}",
-        f"Jmax = {params.get('jmax', 70)}",
-        f"S1 = {params.get('s1', 0)}",
-        f"S2 = {params.get('s2', 0)}",
-        f"S3 = {params.get('s3', 0)}",
-        f"S4 = {params.get('s4', 0)}",
-        f"H1 = {params.get('h1', 1)}",
-        f"H2 = {params.get('h2', 2)}",
-        f"H3 = {params.get('h3', 3)}",
-        f"H4 = {params.get('h4', 4)}",
+        # Параметры обфускации — ДОЛЖНЫ совпадать с сервером AWG1
+        # (v5.4.5: берём из exit_params)
+        f"Jc = {_p('jc', 4)}",
+        f"Jmin = {_p('jmin', 40)}",
+        f"Jmax = {_p('jmax', 70)}",
+        f"S1 = {_p('s1', 0)}",
+        f"S2 = {_p('s2', 0)}",
+        f"S3 = {_p('s3', 0)}",
+        f"S4 = {_p('s4', 0)}",
+        f"H1 = {_p('h1', 1)}",
+        f"H2 = {_p('h2', 2)}",
+        f"H3 = {_p('h3', 3)}",
+        f"H4 = {_p('h4', 4)}",
+    ]
+    # v5.4.5: I1-I5 — по единому правилу (непустые как есть, пустые #)
+    for key in ("i1", "i2", "i3", "i4", "i5"):
+        val = _p(key, "")
+        if val:
+            lines.append(f"{key.upper()} = {val}")
+        else:
+            lines.append(f"# {key.upper()} = ")
+    lines += [
         "",
         "[Peer]",
         f"PublicKey = {exit_pubkey}",
@@ -285,23 +372,29 @@ def _awgs_cascade_build_awg1_conf(
 
 
 def _awgs_cascade_apply_iptables(exit_subnet: str) -> bool:
-    """Применяет iptables-правила для каскада."""
+    """Применяет iptables-правила для каскада.
+
+    v5.4.5 ГЛАВНЫЙ ФИКС: MARK переносится из mangle FORWARD в mangle
+    PREROUTING. Раньше (-A FORWARD ... -j MARK) метка ставилась ПОСЛЕ
+    route decision: транзитный пакет клиента уже был маршрутизирован по
+    main-таблице (oif=ens3), не попадал под FORWARD -i awg0 -o awg1 и
+    дропался policy DROP — Е2Е 2026-10-03: счётчик MARK 236 пакетов при
+    FORWARD awg0→awg1 = 0. fwmark-policy-routing работает для транзита
+    ТОЛЬКО из PREROUTING (метка должна стоять ДО route decision).
+    Метка в OUTPUT (первоначальный вариант) маркировала серверный
+    трафик вместо клиентского (SSH-lockout, см. фикс 33970c2).
+
+    Основная идея:
+    1. Трафик клиентов awg0 к RU-сетям → напрямую через host (без mark)
+    2. Весь остальной клиентский → mark 0x2000 (PREROUTING!) → table 2000 → awg1
+    """
     core = _core_module()
-    # Основная идея:
-    # 1. Трафик к RU-сетям → напрямую через host (без mark)
-    # 2. Весь остальной трафик → mark 0x2000 → route через awg1 (table 2000)
-    #
-    # Используем ipset для матчинга RU-сетей
 
     rules = [
-        # Создаём отдельную таблицу маршрутизации для marked-трафика
-        # (через `ip route add default dev awg1 table 2000`)
-        # Но проще: policy routing по fwmark
-
-        # mark трафик от клиентов awg0 (НЕ весь OUTPUT сервера!), кроме RU
-        # Используем -i awg0 в FORWARD (не OUTPUT), чтобы не маркировать
-        # собственный трафик сервера (SSH-ответы и т.п.)
-        f"iptables -t mangle -A FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
+        # v5.4.5: PREROUTING — ДО route decision (иначе транзит не
+        # попадает в table 2000; см. докстринг). -i awg0 — только
+        # клиентский трафик, серверный (ens3 in) не трогаем.
+        f"iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
 
         # NAT для выхода через awg1
         f"iptables -t nat -A POSTROUTING -o awg1 -j MASQUERADE",
@@ -312,71 +405,135 @@ def _awgs_cascade_apply_iptables(exit_subnet: str) -> bool:
 
         # Для RU-сетей — forward напрямую через host-интерфейс
         f"iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT",
+
+        # v5.4.5: TCPMSS clamp — двойное туннелирование (awg0 MTU 1280 внутри
+        # awg1 MTU 1280 + оверхед обфускации) даёт effective MTU ~1200:
+        # без клампа TCP-сессии с MSS 1240 зависают на больших пакетах
+        # (TLS-certs) — классический MTU blackhole. Transport Mode B делает
+        # TCPMSS 1240, cascade теперь тоже (E2E 2026-10-03).
+        "iptables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140",
+        "iptables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140",
     ]
 
-    # Применяем правила
+    # v5.4.5: подчистить дубли от старых прогонов (голые -A до идемпотентного
+    # фикса + MARK из FORWARD от бажных версий) перед применением
+    core._run(["bash", "-c",
+               f"while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
+               f"while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
+               f"while iptables -t nat -D POSTROUTING -o awg1 -j MASQUERADE 2>/dev/null; do :; done; "
+               f"while iptables -D FORWARD -i awg0 -o awg1 -j ACCEPT 2>/dev/null; do :; done; "
+               f"while iptables -D FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; do :; done; "
+               f"while iptables -D FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT 2>/dev/null; do :; done"],
+              check=False, quiet=True)
+
+    # Применяем правила — ИДЕМПОТЕНТНО (v5.4.5: -C || -A)
     for rule in rules:
-        # Без -t (filter table)
-        if rule.startswith("iptables -t"):
-            parts = rule.split()
-        else:
-            parts = rule.split()
-        r = core._run(parts, capture=True, check=False, quiet=True)
+        check = rule.replace(" -A ", " -C ", 1)
+        r = core._run(["bash", "-c", f"{check} 2>/dev/null || {rule}"],
+                      capture=True, check=False, quiet=True)
         if r.returncode != 0:
             core.log_to_file("WARN", f"iptables rule failed: {rule}: {r.stderr}")
 
     # Policy routing: marked-трафик → через awg1
-    # Добавляем таблицу 2000 (если ещё нет)
-    r = core._run(["ip", "route", "show", "table", "2000"],
-                  capture=True, check=False)
-    if not r.stdout.strip():
-        # Определяем шлюз по умолчанию через awg1
-        exit_base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
-        exit_gw = f"{exit_base}.1"
-        core._run(["ip", "route", "add", "default", "via", exit_gw, "dev", "awg1", "table", "2000"],
-                  check=False, quiet=True)
+    # v5.4.5: КРИТИЧЕСКИЙ фикс — `ip route add default via {gw} dev awg1
+    # table 2000` молча падал с "Nexthop has invalid gateway" при
+    # Address=base.2/32 + Table=off (gateway НЕ on-link). Таблица 2000
+    # оставалась ПУСТОЙ → fwmark-трафик падал в main → весь не-RU
+    # клиентский трафик выходил НАПРЯМУЮ с entry-сервера, каскад молча
+    # не каскадировал (подтверждено E2E 2026-10-03 на живой установке
+    # юзера: table 2000 пустая при активном fwmark-правиле).
+    # Фикс: сначала on-link маршрут подсети exit, затем default.
+    # `replace` вместо `add` — идемпотентность при повторном запуске.
+    exit_base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
+    exit_gw = f"{exit_base}.1"
+    core._run(["ip", "route", "replace", f"{exit_base}.0/24", "dev", "awg1",
+               "table", "2000"], check=False, quiet=True)
+    core._run(["ip", "route", "replace", "default", "via", exit_gw, "dev", "awg1",
+               "table", "2000"], check=False, quiet=True)
+    # Проверяем что default-маршрут реально встал (иначе — громкий warn)
+    r = core._run(["ip", "route", "show", "table", "2000"], capture=True, check=False)
+    if "default" not in (r.stdout or ""):
+        core.log_to_file("ERROR", "cascade: table 2000 has no default route!")
+        core.warn("Маршрут default в table 2000 НЕ установлен — не-RU "
+                  "трафик будет уходить напрямую! Проверьте awg1.")
 
-    # Правило policy routing по fwmark
-    core._run(["ip", "rule", "add", "fwmark", str(AWGS_CASCADE_FWMARK), "lookup", "2000"],
+    # Правило policy routing по fwmark — ИДЕМПОТЕНТНО (v5.4.5: ядро НЕ
+    # отклоняет дубли «fwmark→table» — оно добавляет их с разными
+    # автоприоритетами; E2E: после setup+boot-скрипта висело 2 правила).
+    # Сначала удаляем все существующие fwmark-правила, затем добавляем одно.
+    core._run(["bash", "-c",
+               f"while ip rule del fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null; do :; done; "
+               f"ip rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000"],
               check=False, quiet=True)
 
     return True
 
 
 def _awgs_cascade_create_routing_script(exit_subnet: str) -> None:
-    """Создаёт awg-routing.sh для пересоздания правил при ребуте."""
+    """Создаёт awg-routing.sh для пересоздания правил при ребуте.
+
+    v5.4.5: Скрипт приводит правила В ТОЧНОСТИ к live-набору из
+    _awgs_cascade_apply_iptables. Раньше скрипт маркировал OUTPUT
+    (серверный трафик!) вместо FORWARD -i awg0 (клиентский) и ставил
+    conntrack-ACCEPT в OUTPUT — после ребута разметка молча меняла
+    область действия (подтверждено E2E 2026-10-03: на живой установке
+    юзера в mangle висело OUTPUT-правило от бут-скрипта вместо
+    FORWARD-правила инсталлера). Также добавлены идемпотентность
+    (-C || -A) и on-link маршрут для table 2000 (см. apply_iptables).
+    """
     AWGS_CASCADE_DIR.mkdir(parents=True, exist_ok=True)
     exit_base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
     exit_gw = f"{exit_base}.1"
 
     script = f"""#!/bin/bash
 # AWG Cascade routing — пересоздаёт правила при старте системы
-# Автоматически сгенерировано chimera/modules/awg_cascade.py
-
-set -e
+# Автоматически сгенерировано chimera/modules/awg_cascade.py (v5.4.5)
+# Идемпотентно: безопасен при многократном запуске (-C || -A, replace).
 
 # 1. Загрузить ipset из ru.zone
+# v5.4.5: через `ipset restore` (один pipe) — построчный `ipset add`
+# грузил 12k+ сетей МИНУТЫ; юнит теперь рестартует по PartOf и не
+# должен подвешивать systemd надолго.
+ipset create {AWGS_IPSET_NAME} hash:net family inet hashsize 4096 maxelem 65536 -exist
 if [ -f "{AWGS_RU_ZONE_FILE}" ]; then
-    ipset create {AWGS_IPSET_NAME} hash:net family inet hashsize 4096 maxelem 65536 -exist
-    while IFS= read -r line; do
-        line=$(echo "$line" | tr -d '[:space:]')
-        [ -z "$line" ] && continue
-        [ "${{line:0:1}}" = "#" ] && continue
-        ipset add {AWGS_IPSET_NAME} "$line" -exist
-    done < "{AWGS_RU_ZONE_FILE}"
+    grep -vE '^#|^$|;' "{AWGS_RU_ZONE_FILE}" | sed "s/^/add {AWGS_IPSET_NAME} /" | ipset restore -exist 2>/dev/null || true
 fi
 
-# 2. iptables правила
-iptables -t mangle -A OUTPUT -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK}
-iptables -t mangle -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -t nat -A POSTROUTING -o awg1 -j MASQUERADE
-iptables -A FORWARD -i awg0 -o awg1 -j ACCEPT
-iptables -A FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT
+# 2. iptables правила (идентичны live-набору _awgs_cascade_apply_iptables)
+# 2.1 v5.4.5 ГЛАВНЫЙ ФИКС: маркируем КЛИЕНТСКИЙ трафик в PREROUTING
+#     (ДО route decision — метка в FORWARD ставилась ПОСЛЕ маршрутизации,
+#     транзит уходил в main → DROP; метка в OUTPUT маркировала серверный
+#     трафик — SSH-lockout). -i awg0 — только клиентский трафик.
+iptables -t mangle -C PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null || \
+    iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK}
+# подчистка старых FORWARD-MARK правил от предыдущих версий chimera
+while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done
+# 2.2 NAT для выхода через awg1
+iptables -t nat -C POSTROUTING -o awg1 -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -o awg1 -j MASQUERADE
+# 2.3 FORWARD: клиенты → awg1 и обратно
+iptables -C FORWARD -i awg0 -o awg1 -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -i awg0 -o awg1 -j ACCEPT
+iptables -C FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+# 2.4 RU-сети — напрямую через host
+iptables -C FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT
+# 2.5 v5.4.5: TCPMSS clamp (двойное туннелирование → effective MTU ~1200;
+# без клампа TCP зависает на TLS-certs — MTU blackhole; E2E 2026-10-03)
+iptables -t mangle -C FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || \
+    iptables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
+iptables -t mangle -C FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || \
+    iptables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
 
-# 3. Policy routing
-ip route add default via {exit_gw} dev awg1 table 2000 2>/dev/null || true
-ip rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null || true
+# 3. Policy routing (v5.4.5: on-link подсеть перед default — иначе
+#    "Nexthop has invalid gateway" при Address=base.N/32 + Table=off)
+ip route replace {exit_base}.0/24 dev awg1 table 2000
+ip route replace default via {exit_gw} dev awg1 table 2000
+# v5.4.5: дедуп fwmark-правил (ядро не отклоняет дубли — они висят
+# с разными автоприоритетами; E2E: после setup+reboot — 2 правила)
+while ip rule del fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null; do :; done
+ip rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000
 
 echo "AWG Cascade routing started"
 """
@@ -385,11 +542,21 @@ echo "AWG Cascade routing started"
 
 
 def _awgs_cascade_create_systemd_unit() -> None:
-    """Создаёт systemd-юнит awg-cascade-routing.service."""
+    """Создаёт systemd-юнит awg-cascade-routing.service.
+
+    v5.4.5: PartOf=awg-quick@awg0/@awg1 — при рестарте/стопе этих юнитов
+    routing-юнит рестартует вместе с ними и восстанавливает правила и
+    table 2000. Иначе после `systemctl restart awg-quick@awg1` ядро
+    удаляло маршруты удалённого dev awg1 из table 2000 (default via
+    ... dev awg1 исчезал!) — каскад молча умирал: fwmark-трафик падал
+    в main и уходил напрямую (E2E 2026-10-03 — корневая причина
+    «неработающего» каскада у юзера после любого рестарта).
+    """
     unit = f"""[Unit]
 Description=AWG Cascade Routing (RU split-tunnel)
 After=awg-quick@awg0.service awg-quick@awg1.service network.target
 Wants=awg-quick@awg0.service awg-quick@awg1.service
+PartOf=awg-quick@awg0.service awg-quick@awg1.service
 
 [Service]
 Type=oneshot
@@ -517,9 +684,15 @@ def awgs_cascade_setup_awg1() -> bool:
     core._box_top(f"Данные для настройки AWG0 (вход каскада)")
     core._box_row(f"  {core.GREEN}Endpoint host:{core.NC}  {state.get('endpoint', '?')}")
     core._box_row(f"  {core.GREEN}Port:{core.NC}           {state.get('port', 51820)}")
-    core._box_row(f"  {core.GREEN}Server pubkey:{core.NC}  {state.get('server_pubkey', '?')[:32]}...")
+    core._box_row(f"  {core.GREEN}Server pubkey:{core.NC}  {state.get('server_pubkey', '?')}")
     core._box_row(f"  {core.GREEN}Cascade peer IP:{core.NC} {peer.get('client_ip', '?')}")
     core._box_row(f"  {core.GREEN}Cascade subnet:{core.NC}  {state.get('subnet', '?')}")
+    # v5.4.5: параметры обфускации — КРИТИЧНО для handshake awg1
+    # (должны совпадать на обеих сторонах; раньше не передавались)
+    import json as _json
+    _params_json = _json.dumps(state.get("params", {}), ensure_ascii=False)
+    core._box_row(f"  {core.GREEN}Obfuscation (JSON):{core.NC}")
+    core._box_row(f"  {_params_json}")
     core._box_bottom()
     print()
     info("Передайте эти данные на AWG0 (вход каскада) при настройке.")
@@ -624,6 +797,26 @@ def _awgs_cascade_menu_awg0() -> None:
 
     exit_subnet = input(f"{CYAN}Подсеть AWG1 [172.16.61.0/24]: {NC}").strip() or "172.16.61.0/24"
 
+    # v5.4.5: IP пира cascade_entry на AWG1 (из бокса "Cascade peer IP").
+    # Enter = base.2 (для чистого exit без других пиров).
+    _base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
+    exit_peer_ip = input(f"{CYAN}Cascade peer IP на AWG1 [{_base}.2]: {NC}").strip() or f"{_base}.2"
+
+    # v5.4.5: параметры обфускации AWG1 (строка Obfuscation из бокса AWG1).
+    # Обфускация обязана совпадать на обеих сторонах — иначе handshake
+    # никогда не сойдётся. Enter = параметры этого сервера (только если
+    # вы УВЕРЕНЫ, что пресеты совпадают).
+    exit_params = None
+    _params_raw = input(f"{CYAN}Obfuscation JSON с AWG1 (Enter = как на этом сервере): {NC}").strip()
+    if _params_raw:
+        import json as _json
+        try:
+            exit_params = _json.loads(_params_raw)
+        except Exception as e:
+            warn(f"Некорректный JSON обфускации ({e}) — будут использованы "
+                 "параметры этого сервера (handshake может не сойлись!)")
+            exit_params = None
+
     print()
     confirm = input(f"{core.YELLOW}Настроить каскад с {exit_host}:{exit_port}? [y/N]: {NC}").strip().lower()
     if confirm not in ("y", "yes", "д", "да"):
@@ -634,6 +827,8 @@ def _awgs_cascade_menu_awg0() -> None:
         exit_port=exit_port,
         exit_pubkey=exit_pubkey,
         exit_subnet=exit_subnet,
+        exit_peer_ip=exit_peer_ip,
+        exit_params=exit_params,
     )
 
 

@@ -169,6 +169,28 @@ def awgs_detect_os() -> dict:
     return info
 
 
+def awgs_kmod_already_ready() -> bool:
+    """v5.4.5: бинарники awg/awg-quick + рабочий kmod уже в системе?
+
+    Реальный кейс (E2E 2026-10-03, 138x): пакеты amneziawg-tools/-dkms
+    установлены ранее, но PPA/keyserver недоступны (падение DNS) —
+    инсталлер падал, хотя ВСЁ уже стоит. Идемпотентная установка
+    обязана замечать готовую систему и не требовать сети.
+    """
+    core = _core_module()
+    awg_bin = core._run(["which", AWGS_BIN], capture=True, check=False).stdout.strip()
+    awg_quick = core._run(["which", AWGS_QUICK_BIN], capture=True, check=False).stdout.strip()
+    if not (awg_bin and awg_quick):
+        return False
+    core._run(["modprobe", "amnezia"], check=False, quiet=True)
+    probe = core._run(
+        ["bash", "-c",
+         "ip link add test_awg0 type amneziawg 2>/dev/null && "
+         "ip link del test_awg0 && echo KMOD_OK"],
+        capture=True, check=False)
+    return "KMOD_OK" in (probe.stdout or "")
+
+
 def awgs_install_dkms() -> bool:
     """
     Устанавливает amneziawg-tools + DKMS kernel module через PPA amnezia/ppa.
@@ -179,6 +201,14 @@ def awgs_install_dkms() -> bool:
     DEB822 формат для Ubuntu 24.04+ и Debian 13+, legacy .list для Debian 12.
     """
     core = _core_module()
+
+    # v5.4.5: быстрый путь — всё уже установлено (идемпотентность +
+    # устойчивость к недоступному PPA/keyserver при готовых пакетах)
+    if awgs_kmod_already_ready():
+        core.success("AmneziaWG уже установлен (awg/awg-quick + kmod найдены) — "
+                     "переустановка пакетов не требуется")
+        return True
+
     info = awgs_detect_os()
     distro = info["distro"].lower()
     codename = info["codename"].lower() or info["version"]
@@ -392,10 +422,26 @@ def awgs_install_dkms() -> bool:
         return _awgs_install_dkms_fallback()
 
     # ── Шаг 3: проверка модуля ─────────────────────────────────────────────
-    # modprobe amnezia (DKMS должен был собрать и загрузить модуль)
-    core._run(["modprobe", "amnezia"], check=False, quiet=True)
-    r = core._run(["lsmod"], capture=True, check=False)
-    if "amnezia" not in r.stdout:
+    # v5.4.5: функциональная проба вместо мгновенного lsmod: dkms-раскатка
+    # для нескольких ядер асинхронна, modprobe+lsmod сразу после apt давали
+    # ложный WARN «не загрузился» при реально работающем модуле (E2E de1:
+    # WARN вылез, при этом awg0 поднялся и туннель работал). Проба
+    # `ip link add test_awg0 type amneziawg` — единственный надёжный тест.
+    kmod_ok = False
+    for attempt in range(3):
+        core._run(["modprobe", "amnezia"], check=False, quiet=True)
+        probe = core._run(
+            ["bash", "-c",
+             "ip link add test_awg0 type amneziawg 2>/dev/null && "
+             "ip link del test_awg0 && echo KMOD_OK"],
+            capture=True, check=False)
+        if "KMOD_OK" in (probe.stdout or ""):
+            kmod_ok = True
+            break
+        core.log_to_file("WARN", f"awgs_install_dkms: kmod probe attempt "
+                                  f"{attempt + 1}/3 failed")
+        time.sleep(3)
+    if not kmod_ok:
         # Возможно, нужен reboot (DKMS собрал модуль, но ядро его не подгрузило)
         core.warn("DKMS-модуль amnezia не загрузился в runtime — может потребоваться reboot")
         # Не возвращаем False — бинарники awg/awg-quick всё равно должны работать
@@ -863,6 +909,52 @@ def awgs_detect_wan_interface() -> str:
     return _awg_net_detect_wan_iface(core)
 
 
+def awgs_build_nat_helper_body(awg_subnet: str,
+                               awg_iface: str = AWGS_INTERFACE) -> str:
+    """v5.4.5: тело helper-скрипта /usr/local/sbin/awg-nat-rules.sh.
+
+    Вынесено в отдельную функцию для юнит-тестирования (см.
+    tests/test_awg_standalone.py::TestAwgsNatHelper).
+    """
+    return (
+        "#!/bin/bash\n"
+        "# AWG standalone NAT + FORWARD — сгенерировано chimera (awg_standalone.py)\n"
+        "# up|down — идемпотентно применить/убрать правила для " + awg_subnet + "\n"
+        "# Удаляется awgs_uninstall_full().\n"
+        "set -u\n"
+        "CMD=\"${1:-up}\"\n"
+        "WAN=$(ip route show default | awk '{print $5; exit}')\n"
+        "if [ -z \"$WAN\" ]; then echo \"awg-nat-rules: WAN interface not found\" >&2; exit 1; fi\n"
+        "case \"$CMD\" in\n"
+        "  up)   " + build_nat_idempotent_shell(awg_subnet, awg_iface, "$WAN") + " ;;\n"
+        "  down) " + build_nat_cleanup_shell(awg_subnet, awg_iface, "$WAN") + " ;;\n"
+        "  *) echo \"usage: $0 up|down\" >&2; exit 1 ;;\n"
+        "esac\n"
+    )
+
+
+def awgs_build_nat_unit_content() -> str:
+    """v5.4.5: содержимое awg-nat.service — ExecStart/ExecStop вызывают
+    helper-скрипт БЕЗ shell-кавычек (инлайн `bash -c '...awk '{...}'...'`
+    разрывался systemd-токенизатором — NAT умирал после каждой перезагрузки).
+    """
+    from .awg_constants import AWGS_SYSTEMD_AWG_QUICK
+    return f"""[Unit]
+Description=AWG standalone NAT + FORWARD rules (idempotent)
+After={AWGS_SYSTEMD_AWG_QUICK}
+Requires={AWGS_SYSTEMD_AWG_QUICK}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/awg-nat-rules.sh up
+ExecStop=/usr/local/sbin/awg-nat-rules.sh down
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
 def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
     """
     Настраивает NAT/MASQUERADE + FORWARD + sysctl для standalone AWG.
@@ -956,36 +1048,37 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
     # build_nat_idempotent_shell) — безопасен при многократных restart.
     # WAN определяется в runtime через `ip route show default` (не хардкодим
     # wan_iface, т.к. после ребута интерфейс может переименовать — udev).
+    #
+    # v5.4.5: КРИТИЧЕСКИЙ фикс — раньше ExecStart был инлайном:
+    #   ExecStart=/bin/bash -c 'WAN=$(... awk '{print $5}') ...'
+    # systemd-токенизатор разрывал аргумент на вложенной одинарной кавычке
+    # awk, а $WAN разворачивал сам systemd (пусто). Юнит молча падал
+    # после КАЖДОЙ перезагрузки → NAT не восстанавливался → «подключено,
+    # но нет интернета» (подтверждено E2E 2026-10-03, юнит на de1).
+    # Теперь правила вынесены в helper-скрипт (как awg-expires-check.sh),
+    # юнит вызывает его без shell-кавычек.
     info("Создание systemd-юнита awg-nat.service (idempotent ExecStart)...")
-    from .awg_constants import AWGS_SYSTEMD_AWG_QUICK
+    nat_helper = Path("/usr/local/sbin/awg-nat-rules.sh")
+    helper_body = awgs_build_nat_helper_body(awg_subnet, AWGS_INTERFACE)
+    try:
+        nat_helper.write_text(helper_body)
+        nat_helper.chmod(0o755)
+    except Exception as e:
+        warn(f"Не удалось создать {nat_helper}: {e}")
+        warn("NAT правила применены в runtime, но не переживут reboot")
+        return True
     nat_unit = Path("/etc/systemd/system/awg-nat.service")
-    # Bash-сниппет: определяем $WAN, затем идемпотентно добавляем правила.
-    exec_start_body = (
-        "WAN=$(ip route show default | awk '{print $5; exit}'); "
-        + build_nat_idempotent_shell(awg_subnet, AWGS_INTERFACE, "$WAN")
-    )
-    exec_stop_body = (
-        "WAN=$(ip route show default | awk '{print $5; exit}'); "
-        + build_nat_cleanup_shell(awg_subnet, AWGS_INTERFACE, "$WAN")
-    )
-    nat_unit_content = f"""[Unit]
-Description=AWG standalone NAT + FORWARD rules (idempotent)
-After={AWGS_SYSTEMD_AWG_QUICK}
-Requires={AWGS_SYSTEMD_AWG_QUICK}
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c '{exec_start_body}'
-ExecStop=/bin/bash -c '{exec_stop_body}'
-
-[Install]
-WantedBy=multi-user.target
-"""
+    nat_unit_content = awgs_build_nat_unit_content()
     try:
         nat_unit.write_text(nat_unit_content)
         core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
         core._run(["systemctl", "enable", "awg-nat.service"],
+                  check=False, quiet=True)
+        # v5.4.5: restart обязателен — если юнит остался в failed от
+        # предыдущей установки/бута (E2E 138x: failed-статус висел от
+        # старого юнита юзера при живых runtime-правилах), без restart
+        # он не поднимется до следующего ребута
+        core._run(["systemctl", "restart", "awg-nat.service"],
                   check=False, quiet=True)
         success("awg-nat.service создан и включен (NAT после reboot, idempotent)")
     except Exception as e:
