@@ -132,9 +132,18 @@ def _check_webdav() -> bool:
 def _protocol_checks(state: dict) -> list[tuple[str, bool]]:
     """VLESS+REALITY — ядро проекта: считается активным, пока существует
     state.json (само его наличие означает, что установка проведена)."""
+    # v5.5: лейбл AWG отражает версию протокола из главного state.json
+    # (Mode B transport: awg_protocol_version; "2.0" для старых установок)
+    _awg_label = "AWG (AmneziaWG)"
+    try:
+        _awg_pv = state.get("awg_protocol_version", "2.0")
+        if str(_awg_pv) == "3.1":
+            _awg_label = "AWG 3.1 (AmneziaWG)"
+    except Exception:
+        pass
     checks: list[tuple[str, Callable[[], bool]]] = [
         ("VLESS + REALITY",   lambda: STATE_FILE.exists()),
-        ("AWG (AmneziaWG)",   lambda: _check_awg(state)),
+        (_awg_label,          lambda: _check_awg(state)),
         ("Hysteria2",         lambda: _check_h2(state)),
         ("Telemt / MTProto",  _check_telemt),
         ("VK Turn Tunnel",    _check_vkturn),

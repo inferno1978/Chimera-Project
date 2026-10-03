@@ -1105,6 +1105,24 @@ AWG_I5:   str = ""      # Transport packet junk IPv6 allowed IP (hex)
 #   "default"  (старый хардкод 4/40/70/0/0/1/2/3/4 — для обратной совместимости
 #               с установками до введения полного набора параметров)
 AWG_OBFUSCATION_SOURCE: str = "default"
+
+# ── AWG 3.1 (v5.5): версия протокола + транспортные параметры ────────────
+# AWG_PROTOCOL_VERSION — "2.0" (дефолт, обратная совместимость) | "3.1"
+# (transport protection). Единая точка правды — chimera/modules/awg_protocol.py.
+AWG_PROTOCOL_VERSION: str = "2.0"
+# 9 транспортных параметров AWG 3.1 (диапазоны «N-M» — рандомизация таймеров;
+# флаги "on"). При 2.0 — пустые строки (в конфиги не пишутся).
+# Рендер — awg_protocol.awg_render_31_lines, генерация — awg31_generate_extra_params
+# (констрейнты GenerateObfuscation31, те же что в wpp_awg).
+AWG_HEADER_PROTECTION_KEY:  str = ""   # base64 32 байта (44 символа)
+AWG_CONTENT_PADDING_ADDITION: str = ""  # "8-24" и т.п.
+AWG_REKEY_AFTER_TIME:      str = ""   # "100-120" и т.п.
+AWG_REKEY_TIMEOUT:         str = ""   # "3-6" и т.п.
+AWG_REJECT_AFTER_TIME:     str = ""   # "130-200" и т.п.
+AWG_KEEPALIVE_TIMEOUT:     str = ""   # "8-12" и т.п.
+AWG_MAX_HANDSHAKE_ATTEMPTS: str = ""  # "15-25" и т.п.
+AWG_RANDOM_TRAILERS:       str = ""   # "on"
+AWG_DISABLE_COOKIES:       str = ""   # "on"
 # Routing mark для policy routing
 AWG_FWMARK:      int = 1000
 AWG_ROUTE_TABLE: int = 1000
@@ -3969,7 +3987,7 @@ def do_full_install() -> None:
         # -- AWG 2.0: установка клиента на RU-сервере и сервера на exit-VPS -----
         if AWG_EXIT_ENABLED:
             awg_full_setup()
-            PROGRESS.update(8, "AmneziaWG 2.0")
+            PROGRESS.update(8, "AmneziaWG " + AWG_PROTOCOL_VERSION)
             # BUGFIX: после awg_full_setup() конфиг xray нужно перегенерировать
             # с корректными PARAM_REALITY_DEST (dest/serverNames).
             info("Mode B + AWG: повторная генерация config.json с AWG-параметрами...")
@@ -3987,7 +4005,7 @@ def do_full_install() -> None:
     elif INSTALL_MODE == "A":
         if AWG_EXIT_ENABLED:
             awg_full_setup()
-            PROGRESS.update(8, "AmneziaWG 2.0")
+            PROGRESS.update(8, "AmneziaWG " + AWG_PROTOCOL_VERSION)
         
         if PROTOCOL_MODE == "xhttp":
             generate_xray_config_xhttp()           # Режим A, xHTTP TLS
@@ -4286,6 +4304,17 @@ def do_full_install() -> None:
             "awg_i4":              AWG_I4,
             "awg_i5":              AWG_I5,
             "awg_obfuscation_source": AWG_OBFUSCATION_SOURCE,
+            # AWG 3.1 (v5.5): версия протокола + 9 транспортных параметров
+            "awg_protocol_version": AWG_PROTOCOL_VERSION,
+            "awg_header_protection_key": AWG_HEADER_PROTECTION_KEY,
+            "awg_content_padding_addition": AWG_CONTENT_PADDING_ADDITION,
+            "awg_rekey_after_time": AWG_REKEY_AFTER_TIME,
+            "awg_rekey_timeout":  AWG_REKEY_TIMEOUT,
+            "awg_reject_after_time": AWG_REJECT_AFTER_TIME,
+            "awg_keepalive_timeout": AWG_KEEPALIVE_TIMEOUT,
+            "awg_max_handshake_attempts": AWG_MAX_HANDSHAKE_ATTEMPTS,
+            "awg_random_trailers": AWG_RANDOM_TRAILERS,
+            "awg_disable_cookies": AWG_DISABLE_COOKIES,
             # === PATCH v2: multi-node state fields ===
             "awg_nodes":             [{k: v for k, v in n.items() if k != "ssh_password"}
                                       for n in AWG_NODES] if AWG_NODES else [],
@@ -8148,7 +8177,7 @@ def _menu_network() -> None:
                 # AWG: показываем статус туннеля вместо VLESS-сводки
                 print()
                 _box_top("Сводка AWG 2.0 туннеля (Режим B)")
-                _box_row(f"  Транспорт:     {CYAN}AmneziaWG 2.0{NC}")
+                _box_row(f"  Транспорт:     {CYAN}AmneziaWG {AWG_PROTOCOL_VERSION}{NC}")
                 _box_row(f"  Exit-VPS:      {CYAN}{AWG_EXIT_HOST}:{AWG_EXIT_PORT}/udp{NC}")
                 _box_row(f"  Интерфейс:     {CYAN}{AWG_INTERFACE}{NC}")
                 _box_row(f"  Подсеть IPv4:  {CYAN}{AWG_SUBNET}{NC}")
@@ -9668,6 +9697,12 @@ def _load_state_into_globals() -> None:
     global AWG_H1, AWG_H2, AWG_H3, AWG_H4
     global AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5
     global AWG_OBFUSCATION_SOURCE
+    # AWG 3.1 (v5.5): версия протокола + 9 транспортных параметров
+    global AWG_PROTOCOL_VERSION
+    global AWG_HEADER_PROTECTION_KEY, AWG_CONTENT_PADDING_ADDITION
+    global AWG_REKEY_AFTER_TIME, AWG_REKEY_TIMEOUT, AWG_REJECT_AFTER_TIME
+    global AWG_KEEPALIVE_TIMEOUT, AWG_MAX_HANDSHAKE_ATTEMPTS
+    global AWG_RANDOM_TRAILERS, AWG_DISABLE_COOKIES
     global XHTTP_PADDING_BYTES, XHTTP_NO_SSE_HEADER, XHTTP_NO_GRPC_HEADER, XHTTP_HOST
     global XHTTP_SC_STREAM_UP_SERVER_SECS, XHTTP_SC_MAX_EACH_POST_BYTES
     global XHTTP_SC_MIN_POSTS_INTERVAL_MS, XHTTP_SC_MAX_BUFFERED_POSTS
@@ -9792,6 +9827,17 @@ def _load_state_into_globals() -> None:
         AWG_I4 = state.get("awg_i4",  AWG_I4)
         AWG_I5 = state.get("awg_i5",  AWG_I5)
         AWG_OBFUSCATION_SOURCE = state.get("awg_obfuscation_source", AWG_OBFUSCATION_SOURCE)
+        # AWG 3.1 (v5.5): версия протокола + 9 транспортных параметров
+        AWG_PROTOCOL_VERSION = state.get("awg_protocol_version", AWG_PROTOCOL_VERSION)
+        AWG_HEADER_PROTECTION_KEY = state.get("awg_header_protection_key", AWG_HEADER_PROTECTION_KEY)
+        AWG_CONTENT_PADDING_ADDITION = state.get("awg_content_padding_addition", AWG_CONTENT_PADDING_ADDITION)
+        AWG_REKEY_AFTER_TIME = state.get("awg_rekey_after_time", AWG_REKEY_AFTER_TIME)
+        AWG_REKEY_TIMEOUT = state.get("awg_rekey_timeout", AWG_REKEY_TIMEOUT)
+        AWG_REJECT_AFTER_TIME = state.get("awg_reject_after_time", AWG_REJECT_AFTER_TIME)
+        AWG_KEEPALIVE_TIMEOUT = state.get("awg_keepalive_timeout", AWG_KEEPALIVE_TIMEOUT)
+        AWG_MAX_HANDSHAKE_ATTEMPTS = state.get("awg_max_handshake_attempts", AWG_MAX_HANDSHAKE_ATTEMPTS)
+        AWG_RANDOM_TRAILERS = state.get("awg_random_trailers", AWG_RANDOM_TRAILERS)
+        AWG_DISABLE_COOKIES = state.get("awg_disable_cookies", AWG_DISABLE_COOKIES)
         PARAM_REALITY_DEST = state.get("reality_dest",   PARAM_REALITY_DEST)
         # FIX: загружаем socket_path и spiderx из state — раньше не делалось,
         # что ломало generate_xray_config() при rebuild через пункт меню 5b
@@ -9928,7 +9974,7 @@ def main_menu() -> None:
             _box_row(f"     {DIM}Свой L3 VPN (Protobuf/TLS) — honeypot-прокси вместо отказа зондам{NC}")
             _box_sep()
             _box_row()
-            _box_row(f"  {CYAN}14{NC} 🔒 {TITLE}AmneziaWG 2.0 (standalone VPN){NC}")
+            _box_row(f"  {CYAN}14{NC} 🔒 {TITLE}AmneziaWG 2.0/3.1 (standalone VPN){NC}")
             _box_row(f"     {DIM}Standalone AWG-сервер + carrier-пресеты + каскад RU→зарубеж{NC}")
             _box_row()
             _box_sep()

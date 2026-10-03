@@ -1083,16 +1083,22 @@ def prompt_awg_exit_mode() -> None:
     _box_item("1", f"{GREEN}VLESS{NC}        — через цепочку VLESS-нод (классика, текущий режим)")
     _box_item("2", f"{CYAN}AmneziaWG 2.0{NC} — через AWG-туннель на зарубежный VPS (рекомендуется)")
     _box_item("3", f"{YELLOW}Hysteria2{NC}     — через QUIC/UDP туннель на зарубежный VPS")
+    _box_item("4", f"{CYAN}AmneziaWG 3.1{NC} — transport protection (новое, для жёсткого DPI)")
     _box_row()
     _box_wrap_msg(f"  {DIM}", 2,
-        f"AWG: устойчив к DPI, обфусцирован, не требует VLESS на exit-ноде.{NC}")
+        f"AWG 2.0: устойчив к DPI, обфусцирован, не требует VLESS на exit-ноде.{NC}")
+    _box_wrap_msg(f"  {DIM}", 2,
+        f"AWG 3.1: + шифрование заголовков, паддинг, рандомизация таймеров — "
+        f"против поведенческого AI-анализа. Инструменты на exit-VPS "
+        f"обновляются автоматически; старые amneziawg-tools НЕ поймут "
+        f"3.1-конфиг (обновите PPA amnezia/ppa).{NC}")
     _box_wrap_msg(f"  {DIM}", 2,
         f"H2: QUIC/UDP, высокая скорость, устойчив к потерям пакетов.{NC}")
     _box_bottom()
 
     while True:
         try:
-            choice = input(f"  {CYAN}Выбор транспорта [1/2/3, Enter=1]:{NC} ").strip()
+            choice = input(f"  {CYAN}Выбор транспорта [1/2/3/4, Enter=1]:{NC} ").strip()
         except KeyboardInterrupt:
             print()
             raise
@@ -1103,12 +1109,18 @@ def prompt_awg_exit_mode() -> None:
             setattr(core, "H2_EXIT_ENABLED", H2_EXIT_ENABLED)
             success("Транспорт: VLESS (стандарт)")
             return
-        if choice == "2":
+        if choice in ("2", "4"):
+            # v5.5: 2 = AmneziaWG 2.0, 4 = AmneziaWG 3.1 (transport protection)
+            from chimera.modules.awg_protocol import (
+                awg_normalize_version, awg_protocol_label,
+            )
+            AWG_PROTOCOL_VERSION = awg_normalize_version("3.1" if choice == "4" else "2.0")
+            setattr(core, "AWG_PROTOCOL_VERSION", AWG_PROTOCOL_VERSION)
             AWG_EXIT_ENABLED = True
             setattr(core, "AWG_EXIT_ENABLED", AWG_EXIT_ENABLED)
             H2_EXIT_ENABLED  = False
             setattr(core, "H2_EXIT_ENABLED", H2_EXIT_ENABLED)
-            success("Транспорт: AmneziaWG 2.0")
+            success(f"Транспорт: {awg_protocol_label(AWG_PROTOCOL_VERSION)}")
             break
         if choice == "3":
             AWG_EXIT_ENABLED = False
@@ -1132,7 +1144,7 @@ def prompt_awg_exit_mode() -> None:
             _box_bottom()
             input(f"  {CYAN}Нажмите Enter для продолжения установки...{NC}")
             return
-        warn("Введите 1, 2 или 3")
+        warn("Введите 1, 2, 3 или 4")
 
     # --- Домен маскировки REALITY (dest/sni) ---
     _box_top("Домен маскировки REALITY (dest/sni)")
@@ -1258,7 +1270,25 @@ def prompt_awg_exit_mode() -> None:
     elif _obf_ch == "2":
         # Авто-генерация полного набора через awgs_generate_full_manual_params()
         from chimera.modules.awg_presets import awgs_generate_full_manual_params
-        _p = awgs_generate_full_manual_params()  # без overrides = полный авто-рандом
+        # v5.5: генерация учитывает версию протокола (3.1 → полный набор
+        # с HeaderProtectionKey и таймерами, диапазоны GenerateObfuscation31)
+        _awg_pv = getattr(core, "AWG_PROTOCOL_VERSION", "2.0")
+        _p = awgs_generate_full_manual_params(None, protocol_version=_awg_pv)
+        if _awg_pv == "3.1":
+            from chimera.modules.awg_protocol import AWG31_EXTRA_KEYS
+            _DIR_MAP = {
+                "header_protection_key": "AWG_HEADER_PROTECTION_KEY",
+                "content_padding_addition": "AWG_CONTENT_PADDING_ADDITION",
+                "rekey_after_time": "AWG_REKEY_AFTER_TIME",
+                "rekey_timeout": "AWG_REKEY_TIMEOUT",
+                "reject_after_time": "AWG_REJECT_AFTER_TIME",
+                "keepalive_timeout": "AWG_KEEPALIVE_TIMEOUT",
+                "max_handshake_attempts": "AWG_MAX_HANDSHAKE_ATTEMPTS",
+                "random_trailers": "AWG_RANDOM_TRAILERS",
+                "disable_cookies": "AWG_DISABLE_COOKIES",
+            }
+            for _k31 in AWG31_EXTRA_KEYS:
+                setattr(core, _DIR_MAP[_k31], _p.get(_k31, ""))
         AWG_JC, AWG_JMIN, AWG_JMAX = _p["jc"], _p["jmin"], _p["jmax"]
         AWG_S1, AWG_S2, AWG_S3, AWG_S4 = _p["s1"], _p["s2"], _p["s3"], _p["s4"]
         AWG_H1, AWG_H2, AWG_H3, AWG_H4 = _p["h1"], _p["h2"], _p["h3"], _p["h4"]
@@ -1378,7 +1408,24 @@ def prompt_awg_exit_mode() -> None:
         if not (0 <= _pidx < len(_presets)):
             _pidx = 0
         _preset_name = _presets[_pidx]
-        _p = awgs_presets_generate(_preset_name)
+        # v5.5: пресет с версией протокола (3.1 → GenerateObfuscation31-набор)
+        _awg_pv = getattr(core, "AWG_PROTOCOL_VERSION", "2.0")
+        _p = awgs_presets_generate(_preset_name, protocol_version=_awg_pv)
+        if _awg_pv == "3.1":
+            from chimera.modules.awg_protocol import AWG31_EXTRA_KEYS
+            _DIR_MAP = {
+                "header_protection_key": "AWG_HEADER_PROTECTION_KEY",
+                "content_padding_addition": "AWG_CONTENT_PADDING_ADDITION",
+                "rekey_after_time": "AWG_REKEY_AFTER_TIME",
+                "rekey_timeout": "AWG_REKEY_TIMEOUT",
+                "reject_after_time": "AWG_REJECT_AFTER_TIME",
+                "keepalive_timeout": "AWG_KEEPALIVE_TIMEOUT",
+                "max_handshake_attempts": "AWG_MAX_HANDSHAKE_ATTEMPTS",
+                "random_trailers": "AWG_RANDOM_TRAILERS",
+                "disable_cookies": "AWG_DISABLE_COOKIES",
+            }
+            for _k31 in AWG31_EXTRA_KEYS:
+                setattr(core, _DIR_MAP[_k31], _p.get(_k31, ""))
         AWG_JC, AWG_JMIN, AWG_JMAX = _p["jc"], _p["jmin"], _p["jmax"]
         AWG_S1, AWG_S2, AWG_S3, AWG_S4 = _p["s1"], _p["s2"], _p["s3"], _p["s4"]
         AWG_H1, AWG_H2, AWG_H3, AWG_H4 = _p["h1"], _p["h2"], _p["h3"], _p["h4"]
@@ -1444,6 +1491,7 @@ def prompt_awg_exit_mode() -> None:
         warn("Введите 1 или 2")
 
     _box_row()
+    _box_row(f"  Протокол AWG:  {getattr(core, 'AWG_PROTOCOL_VERSION', '2.0')}")
     _box_row(f"  AWG exit:      {AWG_EXIT_HOST}:{AWG_EXIT_PORT}/udp")
     _box_row(f"  SSH auth:      {AWG_SSH_AUTH_METHOD}")
     _box_row(f"  Jc/Jmin/Jmax:  {AWG_JC}/{AWG_JMIN}/{AWG_JMAX}")

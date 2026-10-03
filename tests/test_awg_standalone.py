@@ -355,7 +355,9 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
         self.assertTrue(ok)
 
         # awgs_presets_generate был вызван (с "default")
-        mock_gen.assert_called_once_with("default")
+        # v5.5: контракт расширен — ротация передаёт protocol_version из
+        # state (отсутствие ключа = "2.0" — старые установки)
+        mock_gen.assert_called_once_with("default", protocol_version="2.0")
 
         # ── КЛЮЧЕВАЯ ПРОВЕРКА: awgs_build_server_conf вызван с NEW_PARAMS ──
         mock_build.assert_called_once()
