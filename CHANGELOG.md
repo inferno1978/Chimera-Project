@@ -1,5 +1,166 @@
 # Changelog
 
+# Changelog new entry — AWG 3.1 (сводная по релизу v5.5–v5.5.3): полная интеграция официального AmneziaWG 3.1 — standalone + мульти-exit каскад с авто-failover + Mode B транспорт + SNI/dest-гигиена; AWG 2.0 байт-в-байт не тронута — 4 октября 2026
+
+
+## FEAT(awg): v5.5 — AmneziaWG 3.1 во всех режимах: standalone, каскад, Mode B транспорт (2.0 байт-в-байт не тронута)
+
+**Контекст (владелец):** официальный AmneziaWG 3.1 (анонс 28.08.2026) —
+шифрование заголовков (HeaderProtectionKey под S1-S4≥12), ContentPadding,
+рандомизация таймеров, защита от поведенческого AI-анализа. In-place
+апгрейд 2.0→3.1 невозможен (конфиги несовместимы, MTU 1280). Требование:
+полная интеграция 3.1 ПАРАЛЛЕЛЬНО с 2.0 во всех режимах, нулевой регресс
+2.0. Эталоны из первых рук: wiki.amnezia.host (параметры/upgrade/версии/
+Self-SNI), исходники amneziawg-go (uapi.go — все 25 uapi-ключей; obf.go —
+семантика 8 CPS-тегов) и amneziawg-tools (config.c/type.c). Внутренний
+референс — WPP-мир (wpp_awg.py уже поддерживал 3.1, констрейнты
+GenerateObfuscation31).
+
+**Ядро протокола:**
+- **`awg_protocol.py`** (новый модуль): нормализация версий, генерация/
+  валидация/рендер всех 9 транспортных директив 3.1 — HeaderProtectionKey
+  (base64-32B), ContentPaddingAddition («N-M»), RekeyAfterTime,
+  RekeyTimeout, RejectAfterTime, KeepaliveTimeout, MaxHandshakeAttempts,
+  RandomTrailers («on»), DisableCookies («on»); merge параметров, чтение
+  версии из state.
+- **State**: `protocol_version` в awg_standalone_state.json (отсутствие
+  ключа = 2.0 — миграция не нужна) + 10 глобалей в _core.py
+  (awg_protocol_version + 9 параметров, save/load).
+- **Каскад**: бокс данных AWG1 с версией протокола + расширенным JSON;
+  setup_awg0(exit_protocol_version=) — ВЕРСИОННАЯ валидация entry vs exit
+  (mismatch = отказ: handshake бы не сошёлся); awg1.conf с 3.1-директивами;
+  Table=off/PREROUTING-MARK не тронуты.
+- **Mode B (транспорт)**: пункт [4] «AmneziaWG 3.1 — transport protection»
+  в выборе транспорта exit-ноды; все генераторы конфигов + юниты знают
+  версию; предупреждение о старых amneziawg-tools на exit-VPS (нужен свежий
+  PPA amnezia/ppa).
+
+**Standalone:**
+- install/пресеты/валидатор/full_manual с protocol_version= (дефолт 2.0 —
+  обратно совместимо), TUI-выбор версии во всех 5 путях установки, ротация
+  обфускации по версии; предупреждения совместимости (роутеры 3.1 не
+  поддерживают, клиент AmneziaVPN 5.0.1.5+, MTU 1100 как fallback).
+
+**Клиенты и обвязка:**
+- awg_qr: клиентский .conf с 3.1-блоком в [Interface]; vpn:// URI с
+  protocol_version «2»/«3» + 3.1-ключи в inner JSON.
+- REST /api/awg/status.protocol_version; бейдж «Протокол: AWG 2.0/3.1» в
+  admin-панели; динамический лейбл status_panel; динамические заголовки
+  uninstall; меню [14] «AmneziaWG 2.0/3.1»; группа 2 в test_runner.
+
+**Хелсчеки:**
+- awgs_supports_awg31 (setconf-проба, safe-default True) + awg_is_31_
+  directive_error; awg_apply при 3.1-ошибке даёт точный warn «обновите
+  amneziawg-tools» БЕЗ запуска I2-I5-self-heal (3.1 ≠ кривая обфускация);
+  diagnose — секция protocol (версия/директивы awg0.conf/инструменты/
+  S≥12/I1-формат); диагностика секции 11 с версией.
+
+## FEAT(awg31+sni): v5.5.1 — полная поддержка ВСЕХ ключей/режимов обфускации официальной 3.1 + SNI/dest-гигиена (приоритет — свой домен)
+
+**Часть 1 — паритет параметров официальной 3.1:**
+- H1-H4 для 3.1 = ОФИЦИАЛЬНЫЙ формат узких непересекающихся диапазонов
+  «N-M» (H1-3 15-20k, H4 25-30k; раньше — формат 1.0 одиночных int):
+  узкие диапазоны ~20k обязательны против CPU-спайка/misclassify в
+  amneziawg-go; валидатор: пересечения H-диапазонов = ошибка, S1+56==S2 =
+  ошибка.
+- Токенайзер awg_is_valid_cps_chain по семантике obf.go: все 9 CPS-тегов
+  (b/r/rc/rd/dz/t/d/ds/c), hex 0x-optional ЧЁТНЫЙ, инт-аргументы
+  обязательны, unknown-тег = весь junk-пакет отвергнут.
+- I1 в 3.1 = любая официальная CPS-цепочка (мимикрия разрешена; «только
+  <r N>» был констрейнтом 3x-ui, не протокола); профили мимикрии I1:
+  QUIC (был) + DNS RFC1035 (новый) + TLS RFC8446 (новый) для 2.0+3.1.
+- Кросс-валидации таймеров (Reject > Keepalive+RekeyTimeout, RekeyAfter <
+  Reject), флаги on/off/0/1, формат «N»|«N-M» для всех диапазонных
+  (type.c); MTU 1280 подтверждён во всех источниках.
+- Промпт standalone: полная переработка — H-блок (N/N-M/auto + проверка
+  пересечений + варн 1-4 vanilla-WG), I-блок (CPS + шорткаты auto/quic/
+  dns/tls + предупреждения про kernel-only <c> и голый hex 1.5), для 3.1 —
+  ручной ввод ВСЕХ 9 транспортных директив; версия протокола протянута в
+  промпт (был хардкод 2.0). WPP-мир не тронут (generation-only).
+
+**Часть 2 — SNI/dest-гигиена (новый модуль `sni_hygiene.py`):**
+Проблема-2026: хостинги РФ вносят в ToS блокировку серверов, у которых в
+SNI/dest — домены известных ресурсов; РКН палит несоответствие «SNI =
+известный домен, IP = VPS-подсеть хостинга». Политика Chimera: приоритет —
+СОБСТВЕННЫЙ домен пользователя (Self-SNI паттерн wiki.amnezia.host),
+известные домены — только явная кастомизация с предупреждениями (ToS/РКН
++ REALITY Cert>8192), нигде в дефолтах/фолбэках домены известных ресурсов.
+- Mode B REALITY: дефолт dest = свой домен (был www.cloudflare.com);
+  reality_dest = свой домен → dest = ЛОКАЛЬНЫЙ nginx-сокет с LE-сертификатом
+  (петля разорвана, xver=1, serverNames=[свой домен]); чужой домен →
+  domain:443 как прежде; reality_server_settings() — единая точка правды
+  dest/xver/serverNames; _assert_reality_dest_sane + self-SNI-ветки в
+  socket-verify/restart-nginx/rebuild.
+- ShadowTLS: handshake к СВОЕМУ nginx (xray→nginx LE = локальный честный
+  TLS, ноль внешних известных доменов); свой домен — пункт [1] и дефолт
+  в меню установки/смены.
+- NaiveProxy: fake_url дефолт = https://<свой домен>/ (probe-редирект на
+  свой decoy-сайт; bing — только без домена).
+- Telemt: «Свой домен + свой сайт (nginx+LE)» пункт [1] и Enter-дефолт
+  (был захоронен в 99, дефолт = известный видеосервис!); известные
+  категории — со второго места + предупреждение.
+- fragment-трио (config/fuzzer/presets): канонический SNI-рул
+  client_sni_for_state (Mode B+AWG+reality_dest → reality_dest, иначе
+  domain) — в Mode A SNI не совпадал с serverNames (конфиг не работал бы)
+  и светил известный домен.
+- diagnostics: openssl-проба по цепочке reality_sni→sni→domain→
+  reality_dest, при пустоте — пропуск (был фолбэк google.com).
+- Осознанно не тронуто: youtube_b4/dpi_bypass sni_type (клиентские
+  fake-пакеты анти-DPI), DNS-коннективити-пробы, adblock-списки клиентских
+  конфигов, WPP (использует DOMAIN).
+
+## FIX(awg): v5.5.2 — 4 фикса живых E2E AWG 3.1
+
+- **FIX-A**: awgs_install — честный False при мёртвом awg-quick@awg0 (был
+  молчаливый warn → «успех» при not-found юните).
+- **FIX-B**: _awgs_apt_lock_heal — висячий apt.systemd.daily/apt-get>30мин
+  (lock) → TERM→KILL + ретрай apt update (живая валидация: зомби-процесс
+  2 суток убит, dkms-путь 44с).
+- **FIX-C**: _awgs_install_userspace_unit — юнит awg-quick@.service для
+  go-fallback (только если пакетного нет).
+- **FIX-D**: _awgs_remove_shadowing_stubs — стабы /usr/local/bin/awg(-quick)
+  затемняли пакетные → syncconf уходил в amneziawg-go (не умеет) → пиры в
+  conf, но НЕ в живом интерфейсе, handshake молча 0; чистка в обоих путях
+  install_dkms.
+
+## FEAT(awg_cascade): v5.5.3 — мульти-exit каскад + авто-failover (сводно; детальная запись — следующей ниже)
+
+cascade_exits (порядок = приоритет) + cascade_active_exit в state, ленивая
+миграция legacy-каскада; register/activate/remove exit (валидации как
+setup_awg0, дедуп, лимит 16); awgs_cascade_failover_check — health-тик
+каждую минуту, двухступенчатая защита (handshake≤300с → ok; несвежий но
+ping-проба через awg1 жива → ok-probe), перебор кандидатов по приоритету,
+TG-уведомления awg_failover, all-dead → возврат исходного; TUI меню [5]
+мульти-exit + REST /api/awg/status (cascade_role/active/exits БЕЗ секретов);
+FIX-E (приватный ключ пира cascade_entry в боксе AWG1 — TUI-флоу каскада
+был сломан: setup_awg0 молча генерил чужой ключ) и FIX-F (awg-nat.service
+WantedBy+=awg-quick@awg0 — NAT exit-ноды гас при stop/restart awg0,
+валидировано на всех 5 нодах).
+
+**Живые E2E (прод-флот RU-Entry + 4 exit FI/DE/NL/PL, selfsteal-домен
+владельца):** standalone 3.1 — RU + живой клиент (handshake, transfer,
+MTU 1280, source-проба) 8/8 ALL GREEN; каскад — все 4 exit доказаны
+source-пробами с третьих нод + tcpdump-трейсы обоих плеч; Mode B Self-SNI
+— probe без ключа: subject=CN=свой домен, issuer Let's Encrypt (известных
+доменов на проводе нет), полный паттерн «клиент → REALITY → xray →
+AWG 3.1 → exit → цель»; health-блок — ротация HPK 3.1, diagnose 0 FAIL,
+mismatch-отказ (exit 2.0 vs own 3.1), REST 10/10; uninstall + полная
+переустановка exit; авто-failover вживую — stop активного exit →
+переключение на резерв за 4с, probe OK, восстановление + switchback OK.
+Тест-артефакты вычищены, PROD_DRIFT: NONE на всех нодах.
+
+**Тесты:** ~203 новых теста в 10 новых файлах (test_awg_protocol_31.py,
+test_awg_presets_31.py, test_awg_standalone_31.py, test_awg_cascade_31.py,
+test_awg_transport_31.py, test_awg_compat_31.py, test_awg_qr_31.py,
+test_awg_install_fixes_v552.py, test_awg_cascade_multiexit.py,
+test_sni_hygiene.py); полный сьют на v5.5.2 — 7228 passed / 0 failed;
+регресс AWG-сьютов на v5.5.3 — ~830 passed / 0 failed; регресс AWG 2.0
+байт-в-байт чистый; full_test.py 74/74, готовность 10/10.
+
+**Мерж:** ветка awg-31 (4 коммита: a862da2 → 9634ff6 → 834f286 → a478e51)
+слита в chimera-v5 через MR !1 (merge-коммит f092fd49), зеркало GitHub
+main синхронизировано.
+
 # Changelog new entry — AWG каскад v5.5.3: МУЛЬТИ-EXIT (все зарубежные выходы в одном каскаде) + авто-failover + FIX-E — 4 октября 2026
 
 
