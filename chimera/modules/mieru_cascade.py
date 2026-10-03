@@ -128,6 +128,8 @@ def _mieru():
 
 _MODULE_STATE = Path("/var/lib/xray-installer/mieru_cascade.json")
 
+_REDSOCKS_CONF  = Path("/etc/redsocks.conf")   # системный конфиг пакета redsocks
+
 _ETC_DIR        = Path("/etc/mieru-cascade")
 _ROUTING_SH     = _ETC_DIR / "routing.sh"
 _HEALTH_WRAPPER = Path("/usr/local/bin/mieru-cascade-health.sh")
@@ -1583,6 +1585,89 @@ def _redsocks_path() -> Optional[str]:
     return shutil.which("redsocks")
 
 
+def _redsocks_comment_dnstc(text: str) -> str:
+    """Комментирует блок dnstc {...} в конфиге redsocks (C-комментарий).
+
+    Чистая функция (без ФС) — тестируется юнит-тестами. Debian-пакет
+    redsocks ships дефолтный /etc/redsocks.conf с dnstc — «fake DNS
+    server», слушающим 127.0.0.1:5300. Этот порт — upstream dnscrypt-proxy
+    (AdGuard Home) во всех установках Chimera: коллизия = crash-loop
+    dnscrypt после ребута (инцидент 2026-10-03, нода 138.124.255.238,
+    3.8k рестартов, мёртвый DNS всей ноды). Каскаду dnstc не нужен —
+    entry-сторона работает через собственные конфиги в /etc/mieru-cascade/.
+
+    Идемпотентна: файл с уже установленным маркером возвращается
+    без изменений (C-комментарии НЕ вкладываются — повторный wrap
+    раскомментировал бы блок обратно).
+    """
+    if "/* chimera: dnstc disabled" in text:
+        return text
+    out: list = []
+    depth = 0
+    started = False
+    for line in text.splitlines(keepends=True):
+        if not started and re.match(r"\s*dnstc\s*\{", line):
+            out.append("/* chimera: dnstc disabled — fake-DNS на :5300 "
+                       "конфликтует с dnscrypt-proxy (инцидент 2026-10-03)\n")
+            out.append(line)
+            depth = line.count("{") - line.count("}")
+            started = True
+            if depth <= 0:
+                out.append("*/\n")
+                started = False
+            continue
+        if started:
+            out.append(line)
+            depth += line.count("{") - line.count("}")
+            if depth <= 0:
+                out.append("*/\n")
+                started = False
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def _neutralize_system_redsocks() -> bool:
+    """Гасит СИСТЕМНЫЙ redsocks.service и dnstc-блок в /etc/redsocks.conf.
+
+    Debian-пакет redsocks (ставится _install_redsocks как зависимость
+    каскада) не только кладёт конфиг с dnstc:5300, но и включает
+    redsocks.service в автозагрузку (deb-systemd-helper). Пока dnscrypt
+    жив, dnstc молча не биндится (сервис в failed), но после ребута
+    юниты стартуют гонкой — если системный redsocks первым займёт
+    :5300, dnscrypt-proxy уходит в crash-loop (bind: address already
+    in use) и DNS сервера мёртв до ручного вмешательства.
+
+    Каскаду системный инстанс НЕ нужен: каждому Exit-у соответствует
+    свой mieru-cascade-redsocks@<id>.service с конфигом в
+    /etc/mieru-cascade/redsocks-<id>.conf. Нейтрализация идемпотентна,
+    выполняется на каждом apply и безопасна при любом состоянии.
+    """
+    # 1) dnstc-блок в дефолтном конфиге пакета → C-комментарий
+    #    (маркер-гвардр: повторный wrap не вкладывается — иначе */
+    #    раскомментировал бы блок обратно)
+    try:
+        if _REDSOCKS_CONF.exists():
+            text = _REDSOCKS_CONF.read_text(encoding="utf-8", errors="replace")
+            if "/* chimera: dnstc disabled" not in text and \
+                    re.search(r"(?m)^\s*dnstc\s*\{", text):
+                _REDSOCKS_CONF.write_text(_redsocks_comment_dnstc(text),
+                                          encoding="utf-8")
+                print("  [i] redsocks: dnstc-блок (:5300) нейтрализован в "
+                      "/etc/redsocks.conf — конфликт с dnscrypt-proxy")
+    except OSError as e:
+        # конфиг недоступен — не блокируем установку, но честно предупреждаем
+        print(f"  [!] redsocks: /etc/redsocks.conf: {e}")
+    # 2) системный юнит: stop + disable + reset-failed.
+    #    ТОЛЬКО plain «redsocks.service» — @-шаблоны mieru-cascade-redsocks@
+    #    не трогаем (это рабочие инстансы каскада).
+    if shutil.which("systemctl"):
+        _run(["systemctl", "stop", "redsocks.service"], capture=True)
+        _run(["systemctl", "disable", "redsocks.service"], capture=True)
+        _run(["systemctl", "reset-failed", "redsocks.service"], capture=True)
+    return True
+
+
 def _install_redsocks() -> bool:
     """redsocks через download manager (.deb из пула дистрибутива).
 
@@ -1590,24 +1675,37 @@ def _install_redsocks() -> bool:
     размещение /root → зеркала (yandex/ubuntu) → post_install dpkg -i.
     Fallback (все зеркала упали): apt-get с честным warn — это отступление
     от DM, но лучше работающий модуль, чем отказ установки.
-    """
-    if _redsocks_path():
-        return True
 
-    from chimera.modules.download_manager import fetch_package
-    from chimera.modules.mieru_cascade_packages import (
-        redsocks_candidates, redsocks_spec_for,
-    )
-    for fn in redsocks_candidates():
-        spec = redsocks_spec_for(fn)
-        if fetch_package(spec, print_hint_on_failure=False,
-                         progress_label="redsocks"):
-            if _redsocks_path():
-                return True
-    print("  [!] redsocks: зеркала DM не ответили — fallback apt-get "
-          "(вне download manager)")
-    r = _run(["apt-get", "install", "-y", "redsocks"], capture=True, timeout=180)
-    return bool(_redsocks_path())
+    v5.4.6: после установки (и при уже установленном бинарнике)
+    нейтрализуется СИСТЕМНЫЙ redsocks.service + dnstc-блок дефолтного
+    /etc/redsocks.conf (fake-DNS :5300 = порт dnscrypt-proxy; пакет
+    включает сервис в автозагрузку → после ребута гонка за :5300 →
+    crash-loop dnscrypt → мёртвый DNS ноды; инцидент 2026-10-03).
+    """
+    if not _redsocks_path():
+        from chimera.modules.download_manager import fetch_package
+        from chimera.modules.mieru_cascade_packages import (
+            redsocks_candidates, redsocks_spec_for,
+        )
+        installed = False
+        for fn in redsocks_candidates():
+            spec = redsocks_spec_for(fn)
+            if fetch_package(spec, print_hint_on_failure=False,
+                             progress_label="redsocks"):
+                if _redsocks_path():
+                    installed = True
+                    break
+        if not installed:
+            print("  [!] redsocks: зеркала DM не ответили — fallback apt-get "
+                  "(вне download manager)")
+            _run(["apt-get", "install", "-y", "redsocks"],
+                 capture=True, timeout=180)
+    if not _redsocks_path():
+        return False
+    # обе ветки (свежая установка и уже установленный ранее пакет):
+    # мина могла быть взведена задолго до этого apply — гасим всегда
+    _neutralize_system_redsocks()
+    return True
 
 
 def _ensure_mieru_client() -> bool:
