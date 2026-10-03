@@ -996,6 +996,43 @@ def _probe_exit_ttfb(exit_node: dict, timeout: float = 5.0) -> Optional[float]:
     return None
 
 
+# EMA-сглаживание метрик (v5.5.4): свежие пробы качаются (TTFB через
+# CDN-хоп ±сотни мс, load скачкообразный) — мгновенные метрики качали
+# доли ±10 п.п. на ровном месте, и каждый health-тик считал это
+# «материальным дрейфом». Сглаживаем по истории st['metrics_ema'].
+_B_EMA_ALPHA = 0.35          # вес свежей пробы (0..1]: меньше — глаже
+_B_EMA_MAX_AGE_S = 900       # история старше 15 мин — протухла
+
+
+def _ema_metrics(st: dict, lbl: str, fresh: dict) -> dict:
+    """EMA-сглаживание метрик Exit-а (история в st['metrics_ema']).
+
+    Единичные скачки проб не должны качать доли каскада: fresh
+    смешивается с предыдущим сглаженным значением (α=0.35 — всплеск
+    3x даёт сдвиг ~1.35x). Нет истории / протухла (>15 мин) / метрика
+    не числовая — возвращаем fresh как есть (быстрый старт, прежняя
+    семантика). Побочный эффект: пишет историю в st (сохранится
+    ближайшим state_save)."""
+    hist_all = st.setdefault("metrics_ema", {})
+    hist = hist_all.get(lbl)
+    out = dict(fresh)
+    if isinstance(hist, dict):
+        try:
+            age = time.time() - float(hist.get("ts") or 0)
+        except (TypeError, ValueError):
+            age = -1.0
+        if 0 <= age <= _B_EMA_MAX_AGE_S:
+            for k, v in fresh.items():
+                h = hist.get(k)
+                if (isinstance(v, (int, float)) and not isinstance(v, bool)
+                        and isinstance(h, (int, float))
+                        and not isinstance(h, bool)):
+                    out[k] = _B_EMA_ALPHA * v + (1 - _B_EMA_ALPHA) * h
+    out["ts"] = time.time()
+    hist_all[lbl] = out
+    return {k: v for k, v in out.items() if k != "ts"}
+
+
 def _balance_shares(st: dict, act: list) -> Optional[dict]:
     """Доли Exit-ов для весовых стратегий: label → q, Σq = 1.
 
@@ -1022,22 +1059,28 @@ def _balance_shares(st: dict, act: list) -> Optional[dict]:
             mm["load"] = _count_exit_load(e)
         if strategy == "smart":
             mm["ttfb_ms"] = _probe_exit_ttfb(e)
+        # EMA-сглаживание (v5.5.4): всплеск пробы (TTFB CDN-хоп) не
+        # должен качать доли — смешиваем с историей st['metrics_ema'].
+        sm = _ema_metrics(st, lbl, mm)
+        lat = sm.get("lat_ms")
+        ttfb = sm.get("ttfb_ms")
+        load = sm.get("load")
+        load_v = load if isinstance(load, (int, float)) else 0
         if strategy == "leastping":
             w = (1.0 / max(lat, 1.0)) if lat is not None else 0.0
         elif strategy == "leastload":
-            w = 1.0 / (1 + mm["load"])
+            w = 1.0 / (1 + load_v)
         else:  # smart — composite score, зеркально _compute_score (VLESS)
             lat_n = min(1.0, (lat if lat is not None else _B_NORM_LAT_MS)
                         / _B_NORM_LAT_MS)
-            ttfb = mm.get("ttfb_ms")
             ttfb_n = min(1.0, (ttfb if ttfb is not None else _B_NORM_TTFB_MS)
                          / _B_NORM_TTFB_MS)
-            load_n = min(1.0, mm["load"] / _B_NORM_LOAD)
+            load_n = min(1.0, load_v / _B_NORM_LOAD)
             score = round(_B_W_LATENCY * lat_n + _B_W_BANDWIDTH * ttfb_n
                           + _B_W_LOAD * load_n, 4)
-            mm["score"] = score
+            sm["score"] = score
             w = 1.0 / max(score, _B_SCORE_FLOOR)
-        metrics[lbl] = mm
+        metrics[lbl] = sm
         weights[lbl] = w
     total = sum(weights.values())
     if total <= 0:
@@ -1369,6 +1412,7 @@ def _rules_apply(st: dict) -> bool:
     # 4) запомнить + персист
     st["applied_rules"] = specs
     st["balance"] = bal
+    st["weights_applied_ts"] = time.time()   # cooldown весовых ребалансов
     proto_ipt_persist()
     state_save(st)
     return ok
@@ -2549,6 +2593,7 @@ def _ensure_local_services(st: dict) -> list:
 # полную пересборку правил каскада + persist rules.v4 (живой кейс
 # entry-ноды с leastping, октябрь 2026).
 WEIGHTS_HYSTERESIS = 0.05   # 5 процентных пунктов по доле Exit-а
+WEIGHTS_REBUILD_COOLDOWN_S = 600   # весовой ребаланс — не чаще раза в 10 мин
 
 
 def _shares_materially_changed(old_bal: Optional[dict],
@@ -2630,12 +2675,16 @@ def _health_tick_locked(verbose: bool = False) -> dict:
             bal = _balance_shares(st, _active_exits(st))
             result["balance"] = bal
             fresh = _rule_specs(st, bal)
-            # Гистерезис (v5.5.4): джиттер метрик (доли в пределах
-            # WEIGHTS_HYSTERESIS от последней применённой) — НЕ повод
-            # для пересборки: без порога тик перестраивал правила
+            # Гистерезис + cooldown (v5.5.4): доли в пределах
+            # WEIGHTS_HYSTERESIS от последней применённой — НЕ повод
+            # для пересборки; даже материальный дрейф — не чаще раза в
+            # WEIGHTS_REBUILD_COOLDOWN_S (EMA-сглаженные метрики
+            # осциллируют редко). Без этого тик перестраивал правила
             # (~90 вызовов iptables) и персистил rules.v4 каждую минуту.
             weights_drift = (
-                _shares_materially_changed(st.get("balance"), bal)
+                (time.time() - float(st.get("weights_applied_ts") or 0)
+                 >= WEIGHTS_REBUILD_COOLDOWN_S)
+                and _shares_materially_changed(st.get("balance"), bal)
                 and fresh != (st.get("applied_rules") or []))
         except Exception:
             weights_drift = False

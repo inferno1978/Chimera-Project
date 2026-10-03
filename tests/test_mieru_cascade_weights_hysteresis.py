@@ -10,7 +10,10 @@
 Exit-ов).
 """
 
+import time
 import types
+
+import pytest
 
 from chimera.modules import mieru_cascade as mc
 
@@ -124,3 +127,104 @@ def test_tick_material_drift_rebuilds(monkeypatch, tmp_path):
     result = mc._health_tick_locked(verbose=False)
     assert applied == [True]                   # ребаланс выполнен
     assert result["rebalanced"] is True
+
+
+# ── EMA-сглаживание метрик ───────────────────────────────────────────────
+
+def test_ema_no_history_returns_fresh():
+    st = {}
+    out = mc._ema_metrics(st, "A", {"lat_ms": 30.0, "ttfb_ms": 200.0})
+    assert out == {"lat_ms": 30.0, "ttfb_ms": 200.0}
+    assert "A" in st["metrics_ema"]              # история посеяна
+
+
+def test_ema_blends_with_history():
+    st = {"metrics_ema": {"A": {"lat_ms": 100.0, "ttfb_ms": 300.0,
+                                "ts": time.time()}}}
+    out = mc._ema_metrics(st, "A", {"lat_ms": 200.0, "ttfb_ms": 300.0})
+    exp = mc._B_EMA_ALPHA * 200.0 + (1 - mc._B_EMA_ALPHA) * 100.0
+    assert out["lat_ms"] == pytest.approx(exp)
+    assert out["ttfb_ms"] == pytest.approx(300.0)
+
+
+def test_ema_stale_history_forgotten():
+    st = {"metrics_ema": {"A": {"lat_ms": 100.0, "ts": time.time() - 3600}}}
+    out = mc._ema_metrics(st, "A", {"lat_ms": 200.0})
+    assert out["lat_ms"] == 200.0               # протухла — берём fresh
+
+
+def test_ema_non_numeric_passthrough():
+    st = {"metrics_ema": {"A": {"lat_ms": 100.0, "ts": time.time()}}}
+    out = mc._ema_metrics(st, "A", {"lat_ms": None})
+    assert out["lat_ms"] is None                # провал пробы не сглаживаем
+
+
+def test_balance_shares_smart_uses_smoothed_metrics(monkeypatch):
+    monkeypatch.setattr(mc, "_count_exit_load", lambda e: 0)
+    monkeypatch.setattr(mc, "_probe_exit_ttfb", lambda e: 480.0)
+    st = {
+        "strategy": "smart",
+        "metrics_ema": {"A": {"lat_ms": 30.0, "ttfb_ms": 160.0,
+                              "load": 0, "ts": time.time()}},
+    }
+    act = [{"id": "e1", "label": "A", "latency_ms": 30.0,
+            "redsocks_port": 23081}]
+    bal = mc._balance_shares(st, act)
+    # всплеск TTFB 480 при истории 160 → сглажено между ними, не 480
+    assert 160.0 < bal["metrics"]["A"]["ttfb_ms"] < 480.0
+    assert bal["shares"]["A"] == pytest.approx(1.0)
+
+
+# ── Cooldown весовых ребалансов ───────────────────────────────────────────
+
+def test_cooldown_blocks_weights_rebuild(monkeypatch, tmp_path):
+    applied = _mock_tick(
+        monkeypatch, tmp_path,
+        bal=_bal({"A": 0.40, "B": 0.30, "C": 0.30}))   # материальный дрейф
+
+    def _st_now():
+        s = _st()
+        s["weights_applied_ts"] = time.time()          # только что применяли
+        return s
+
+    monkeypatch.setattr(mc, "state_load", _st_now)
+    result = mc._health_tick_locked(verbose=False)
+    assert applied == []                       # cooldown подавил ребаланс
+    assert result["rebalanced"] is False
+
+
+def test_cooldown_expiry_allows_rebuild(monkeypatch, tmp_path):
+    applied = _mock_tick(
+        monkeypatch, tmp_path,
+        bal=_bal({"A": 0.40, "B": 0.30, "C": 0.30}))
+
+    def _st_old():
+        s = _st()
+        s["weights_applied_ts"] = (
+            time.time() - (mc.WEIGHTS_REBUILD_COOLDOWN_S + 1))
+        return s
+
+    monkeypatch.setattr(mc, "state_load", _st_old)
+    result = mc._health_tick_locked(verbose=False)
+    assert applied == [True]                   # cooldown истёк — ребаланс
+    assert result["rebalanced"] is True
+
+
+def test_rules_apply_records_weights_ts(monkeypatch, tmp_path):
+    st = _st()
+    monkeypatch.setattr(mc, "_active_exits", lambda st: st["exits"])
+    monkeypatch.setattr(mc, "_balance_shares",
+                        lambda st, act: _bal({"A": 1.0}))
+    monkeypatch.setattr(mc, "_rule_specs",
+                        lambda st, bal=None: [{"spec": "x"}])
+    monkeypatch.setattr(mc, "_spec_argv",
+                        lambda sp, add: ["true"] if add else ["false"])
+    monkeypatch.setattr(mc, "_purge_orphan_rules", lambda st: None)
+    monkeypatch.setattr(
+        mc, "_run",
+        lambda cmd, capture=False: types.SimpleNamespace(
+            returncode=0 if cmd[0] == "true" else 1, stderr=""))
+    monkeypatch.setattr(mc, "proto_ipt_persist", lambda: None)
+    monkeypatch.setattr(mc, "state_save", lambda st: None)
+    mc._rules_apply(st)
+    assert st.get("weights_applied_ts", 0) > 0  # clock для cooldown
