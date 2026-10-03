@@ -829,6 +829,14 @@ def generate_xray_config() -> None:
     log_to_file = core.log_to_file
 
     _assert_reality_dest_sane()
+    # v5.5.1 Self-SNI (Mode B): dest = свой домен → берём nginx-сокет
+    from chimera.modules.sni_hygiene import (
+        reality_self_sni as _rsn_check, reality_server_settings,
+    )
+    _reality_self_sni = bool(AWG_EXIT_ENABLED and
+                             _rsn_check(PARAM_REALITY_DEST, PARAM_DOMAIN))
+    _reality_settings = reality_server_settings(
+        AWG_EXIT_ENABLED, PARAM_REALITY_DEST, PARAM_DOMAIN, PARAM_SOCKET_PATH)
     info("Создание конфигурации Xray...")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # ПАТЧ: гарантируем создание группы/пользователя xray ДО chown.
@@ -1014,13 +1022,18 @@ def generate_xray_config() -> None:
                 "security": "reality",
                 "realitySettings": {
                     "show":        False,
-                    "dest":        (PARAM_REALITY_DEST + ":443") if AWG_EXIT_ENABLED else PARAM_SOCKET_PATH,
-                    # xver=1 (Proxy Protocol) только в классическом режиме:
-                    # Xray передаёт реальный IP клиента в Nginx через unix socket.
-                    # xver=0 при AWG: Xray слушает напрямую, PP-заголовок некому читать.
-                    "xver":        0 if AWG_EXIT_ENABLED else 1,
+                    # v5.5.1 Self-SNI (sni_hygiene): если REALITY dest
+                    # указывает на СВОЙ домен (PARAM_DOMAIN) — берём
+                    # dest = ЛОКАЛЬНЫЙ nginx-сокет с LE-сертификатом этого
+                    # домена (как в Mode A). Петли нет (сокет, не domain:443),
+                    # IP↔домен↔сертификат совпадают, SNI на проводе = свой
+                    # домен — никакого маскарада под известные ресурсы
+                    # (ToS РФ-хостингов / РКН). Чужой домен — как раньше,
+                    # domain:443 (явный выбор пользователя).
+                    # dest/xver/serverNames — единая точка правды
+                    # (sni_hygiene.reality_server_settings: Self-SNI → сокет)
+                    **_reality_settings,
                     "spiderX":     PARAM_SPIDERX,
-                    "serverNames": [PARAM_REALITY_DEST if AWG_EXIT_ENABLED else PARAM_DOMAIN],
                     "privateKey":  PARAM_PRIVATE_KEY,
                     "publicKey":   PARAM_PUBLIC_KEY,
                     "shortIds":    [PARAM_SHORTID],
@@ -1580,6 +1593,14 @@ def generate_xray_config_xhttp_reality() -> None:
     log_to_file = core.log_to_file
 
     _assert_reality_dest_sane()
+    # v5.5.1 Self-SNI (Mode B): dest = свой домен → берём nginx-сокет
+    from chimera.modules.sni_hygiene import (
+        reality_self_sni as _rsn_check, reality_server_settings,
+    )
+    _reality_self_sni = bool(AWG_EXIT_ENABLED and
+                             _rsn_check(PARAM_REALITY_DEST, PARAM_DOMAIN))
+    _reality_settings = reality_server_settings(
+        AWG_EXIT_ENABLED, PARAM_REALITY_DEST, PARAM_DOMAIN, PARAM_SOCKET_PATH)
     info("Создание конфигурации Xray (xHTTP + REALITY)...")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # ПАТЧ (синхрон с generate_xray_config): группа/пользователь xray ДО chown.
@@ -1738,13 +1759,15 @@ def generate_xray_config_xhttp_reality() -> None:
                 # Транспортный слой xHTTP (mode/path/extra: padding, xmux)
                 "xhttpSettings": _xhttp_s,
                 # TLS-маскировка REALITY — та же, что в tcp+reality:
-                # dest=unix-сокет nginx (сайт-заглушка), serverNames=домен.
+                # dest=unix-сокет nginx (сайт-заглушка), serverNames=домен;
+                # v5.5.1 Self-SNI — и в Mode B, если dest = свой домен
+                # (sni_hygiene.reality_self_sni).
                 "realitySettings": {
                     "show":        False,
-                    "dest":        (PARAM_REALITY_DEST + ":443") if AWG_EXIT_ENABLED else PARAM_SOCKET_PATH,
-                    "xver":        0 if AWG_EXIT_ENABLED else 1,
+                    # dest/xver/serverNames — единая точка правды
+                    # (sni_hygiene.reality_server_settings: Self-SNI → сокет)
+                    **_reality_settings,
                     "spiderX":     PARAM_SPIDERX,
-                    "serverNames": [PARAM_REALITY_DEST if AWG_EXIT_ENABLED else PARAM_DOMAIN],
                     "privateKey":  PARAM_PRIVATE_KEY,
                     "publicKey":   PARAM_PUBLIC_KEY,
                     "shortIds":    [PARAM_SHORTID],
@@ -1820,7 +1843,8 @@ def generate_xray_config_xhttp_reality() -> None:
     if r.returncode == 0:
         success(f"Конфигурация xHTTP+REALITY валидирована "
                 f"(mode={XHTTP_MODE}, path={XHTTP_PATH}, port={SERVER_PORT}, "
-                f"REALITY dest={PARAM_SOCKET_PATH or PARAM_REALITY_DEST + ':443'})")
+                f"REALITY dest={(PARAM_REALITY_DEST + ':443') if (AWG_EXIT_ENABLED and not _reality_self_sni) else PARAM_SOCKET_PATH}"
+                f"{' (Self-SNI: свой домен + nginx-сокет)' if (AWG_EXIT_ENABLED and _reality_self_sni) else ''})")
     else:
         # (geo-self-heal): см. generate_xray_config
         _healed = False

@@ -1,21 +1,29 @@
 """
 chimera/modules/awg_cascade.py
 ───────────────────────────────────────────────────────────────────────────────
-Каскад из 2 серверов AmneziaWG: RU (вход) → зарубеж (выход).
+Каскад AmneziaWG: RU (вход) → зарубеж (выход). С v5.5.3 — МУЛЬТИ-EXIT:
+несколько зарубежных выходов в одном каскаде, активен один awg1-туннель,
+авто-failover переключает на следующий выход при смерти активного.
 
 Схема (как в bivlked CASCADE.md):
   Клиент ──AWG──► AWG0 (RU, вход) ──┬──► российские сети напрямую (через host)
-                                    └──► остальной трафик ──► AWG1 (зарубеж, выход)
+                                    └──► остальной трафик ──► awg1 ──► exit
+                                             (exit = активный из cascade_exits:
+                                              fi1 → de → nl1 → pl1 → ...)
 
 Реализация:
-  • AWG1 (выход): стандартная установка standalone AWG + спец-пир 'cascade_entry'
-    для подключения AWG0
-  • AWG0 (вход): стандартная установка standalone AWG + клиентский туннель awg1
-    к AWG1 + ipset с RU-сетями + iptables-маршрутизация + systemd-юнит + cron
-    обновления ru.zone
+  • Exit-нода: standalone AWG + спец-пир 'cascade_entry' (setup_awg1)
+  • Entry-нода (RU): standalone AWG + клиентский туннель awg1 к АКТИВНОМУ
+    exit + ipset RU-сетей + iptables/fwmark-маршрутизация + systemd-юнит
+    + cron обновления ru.zone
+  • Мульти-exit (v5.5.3): список cascade_exits в state (порядок = приоритет
+    failover), awgs_cascade_activate_exit — переключение, таймер
+    awg-cascade-failover.timer (health-тик каждую минуту) — авто-failover
+    с двухступенчатой проверкой (handshake → ping → перебор кандидатов)
 
 Весь трафик к российским сетям (из ru.zone) идёт напрямую через host,
-остальной трафик маркируется fwmark=0x2000 и уходит через awg1 (туннель к AWG1).
+остальной трафик маркируется fwmark=0x2000 и уходит через awg1 (туннель к
+активному exit).
 """
 from __future__ import annotations
 
@@ -29,6 +37,11 @@ from .awg_constants import (
     AWGS_CRON_RU_UPDATE, AWGS_CRON_RU_UPDATE_SCRIPT, AWGS_SYSTEMD_CASCADE,
     AWGS_RU_ZONE_URL, AWGS_RU_ZONE_FALLBACK_GH,
     AWGS_CASCADE_ENTRY_PEER, AWGS_DEFAULT_SUBNET,
+    AWGS_CASCADE_EXITS_KEY, AWGS_CASCADE_ACTIVE_KEY,
+    AWGS_FAILOVER_SCRIPT, AWGS_SYSTEMD_FAILOVER_SVC,
+    AWGS_SYSTEMD_FAILOVER_TIMER, AWGS_FAILOVER_STALE_SEC,
+    AWGS_FAILOVER_PROBE_SEC, AWGS_FAILOVER_MAX_EXITS,
+    AWGS_AWG1_CONF,
 )
 from .awg_state import (
     awgs_state_load, awgs_state_save, awgs_state_set_cascade_role,
@@ -141,6 +154,8 @@ def awgs_cascade_setup_awg0(
     exit_peer_psk: str = "",
     exit_peer_ip: str = "",
     exit_params: dict = None,
+    exit_protocol_version: str = "",
+    exit_name: str = "",
 ) -> bool:
     """
     Настраивает AWG0 (вход каскада):
@@ -163,11 +178,39 @@ def awgs_cascade_setup_awg0(
         transfer 0 B received при живом туннеле с обеих сторон).
       • Валидация: exit_subnet не должен совпадать с подсетью awg0 entry
         и exit_host не должен быть собственным IP (self-loop).
+
+    v5.5 (AWG 3.1):
+      • exit_protocol_version — версия протокола exit-ноды ("2.0"/"3.1"
+        из бокса AWG1). Версии ОБЯЗАНЫ совпадать на обеих сторонах
+        туннеля awg1 — при расхождении handshake не сойдётся (3.1-
+        директивы обязаны быть на обоих концах или ни на одном).
+        Пусто/отсутствие = "2.0" (совместимость со старыми боксами).
+      • При 3.1 обфускация awg1.conf включает 9 транспортных директив
+        из exit_params (HeaderProtectionKey и т.д. — полный JSON из
+        бокса AWG1 уже содержит расширенный набор).
     """
+    from .awg_protocol import (
+        awg_is_31, awg_normalize_version, awg_protocol_label,
+    )
     core = _core_module()
     info = core.info
     success = core.success
     warn = core.warn
+
+    exit_protocol_version = awg_normalize_version(exit_protocol_version)
+
+    # v5.5: версионная валидация — версии протокола entry и exit обязаны
+    # совпадать (3.1-директивы синхронны на обоих концах или отсутствуют
+    # на обоих). Расхождение = гарантированно мёртвый handshake.
+    _own_protocol = awgs_state_load().get("protocol_version", "2.0")
+    if awg_normalize_version(_own_protocol) != exit_protocol_version:
+        warn(f"Версии протокола не совпадают: этот сервер — "
+             f"{awg_protocol_label(_own_protocol)}, AWG1 — "
+             f"{awg_protocol_label(exit_protocol_version)}.")
+        warn("Обфускация awg1 обязана совпадать с exit — переустановите "
+             "standalone AWG на этом сервере с той же версией протокола "
+             "(меню установки → выбор версии).")
+        return False
 
     # v5.4.5: валидация подсети и self-loop (E2E: у юзера exit_subnet
     # мог совпасть с 10.66.66.0/24 entry — маршрутная каша)
@@ -220,7 +263,8 @@ def awgs_cascade_setup_awg0(
     # 1. Создаём конфиг awg1 (туннель к AWG1)
     info("Создание конфига awg1 (туннель к AWG1)...")
     if exit_params:
-        info("Обфускация: используются параметры AWG1 (синхронизация)")
+        info(f"Обфускация: используются параметры AWG1 (синхронизация, "
+             f"{awg_protocol_label(exit_protocol_version)})")
     else:
         warn("Параметры обфускации AWG1 не переданы — используются "
              "параметры ЭТОГО сервера. Если пресет AWG1 отличается, "
@@ -230,8 +274,10 @@ def awgs_cascade_setup_awg0(
         exit_peer_privkey, exit_peer_psk, exit_subnet,
         exit_peer_ip=exit_peer_ip,
         exit_params=exit_params,
+        exit_protocol_version=exit_protocol_version,
     )
-    awg1_path = Path("/etc/amnezia/amneziawg/awg1.conf")
+    awg1_path = AWGS_AWG1_CONF
+    awg1_path.parent.mkdir(parents=True, exist_ok=True)
     awg1_path.write_text(awg1_conf)
     awg1_path.chmod(0o600)
 
@@ -285,6 +331,32 @@ def awgs_cascade_setup_awg0(
     if r.returncode != 0:
         warn(f"awg-cascade-routing не запустился: {r.stderr}")
 
+    # 8. v5.5.3: регистрируем exit в мульти-exit списке каскада
+    #    (переключение/авто-failover). Дедуп — по имени и endpoint:port.
+    _name = _awgs_cascade_slug_name(exit_name or exit_host)
+    _exits = [e for e in awgs_state_load().get(AWGS_CASCADE_EXITS_KEY) or []
+              if e.get("name") != _name
+              and not (str(e.get("endpoint")) == exit_host
+                       and int(e.get("port") or 0) == exit_port)]
+    _exits.append({
+        "name": _name,
+        "endpoint": exit_host,
+        "port": exit_port,
+        "server_pubkey": exit_pubkey,
+        "peer_privkey": exit_peer_privkey,
+        "peer_psk": exit_peer_psk or "",
+        "peer_ip": exit_peer_ip or "",
+        "subnet": exit_subnet,
+        "protocol_version": exit_protocol_version,
+        "params": exit_params or {},
+        "mtu": awgs_state_load().get("mtu", 1280),
+        "added_at": _now_iso(),
+    })
+    _st = awgs_state_load()
+    _st[AWGS_CASCADE_EXITS_KEY] = _exits
+    _st[AWGS_CASCADE_ACTIVE_KEY] = _name
+    awgs_state_save(_st)
+
     success("Каскад AWG0 (вход) настроен")
     return True
 
@@ -298,6 +370,7 @@ def _awgs_cascade_build_awg1_conf(
     exit_subnet: str,
     exit_peer_ip: str = "",
     exit_params: dict = None,
+    exit_protocol_version: str = "",
 ) -> str:
     """Генерирует awg1.conf — клиентский туннель к AWG1.
 
@@ -312,7 +385,13 @@ def _awgs_cascade_build_awg1_conf(
       • I1-I5 добавлены (правило v5.4.5: непустые как есть, пустые
         комментируются) — раньше отсутствовали полностью, что ломало
         handshake с exit-серверами, использующими I1 (default preset).
+
+    v5.5 (AWG 3.1): exit_protocol_version="3.1" → после I1-I5 добавляются
+    9 транспортных директив (HeaderProtectionKey/ContentPaddingAddition/
+    Rekey*/... — из exit_params, тот же расширенный JSON из бокса AWG1).
+    Пусто/"2.0" — конфиг байт-в-байт как в v5.4.5.
     """
+    from .awg_protocol import awg_is_31, awg_render_31_lines
     base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
     # v5.4.5: приоритет — явно переданный peer IP, fallback — base.2
     peer_addr = exit_peer_ip if exit_peer_ip else f"{base}.2"
@@ -358,6 +437,11 @@ def _awgs_cascade_build_awg1_conf(
             lines.append(f"{key.upper()} = {val}")
         else:
             lines.append(f"# {key.upper()} = ")
+    # v5.5 — AWG 3.1: 9 транспортных директив из exit_params (тот же
+    # расширенный JSON обфускации из бокса AWG1). Правило v5.4.5 —
+    # непустые «Key = value», пустые «# Key = ».
+    if awg_is_31(exit_protocol_version):
+        lines.append(awg_render_31_lines(params))
     lines += [
         "",
         "[Peer]",
@@ -637,27 +721,519 @@ def awgs_cascade_update_ru_zone() -> bool:
 
 
 # ============================================================================
+#  МУЛЬТИ-EXIT КАСКАД (v5.5.3)
+#  RU (вход) → НЕСКОЛЬКО зарубежных выходов. Активен один awg1-туннель;
+#  порядок cascade_exits = приоритет failover. Таймер раз в минуту
+#  проверяет handshake активного exit и при его смерти переключает awg1
+#  на следующий живой выход (awgs_cascade_failover_check).
+# ============================================================================
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _awgs_cascade_slug_name(name: str) -> str:
+    """Имя exit-ноды → slug [A-Za-z0-9._-] (для state/меню/логов)."""
+    slug = re.sub(r"[^A-Za-z0-9._-]", "-", (name or "").strip()).strip("-.")
+    return slug or "exit-1"
+
+
+def _awgs_cascade_exits_load() -> list:
+    """Список exit-боксов из state + ленивая миграция legacy-каскада.
+
+    Legacy (v5.4.x/v5.5.2): единственный exit хранился в плоских полях
+    cascade_peer_*. При первом обращении синтезируем из них бокс и
+    сохраняем в cascade_exits. Плоские поля остаются зеркалом активного
+    exit (обратная совместимость чтения).
+    """
+    state = awgs_state_load()
+    exits = state.get(AWGS_CASCADE_EXITS_KEY) or []
+    if exits:
+        return exits
+    if state.get("cascade_role") == "entry" and state.get("cascade_peer_host"):
+        box = {
+            "name": _awgs_cascade_slug_name(state.get("cascade_peer_host")),
+            "endpoint": state.get("cascade_peer_host", ""),
+            "port": int(state.get("cascade_peer_port") or 51820),
+            "server_pubkey": state.get("cascade_peer_pubkey", ""),
+            "peer_privkey": state.get("cascade_peer_privkey", ""),
+            "peer_psk": "",
+            "peer_ip": "",
+            "subnet": state.get("cascade_subnet", AWGS_DEFAULT_SUBNET),
+            "protocol_version": state.get("protocol_version", "2.0"),
+            "params": state.get("params", {}),
+            "mtu": state.get("mtu", 1280),
+            "added_at": _now_iso(),
+        }
+        exits = [box]
+        state[AWGS_CASCADE_EXITS_KEY] = exits
+        state[AWGS_CASCADE_ACTIVE_KEY] = box["name"]
+        awgs_state_save(state)
+    return exits
+
+
+def _awgs_cascade_active_name(exits: list, state: dict) -> str:
+    """Имя активного exit (с фолбэком на первый в списке)."""
+    name = state.get(AWGS_CASCADE_ACTIVE_KEY, "")
+    if name and any(e.get("name") == name for e in exits):
+        return name
+    return exits[0].get("name", "") if exits else ""
+
+
+def awgs_cascade_register_exit(
+    name: str = "",
+    endpoint: str = "",
+    port: int = 51820,
+    server_pubkey: str = "",
+    peer_privkey: str = "",
+    peer_psk: str = "",
+    peer_ip: str = "",
+    subnet: str = "",
+    protocol_version: str = "2.0",
+    params: dict = None,
+    mtu: int = 1280,
+    activate: bool = False,
+) -> bool:
+    """Регистрирует exit-ноду в мульти-exit каскаде (v5.5.3).
+
+    Бокс данных берётся с exit-ноды (awgs_cascade_setup_awg1 / меню
+    «Настроить как AWG1»). Валидации те же, что в awgs_cascade_setup_awg0
+    (версия протокола/подсеть/self-loop) — до записи в state. Дубликат
+    по имени ИЛИ endpoint:port заменяется (обновление), а не плодится.
+    Первый зарегистрированный exit становится активным автоматически.
+    """
+    from .awg_protocol import awg_normalize_version, awg_protocol_label
+    core = _core_module()
+    info = core.info
+    warn = core.warn
+
+    endpoint = (endpoint or "").strip()
+    if not endpoint:
+        warn("Endpoint host обязателен")
+        return False
+    name = _awgs_cascade_slug_name(name or endpoint)
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        warn(f"Некорректный порт: {port!r}")
+        return False
+    if not (1 <= port <= 65535):
+        warn(f"Порт вне диапазона 1-65535: {port}")
+        return False
+    if not (server_pubkey or "").strip():
+        warn("Server pubkey exit-ноды обязателен")
+        return False
+    if not (peer_privkey or "").strip():
+        warn("Cascade peer privkey обязателен (без него handshake "
+             "невозможен: exit ждёт pubkey этого ключа)")
+        return False
+
+    protocol_version = awg_normalize_version(protocol_version)
+    state = awgs_state_load()
+
+    # Версии протокола entry и exit обязаны совпадать (3.1-директивы
+    # синхронны на обоих концах или отсутствуют на обоих).
+    _own_pv = awg_normalize_version(state.get("protocol_version", "2.0"))
+    if _own_pv != protocol_version:
+        warn(f"Версии протокола не совпадают: этот сервер — "
+             f"{awg_protocol_label(_own_pv)}, exit '{name}' — "
+             f"{awg_protocol_label(protocol_version)}.")
+        return False
+
+    # Self-loop
+    try:
+        _own_ip = core.get_server_ip("4")
+    except Exception:
+        _own_ip = ""
+    if _own_ip and _own_ip == endpoint:
+        warn(f"exit '{name}' указывает на этот же сервер (self-loop)")
+        return False
+
+    # Подсеть exit не должна совпадать с подсетью awg0 entry
+    subnet = (subnet or "").strip() or AWGS_DEFAULT_SUBNET
+    _own_subnet = state.get("subnet", "")
+    if _own_subnet and _own_subnet == subnet:
+        warn(f"Подсеть exit ({subnet}) совпадает с подсетью awg0 ({_own_subnet})")
+        return False
+
+    if not params:
+        warn("Параметры обфускации exit не переданы — awg1 возьмёт "
+             "параметры ЭТОГО сервера (handshake может не сойтись!)")
+
+    exits = _awgs_cascade_exits_load()
+    # Дедуп по имени И по endpoint:port — обновление бокса, а не клон
+    exits = [e for e in exits
+             if e.get("name") != name
+             and not (str(e.get("endpoint")) == endpoint
+                      and int(e.get("port") or 0) == port)]
+    if len(exits) + 1 > AWGS_FAILOVER_MAX_EXITS:
+        warn(f"Слишком много exit-нод (максимум {AWGS_FAILOVER_MAX_EXITS})")
+        return False
+
+    box = {
+        "name": name,
+        "endpoint": endpoint,
+        "port": port,
+        "server_pubkey": server_pubkey.strip(),
+        "peer_privkey": peer_privkey.strip(),
+        "peer_psk": (peer_psk or "").strip(),
+        "peer_ip": (peer_ip or "").strip(),
+        "subnet": subnet,
+        "protocol_version": protocol_version,
+        "params": params or {},
+        "mtu": int(mtu or 1280),
+        "added_at": _now_iso(),
+    }
+    exits.append(box)
+    state = awgs_state_load()
+    state[AWGS_CASCADE_EXITS_KEY] = exits
+    if not state.get(AWGS_CASCADE_ACTIVE_KEY):
+        state[AWGS_CASCADE_ACTIVE_KEY] = name
+    awgs_state_save(state)
+    info(f"Exit-нода '{name}' ({endpoint}:{port}, "
+         f"{awg_protocol_label(protocol_version)}) добавлена в каскад "
+         f"(всего exit: {len(exits)})")
+
+    if activate or len(exits) == 1:
+        return awgs_cascade_activate_exit(name)
+    return True
+
+
+def awgs_cascade_activate_exit(name: str, probe_timeout: int = 0) -> bool:
+    """Переключает awg1-туннель на exit-ноду `name` из cascade_exits.
+
+    Меняется только [Interface]-ключ + [Peer]-секция awg1.conf (Endpoint/
+    PublicKey/обфускация) — маршрутизация (fwmark 0x2000 → table 2000 →
+    awg1) не меняется. routing-скрипт перегенерируется под подсеть exit
+    (все exit обычно в одной подсети 172.16.91.0/24 — тогда no-op).
+
+    probe_timeout > 0 — ждать handshake/ping после переключения (используется
+    failover-пробой кандидатов).
+    """
+    core = _core_module()
+    info = core.info
+    warn = core.warn
+
+    exits = _awgs_cascade_exits_load()
+    box = next((e for e in exits if e.get("name") == name), None)
+    if box is None:
+        warn(f"Exit-нода '{name}' не найдена в списке каскада")
+        return False
+
+    subnet = box.get("subnet", AWGS_DEFAULT_SUBNET)
+
+    # 1. awg1.conf из бокса exit (обфускация/версия — синхронно с exit)
+    conf = _awgs_cascade_build_awg1_conf(
+        exit_host=box.get("endpoint", ""),
+        exit_port=int(box.get("port", 51820)),
+        exit_pubkey=box.get("server_pubkey", ""),
+        client_privkey=box.get("peer_privkey", ""),
+        psk=box.get("peer_psk", "") or "",
+        exit_subnet=subnet,
+        exit_peer_ip=box.get("peer_ip", ""),
+        exit_params=box.get("params") or None,
+        exit_protocol_version=box.get("protocol_version", "2.0"),
+    )
+    awg1_path = AWGS_AWG1_CONF
+    awg1_path.parent.mkdir(parents=True, exist_ok=True)
+    awg1_path.write_text(conf)
+    awg1_path.chmod(0o600)
+
+    # 2. Routing-скрипт под подсеть exit + рестарт туннеля
+    #    (PartOf=awg-quick@awg1 перезапустит routing-юнит и пересоздаст
+    #    table 2000; явный restart — страховка для старых юнит-файлов)
+    _awgs_cascade_create_routing_script(subnet)
+    core._run(["systemctl", "enable", "awg-quick@awg1"], check=False, quiet=True)
+    r = core._run(["systemctl", "restart", "awg-quick@awg1"],
+                  capture=True, check=False)
+    if r.returncode != 0:
+        warn(f"awg1 не перезапустился: {r.stderr}")
+        return False
+    core._run(["systemctl", "restart", "awg-cascade-routing"],
+              check=False, quiet=True)
+
+    # 3. state: активный exit + зеркало legacy-полей (обратная совместимость)
+    state = awgs_state_load()
+    state[AWGS_CASCADE_EXITS_KEY] = exits
+    state[AWGS_CASCADE_ACTIVE_KEY] = name
+    state["cascade_peer_host"] = box.get("endpoint", "")
+    state["cascade_peer_port"] = int(box.get("port", 51820))
+    state["cascade_peer_pubkey"] = box.get("server_pubkey", "")
+    state["cascade_peer_privkey"] = box.get("peer_privkey", "")
+    state["cascade_subnet"] = subnet
+    awgs_state_save(state)
+    info(f"Активный exit каскада: {name} ({box.get('endpoint')}:{box.get('port')})")
+
+    # 4. Проба живости (failover-кандидаты): ждём свежий handshake или ping
+    if probe_timeout and probe_timeout > 0:
+        deadline = time.time() + probe_timeout
+        while time.time() < deadline:
+            time.sleep(3)
+            age = awgs_cascade_handshake_age()
+            if age is not None and age <= 30:
+                return True
+            if _awgs_cascade_probe_alive(subnet):
+                return True
+        return False
+    return True
+
+
+def awgs_cascade_remove_exit(name: str) -> bool:
+    """Удаляет exit-ноду из списка каскада.
+
+    Если удаляли активную — активируется первая оставшаяся (awg1
+    переключается немедленно, чтобы каскад не смотрел в пустоту).
+    """
+    core = _core_module()
+    warn = core.warn
+    exits = _awgs_cascade_exits_load()
+    if not any(e.get("name") == name for e in exits):
+        warn(f"Exit-нода '{name}' не найдена")
+        return False
+    was_active = _awgs_cascade_active_name(exits, awgs_state_load()) == name
+    exits = [e for e in exits if e.get("name") != name]
+    state = awgs_state_load()
+    state[AWGS_CASCADE_EXITS_KEY] = exits
+    if state.get(AWGS_CASCADE_ACTIVE_KEY) == name:
+        state[AWGS_CASCADE_ACTIVE_KEY] = exits[0].get("name", "") if exits else ""
+    awgs_state_save(state)
+    if was_active and exits:
+        return awgs_cascade_activate_exit(exits[0].get("name", ""))
+    return True
+
+
+def _awgs_cascade_parse_handshake_age(text: str):
+    """Парсит вывод `awg show` → возраст handshake в секундах.
+
+    "latest handshake: 1 minute, 25 seconds ago" → 85
+    Нет строки handshake (туннель свежий/мёртвый) → None.
+    Чистая функция (тестируется без сервера).
+    """
+    m = re.search(r"latest handshake:\s*(.+?)\s+ago", text or "")
+    if not m:
+        return None
+    total, found = 0, False
+    for part in m.group(1).split(","):
+        pm = re.match(r"(\d+)\s+(second|minute|hour|day|week)s?",
+                      part.strip())
+        if pm:
+            found = True
+            mult = {"second": 1, "minute": 60, "hour": 3600,
+                    "day": 86400, "week": 604800}[pm.group(2)]
+            total += int(pm.group(1)) * mult
+    return total if found else None
+
+
+def awgs_cascade_handshake_age():
+    """Возраст последнего handshake awg1 (сек) или None (не было/нет awg1)."""
+    core = _core_module()
+    r = core._run(["awg", "show", "awg1"], capture=True, check=False)
+    if r.returncode != 0:
+        return None
+    return _awgs_cascade_parse_handshake_age(r.stdout or "")
+
+
+def _awgs_cascade_probe_alive(subnet: str) -> bool:
+    """Пинг-проба шлюза exit через awg1 (ICMP отвечает ядро exit-ноды)."""
+    core = _core_module()
+    base = (subnet or AWGS_DEFAULT_SUBNET).split("/")[0].rsplit(".", 1)[0]
+    gw = f"{base}.1"
+    r = core._run(["ping", "-n", "-I", "awg1", "-c", "2", "-W", "2", gw],
+                  capture=True, check=False)
+    return r.returncode == 0
+
+
+def _awgs_cascade_failover_notify(detail: str) -> None:
+    """Best-effort TG-уведомление о failover-событии (не бросает исключений)."""
+    try:
+        from .tg_bot import tg_notify_event
+        tg_notify_event("awg_failover", detail)
+    except Exception:
+        pass
+
+
+def awgs_cascade_failover_check() -> str:
+    """Health-тик мульти-exit каскада (таймер раз в минуту).
+
+    Логика (двухступенчатая защита от ложных срабатываний):
+      1. handshake свежий (<= AWGS_FAILOVER_STALE_SEC) → "ok"
+      2. handshake несвежий, но ping шлюза через awg1 жив → "ok-probe"
+      3. туннель мёртв → перебор exit-кандидатов ПО ПОРЯДКУ СПИСКА
+         (после активного); первый давший handshake → "failover:<name>"
+      4. никто не ответил → восстановить исходный → "all-dead"
+
+    Возвращает строку-действие (для логов/тестов): not-entry |
+    single-exit | ok | ok-probe | failover:<name> | all-dead.
+    """
+    core = _core_module()
+    state = awgs_state_load()
+    if state.get("cascade_role") != "entry":
+        return "not-entry"
+    exits = _awgs_cascade_exits_load()
+    if len(exits) < 2:
+        return "single-exit"
+
+    active = _awgs_cascade_active_name(exits, state)
+
+    age = awgs_cascade_handshake_age()
+    if age is not None and age <= AWGS_FAILOVER_STALE_SEC:
+        return "ok"
+
+    active_box = next((e for e in exits if e.get("name") == active), exits[0])
+    if _awgs_cascade_probe_alive(active_box.get("subnet", AWGS_DEFAULT_SUBNET)):
+        return "ok-probe"
+
+    core.log_to_file(
+        "WARN",
+        f"awg-cascade-failover: активный exit '{active}' не отвечает "
+        f"(handshake age={age}s, ping fail) — перебор кандидатов")
+    for cand in [e for e in exits if e.get("name") != active]:
+        _name = cand.get("name", "?")
+        if awgs_cascade_activate_exit(_name, probe_timeout=AWGS_FAILOVER_PROBE_SEC):
+            core.log_to_file(
+                "INFO",
+                f"awg-cascade-failover: переключение на '{_name}' успешно")
+            _awgs_cascade_failover_notify(
+                f"AWG-каскад: авто-failover → <b>{_name}</b> "
+                f"({cand.get('endpoint')}:{cand.get('port')})")
+            return f"failover:{_name}"
+
+    # Все кандидаты молчат — возвращаем исходный (стабильность приоритетов)
+    awgs_cascade_activate_exit(active, probe_timeout=0)
+    core.log_to_file(
+        "ERROR",
+        "awg-cascade-failover: все exit-ноды недоступны — восстановлен "
+        "исходный exit, ждём восстановления сети")
+    _awgs_cascade_failover_notify(
+        "AWG-каскад: failover не удался — все exit-ноды недоступны, "
+        "восстановлен исходный")
+    return "all-dead"
+
+
+def awgs_cascade_failover_setup() -> bool:
+    """Создаёт и запускает failover-таймер (ежеминутный health-тик).
+
+    Wrapper-скрипт PYTHONPATH-safe (тот же паттерн, что
+    _awgs_cascade_setup_cron — bare python3 -c из-под systemd падает с
+    ModuleNotFoundError). Лог — в /root/awg/awg_standalone.log.
+    """
+    core = _core_module()
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("chimera")
+        if spec and spec.submodule_search_locations:
+            installer_path = str(
+                Path(list(spec.submodule_search_locations)[0]).parent)
+        else:
+            installer_path = "/opt/chimera"
+    except Exception:
+        installer_path = "/opt/chimera"
+
+    wrapper = (
+        "#!/bin/bash\n"
+        "# AWG cascade multi-exit failover — health-тик (v5.5.3).\n"
+        "mkdir -p /root/awg\n"
+        f"export PYTHONPATH=\"{installer_path}:$PYTHONPATH\"\n"
+        f"/usr/bin/python3 -c \"\n"
+        f"import sys\n"
+        f"sys.path.insert(0, '{installer_path}')\n"
+        f"from chimera.modules.awg_cascade import awgs_cascade_failover_check\n"
+        f"awgs_cascade_failover_check()\n"
+        f"\" >> /root/awg/awg_standalone.log 2>&1\n"
+    )
+    AWGS_FAILOVER_SCRIPT.write_text(wrapper)
+    AWGS_FAILOVER_SCRIPT.chmod(0o755)
+
+    AWGS_SYSTEMD_FAILOVER_SVC.write_text(
+        "[Unit]\n"
+        "Description=AWG Cascade failover check (multi-exit health)\n"
+        "After=awg-quick@awg1.service\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={AWGS_FAILOVER_SCRIPT}\n"
+    )
+    AWGS_SYSTEMD_FAILOVER_TIMER.write_text(
+        "[Unit]\n"
+        "Description=AWG Cascade multi-exit failover (health-тик каждую минуту)\n"
+        "\n"
+        "[Timer]\n"
+        "OnCalendar=*:0/1\n"
+        "AccuracySec=10s\n"
+        "Persistent=true\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+    core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
+    core._run(["systemctl", "enable", "--now", "awg-cascade-failover.timer"],
+              capture=True, check=False)
+    r = core._run(["systemctl", "is-active", "awg-cascade-failover.timer"],
+                  capture=True, check=False)
+    return (r.stdout or "").strip() == "active"
+
+
+def awgs_cascade_failover_teardown() -> bool:
+    """Останавливает и удаляет failover-таймер/сервис/wrapper."""
+    core = _core_module()
+    for unit in ("awg-cascade-failover.timer", "awg-cascade-failover.service"):
+        core._run(["systemctl", "stop", unit], check=False, quiet=True)
+        core._run(["systemctl", "disable", unit], check=False, quiet=True)
+    AWGS_SYSTEMD_FAILOVER_TIMER.unlink(missing_ok=True)
+    AWGS_SYSTEMD_FAILOVER_SVC.unlink(missing_ok=True)
+    AWGS_FAILOVER_SCRIPT.unlink(missing_ok=True)
+    core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
+    return True
+
+
+# ============================================================================
 #  AWG1 (выход) — спец-пир для AWG0
 # ============================================================================
 
-def awgs_cascade_setup_awg1() -> bool:
+def awgs_cascade_setup_awg1(protocol_version: str = "2.0") -> bool:
     """
     Настраивает AWG1 (выход каскада):
       • Стандартная установка standalone AWG (если ещё не установлен)
       • Создаёт спец-пир 'cascade_entry' для подключения AWG0
       • Возвращает данные для настройки AWG0 (host/port/pubkey)
+
+    v5.5: protocol_version="3.1" — установка exit на AWG 3.1 (полный
+    3.1-набор обфускации + директивы в awg0.conf). Бокс данных для AWG0
+    теперь содержит строку Protocol version + расширенный JSON обфускации
+    (включая HeaderProtectionKey и таймеры для 3.1).
     """
+    from .awg_protocol import awg_normalize_version, awg_protocol_label
     core = _core_module()
     info = core.info
     success = core.success
     warn = core.warn
 
-    # Если standalone AWG не установлен — устанавливаем
+    protocol_version = awg_normalize_version(protocol_version)
+
+    # Если standalone AWG не установлен — устанавливаем (с выбранной версией)
     if not awgs_state_is_installed():
-        info("Установка standalone AWG на этом сервере (AWG1, выход)...")
-        if not awgs_install():
+        info(f"Установка standalone {awg_protocol_label(protocol_version)} "
+             f"на этом сервере (AWG1, выход)...")
+        if not awgs_install(protocol_version=protocol_version):
             warn("Установка standalone AWG не удалась")
             return False
+    else:
+        # v5.5: если уже установлен — проверяем совпадение версий
+        _installed_v = awgs_state_load().get("protocol_version", "2.0")
+        if awg_normalize_version(_installed_v) != protocol_version:
+            warn(f"Standalone AWG на этом сервере — {awg_protocol_label(_installed_v)}, "
+                 f"а запрошено {awg_protocol_label(protocol_version)} для каскада.")
+            warn("Каскад требует одинаковой версии на обоих концах. "
+                 "Переустановите standalone AWG с нужной версией или "
+                 "используйте текущую.")
+            # Продолжаем с ФАКТИЧЕСКОЙ версией установки — бокс данных
+            # должен отражать реальность (иначе AWG0 получит неверные
+            # параметры для синхронизации).
+            protocol_version = awg_normalize_version(_installed_v)
+            info(f"Бокс данных будет сформирован для "
+                 f"{awg_protocol_label(protocol_version)} (фактическая версия)")
 
     # Создаём спец-пир cascade_entry
     info("Создание пира 'cascade_entry' для подключения AWG0...")
@@ -687,8 +1263,18 @@ def awgs_cascade_setup_awg1() -> bool:
     core._box_row(f"  {core.GREEN}Server pubkey:{core.NC}  {state.get('server_pubkey', '?')}")
     core._box_row(f"  {core.GREEN}Cascade peer IP:{core.NC} {peer.get('client_ip', '?')}")
     core._box_row(f"  {core.GREEN}Cascade subnet:{core.NC}  {state.get('subnet', '?')}")
+    # v5.5.3 FIX-E: privkey пира cascade_entry — ОБЯЗАТЕЛЬНАЯ часть бокса.
+    # AWG0 подставляет его в [Interface] awg1.conf; без него exit ждёт
+    # чужой pubkey и handshake никогда не сойдётся (TUI-флоу был сломан —
+    # ключ генерировался заново на entry, см. _awgs_cascade_menu_awg0).
+    core._box_row(f"  {core.GREEN}Cascade peer privkey:{core.NC}")
+    core._box_row(f"  {peer.get('client_privkey', '?')}")
+    # v5.5: версия протокола — ОБЯЗАТЕЛЬНА для передачи на AWG0 (при
+    # расхождении версий handshake не сойдётся)
+    core._box_row(f"  {core.GREEN}Protocol version:{core.NC} {protocol_version}")
     # v5.4.5: параметры обфускации — КРИТИЧНО для handshake awg1
-    # (должны совпадать на обеих сторонах; раньше не передавались)
+    # (должны совпадать на обеих сторонах; раньше не передавались).
+    # Для 3.1 JSON содержит и 9 транспортных параметров.
     import json as _json
     _params_json = _json.dumps(state.get("params", {}), ensure_ascii=False)
     core._box_row(f"  {core.GREEN}Obfuscation (JSON):{core.NC}")
@@ -728,17 +1314,25 @@ def do_manage_awg_cascade() -> None:
         state = awgs_state_load()
         role = state.get("cascade_role", "")
         if role:
-            _box_row(f"  {GREEN}● Текущая роль:{NC} {role}")
+            from .awg_protocol import awg_protocol_label
+            _pv = state.get("protocol_version", "2.0")
+            _box_row(f"  {GREEN}● Текущая роль:{NC} {role} "
+                     f"({awg_protocol_label(_pv)})")
         else:
             _box_row(f"  {DIM}○ Каскад не настроен{NC}")
         _box_row()
         _box_item("1", f"Настроить как AWG0 (вход, РФ)")
         _box_desc("Этот сервер принимает клиентов и делит трафик: RU напрямую, остальное через AWG1.")
-        _box_item("2", f"Настроить как AWG1 (выход, зарубеж)")
-        _box_desc("Этот сервер — зарубежный exit. Создаст спец-пир для AWG0.")
+        _box_item("2", f"Настроить как AWG1 (выход, зарубеж) — 2.0 / 3.1")
+        _box_desc("Этот сервер — зарубежный exit. Создаст спец-пир для AWG0. "
+                  "Версия протокола выбирается перед настройкой.")
         _box_item("3", f"Обновить ru.zone вручную")
         _box_desc("Принудительное обновление списка российских сетей с ipdeny.com.")
         _box_item("4", f"Проверить состояние каскада")
+        _box_item("5", f"Мульти-exit: все выходы + авто-failover")
+        _box_desc("Несколько зарубежных exit в одном каскаде: активен один, "
+                  "при смерти активного таймер переключает на следующий. "
+                  "Порядок списка = приоритет.")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -747,7 +1341,9 @@ def do_manage_awg_cascade() -> None:
             _awgs_cascade_menu_awg0()
             input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch == "2":
-            awgs_cascade_setup_awg1()
+            # v5.5: выбор версии протокола перед настройкой exit
+            _pv = _awgs_cascade_prompt_exit_version()
+            awgs_cascade_setup_awg1(protocol_version=_pv)
             input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch == "3":
             info("Обновление ru.zone...")
@@ -759,12 +1355,49 @@ def do_manage_awg_cascade() -> None:
         elif ch == "4":
             _awgs_cascade_status()
             input(f"{core.BLUE}Нажмите Enter...{NC}")
+        elif ch == "5":
+            _awgs_cascade_menu_multiexit()
         elif ch in ("q", ""):
             break
 
 
+def _awgs_cascade_prompt_exit_version() -> str:
+    """v5.5: выбор версии протокола exit-ноды (AWG1) перед настройкой.
+
+    Возвращает "2.0" или "3.1".
+    """
+    from .awg_protocol import AWG_VERSION_20, AWG_VERSION_31
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_item = core._box_item
+    _box_desc = core._box_desc
+    _box_bottom = core._box_bottom
+    CYAN, NC, GREEN, YELLOW, DIM = core.CYAN, core.NC, core.GREEN, core.YELLOW, core.DIM
+
+    print()
+    _box_top(f"Версия протокола AWG1 (выход каскада)")
+    _box_row()
+    _box_item("1", f"AmneziaWG 2.0 {GREEN}(Enter — по умолчанию){NC}")
+    _box_desc("Каскад на 2.0 — максимальная совместимость инструментов.")
+    _box_item("2", f"AmneziaWG 3.1 {YELLOW}(transport protection){NC}")
+    _box_desc("Каскад на 3.1 — шифрование заголовков + паддинг + "
+              "рандомизация таймеров на транзитном канале. "
+              "AWG0 (вход) должен быть переустановлен с той же версией!")
+    _box_row()
+    _box_bottom()
+    while True:
+        ch = input(f"{CYAN}Версия протокола AWG1 [1/2, Enter=1]:{NC} ").strip()
+        if ch in ("", "1"):
+            return AWG_VERSION_20
+        if ch == "2":
+            return AWG_VERSION_31
+        core.warn("Введите 1 или 2")
+
+
 def _awgs_cascade_menu_awg0() -> None:
     """Подменю настройки AWG0 (вход каскада)."""
+    from .awg_protocol import awg_normalize_version
     core = _core_module()
     info = core.info
     warn = core.warn
@@ -789,6 +1422,17 @@ def _awgs_cascade_menu_awg0() -> None:
 
     exit_port_str = input(f"{CYAN}UDP-порт AWG1 [51820]: {NC}").strip()
     exit_port = int(exit_port_str) if exit_port_str.isdigit() else 51820
+
+    # v5.5.3 FIX-E: privkey пира cascade_entry (строка «Cascade peer
+    # privkey» из бокса AWG1). КРИТИЧНО: exit ждёт pubkey именно этого
+    # ключа в своём [Peer]. Раньше промпта не было и setup_awg0 молча
+    # генерировал НОВЫЙ ключ — handshake никогда не сходился в TUI-флоу.
+    exit_peer_privkey = input(
+        f"{CYAN}Cascade peer privkey с AWG1 (строка из бокса): {NC}").strip()
+    if not exit_peer_privkey:
+        warn("Без peer privkey с AWG1 handshake НЕ сойдётся (exit ждёт "
+             "pubkey этого ключа). Будет сгенерирован новый ключ — "
+             "потребуется пересоздать cascade_entry на AWG1 с ним.")
 
     exit_pubkey = input(f"{CYAN}Server pubkey AWG1: {NC}").strip()
     if not exit_pubkey:
@@ -817,6 +1461,11 @@ def _awgs_cascade_menu_awg0() -> None:
                  "параметры этого сервера (handshake может не сойлись!)")
             exit_params = None
 
+    # v5.5: версия протокола AWG1 (строка Protocol version из бокса AWG1).
+    # Обязательна для 3.1-каскада — версии должны совпадать на обоих концах.
+    _pv_raw = input(f"{CYAN}Версия протокола AWG1 [1=2.0, 2=3.1, Enter=2.0]: {NC}").strip()
+    exit_protocol_version = "3.1" if _pv_raw == "2" else "2.0"
+
     print()
     confirm = input(f"{core.YELLOW}Настроить каскад с {exit_host}:{exit_port}? [y/N]: {NC}").strip().lower()
     if confirm not in ("y", "yes", "д", "да"):
@@ -827,9 +1476,161 @@ def _awgs_cascade_menu_awg0() -> None:
         exit_port=exit_port,
         exit_pubkey=exit_pubkey,
         exit_subnet=exit_subnet,
+        exit_peer_privkey=exit_peer_privkey,
         exit_peer_ip=exit_peer_ip,
         exit_params=exit_params,
+        exit_protocol_version=exit_protocol_version,
     )
+
+
+def _awgs_cascade_menu_multiexit() -> None:
+    """v5.5.3: управление мульти-exit каскадом (список выходов + failover)."""
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_sep = core._box_sep
+    _box_bottom = core._box_bottom
+    _box_item = core._box_item
+    _box_desc = core._box_desc
+    info = core.info
+    warn = core.warn
+    success = core.success
+    CYAN, NC, GREEN, YELLOW, DIM = core.CYAN, core.NC, core.GREEN, core.YELLOW, core.DIM
+
+    while True:
+        import os
+        os.system("clear")
+        print()
+        exits = _awgs_cascade_exits_load()
+        state = awgs_state_load()
+        active = _awgs_cascade_active_name(exits, state)
+
+        _box_top(f"Мульти-exit каскад — все выходы + авто-failover")
+        _box_row()
+        _box_desc("RU (вход) ──awg1──► активный exit; при его смерти таймер")
+        _box_desc("переключает туннель на следующий по списку (1 раз/мин).")
+        _box_row()
+        if exits:
+            _box_row(f"  Exit-ноды ({len(exits)}), активный: "
+                     f"{GREEN}{active or '—'}{NC}")
+            for e in exits:
+                mark = f"{GREEN}●{NC}" if e.get("name") == active else f"{DIM}○{NC}"
+                _box_row(f"    {mark} {e.get('name')} — {e.get('endpoint')}:"
+                         f"{e.get('port')} ({e.get('protocol_version', '2.0')})")
+        else:
+            _box_row(f"  {DIM}Exit-ноды не заданы — добавьте первый{NC}")
+        r = core._run(["systemctl", "is-active", "awg-cascade-failover.timer"],
+                      capture=True, check=False)
+        timer_on = (r.stdout or "").strip() == "active"
+        _box_row(f"  Авто-failover: "
+                 f"{GREEN}включён{NC}" if timer_on else f"  Авто-failover: {DIM}выключен{NC}")
+        _box_row()
+        _box_item("1", "Добавить/обновить exit (бокс данных с AWG1)")
+        _box_item("2", "Переключить активный exit")
+        _box_item("3", "Удалить exit")
+        _box_item("4", "Авто-failover: включить (health-тик каждую минуту)")
+        _box_item("5", "Авто-failover: выключить")
+        _box_item("Q", "Назад")
+        _box_bottom()
+        ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+
+        if ch == "1":
+            _awgs_cascade_menu_exit_add(active)
+        elif ch == "2":
+            if not exits:
+                warn("Список exit пуст")
+                input(f"{core.BLUE}Нажмите Enter...{NC}")
+                continue
+            print()
+            for i, e in enumerate(exits, 1):
+                mark = "●" if e.get("name") == active else " "
+                print(f"  [{i}] {mark} {e.get('name')} — {e.get('endpoint')}:"
+                      f"{e.get('port')}")
+            pick = input(f"{CYAN}Номер exit для активации:{NC} ").strip()
+            if pick.isdigit() and 1 <= int(pick) <= len(exits):
+                name = exits[int(pick) - 1].get("name", "")
+                if awgs_cascade_activate_exit(name):
+                    success(f"Активный exit: {name}")
+                else:
+                    warn(f"Не удалось переключиться на {name} (см. лог)")
+            input(f"{core.BLUE}Нажмите Enter...{NC}")
+        elif ch == "3":
+            if not exits:
+                warn("Список exit пуст")
+                input(f"{core.BLUE}Нажмите Enter...{NC}")
+                continue
+            name = input(f"{CYAN}Имя exit для удаления:{NC} ").strip()
+            if name:
+                if awgs_cascade_remove_exit(name):
+                    success(f"Exit '{name}' удалён")
+                else:
+                    warn(f"Не удалось удалить '{name}'")
+            input(f"{core.BLUE}Нажмите Enter...{NC}")
+        elif ch == "4":
+            if awgs_cascade_failover_setup():
+                success("Авто-failover включён (таймер каждую минуту)")
+            else:
+                warn("Не удалось включить failover-таймер (см. лог)")
+            input(f"{core.BLUE}Нажмите Enter...{NC}")
+        elif ch == "5":
+            awgs_cascade_failover_teardown()
+            info("Авто-failover выключен, юниты удалены")
+            input(f"{core.BLUE}Нажмите Enter...{NC}")
+        elif ch in ("q", ""):
+            break
+
+
+def _awgs_cascade_menu_exit_add(active: str) -> None:
+    """Промпты добавления/обновления exit-ноды в мульти-exit каскад."""
+    core = _core_module()
+    info = core.info
+    warn = core.warn
+    CYAN, NC, YELLOW = core.CYAN, core.NC, core.YELLOW
+
+    print()
+    info("Добавление exit-ноды. Все данные — из бокса «Данные для")
+    info("настройки AWG0» на exit-ноде (меню каскада → «Настроить как AWG1»).")
+    print()
+    name = input(f"{CYAN}Имя exit (например de/nl1/pl1/fi1): {NC}").strip()
+    endpoint = input(f"{CYAN}Endpoint host: {NC}").strip()
+    if not endpoint:
+        warn("Endpoint обязателен")
+        return
+    port_str = input(f"{CYAN}UDP-порт [52831]: {NC}").strip()
+    port = int(port_str) if port_str.isdigit() else 52831
+    server_pubkey = input(f"{CYAN}Server pubkey: {NC}").strip()
+    peer_privkey = input(f"{CYAN}Cascade peer privkey: {NC}").strip()
+    peer_ip = input(f"{CYAN}Cascade peer IP [172.16.91.2]: {NC}").strip() or "172.16.91.2"
+    subnet = input(f"{CYAN}Cascade subnet [172.16.91.0/24]: {NC}").strip() or "172.16.91.0/24"
+
+    import json as _json
+    params = None
+    _params_raw = input(f"{CYAN}Obfuscation JSON с exit (обязателен): {NC}").strip()
+    if _params_raw:
+        try:
+            params = _json.loads(_params_raw)
+        except Exception as e:
+            warn(f"Некорректный JSON ({e})")
+            return
+    else:
+        warn("Obfuscation JSON обязателен — параметры обязаны совпадать с exit")
+
+    _pv_raw = input(f"{CYAN}Версия протокола exit [1=2.0, 2=3.1, Enter=3.1]: {NC}").strip()
+    protocol_version = "2.0" if _pv_raw == "1" else "3.1"
+
+    first = not _awgs_cascade_exits_load()
+    activate_default = "n" if (not first and active) else "y"
+    act = input(f"{CYAN}Активировать сразу? [Y/n]: {NC}").strip().lower()
+    activate = (act not in ("n", "no", "н", "нет")) if act else (activate_default == "y")
+
+    print()
+    if awgs_cascade_register_exit(
+        name=name, endpoint=endpoint, port=port,
+        server_pubkey=server_pubkey, peer_privkey=peer_privkey,
+        peer_ip=peer_ip, subnet=subnet, protocol_version=protocol_version,
+        params=params, activate=activate,
+    ):
+        core.success(f"Exit '{name or endpoint}' добавлен")
 
 
 def _awgs_cascade_status() -> None:
@@ -856,6 +1657,10 @@ def _awgs_cascade_status() -> None:
     _box_sep()
 
     if role == "entry":
+        from .awg_protocol import awg_protocol_label
+        _pv = state.get("protocol_version", "2.0")
+        _box_row(f"  Протокол: {CYAN}{awg_protocol_label(_pv)}{NC}")
+
         # Проверяем awg1 (туннель к AWG1)
         r = core._run(["systemctl", "is-active", "awg-quick@awg1"],
                       capture=True, check=False)
@@ -886,7 +1691,33 @@ def _awgs_cascade_status() -> None:
         _box_row(f"  Exit port: {state.get('cascade_peer_port', '?')}")
         _box_row(f"  Exit subnet: {state.get('cascade_subnet', '?')}")
 
+        # v5.5.3: мульти-exit каскад
+        exits = _awgs_cascade_exits_load()
+        if len(exits) > 1 or state.get(AWGS_CASCADE_ACTIVE_KEY):
+            _active = _awgs_cascade_active_name(exits, state)
+            _box_sep()
+            _box_row(f"  Exit-ноды ({len(exits)}), активный: "
+                     f"{CYAN}{_active or '—'}{NC}")
+            for e in exits:
+                mark = f"{GREEN}●{NC}" if e.get("name") == _active else f"{DIM}○{NC}"
+                _box_row(f"    {mark} {e.get('name')} — {e.get('endpoint')}:"
+                         f"{e.get('port')} ({e.get('protocol_version', '2.0')})")
+            age = awgs_cascade_handshake_age()
+            if age is not None:
+                _box_row(f"    handshake awg1: {age} сек назад")
+            r = core._run(["systemctl", "is-active",
+                           "awg-cascade-failover.timer"],
+                          capture=True, check=False)
+            timer_on = (r.stdout or "").strip() == "active"
+            _box_row(f"    failover-таймер: "
+                     f"{GREEN}active{NC}" if timer_on
+                     else f"{DIM}off{NC}")
+
     elif role == "exit":
+        from .awg_protocol import awg_protocol_label
+        _pv = state.get("protocol_version", "2.0")
+        _box_row(f"  Протокол: {CYAN}{awg_protocol_label(_pv)}{NC}")
+
         # Просто проверяем, что standalone AWG активен
         from .awg_apply import awgs_service_status
         status = awgs_service_status()

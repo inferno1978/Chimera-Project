@@ -1,7 +1,7 @@
 """
 chimera/modules/awg_constants.py
 ───────────────────────────────────────────────────────────────────────────────
-Константы и пути для AmneziaWG 2.0 standalone-режима.
+Константы и пути для AmneziaWG standalone-режима (протокол 2.0 и 3.1).
 
 Это АВТОНОМНЫЙ модуль — он не переиспользует globals AWG_* из _core.py
 (те относятся к chain Mode B transport). Все standalone-константы имеют
@@ -30,6 +30,9 @@ AWGS_DEFAULT_MTU:      int  = 1280             # безопасный MTU для
 # ── Пути ─────────────────────────────────────────────────────────────────────
 AWGS_CONF_DIR:        Path = Path("/etc/amnezia/amneziawg")
 AWGS_SERVER_CONF:     Path = AWGS_CONF_DIR / "awg0.conf"
+# v5.5.3: конфиг каскадного туннеля awg1 на entry-ноде (RU → активный exit).
+# Константа (не литерал в коде) — тестируемость + единая точка правды.
+AWGS_AWG1_CONF:       Path = AWGS_CONF_DIR / "awg1.conf"
 AWGS_AWG_DIR:         Path = Path("/root/awg")
 AWGS_KEYS_DIR:        Path = AWGS_AWG_DIR / "keys"
 AWGS_INIT_FILE:       Path = AWGS_AWG_DIR / "awgsetup_cfg.init"
@@ -65,6 +68,24 @@ AWGS_CRON_RU_UPDATE_SCRIPT:  Path = Path("/usr/local/sbin/awg-cascade-ru-update.
 AWGS_SYSTEMD_AWG_QUICK: str = "awg-quick@awg0.service"
 AWGS_SYSTEMD_CASCADE:   Path = Path("/etc/systemd/system/awg-cascade-routing.service")
 
+# ── Мульти-exit каскад + авто-failover (v5.5.3) ──────────────────────────────
+# Каскад RU (вход) → несколько зарубежных выходов. Активен один awg1-туннель;
+# failover-таймер раз в минуту проверяет handshake и при смерти активного
+# exit переключает awg1 на следующий по списку (порядок = приоритет).
+AWGS_CASCADE_EXITS_KEY:  str  = "cascade_exits"        # список exit-боксов в state
+AWGS_CASCADE_ACTIVE_KEY: str  = "cascade_active_exit"  # имя активного exit
+AWGS_FAILOVER_SCRIPT:     Path = Path("/usr/local/sbin/awg-cascade-failover.sh")
+AWGS_SYSTEMD_FAILOVER_SVC: Path = Path("/etc/systemd/system/awg-cascade-failover.service")
+AWGS_SYSTEMD_FAILOVER_TIMER: Path = Path("/etc/systemd/system/awg-cascade-failover.timer")
+# handshake старше N секунд = подозрение на мёртвый туннель. Keepalive 25с +
+# RejectAfterTime 161-216с (3.1) дают максимум ~4 мин между handshake при
+# живом туннеле — 300с = безопасный порог без ложных срабатываний.
+AWGS_FAILOVER_STALE_SEC: int = 300
+# Сколько секунд ждать handshake после переключения на exit-кандидата.
+AWGS_FAILOVER_PROBE_SEC: int = 18
+# Разумный верхний предел списка exit-нод.
+AWGS_FAILOVER_MAX_EXITS: int = 16
+
 # ── Бинарники ────────────────────────────────────────────────────────────────
 AWGS_BIN:       str = "awg"
 AWGS_QUICK_BIN: str = "awg-quick"
@@ -94,6 +115,33 @@ AWGS_DEFAULT_PARAMS: dict = {
     "i4":   "",
     "i5":   "",
 }
+
+# ── Версия протокола AmneziaWG (2.0 / 3.1) ────────────────────────────────
+# Единая точка правды — chimera/modules/awg_protocol.py (awg_normalize_version).
+# Здесь — только константы для standalone-мира (AWGS_*).
+# Отсутствие protocol_version в state.json = старая установка = "2.0".
+AWGS_PROTOCOL_VERSION_20: str = "2.0"
+AWGS_PROTOCOL_VERSION_31: str = "3.1"
+AWGS_PROTOCOL_VERSIONS:  tuple = (AWGS_PROTOCOL_VERSION_20, AWGS_PROTOCOL_VERSION_31)
+AWGS_DEFAULT_PROTOCOL_VERSION: str = AWGS_PROTOCOL_VERSION_20
+
+# ── Валидационные диапазоны AWG 3.1 (констрейнты GenerateObfuscation31, ─────
+# те же, что в wpp_awg.py — мир WPP-профилей уже поддерживает 3.1):
+# S1/S2 ≥ 12 байт (HeaderProtectionKey требует паддинга ≥ 12),
+# S3 12-55, S4 12-27, Jmax ≤ 339 (Jmin ≤ 89 + delta ≤ 250).
+AWGS31_S1_MIN: int = 15
+AWGS31_S1_MAX: int = 150
+AWGS31_S2_MIN: int = 15
+AWGS31_S2_MAX: int = 150
+AWGS31_S3_MIN: int = 12
+AWGS31_S3_MAX: int = 55
+AWGS31_S4_MIN: int = 12
+AWGS31_S4_MAX: int = 27
+AWGS31_JMIN_MIN: int = 40
+AWGS31_JMIN_MAX: int = 89
+AWGS31_JMAX_DELTA_MIN: int = 50
+AWGS31_JMAX_DELTA_MAX: int = 250
+AWGS31_JMAX_MAX: int = 339   # 89 + 250
 
 # ── Валидационные диапазоны (из upstream) ───────────────────────────────────
 AWGS_JC_MIN:        int = 1

@@ -355,7 +355,9 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
         self.assertTrue(ok)
 
         # awgs_presets_generate был вызван (с "default")
-        mock_gen.assert_called_once_with("default")
+        # v5.5: контракт расширен — ротация передаёт protocol_version из
+        # state (отсутствие ключа = "2.0" — старые установки)
+        mock_gen.assert_called_once_with("default", protocol_version="2.0")
 
         # ── КЛЮЧЕВАЯ ПРОВЕРКА: awgs_build_server_conf вызван с NEW_PARAMS ──
         mock_build.assert_called_once()
@@ -497,6 +499,16 @@ class TestAwgsNatHelperV545(unittest.TestCase):
         self.assertNotIn("bash -c '", unit,
                          "инлайн bash -c '<...>' в ExecStart разрывается "
                          "systemd-токенизатором (баг v5.4.4, E2E de1)")
+
+    def test_nat_unit_wanted_by_awg_quick(self):
+        """v5.5.3 FIX-F: WantedBy содержит awg-quick@awg0.service — старт
+        туннеля тянет за собой NAT (иначе stop/start awg0 = чёрная дыра:
+        Requires гасит NAT, повторный старт его не поднимает)."""
+        from chimera.modules.awg_standalone import awgs_build_nat_unit_content
+        unit = awgs_build_nat_unit_content()
+        self.assertIn("WantedBy=multi-user.target awg-quick@awg0.service", unit)
+        # стоп-направление сохранено
+        self.assertIn("Requires=awg-quick@awg0.service", unit)
 
     def test_nat_helper_body_contract(self):
         """helper-скрипт: шебанг, up/down, WAN-детект, идемпотентные правила."""

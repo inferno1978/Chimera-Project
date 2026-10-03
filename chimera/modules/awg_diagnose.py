@@ -202,6 +202,87 @@ def _diag_carrier_compare(carrier: str) -> dict:
     return awgs_presets_compare_with_carrier(params, carrier)
 
 
+def _diag_protocol_version() -> dict:
+    """v5.5: диагностика версии протокола (2.0 / 3.1).
+
+    Проверки:
+      • version — версия из state ("2.0" | "3.1");
+      • conf_directives — соответствие: при 3.1 awg0.conf обязан содержать
+        9 транспортных директив (HeaderProtectionKey и т.д.);
+      • tools_support — поддерживают ли локальные amneziawg-tools 3.1
+        (через awgs_supports_awg31, только для 3.1);
+      • params_31 — при 3.1: S1-S4 ≥ 12, I1 = <r N>.
+
+    Статусы: OK / WARN / FAIL (как в остальных секциях отчёта).
+    """
+    from .awg_protocol import (
+        awg_normalize_version, awg_protocol_label, AWG31_DIRECTIVE_NAMES,
+    )
+    core = _core_module()
+    state = awgs_state_load()
+    version = awg_normalize_version(state.get("protocol_version", "2.0"))
+    result = {
+        "version": version,
+        "label": awg_protocol_label(version),
+        "checks": [],
+    }
+
+    result["checks"].append(
+        ("OK", f"Версия протокола: {awg_protocol_label(version)}"))
+
+    if version == "3.1":
+        # 1. Директивы в awg0.conf
+        try:
+            from .awg_constants import AWGS_SERVER_CONF
+            conf = AWGS_SERVER_CONF.read_text() if AWGS_SERVER_CONF.exists() else ""
+            missing = [d for d in AWG31_DIRECTIVE_NAMES.values()
+                       if f"{d} = " not in conf]
+            if missing:
+                result["checks"].append(
+                    ("FAIL", f"awg0.conf не содержит 3.1-директивы: "
+                             f"{', '.join(missing)} — перезапустите ротацию "
+                             f"обфускации или переустановите AWG 3.1"))
+            else:
+                result["checks"].append(
+                    ("OK", "Все 9 транспортных директив 3.1 в awg0.conf"))
+        except Exception as e:
+            result["checks"].append(("WARN", f"Не удалось прочитать awg0.conf: {e}"))
+
+        # 2. Поддержка инструментами
+        try:
+            from .awg_compat import awgs_supports_awg31
+            if awgs_supports_awg31():
+                result["checks"].append(
+                    ("OK", "amneziawg-tools поддерживают директивы 3.1"))
+            else:
+                result["checks"].append(
+                    ("FAIL", "amneziawg-tools НЕ поддерживают 3.1 — обновите: "
+                             "apt update && apt install --only-upgrade "
+                             "amneziawg-tools amneziawg-dkms (PPA amnezia/ppa)"))
+        except Exception as e:
+            result["checks"].append(("WARN", f"Детект 3.1-инструментов: {e}"))
+
+        # 3. Параметры (S1-S4 >= 12, I1 = <r N>)
+        params = state.get("params", {})
+        try:
+            bad_s = [k.upper() for k in ("s1", "s2", "s3", "s4")
+                     if not (isinstance(params.get(k), int) and params[k] >= 12)]
+            if bad_s:
+                result["checks"].append(
+                    ("WARN", f"S-паддинг < 12 ({', '.join(bad_s)}) — "
+                             f"HeaderProtectionKey требует S1-S4 >= 12; "
+                             f"запустите ротацию обфускации"))
+            i1 = str(params.get("i1", ""))
+            if not (i1.startswith("<r ") and i1.endswith(">")):
+                result["checks"].append(
+                    ("WARN", f"I1='{i1[:24]}' не в 3.1-формате '<r N>' — "
+                             f"запустите ротацию обфускации"))
+        except Exception as e:
+            result["checks"].append(("WARN", f"Проверка параметров 3.1: {e}"))
+
+    return result
+
+
 # ── Полный diagnostic-отчёт ────────────────────────────────────────────────
 
 def awgs_diagnose_full(carrier: str = "") -> dict:
@@ -215,6 +296,7 @@ def awgs_diagnose_full(carrier: str = "") -> dict:
 
     report = {
         "installed":     awgs_state_is_installed(),
+        "protocol":      _diag_protocol_version(),
         "kernel":        _diag_kernel_module(),
         "sysctl":        _diag_sysctl(),
         "ufw":           _diag_ufw(port),
@@ -275,6 +357,13 @@ def do_awg_diagnose_menu() -> None:
         _box_row(f"  {GREEN}●{NC} Standalone AWG установлен")
     else:
         _box_row(f"  {RED}●{NC} Standalone AWG НЕ установлен")
+    _box_sep()
+
+    # Protocol version (v5.5: 2.0 / 3.1)
+    pv = report.get("protocol", {})
+    for status, msg in pv.get("checks", []):
+        icon = {"OK": "✅", "WARN": "⚠️", "FAIL": "❌"}.get(status, "•")
+        _box_row(f"  {icon} {msg}")
     _box_sep()
 
     # Kernel

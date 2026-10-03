@@ -113,6 +113,35 @@ def _awg_build_i_lines(i1: str, i2: str, i3: str, i4: str, i5: str,
 
 
 
+def _awg_build_31_lines() -> str:
+    """v5.5 (AWG 3.1): 9 транспортных директив Mode B из core-глобалей.
+
+    Возвращает ПУСТУЮ строку при AWG_PROTOCOL_VERSION != "3.1" (все
+    существующие 2.0-конфиги — байт-в-байт как раньше) и полный блок
+    директив (HeaderProtectionKey, ContentPaddingAddition, Rekey*,
+    RejectAfterTime, KeepaliveTimeout, MaxHandshakeAttempts,
+    RandomTrailers, DisableCookies) при 3.1. Единое правило v5.4.5 —
+    непустые «Key = value», пустые «# Key = ».
+    """
+    from .awg_protocol import awg_is_31, awg_render_31_lines
+    core = _core_module()
+    version = getattr(core, "AWG_PROTOCOL_VERSION", "2.0")
+    if not awg_is_31(version):
+        return ""
+    params = {
+        "header_protection_key":    getattr(core, "AWG_HEADER_PROTECTION_KEY", ""),
+        "content_padding_addition": getattr(core, "AWG_CONTENT_PADDING_ADDITION", ""),
+        "rekey_after_time":         getattr(core, "AWG_REKEY_AFTER_TIME", ""),
+        "rekey_timeout":            getattr(core, "AWG_REKEY_TIMEOUT", ""),
+        "reject_after_time":        getattr(core, "AWG_REJECT_AFTER_TIME", ""),
+        "keepalive_timeout":        getattr(core, "AWG_KEEPALIVE_TIMEOUT", ""),
+        "max_handshake_attempts":   getattr(core, "AWG_MAX_HANDSHAKE_ATTEMPTS", ""),
+        "random_trailers":          getattr(core, "AWG_RANDOM_TRAILERS", ""),
+        "disable_cookies":          getattr(core, "AWG_DISABLE_COOKIES", ""),
+    }
+    return awg_render_31_lines(params)
+
+
 def awg_check_tool(binary: str) -> bool:
     """Проверяет наличие бинарника AWG в PATH."""
     core = _core_module()
@@ -517,6 +546,11 @@ def _awg_server_conf_text() -> str:
     # v5.4.4: I1-I5 через _awg_build_i_lines(role="server")
     _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
                                   role="server")
+    # v5.5: блок директив AWG 3.1 (пустая строка при 2.0 — конфиг
+    # байт-в-байт как в v5.4.x)
+    _31_lines = _awg_build_31_lines()
+    if _31_lines:
+        _i_lines = _i_lines + _31_lines + "\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {AWG_SERVER_PRIVKEY}\n"
@@ -584,6 +618,10 @@ def _awg_client_conf_text() -> str:
     # v5.4.4: I1-I5 через _awg_build_i_lines(role="client")
     _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
                                   role="client")
+    # v5.5: блок директив AWG 3.1 (пустая строка при 2.0)
+    _31_lines = _awg_build_31_lines()
+    if _31_lines:
+        _i_lines = _i_lines + _31_lines + "\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {AWG_CLIENT_PRIVKEY}\n"
@@ -618,6 +656,8 @@ def _awg_client_conf_text() -> str:
 def _awg_systemd_unit_text(xray_uid: int) -> str:
     """Формирует текст systemd unit для AWG-клиента."""
     core = _core_module()
+    from .awg_protocol import awg_normalize_version
+    AWG_PROTOCOL_VERSION = awg_normalize_version(getattr(core, "AWG_PROTOCOL_VERSION", "2.0"))
     AWG_FWMARK = getattr(core, "AWG_FWMARK", 1000)
     AWG_INTERFACE = getattr(core, "AWG_INTERFACE", "awg0")
     AWG_MTU = getattr(core, "AWG_MTU", 1280)
@@ -721,7 +761,7 @@ def _awg_systemd_unit_text(xray_uid: int) -> str:
     )
     return (
         f"[Unit]\n"
-        f"Description=AmneziaWG 2.0 client (awg0) + policy routing for Xray\n"
+        f"Description=AmneziaWG {AWG_PROTOCOL_VERSION} client (awg0) + policy routing for Xray\n"
         f"After=network-online.target\n"
         f"Wants=network-online.target\n"
         f"\n"
@@ -1746,9 +1786,11 @@ def awg_setup_remote_server(
         success("AWG remote: модуль ядра доступен на exit-VPS — используем kernel mode")
     else:
         info("AWG remote: модуль ядра недоступен на exit-VPS — используем userspace (amneziawg-go)")
+    from .awg_protocol import awg_normalize_version
+    _awg_pv_label = awg_normalize_version(getattr(core, "AWG_PROTOCOL_VERSION", "2.0"))
     _unit_lines_base = [
         "[Unit]",
-        "Description=AmneziaWG 2.0 server (awg0)",
+        f"Description=AmneziaWG {_awg_pv_label} server (awg0)",
         "After=network.target",
         "",
         "[Service]",
@@ -3030,6 +3072,10 @@ def _awg_client_conf_for_node(node: dict) -> str:
     # v5.4.4: I1-I5 через _awg_build_i_lines(role="client") — клиент
     _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
                                   role="client")
+    # v5.5: блок директив AWG 3.1 (пустая строка при 2.0)
+    _31_lines = _awg_build_31_lines()
+    if _31_lines:
+        _i_lines = _i_lines + _31_lines + "\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {cli_priv}\n"
@@ -3100,6 +3146,10 @@ def _awg_server_conf_for_node(node: dict) -> str:
     # v5.4.4: I1-I5 через _awg_build_i_lines(role="server") — сервер
     _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
                                   role="server")
+    # v5.5: блок директив AWG 3.1 (пустая строка при 2.0)
+    _31_lines = _awg_build_31_lines()
+    if _31_lines:
+        _i_lines = _i_lines + _31_lines + "\n"
     return (
         f"[Interface]\n"
         f"PrivateKey = {srv_priv}\n"
@@ -3181,7 +3231,7 @@ def _awg_systemd_unit_for_node(node: dict, xray_uid: int) -> str:
     )
     return (
         f"[Unit]\n"
-        f"Description=AmneziaWG 2.0 client ({iface}) + policy routing\n"
+        f"Description=AmneziaWG {awg_normalize_version(getattr(core, 'AWG_PROTOCOL_VERSION', '2.0'))} client ({iface}) + policy routing\n"
         f"After=network-online.target\nWants=network-online.target\n\n"
         f"[Service]\nType=oneshot\nRemainAfterExit=yes\n{_env_line}"
         f"ExecStartPre=/bin/bash -c '{_pre}'\n"
