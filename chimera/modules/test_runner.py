@@ -56,12 +56,16 @@ TEST_GROUPS: dict[str, dict] = {
     },
     "2": {
         "label": "AWG / Каскад",
-        "description": "Standalone AWG, каскад, пиры, ротация обфускации",
+        "description": "Standalone AWG (2.0/3.1), каскад, пиры, ротация обфускации",
         "tests": [
             "awg_constants", "awg_presets", "awg_state", "awg_qr",
             "awg_expires", "awg_apply", "awg_transport", "awg_diagnose",
             "awg_cascade", "awg_peers", "awg_standalone", "awg_backup",
             "awg_hw_tuning", "awg_net_common", "awg_rest_api",
+            # v5.5 (AWG 3.1): версионное ядро + 3.1-тесты всех подсистем
+            "awg_protocol_31", "awg_presets_31", "awg_standalone_31",
+            "awg_qr_31", "awg_cascade_31", "awg_transport_31",
+            "awg_compat_31",
         ],
     },
     "3": {

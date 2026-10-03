@@ -60,7 +60,8 @@ from typing import Any, Optional
 
 from .awg_constants import AWGS_STATE_FILE, AWGS_INTERFACE, AWGS_DEFAULT_PORT
 from .awg_constants import AWGS_DEFAULT_SUBNET, AWGS_DEFAULT_SUBNET_V6, AWGS_DEFAULT_MTU
-from .awg_constants import AWGS_DEFAULT_PARAMS
+from .awg_constants import AWGS_DEFAULT_PARAMS, AWGS_DEFAULT_PROTOCOL_VERSION
+from .awg_protocol import awg_normalize_version, awg_state_protocol_version
 
 
 def _core_module():
@@ -128,8 +129,15 @@ def awgs_state_init(
     params: Optional[dict] = None,
     carrier_preset: str = "default",
     allow_ipv6_tunnel: bool = False,
+    protocol_version: str = AWGS_DEFAULT_PROTOCOL_VERSION,
 ) -> dict:
-    """Создаёт начальный state при первой установке."""
+    """Создаёт начальный state при первой установке.
+
+    protocol_version — "2.0" (дефолт, обратная совместимость) или "3.1"
+    (AWG 3.1: transport protection — HeaderProtectionKey/ContentPaddingAddition/
+    Rekey*/RejectAfterTime/KeepaliveTimeout/MaxHandshakeAttempts/
+    RandomTrailers/DisableCookies в params).
+    """
     state = {
         "installed":         True,
         "version":           "1.0.0",
@@ -153,9 +161,33 @@ def awgs_state_init(
         "cascade_peer_privkey": "",
         "cascade_subnet":    "",
         "allow_ipv6_tunnel": allow_ipv6_tunnel,
+        "protocol_version":  awg_normalize_version(protocol_version),
     }
     awgs_state_save(state)
     return state
+
+
+# ── Версия протокола (2.0 / 3.1) ────────────────────────────────────────────
+
+def awgs_state_get_protocol_version() -> str:
+    """Возвращает protocol_version из state ("2.0" | "3.1").
+
+    Отсутствие ключа (старые установки до v5.5) = "2.0" — миграция
+    не требуется: awg_protocol.awg_state_protocol_version нормализует.
+    """
+    return awg_state_protocol_version(awgs_state_load())
+
+
+def awgs_state_set_protocol_version(version: str) -> bool:
+    """Устанавливает protocol_version в state. Возвращает True при успехе.
+
+    ВНИМАНИЕ: смена версии задним числом НЕ меняет params — для реального
+    перехода 2.0 → 3.1 нужна переустановка/ротация обфускации с новым
+    набором параметров (иначе state будет обещать 3.1 без 3.1-директив).
+    Вызывается только из флоу установки/ротации.
+    """
+    awgs_state_update(protocol_version=awg_normalize_version(version))
+    return True
 
 
 # ── Peers management (вспомогательные функции для state) ────────────────────
