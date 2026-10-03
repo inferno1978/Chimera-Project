@@ -286,6 +286,30 @@ def awgs_apply(mode: str = AWGS_APPLY_MODE_SYNCCONF) -> bool:
         finally:
             _SELF_HEAL_IN_PROGRESS = False
 
+    # v5.5 (AWG 3.1): ошибка про 3.1-директиву (Line unrecognized:
+    # HeaderProtectionKey= и т.п.) — это НЕ лечится self-heal по I2-I5:
+    # инструменты физически не знают директивы 3.1. Даём точную подсказку
+    # и НЕ пытаемся молча деградировать (state обещает 3.1) — fallback
+    # на restart тоже покажет ту же ошибку, но конфиг останется на диске.
+    if not _SELF_HEAL_IN_PROGRESS:
+        try:
+            from .awg_compat import awg_is_31_directive_error
+            if awg_is_31_directive_error(last_stderr):
+                core.warn(
+                    "Применение конфига НЕ удалось: локальный amneziawg-tools "
+                    "не поддерживает директивы AWG 3.1 (HeaderProtectionKey, "
+                    "ContentPaddingAddition, Rekey*, RandomTrailers, "
+                    "DisableCookies). Конфиг сохранён на диске; туннель "
+                    "продолжает работать на предыдущих параметрах.\n"
+                    "Для работы AWG 3.1 обновите инструменты на 3.1-сборку:\n"
+                    "  apt update && apt install --only-upgrade amneziawg-tools amneziawg-dkms\n"
+                    "(PPA amnezia/ppa; на fresh-установках — amneziawg-tools "
+                    "1.1+ / ядро-модуль 3.1-ветки)"
+                )
+                return False
+        except Exception:
+            pass
+
     # Defensive stderr fallback (как в v5.2, но с правильным извлечением stderr)
     if last_stderr:
         snippet = last_stderr[:300]

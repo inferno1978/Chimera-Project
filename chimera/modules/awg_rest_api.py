@@ -188,6 +188,9 @@ def awg_handle_get(handler, path: str, query: dict) -> bool:
                 "endpoint": state.get("endpoint_host") or state.get("endpoint", ""),
                 "peers_count": len(state.get("peers", [])),
                 "installed": True,
+                # v5.5 (AWG 3.1): версия протокола установки ("2.0" | "3.1";
+                # отсутствие ключа в старых state = "2.0")
+                "protocol_version": state.get("protocol_version", "2.0"),
             })
         except Exception as e:
             handler._send_json({"error": str(e)}, 500)

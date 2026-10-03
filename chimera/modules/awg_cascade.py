@@ -141,6 +141,7 @@ def awgs_cascade_setup_awg0(
     exit_peer_psk: str = "",
     exit_peer_ip: str = "",
     exit_params: dict = None,
+    exit_protocol_version: str = "",
 ) -> bool:
     """
     Настраивает AWG0 (вход каскада):
@@ -163,11 +164,39 @@ def awgs_cascade_setup_awg0(
         transfer 0 B received при живом туннеле с обеих сторон).
       • Валидация: exit_subnet не должен совпадать с подсетью awg0 entry
         и exit_host не должен быть собственным IP (self-loop).
+
+    v5.5 (AWG 3.1):
+      • exit_protocol_version — версия протокола exit-ноды ("2.0"/"3.1"
+        из бокса AWG1). Версии ОБЯЗАНЫ совпадать на обеих сторонах
+        туннеля awg1 — при расхождении handshake не сойдётся (3.1-
+        директивы обязаны быть на обоих концах или ни на одном).
+        Пусто/отсутствие = "2.0" (совместимость со старыми боксами).
+      • При 3.1 обфускация awg1.conf включает 9 транспортных директив
+        из exit_params (HeaderProtectionKey и т.д. — полный JSON из
+        бокса AWG1 уже содержит расширенный набор).
     """
+    from .awg_protocol import (
+        awg_is_31, awg_normalize_version, awg_protocol_label,
+    )
     core = _core_module()
     info = core.info
     success = core.success
     warn = core.warn
+
+    exit_protocol_version = awg_normalize_version(exit_protocol_version)
+
+    # v5.5: версионная валидация — версии протокола entry и exit обязаны
+    # совпадать (3.1-директивы синхронны на обоих концах или отсутствуют
+    # на обоих). Расхождение = гарантированно мёртвый handshake.
+    _own_protocol = awgs_state_load().get("protocol_version", "2.0")
+    if awg_normalize_version(_own_protocol) != exit_protocol_version:
+        warn(f"Версии протокола не совпадают: этот сервер — "
+             f"{awg_protocol_label(_own_protocol)}, AWG1 — "
+             f"{awg_protocol_label(exit_protocol_version)}.")
+        warn("Обфускация awg1 обязана совпадать с exit — переустановите "
+             "standalone AWG на этом сервере с той же версией протокола "
+             "(меню установки → выбор версии).")
+        return False
 
     # v5.4.5: валидация подсети и self-loop (E2E: у юзера exit_subnet
     # мог совпасть с 10.66.66.0/24 entry — маршрутная каша)
@@ -220,7 +249,8 @@ def awgs_cascade_setup_awg0(
     # 1. Создаём конфиг awg1 (туннель к AWG1)
     info("Создание конфига awg1 (туннель к AWG1)...")
     if exit_params:
-        info("Обфускация: используются параметры AWG1 (синхронизация)")
+        info(f"Обфускация: используются параметры AWG1 (синхронизация, "
+             f"{awg_protocol_label(exit_protocol_version)})")
     else:
         warn("Параметры обфускации AWG1 не переданы — используются "
              "параметры ЭТОГО сервера. Если пресет AWG1 отличается, "
@@ -230,6 +260,7 @@ def awgs_cascade_setup_awg0(
         exit_peer_privkey, exit_peer_psk, exit_subnet,
         exit_peer_ip=exit_peer_ip,
         exit_params=exit_params,
+        exit_protocol_version=exit_protocol_version,
     )
     awg1_path = Path("/etc/amnezia/amneziawg/awg1.conf")
     awg1_path.write_text(awg1_conf)
@@ -298,6 +329,7 @@ def _awgs_cascade_build_awg1_conf(
     exit_subnet: str,
     exit_peer_ip: str = "",
     exit_params: dict = None,
+    exit_protocol_version: str = "",
 ) -> str:
     """Генерирует awg1.conf — клиентский туннель к AWG1.
 
@@ -312,7 +344,13 @@ def _awgs_cascade_build_awg1_conf(
       • I1-I5 добавлены (правило v5.4.5: непустые как есть, пустые
         комментируются) — раньше отсутствовали полностью, что ломало
         handshake с exit-серверами, использующими I1 (default preset).
+
+    v5.5 (AWG 3.1): exit_protocol_version="3.1" → после I1-I5 добавляются
+    9 транспортных директив (HeaderProtectionKey/ContentPaddingAddition/
+    Rekey*/... — из exit_params, тот же расширенный JSON из бокса AWG1).
+    Пусто/"2.0" — конфиг байт-в-байт как в v5.4.5.
     """
+    from .awg_protocol import awg_is_31, awg_render_31_lines
     base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
     # v5.4.5: приоритет — явно переданный peer IP, fallback — base.2
     peer_addr = exit_peer_ip if exit_peer_ip else f"{base}.2"
@@ -358,6 +396,11 @@ def _awgs_cascade_build_awg1_conf(
             lines.append(f"{key.upper()} = {val}")
         else:
             lines.append(f"# {key.upper()} = ")
+    # v5.5 — AWG 3.1: 9 транспортных директив из exit_params (тот же
+    # расширенный JSON обфускации из бокса AWG1). Правило v5.4.5 —
+    # непустые «Key = value», пустые «# Key = ».
+    if awg_is_31(exit_protocol_version):
+        lines.append(awg_render_31_lines(params))
     lines += [
         "",
         "[Peer]",
@@ -640,24 +683,48 @@ def awgs_cascade_update_ru_zone() -> bool:
 #  AWG1 (выход) — спец-пир для AWG0
 # ============================================================================
 
-def awgs_cascade_setup_awg1() -> bool:
+def awgs_cascade_setup_awg1(protocol_version: str = "2.0") -> bool:
     """
     Настраивает AWG1 (выход каскада):
       • Стандартная установка standalone AWG (если ещё не установлен)
       • Создаёт спец-пир 'cascade_entry' для подключения AWG0
       • Возвращает данные для настройки AWG0 (host/port/pubkey)
+
+    v5.5: protocol_version="3.1" — установка exit на AWG 3.1 (полный
+    3.1-набор обфускации + директивы в awg0.conf). Бокс данных для AWG0
+    теперь содержит строку Protocol version + расширенный JSON обфускации
+    (включая HeaderProtectionKey и таймеры для 3.1).
     """
+    from .awg_protocol import awg_normalize_version, awg_protocol_label
     core = _core_module()
     info = core.info
     success = core.success
     warn = core.warn
 
-    # Если standalone AWG не установлен — устанавливаем
+    protocol_version = awg_normalize_version(protocol_version)
+
+    # Если standalone AWG не установлен — устанавливаем (с выбранной версией)
     if not awgs_state_is_installed():
-        info("Установка standalone AWG на этом сервере (AWG1, выход)...")
-        if not awgs_install():
+        info(f"Установка standalone {awg_protocol_label(protocol_version)} "
+             f"на этом сервере (AWG1, выход)...")
+        if not awgs_install(protocol_version=protocol_version):
             warn("Установка standalone AWG не удалась")
             return False
+    else:
+        # v5.5: если уже установлен — проверяем совпадение версий
+        _installed_v = awgs_state_load().get("protocol_version", "2.0")
+        if awg_normalize_version(_installed_v) != protocol_version:
+            warn(f"Standalone AWG на этом сервере — {awg_protocol_label(_installed_v)}, "
+                 f"а запрошено {awg_protocol_label(protocol_version)} для каскада.")
+            warn("Каскад требует одинаковой версии на обоих концах. "
+                 "Переустановите standalone AWG с нужной версией или "
+                 "используйте текущую.")
+            # Продолжаем с ФАКТИЧЕСКОЙ версией установки — бокс данных
+            # должен отражать реальность (иначе AWG0 получит неверные
+            # параметры для синхронизации).
+            protocol_version = awg_normalize_version(_installed_v)
+            info(f"Бокс данных будет сформирован для "
+                 f"{awg_protocol_label(protocol_version)} (фактическая версия)")
 
     # Создаём спец-пир cascade_entry
     info("Создание пира 'cascade_entry' для подключения AWG0...")
@@ -687,8 +754,12 @@ def awgs_cascade_setup_awg1() -> bool:
     core._box_row(f"  {core.GREEN}Server pubkey:{core.NC}  {state.get('server_pubkey', '?')}")
     core._box_row(f"  {core.GREEN}Cascade peer IP:{core.NC} {peer.get('client_ip', '?')}")
     core._box_row(f"  {core.GREEN}Cascade subnet:{core.NC}  {state.get('subnet', '?')}")
+    # v5.5: версия протокола — ОБЯЗАТЕЛЬНА для передачи на AWG0 (при
+    # расхождении версий handshake не сойдётся)
+    core._box_row(f"  {core.GREEN}Protocol version:{core.NC} {protocol_version}")
     # v5.4.5: параметры обфускации — КРИТИЧНО для handshake awg1
-    # (должны совпадать на обеих сторонах; раньше не передавались)
+    # (должны совпадать на обеих сторонах; раньше не передавались).
+    # Для 3.1 JSON содержит и 9 транспортных параметров.
     import json as _json
     _params_json = _json.dumps(state.get("params", {}), ensure_ascii=False)
     core._box_row(f"  {core.GREEN}Obfuscation (JSON):{core.NC}")
@@ -728,14 +799,18 @@ def do_manage_awg_cascade() -> None:
         state = awgs_state_load()
         role = state.get("cascade_role", "")
         if role:
-            _box_row(f"  {GREEN}● Текущая роль:{NC} {role}")
+            from .awg_protocol import awg_protocol_label
+            _pv = state.get("protocol_version", "2.0")
+            _box_row(f"  {GREEN}● Текущая роль:{NC} {role} "
+                     f"({awg_protocol_label(_pv)})")
         else:
             _box_row(f"  {DIM}○ Каскад не настроен{NC}")
         _box_row()
         _box_item("1", f"Настроить как AWG0 (вход, РФ)")
         _box_desc("Этот сервер принимает клиентов и делит трафик: RU напрямую, остальное через AWG1.")
-        _box_item("2", f"Настроить как AWG1 (выход, зарубеж)")
-        _box_desc("Этот сервер — зарубежный exit. Создаст спец-пир для AWG0.")
+        _box_item("2", f"Настроить как AWG1 (выход, зарубеж) — 2.0 / 3.1")
+        _box_desc("Этот сервер — зарубежный exit. Создаст спец-пир для AWG0. "
+                  "Версия протокола выбирается перед настройкой.")
         _box_item("3", f"Обновить ru.zone вручную")
         _box_desc("Принудительное обновление списка российских сетей с ipdeny.com.")
         _box_item("4", f"Проверить состояние каскада")
@@ -747,7 +822,9 @@ def do_manage_awg_cascade() -> None:
             _awgs_cascade_menu_awg0()
             input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch == "2":
-            awgs_cascade_setup_awg1()
+            # v5.5: выбор версии протокола перед настройкой exit
+            _pv = _awgs_cascade_prompt_exit_version()
+            awgs_cascade_setup_awg1(protocol_version=_pv)
             input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch == "3":
             info("Обновление ru.zone...")
@@ -763,8 +840,43 @@ def do_manage_awg_cascade() -> None:
             break
 
 
+def _awgs_cascade_prompt_exit_version() -> str:
+    """v5.5: выбор версии протокола exit-ноды (AWG1) перед настройкой.
+
+    Возвращает "2.0" или "3.1".
+    """
+    from .awg_protocol import AWG_VERSION_20, AWG_VERSION_31
+    core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_item = core._box_item
+    _box_desc = core._box_desc
+    _box_bottom = core._box_bottom
+    CYAN, NC, GREEN, YELLOW, DIM = core.CYAN, core.NC, core.GREEN, core.YELLOW, core.DIM
+
+    print()
+    _box_top(f"Версия протокола AWG1 (выход каскада)")
+    _box_row()
+    _box_item("1", f"AmneziaWG 2.0 {GREEN}(Enter — по умолчанию){NC}")
+    _box_desc("Каскад на 2.0 — максимальная совместимость инструментов.")
+    _box_item("2", f"AmneziaWG 3.1 {YELLOW}(transport protection){NC}")
+    _box_desc("Каскад на 3.1 — шифрование заголовков + паддинг + "
+              "рандомизация таймеров на транзитном канале. "
+              "AWG0 (вход) должен быть переустановлен с той же версией!")
+    _box_row()
+    _box_bottom()
+    while True:
+        ch = input(f"{CYAN}Версия протокола AWG1 [1/2, Enter=1]:{NC} ").strip()
+        if ch in ("", "1"):
+            return AWG_VERSION_20
+        if ch == "2":
+            return AWG_VERSION_31
+        core.warn("Введите 1 или 2")
+
+
 def _awgs_cascade_menu_awg0() -> None:
     """Подменю настройки AWG0 (вход каскада)."""
+    from .awg_protocol import awg_normalize_version
     core = _core_module()
     info = core.info
     warn = core.warn
@@ -817,6 +929,11 @@ def _awgs_cascade_menu_awg0() -> None:
                  "параметры этого сервера (handshake может не сойлись!)")
             exit_params = None
 
+    # v5.5: версия протокола AWG1 (строка Protocol version из бокса AWG1).
+    # Обязательна для 3.1-каскада — версии должны совпадать на обоих концах.
+    _pv_raw = input(f"{CYAN}Версия протокола AWG1 [1=2.0, 2=3.1, Enter=2.0]: {NC}").strip()
+    exit_protocol_version = "3.1" if _pv_raw == "2" else "2.0"
+
     print()
     confirm = input(f"{core.YELLOW}Настроить каскад с {exit_host}:{exit_port}? [y/N]: {NC}").strip().lower()
     if confirm not in ("y", "yes", "д", "да"):
@@ -829,6 +946,7 @@ def _awgs_cascade_menu_awg0() -> None:
         exit_subnet=exit_subnet,
         exit_peer_ip=exit_peer_ip,
         exit_params=exit_params,
+        exit_protocol_version=exit_protocol_version,
     )
 
 
@@ -856,6 +974,10 @@ def _awgs_cascade_status() -> None:
     _box_sep()
 
     if role == "entry":
+        from .awg_protocol import awg_protocol_label
+        _pv = state.get("protocol_version", "2.0")
+        _box_row(f"  Протокол: {CYAN}{awg_protocol_label(_pv)}{NC}")
+
         # Проверяем awg1 (туннель к AWG1)
         r = core._run(["systemctl", "is-active", "awg-quick@awg1"],
                       capture=True, check=False)
@@ -887,6 +1009,10 @@ def _awgs_cascade_status() -> None:
         _box_row(f"  Exit subnet: {state.get('cascade_subnet', '?')}")
 
     elif role == "exit":
+        from .awg_protocol import awg_protocol_label
+        _pv = state.get("protocol_version", "2.0")
+        _box_row(f"  Протокол: {CYAN}{awg_protocol_label(_pv)}{NC}")
+
         # Просто проверяем, что standalone AWG активен
         from .awg_apply import awgs_service_status
         status = awgs_service_status()

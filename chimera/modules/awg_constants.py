@@ -1,7 +1,7 @@
 """
 chimera/modules/awg_constants.py
 ───────────────────────────────────────────────────────────────────────────────
-Константы и пути для AmneziaWG 2.0 standalone-режима.
+Константы и пути для AmneziaWG standalone-режима (протокол 2.0 и 3.1).
 
 Это АВТОНОМНЫЙ модуль — он не переиспользует globals AWG_* из _core.py
 (те относятся к chain Mode B transport). Все standalone-константы имеют
@@ -94,6 +94,33 @@ AWGS_DEFAULT_PARAMS: dict = {
     "i4":   "",
     "i5":   "",
 }
+
+# ── Версия протокола AmneziaWG (2.0 / 3.1) ────────────────────────────────
+# Единая точка правды — chimera/modules/awg_protocol.py (awg_normalize_version).
+# Здесь — только константы для standalone-мира (AWGS_*).
+# Отсутствие protocol_version в state.json = старая установка = "2.0".
+AWGS_PROTOCOL_VERSION_20: str = "2.0"
+AWGS_PROTOCOL_VERSION_31: str = "3.1"
+AWGS_PROTOCOL_VERSIONS:  tuple = (AWGS_PROTOCOL_VERSION_20, AWGS_PROTOCOL_VERSION_31)
+AWGS_DEFAULT_PROTOCOL_VERSION: str = AWGS_PROTOCOL_VERSION_20
+
+# ── Валидационные диапазоны AWG 3.1 (констрейнты GenerateObfuscation31, ─────
+# те же, что в wpp_awg.py — мир WPP-профилей уже поддерживает 3.1):
+# S1/S2 ≥ 12 байт (HeaderProtectionKey требует паддинга ≥ 12),
+# S3 12-55, S4 12-27, Jmax ≤ 339 (Jmin ≤ 89 + delta ≤ 250).
+AWGS31_S1_MIN: int = 15
+AWGS31_S1_MAX: int = 150
+AWGS31_S2_MIN: int = 15
+AWGS31_S2_MAX: int = 150
+AWGS31_S3_MIN: int = 12
+AWGS31_S3_MAX: int = 55
+AWGS31_S4_MIN: int = 12
+AWGS31_S4_MAX: int = 27
+AWGS31_JMIN_MIN: int = 40
+AWGS31_JMIN_MAX: int = 89
+AWGS31_JMAX_DELTA_MIN: int = 50
+AWGS31_JMAX_DELTA_MAX: int = 250
+AWGS31_JMAX_MAX: int = 339   # 89 + 250
 
 # ── Валидационные диапазоны (из upstream) ───────────────────────────────────
 AWGS_JC_MIN:        int = 1

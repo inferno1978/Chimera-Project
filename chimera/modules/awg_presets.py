@@ -35,6 +35,11 @@ import random
 import re
 from typing import Optional
 
+from .awg_protocol import (
+    awg_is_31, awg_normalize_version, awg31_generate_extra_params,
+    awg31_validate_extra_params, awg31_merge_into_params, AWG_VERSION_20,
+)
+
 
 # ── Carrier-пресеты (из bivlked awg_common.sh) ──────────────────────────────
 # Формат: (jc_min, jc_max, jmin_min, jmin_max, jmax_delta_min, jmax_delta_max, i1_mode)
@@ -160,10 +165,23 @@ def awgs_presets_get(name: str) -> Optional[dict]:
     return AWGS_CARRIER_PRESETS.get(name)
 
 
-def awgs_presets_generate(name: str = "default") -> dict:
+def awgs_presets_generate(name: str = "default", protocol_version: str = AWG_VERSION_20) -> dict:
     """
     Генерирует конкретные значения параметров обфускации по пресету.
     Возвращает dict с ключами: jc, jmin, jmax, s1, s2, s3, s4, h1, h2, h3, h4, i1..i5
+    (при protocol_version="3.1" — плюс 9 ключей 3.1: header_protection_key,
+    content_padding_addition, rekey_*, reject_after_time, keepalive_timeout,
+    max_handshake_attempts, random_trailers, disable_cookies).
+
+    protocol_version="3.1" (AWG 3.1, v5.5) — диапазоны сужаются до констрейнтов
+    GenerateObfuscation31 (как в wpp_awg.py):
+      • S1/S2 15-150, S3 12-55, S4 12-27 (S-паддинг ≥ 12 под HeaderProtectionKey);
+      • Jmin 40-89, Jmax = Jmin + 50..250 (≤ 339);
+      • H1-H4 — одиночные int в НЕПЕРЕСЕКАЮЩИХСЯ бандах от 5 (не диапазоны
+        "N-M": 3.1-генератор 3x-ui использует одиночные значения);
+      • I1 — ВСЕГДА CPS-тег «<r N>» (N 32-256), независимо от i1_mode пресета
+        (в 3.1 I1 обязателен; binary/quic_mimicry — 2.0-специфика);
+      • + 9 дополнительных параметров 3.1 (см. awg_protocol).
 
     Jc/Jmin/Jmax — случайные в per-preset диапазонах (DPI-тюнинг под
     конкретного оператора, см. AWGS_CARRIER_PRESETS). I1 — per-preset
@@ -194,14 +212,28 @@ def awgs_presets_generate(name: str = "default") -> dict:
         raise ValueError(f"Неизвестный пресет: '{name}'. "
                          f"Допустимые: {', '.join(AWGS_CARRIER_PRESETS.keys())}")
 
+    is_31 = awg_is_31(protocol_version)
+
     # Jc — случайное целое в per-preset диапазоне
     jc = random.randint(preset["jc_min"], preset["jc_max"])
 
-    # Jmin — случайное целое в per-preset диапазоне
-    jmin = random.randint(preset["jmin_min"], preset["jmin_max"])
+    # Jmin — случайное целое в per-preset диапазоне; для 3.1 дополнительно
+    # ограничиваем 40-89 (констрейнт GenerateObfuscation31: Jmax ≤ 339)
+    # Если пересечение диапазонов пусто (например tmobile_us jmin=10-10 < 40)
+    # — fallback на глобальный 3.1-диапазон 40-89.
+    if is_31:
+        _lo = max(preset["jmin_min"], 40)
+        _hi = min(preset["jmin_max"], 89)
+        if _lo > _hi:
+            _lo, _hi = 40, 89
+        jmin = random.randint(_lo, _hi)
+    else:
+        jmin = random.randint(preset["jmin_min"], preset["jmin_max"])
 
-    # Jmax = Jmin + delta (delta в per-preset диапазоне)
+    # Jmax = Jmin + delta (delta в per-preset диапазоне; для 3.1 — ≤ 339)
     jmax_delta = random.randint(preset["jmax_delta_min"], preset["jmax_delta_max"])
+    if is_31:
+        jmax_delta = min(jmax_delta, 250)
     jmax = jmin + jmax_delta
 
     # S1, S2 — случайные ненулевые (как в эталонном конфиге Amnezia).
@@ -210,23 +242,44 @@ def awgs_presets_generate(name: str = "default") -> dict:
     # с S1=0, S2=0 handshake не завершается. С ненулевыми S1/S2 — работает.
     # S1/S2 — это junk packet size для init/response фазы handshake.
     # Нулевое значение может вызывать сбой на некоторых реализациях AWG.
-    s1 = random.randint(_FULL_MANUAL_RANGES["s1"][0], _FULL_MANUAL_RANGES["s1"][1])
-    s2 = random.randint(_FULL_MANUAL_RANGES["s2"][0], _FULL_MANUAL_RANGES["s2"][1])
+    #
+    # AWG 3.1: S1/S2 15-150 (S ≥ 12 под HeaderProtectionKey), S3 12-55,
+    # S4 12-27 — как в GenerateObfuscation31 (wpp_awg._parameters).
+    if is_31:
+        s1 = random.randint(15, 150)
+        s2 = random.randint(15, 150)
+    else:
+        s1 = random.randint(_FULL_MANUAL_RANGES["s1"][0], _FULL_MANUAL_RANGES["s1"][1])
+        s2 = random.randint(_FULL_MANUAL_RANGES["s2"][0], _FULL_MANUAL_RANGES["s2"][1])
     # Правило S1 + 56 != S2 (паттерн, выдающий VPN) — перегенерация при коллизии
     for _attempt in range(10):
         if s1 + 56 != s2:
             break
-        s2 = random.randint(_FULL_MANUAL_RANGES["s2"][0], _FULL_MANUAL_RANGES["s2"][1])
+        s2 = random.randint(15, 150) if is_31 else random.randint(
+            _FULL_MANUAL_RANGES["s2"][0], _FULL_MANUAL_RANGES["s2"][1])
 
     # S3, S4 — случайные в общих диапазонах (общегигиенические, не per-preset).
     # Переиспользуем диапазоны из _FULL_MANUAL_RANGES чтобы не дублировать.
-    s3 = random.randint(_FULL_MANUAL_RANGES["s3"][0], _FULL_MANUAL_RANGES["s3"][1])
-    s4 = random.randint(_FULL_MANUAL_RANGES["s4"][0], _FULL_MANUAL_RANGES["s4"][1])
+    if is_31:
+        s3 = random.randint(12, 55)
+        s4 = random.randint(12, 27)
+    else:
+        s3 = random.randint(_FULL_MANUAL_RANGES["s3"][0], _FULL_MANUAL_RANGES["s3"][1])
+        s4 = random.randint(_FULL_MANUAL_RANGES["s4"][0], _FULL_MANUAL_RANGES["s4"][1])
 
     # H1-H4 — непересекающиеся случайные значения (см. комментарий выше).
-    h1, h2, h3, h4 = _generate_non_overlapping_h_values()
+    # AWG 3.1: одиночные int в бандах от 5 (GenerateObfuscation31-стиль),
+    # НЕ диапазоны "N-M" — как в wpp_awg._parameters (референс 3.1 в проде).
+    if is_31:
+        h1, h2, h3, h4 = _generate_non_overlapping_h_values_31()
+    else:
+        h1, h2, h3, h4 = _generate_non_overlapping_h_values()
 
-    # I1 — зависит от per-preset i1_mode
+    # I1 — зависит от per-preset i1_mode.
+    #
+    # AWG 3.1: I1 ВСЕГДА «<r N>» с N 32-256 (GenerateObfuscation31;
+    # i1_mode пресета игнорируется — в 3.1 I1 обязателен, а binary/
+    # quic_mimicry — 2.0-специфика).
     #
     # v5.1: I1 теперь генерируется в CPS tag-формате (AWG 2.0), а НЕ как
     # голая hex-строка. Сравнение с конфигом официального приложения
@@ -236,29 +289,33 @@ def awgs_presets_generate(name: str = "default") -> dict:
     # Некоторые клиенты (Keenetic native AWG 2.0, amneziawg-go) падают
     # на голом hex-формате с невнятной ошибкой "туннель подключается,
     # но трафик не идёт".
-    i1_mode = preset["i1_mode"]
-    if i1_mode == "random":
-        # Случайные N байт — простейший валидный CPS-формат, функционально
-        # эквивалентен старому голому hex-снапшоту (та же энтропия), но
-        # синтаксически корректный для AWG 2.0.
-        i1_size = random.randint(24, 32)
+    if is_31:
+        i1_size = random.randint(32, 256)
         i1 = f"<r {i1_size}>"
-    elif i1_mode == "binary":
-        # Статичные байты в CPS-формате <b 0x...> — для T-Mobile US
-        # (короткий фиксированный blob, как в upstream preset).
-        i1_hex = "".join(random.choices("0123456789abcdef", k=32))
-        i1 = f"<b 0x{i1_hex}>"
-    elif i1_mode == "quic_mimicry":
-        # QUIC Initial packet mimicry — маскировка под QUIC v1 long-header.
-        # Используется опционально для sneaky-режима (см. bivlked-гайд).
-        i1 = _generate_quic_mimicry_i1()
-    else:  # absent
-        i1 = ""
+    else:
+        i1_mode = preset["i1_mode"]
+        if i1_mode == "random":
+            # Случайные N байт — простейший валидный CPS-формат, функционально
+            # эквивалентен старому голому hex-снапшоту (та же энтропия), но
+            # синтаксически корректный для AWG 2.0.
+            i1_size = random.randint(24, 32)
+            i1 = f"<r {i1_size}>"
+        elif i1_mode == "binary":
+            # Статичные байты в CPS-формате <b 0x...> — для T-Mobile US
+            # (короткий фиксированный blob, как в upstream preset).
+            i1_hex = "".join(random.choices("0123456789abcdef", k=32))
+            i1 = f"<b 0x{i1_hex}>"
+        elif i1_mode == "quic_mimicry":
+            # QUIC Initial packet mimicry — маскировка под QUIC v1 long-header.
+            # Используется опционально для sneaky-режима (см. bivlked-гайд).
+            i1 = _generate_quic_mimicry_i1()
+        else:  # absent
+            i1 = ""
 
     # I2-I5 — пустые (опциональные decoy-пакеты)
     i2 = i3 = i4 = i5 = ""
 
-    return {
+    params = {
         "jc":   jc,
         "jmin": jmin,
         "jmax": jmax,
@@ -267,19 +324,50 @@ def awgs_presets_generate(name: str = "default") -> dict:
         "i1":   i1, "i2": i2, "i3": i3, "i4": i4, "i5": i5,
     }
 
+    # AWG 3.1: добавляем 9 транспортных параметров (HeaderProtectionKey и т.д.)
+    if is_31:
+        params = awg31_merge_into_params(params)
 
-def awgs_presets_validate_params(params: dict) -> tuple[bool, str]:
+    return params
+
+
+# ── H1-H4 для AWG 3.1 (GenerateObfuscation31-стиль) ─────────────────────────
+
+def _generate_non_overlapping_h_values_31():
+    """Генерирует H1-H4 для AWG 3.1 — одиночные int в НЕПЕРЕСЕКАЮЩИХСЯ бандах.
+
+    Как в GenerateObfuscation31 (3x-ui 3.8.5) и wpp_awg._parameters:
+    каждое H-значение получает свой band в [5, INT32_MAX], диапазоны
+    физически не пересекаются. Значения 1-4 не используются — это
+    узнаваемые vanilla-WireGuard типы сообщений (init/response/cookie/
+    transport).
+    """
+    h_low = 5
+    h_band = (2147483647 - h_low + 1) // 4
+    return tuple(
+        random.randint(h_low + i * h_band, h_low + (i + 1) * h_band - 1)
+        for i in range(4)
+    )
+
+
+def awgs_presets_validate_params(params: dict, protocol_version: str = AWG_VERSION_20) -> tuple[bool, str]:
     """
     Валидирует параметры обфускации.
     Возвращает (ok, error_message).
     Перенесено из validate_jc_value/validate_junk_size в bivlked + расширено
     для S1/S2 (нет явного max в bivlked, используем 1280 как для Jmin/Jmax)
     и H1-H4 (0-255, magic header byte).
+
+    protocol_version="3.1": дополнительно проверяются 9 параметров 3.1
+    (HeaderProtectionKey/ContentPaddingAddition/Rekey*/...) через
+    awg_protocol.awg31_validate_extra_params, S1-S4 ≥ 12, Jmax ≤ 339,
+    I1 — строго «<r N>» (GenerateObfuscation31-констрейнты; см. wpp_awg).
     """
     from .awg_constants import (
         AWGS_JC_MIN, AWGS_JC_MAX, AWGS_JMIN_MAX, AWGS_JMAX_MAX,
-        AWGS_S3_MAX, AWGS_S4_MAX,
+        AWGS_S3_MAX, AWGS_S4_MAX, AWGS31_JMAX_MAX,
     )
+    is_31 = awg_is_31(protocol_version)
 
     # Jc: 1-128
     jc = params.get("jc", 0)
@@ -291,28 +379,36 @@ def awgs_presets_validate_params(params: dict) -> tuple[bool, str]:
     if not isinstance(jmin, int) or jmin < 0 or jmin > AWGS_JMIN_MAX:
         return False, f"Jmin={jmin} вне диапазона (0-{AWGS_JMIN_MAX})"
 
-    # Jmax: 0-1280, >= Jmin
+    # Jmax: 0-1280, >= Jmin; для 3.1 — ≤ 339 (констрейнт GenerateObfuscation31)
     jmax = params.get("jmax", 0)
     if not isinstance(jmax, int) or jmax < 0 or jmax > AWGS_JMAX_MAX:
         return False, f"Jmax={jmax} вне диапазона (0-{AWGS_JMAX_MAX})"
     if jmax < jmin:
         return False, f"Jmax ({jmax}) меньше Jmin ({jmin})"
+    if is_31 and jmax > AWGS31_JMAX_MAX:
+        return False, f"Jmax={jmax} вне диапазона AWG 3.1 (0-{AWGS31_JMAX_MAX})"
 
-    # S1, S2: 0-1280 (junk size, как Jmin/Jmax)
+    # S1, S2: 0-1280 (junk size, как Jmin/Jmax); для 3.1 — 15-150
     for key in ("s1", "s2"):
         v = params.get(key, 0)
         if not isinstance(v, int) or v < 0 or v > AWGS_JMIN_MAX:
             return False, f"{key.upper()}={v} вне диапазона (0-{AWGS_JMIN_MAX})"
+        if is_31 and not (15 <= v <= 150):
+            return False, f"{key.upper()}={v} вне диапазона AWG 3.1 (15-150)"
 
-    # S3: 0-64
+    # S3: 0-64; для 3.1 — 12-55
     s3 = params.get("s3", 0)
     if not isinstance(s3, int) or s3 < 0 or s3 > AWGS_S3_MAX:
         return False, f"S3={s3} вне диапазона (0-{AWGS_S3_MAX})"
+    if is_31 and not (12 <= s3 <= 55):
+        return False, f"S3={s3} вне диапазона AWG 3.1 (12-55)"
 
-    # S4: 0-32
+    # S4: 0-32; для 3.1 — 12-27
     s4 = params.get("s4", 0)
     if not isinstance(s4, int) or s4 < 0 or s4 > AWGS_S4_MAX:
         return False, f"S4={s4} вне диапазона (0-{AWGS_S4_MAX})"
+    if is_31 and not (12 <= s4 <= 27):
+        return False, f"S4={s4} вне диапазона AWG 3.1 (12-27)"
 
     # H1-H4: magic headers. По официальной документации AmneziaWG
     # (docs.amnezia.org) безопасный верхний предел — INT32_MAX (2147483647).
@@ -377,6 +473,20 @@ def awgs_presets_validate_params(params: dict) -> tuple[bool, str]:
                           f"Ожидается CPS tag-формат AWG 2.0 "
                           f"(<b 0x...>, <r N>, <t>) или голый hex (AWG 1.5). "
                           f"Фактически: {v[:64]}{'...' if len(v) > 64 else ''}")
+
+    # AWG 3.1: I1 — строго «<r N>» (GenerateObfuscation31; binary-blob и
+    # quic_mimicry — 2.0-специфика, в 3.1 I1 обязан быть random-тегом).
+    if is_31:
+        i1 = params.get("i1", "")
+        if not (isinstance(i1, str) and i1.startswith("<r ") and i1.endswith(">")):
+            return False, ("I1 в AWG 3.1 должен быть CPS-тегом '<r N>' "
+                           f"(фактически: {str(i1)[:32]!r})")
+
+    # AWG 3.1: 9 дополнительных параметров (HeaderProtectionKey и т.д.)
+    if is_31:
+        ok31, err31 = awg31_validate_extra_params(params)
+        if not ok31:
+            return False, f"AWG 3.1: {err31}"
 
     return True, ""
 
@@ -716,10 +826,18 @@ _FULL_MANUAL_RANGES: dict = {
 }
 
 
-def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
-    """Генерирует ПОЛНЫЙ набор параметров AWG 2.0 (все 16: Jc/Jmin/Jmax/
-    S1-S4/H1-H4/I1-I5) со случайными значениями в рекомендованных
+def awgs_generate_full_manual_params(overrides: dict | None = None,
+                                     protocol_version: str = AWG_VERSION_20) -> dict:
+    """Генерирует ПОЛНЫЙ набор параметров AWG (все 16: Jc/Jmin/Jmax/
+    S1-S4/H1-H4/I1-I5 — а при protocol_version="3.1" плюс 9 транспортных
+    параметров 3.1) со случайными значениями в рекомендованных
     диапазонах по умолчанию.
+
+    protocol_version="3.1": S1/S2 15-150, S3 12-55, S4 12-27, Jmin 40-89,
+    Jmax ≤ 339, H1-H4 — одиночные int в бандах от 5, I1 = «<r 32-256>»,
+    + HeaderProtectionKey/ContentPaddingAddition/Rekey*/RejectAfterTime/
+    KeepaliveTimeout/MaxHandshakeAttempts/RandomTrailers/DisableCookies
+    (констрейнты GenerateObfuscation31, см. awg_protocol).
 
     overrides — словарь с значениями, явно введёнными пользователем
     интерактивно (см. awgs_prompt_custom_params в awg_standalone.py).
@@ -750,6 +868,7 @@ def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
     """
     overrides = overrides or {}
     r = _FULL_MANUAL_RANGES
+    is_31 = awg_is_31(protocol_version)
 
     # ── Jc ────────────────────────────────────────────────────────────────
     if "jc" in overrides:
@@ -758,13 +877,18 @@ def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
         jc = random.randint(r["jc"][0], r["jc"][1])
 
     # ── Jmin/Jmax ─────────────────────────────────────────────────────────
+    # AWG 3.1: Jmin 40-89, Jmax ≤ 339 (GenerateObfuscation31)
     if "jmin" in overrides:
         jmin = int(overrides["jmin"])
+    elif is_31:
+        jmin = random.randint(40, 89)
     else:
         jmin = random.randint(r["jmin"][0], r["jmin"][1])
 
     if "jmax" in overrides:
         jmax = int(overrides["jmax"])
+    elif is_31:
+        jmax = jmin + random.randint(50, 250)
     else:
         jmax_delta = random.randint(r["jmax_delta"][0], r["jmax_delta"][1])
         jmax = jmin + jmax_delta
@@ -773,77 +897,93 @@ def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
         jmax = jmin
 
     # ── S1, S2 (с правилом S1 + 56 != S2) ─────────────────────────────────
+    # AWG 3.1: S1/S2 15-150 (S >= 12 под HeaderProtectionKey)
+    _s1_lo, _s1_hi = (15, 150) if is_31 else (r["s1"][0], r["s1"][1])
+    _s2_lo, _s2_hi = (15, 150) if is_31 else (r["s2"][0], r["s2"][1])
+
     if "s1" in overrides:
         s1 = int(overrides["s1"])
     else:
-        s1 = random.randint(r["s1"][0], r["s1"][1])
+        s1 = random.randint(_s1_lo, _s1_hi)
 
     if "s2" in overrides:
         s2 = int(overrides["s2"])
     else:
         # Перегенерируем S2 если S1 + 56 == S2 (паттерн, выдающий VPN)
         # Делаем до 10 попыток, потом принудительно сдвигаем.
-        s2 = random.randint(r["s2"][0], r["s2"][1])
+        s2 = random.randint(_s2_lo, _s2_hi)
         for _attempt in range(10):
             if s1 + 56 != s2:
                 break
-            s2 = random.randint(r["s2"][0], r["s2"][1])
+            s2 = random.randint(_s2_lo, _s2_hi)
         else:
-            # Все 10 попыток совпали (маловероятно для диапазона 0-32) —
-            # принудительно сдвигаем S2 на 1 от S1+56.
+            # Все 10 попыток совпали (маловероятно) — принудительно
+            # сдвигаем S2 на 1 от S1+56.
             s2 = (s1 + 57) & 0xFFFFFFFF
-            if s2 > r["s2"][1]:
-                s2 = r["s2"][1] if r["s2"][1] != (s1 + 56) else r["s2"][0]
+            if s2 > _s2_hi:
+                s2 = _s2_hi if _s2_hi != (s1 + 56) else _s2_lo
 
     # ── S3, S4 ────────────────────────────────────────────────────────────
+    # AWG 3.1: S3 12-55, S4 12-27 (GenerateObfuscation31)
+    _s3_lo, _s3_hi = (12, 55) if is_31 else (r["s3"][0], r["s3"][1])
+    _s4_lo, _s4_hi = (12, 27) if is_31 else (r["s4"][0], r["s4"][1])
+
     if "s3" in overrides:
         s3 = int(overrides["s3"])
     else:
-        s3 = random.randint(r["s3"][0], r["s3"][1])
+        s3 = random.randint(_s3_lo, _s3_hi)
 
     if "s4" in overrides:
         s4 = int(overrides["s4"])
     else:
-        s4 = random.randint(r["s4"][0], r["s4"][1])
+        s4 = random.randint(_s4_lo, _s4_hi)
 
     # ── H1-H4 — непересекающиеся диапазоны в формате 'N-M' (AWG 2.0) ─────
     # v5.4.2: Всегда генерируем диапазоны (подтверждено zvshka — работает).
     # Overrides: если пользователь явно ввёл H1-H4, используем как есть.
-    h_overrides = []
-    for key in ("h1", "h2", "h3", "h4"):
-        if key in overrides:
-            hv = str(overrides[key])
-            h_overrides.append((key, hv))
+    # AWG 3.1: одиночные int в НЕПЕРЕСЕКАЮЩИХСЯ бандах от 5
+    # (GenerateObfuscation31-стиль, как в wpp_awg) — не диапазоны.
+    if is_31 and not any(k in overrides for k in ("h1", "h2", "h3", "h4")):
+        h1, h2, h3, h4 = (str(v) for v in _generate_non_overlapping_h_values_31())
+    else:
+        h_overrides = []
+        for key in ("h1", "h2", "h3", "h4"):
+            if key in overrides:
+                hv = str(overrides[key])
+                h_overrides.append((key, hv))
 
-    used_ranges: list[tuple[int, int]] = []
-    # Парсим overrides в диапазоны для проверки пересечений
-    for key, hv in h_overrides:
-        if "-" in hv:
-            parts = hv.split("-")
-            used_ranges.append((int(parts[0]), int(parts[1])))
-        else:
-            v = int(hv)
-            used_ranges.append((v, v))
-    # Заполняем остальные (без override)
-    for key in ("h1", "h2", "h3", "h4"):
-        if key in overrides:
-            continue
-        start, end = _generate_non_overlapping_h_ranges(used_ranges)
-        used_ranges.append((start, end))
-        h_overrides.append((key, f"{start}-{end}"))
+        used_ranges: list[tuple[int, int]] = []
+        # Парсим overrides в диапазоны для проверки пересечений
+        for key, hv in h_overrides:
+            if "-" in hv:
+                parts = hv.split("-")
+                used_ranges.append((int(parts[0]), int(parts[1])))
+            else:
+                v = int(hv)
+                used_ranges.append((v, v))
+        # Заполняем остальные (без override)
+        for key in ("h1", "h2", "h3", "h4"):
+            if key in overrides:
+                continue
+            start, end = _generate_non_overlapping_h_ranges(used_ranges)
+            used_ranges.append((start, end))
+            h_overrides.append((key, f"{start}-{end}"))
 
-    # Сортируем по ключу, чтобы порядок был h1, h2, h3, h4
-    h_overrides.sort(key=lambda x: ("h1", "h2", "h3", "h4").index(x[0]))
-    h1, h2, h3, h4 = (v for _, v in h_overrides)
+        # Сортируем по ключу, чтобы порядок был h1, h2, h3, h4
+        h_overrides.sort(key=lambda x: ("h1", "h2", "h3", "h4").index(x[0]))
+        h1, h2, h3, h4 = (v for _, v in h_overrides)
 
-    # ── I1 — CPS tag-формат <r N> (24-32 случайных байт, AWG 2.0) ─────────
+    # ── I1 — CPS tag-формат <r N> (AWG 2.0: 24-32; 3.1: 32-256) ─────────
     # v5.1: раньше генерировался голый hex (AWG 1.5). Теперь — CPS tag-формат
     # <r N>, как в awgs_presets_generate() для i1_mode='random'. Голый hex
     # ломает некоторых клиентов AWG 2.0 (Keenetic, amneziawg-go).
     # Override принимается as-is (через _is_valid_cps_or_legacy_hex проходит
     # и CPS, и legacy hex).
+    # AWG 3.1: N 32-256 (GenerateObfuscation31).
     if "i1" in overrides and overrides["i1"]:
         i1 = str(overrides["i1"])
+    elif is_31:
+        i1 = f"<r {random.randint(32, 256)}>"
     else:
         i1_size = random.randint(24, 32)
         i1 = f"<r {i1_size}>"
@@ -854,7 +994,7 @@ def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
     i4 = str(overrides["i4"]) if "i4" in overrides and overrides["i4"] else ""
     i5 = str(overrides["i5"]) if "i5" in overrides and overrides["i5"] else ""
 
-    return {
+    params = {
         "jc":   jc,
         "jmin": jmin,
         "jmax": jmax,
@@ -862,3 +1002,17 @@ def awgs_generate_full_manual_params(overrides: dict | None = None) -> dict:
         "h1":   h1, "h2": h2, "h3": h3, "h4": h4,
         "i1":   i1, "i2": i2, "i3": i3, "i4": i4, "i5": i5,
     }
+
+    # AWG 3.1: добавляем 9 транспортных параметров (HeaderProtectionKey и т.д.).
+    # Overrides с 3.1-ключами уважаются (awg31_merge_into_params заполняет
+    # только отсутствующие/пустые).
+    if is_31:
+        extra_overrides = {k: overrides[k] for k in overrides
+                           if k in ("header_protection_key", "content_padding_addition",
+                                    "rekey_after_time", "rekey_timeout",
+                                    "reject_after_time", "keepalive_timeout",
+                                    "max_handshake_attempts", "random_trailers",
+                                    "disable_cookies") and overrides[k]}
+        params = awg31_merge_into_params(params, extra_overrides or None)
+
+    return params

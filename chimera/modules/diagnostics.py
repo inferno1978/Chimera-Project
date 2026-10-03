@@ -2047,7 +2047,7 @@ def do_full_diagnostic() -> None:
                 _res("11. AWG Multi-Node", _PASS if _state.get("awg_nodes") else _WARN)
             else:
                 # Оригинальная одиночная диагностика awg0
-                _box_info("  Режим AWG 2.0 — проверяем туннель awg0...")
+                _box_info(f"  Режим AWG {_state.get('awg_protocol_version', '2.0')} — проверяем туннель awg0...")
                 _r_awg_if = _run(["ip", "link", "show", "awg0"], capture=True, check=False)
                 _awg_if_ok = _r_awg_if.returncode == 0
                 if _awg_if_ok:
