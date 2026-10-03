@@ -97,6 +97,29 @@ class TestAwgsCascadeBuildAwg1Conf(unittest.TestCase):
         # base = 172.16.61 → client_ip = 172.16.61.2/32
         self.assertIn("172.16.61.2/32", conf)
 
+    def test_exit_peer_ip_overrides_base2_v545(self):
+        """v5.4.5: exit_peer_ip переопределяет хардкод base.2.
+
+        Если у exit уже есть пиры (VLESS-юзеры), cascade_entry
+        получает .3+ от awgs_state_next_ip — хардкод .2 давал
+        address mismatch → handshake никогда не сходился.
+        """
+        from chimera.modules import awg_cascade
+        self._state.write_text(json.dumps({
+            "installed": True, "params": {},
+        }))
+        with self._patch():
+            conf = awg_cascade._awgs_cascade_build_awg1_conf(
+                exit_host="1.2.3.4", exit_port=51820,
+                exit_pubkey="PUB", client_privkey="PRIV",
+                psk="", exit_subnet="172.16.61.0/24",
+                exit_peer_ip="172.16.61.7",
+            )
+        self.assertIn("172.16.61.7/32", conf,
+                      "peer IP должен браться из exit_peer_ip (v5.4.5)")
+        self.assertNotIn("172.16.61.2/32", conf,
+                         "хардкод base.2 не должен применяться при заданном peer IP")
+
     def test_omits_preshared_key_when_empty(self):
         from chimera.modules import awg_cascade
         self._state.write_text(json.dumps({
@@ -201,12 +224,18 @@ class TestAwgsCascadeApplyIptablesRules(unittest.TestCase):
         core._run = _capture_run
         return core
 
-    def test_mark_rule_uses_forward_not_output(self):
-        """Regression: MARK-правило использует '-A FORWARD -i awg0',
-        а НЕ '-A OUTPUT'.
+    def test_mark_rule_uses_prerouting_v545(self):
+        """Regression v5.4.5 ГЛАВНЫЙ ФИКС: MARK-правило в mangle PREROUTING.
 
-        До фикса (коммит 33970c2) правило было '-A OUTPUT', что маркировало
-        весь исходящий трафик сервера (включая SSH-ответы) → SSH lockout.
+        История бага (3 итерации):
+        1. '-A OUTPUT' — маркировало весь исходящий трафик сервера
+           (SSH lockout) — фикс 33970c2.
+        2. '-A FORWARD' — метка ставилась ПОСЛЕ route decision: транзит
+           уже маршрутизирован по main (oif=ens3) → дроп policy DROP.
+           E2E 2026-10-03 (138x): счётчик MARK 236 pkt, FORWARD
+           awg0→awg1 = 0 pkt — каскад не работал ВООБЩЕ.
+        3. '-A PREROUTING -i awg0' (текущий) — метка ДО route decision,
+           только входящий клиентский трафик.
         """
         from chimera.modules import awg_cascade
 
@@ -218,15 +247,26 @@ class TestAwgsCascadeApplyIptablesRules(unittest.TestCase):
         all_cmds = [" ".join(cmd) for cmd in self._run_calls]
         all_text = "\n".join(all_cmds)
 
-        # Должна быть команда с FORWARD -i awg0 и MARK
-        has_forward_mark = any(
-            "FORWARD" in c and "-i" in c and "awg0" in c and "MARK" in c
+        # Должна быть команда с PREROUTING -i awg0 и MARK (v5.4.5)
+        has_prerouting_mark = any(
+            "PREROUTING" in c and "-i" in c and "awg0" in c and "MARK" in c
             for c in all_cmds
         )
-        self.assertTrue(has_forward_mark,
-                        f"Expected FORWARD -i awg0 MARK rule, got: {all_cmds}")
+        self.assertTrue(has_prerouting_mark,
+                        f"Expected PREROUTING -i awg0 MARK rule (v5.4.5), "
+                        f"got: {all_cmds}")
 
-        # НЕ должно быть команды с OUTPUT и MARK одновременно
+        # НЕ должно быть MARK в FORWARD (ставится ПОСЛЕ route decision —
+        # транзит не попадает в table 2000; v5.4.5)
+        has_forward_mark = any(
+            "FORWARD" in c and "MARK" in c and " -C " not in c and " -D " not in c
+            for c in all_cmds
+        )
+        self.assertFalse(has_forward_mark,
+                         f"FORWARD + MARK rule found (после route decision — "
+                         "транзит не каскадируется; v5.4.5), got: {all_cmds}")
+
+        # НЕ должно быть команды с OUTPUT и MARK одновременно (SSH lockout)
         has_output_mark = any(
             "OUTPUT" in c and "MARK" in c
             for c in all_cmds
@@ -300,8 +340,8 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
 
     def test_writes_script_with_ipset_references(self):
         """Скрипт содержит ссылки на ipset и exit_gw (base.1 из exit_subnet).
-        Ранее f-string конфликтовал с bash ${line:0:1} → NameError при вызове
-        (фикс: экранирование через ${{line:0:1}})."""
+        v5.4.5: ipset грузится через `ipset restore` (один pipe) —
+        построчный `ipset add` грузил 12k+ сетей минуты."""
         from chimera.modules.awg_cascade import (
             _awgs_cascade_create_routing_script, AWGS_IPSET_NAME,
         )
@@ -312,8 +352,11 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
         # exit_gw = base.1 где base = exit_subnet без последнего октета и /CIDR
         # 172.16.61.0/24 → base=172.16.61 → exit_gw=172.16.61.1
         self.assertIn("172.16.61.1", content)
-        # bash-конструкция ${line:0:1} должна остаться в скрипте как есть
-        self.assertIn("${line:0:1}", content)
+        # v5.4.5: быстрая загрузка ipset через restore
+        self.assertIn("ipset restore -exist", content,
+                      "ipset должен грузиться через restore (v5.4.5, скорость)")
+        # старый медленный построчный цикл удалён
+        self.assertNotIn("ipset add " + AWGS_IPSET_NAME + " \"$line\"", content)
 
     def test_script_is_executable(self):
         """Скрипт создаётся с executable bit (0o755)."""
@@ -325,6 +368,58 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
             _awgs_cascade_create_routing_script("172.16.61.0/24")
         mode = stat.S_IMODE(os.stat(self._script).st_mode)
         self.assertTrue(mode & 0o100)  # executable bit
+
+    def test_script_marks_prerouting_v545(self):
+        """v5.4.5 ГЛАВНЫЙ ФИКС: MARK в PREROUTING (до route decision).
+
+        FORWARD-MARK ставился ПОСЛЕ маршрутизации — транзит клиентов
+        уходил в main → DROP (E2E 138x: MARK 236 pkt, FORWARD=0).
+        OUTPUT-MARK маркировал серверный трафик (SSH-lockout).
+        """
+        from chimera.modules.awg_cascade import (
+            _awgs_cascade_create_routing_script,
+        )
+        with self._patch()[0], self._patch()[1]:
+            _awgs_cascade_create_routing_script("172.16.61.0/24")
+        content = self._script.read_text()
+        self.assertIn("-A PREROUTING -i awg0 -m set ! --match-set", content,
+                      "бут-скрипт должен ставить MARK в PREROUTING (v5.4.5)")
+        self.assertNotIn("-A OUTPUT -m set", content,
+                         "бут-скрипт НЕ должен маркировать OUTPUT (серверный "
+                         "трафик — SSH-lockout)")
+        self.assertNotIn("-A OUTPUT -m conntrack", content,
+                         "conntrack-ACCEPT в OUTPUT не нужен (v5.4.5)")
+        self.assertNotIn("-A FORWARD -i awg0 -m set ! --match-set", content,
+                         "MARK в FORWARD слишком поздний для транзита "
+                         "(после route decision — v5.4.5)")
+
+    def test_script_routes_onlink_before_default_v545(self):
+        """v5.4.5: перед default via base.1 идёт on-link подсеть
+        base.0/24 — иначе 'Nexthop has invalid gateway' при
+        Address=base.N/32 + Table=off и table 2000 остаётся пустой."""
+        from chimera.modules.awg_cascade import (
+            _awgs_cascade_create_routing_script,
+        )
+        with self._patch()[0], self._patch()[1]:
+            _awgs_cascade_create_routing_script("172.16.61.0/24")
+        content = self._script.read_text()
+        self.assertIn("ip route replace 172.16.61.0/24 dev awg1 table 2000", content,
+                      "on-link подсеть обязательна перед default (v5.4.5)")
+        self.assertIn("ip route replace default via 172.16.61.1 dev awg1 table 2000", content)
+
+    def test_script_idempotent_rules_v545(self):
+        """v5.4.5: правила через -C || -A (идемпотентность при
+        повторном запуске — раньше голые -A дублировались)."""
+        from chimera.modules.awg_cascade import (
+            _awgs_cascade_create_routing_script,
+        )
+        with self._patch()[0], self._patch()[1]:
+            _awgs_cascade_create_routing_script("172.16.61.0/24")
+        content = self._script.read_text()
+        self.assertIn("-C FORWARD -i awg0 -o awg1 -j ACCEPT", content,
+                      "FORWARD awg0→awg1 должен проверяться -C перед -A (v5.4.5)")
+        self.assertIn("-C POSTROUTING -o awg1 -j MASQUERADE", content,
+                      "MASQ должен проверяться -C перед -A (v5.4.5)")
 
 
 class TestAwgsCascadeCreateSystemdUnit(unittest.TestCase):
@@ -354,6 +449,19 @@ class TestAwgsCascadeCreateSystemdUnit(unittest.TestCase):
         self.assertIn("[Service]", content)
         self.assertIn("ExecStart=", content)
         self.assertIn(str(AWGS_ROUTING_SCRIPT), content)
+
+    def test_unit_has_partof_v545(self):
+        """v5.4.5: PartOf=awg-quick@awg0/@awg1 — при рестарте туннеля
+        routing-юнит восстанавливает table 2000 (иначе ядро удаляет
+        маршруты удалённого dev и каскад молча умирает — E2E)."""
+        from chimera.modules.awg_cascade import (
+            _awgs_cascade_create_systemd_unit,
+        )
+        with self._patch():
+            _awgs_cascade_create_systemd_unit()
+        content = self._unit.read_text()
+        self.assertIn("PartOf=awg-quick@awg0.service awg-quick@awg1.service", content,
+                      "PartOf-зависимость обязательна (v5.4.5, table 2000)")
 
 
 class TestAwgsCascadeSetupCron(unittest.TestCase):
