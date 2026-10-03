@@ -206,6 +206,11 @@ def awgs_install_dkms() -> bool:
     # v5.4.5: быстрый путь — всё уже установлено (идемпотентность +
     # устойчивость к недоступному PPA/keyserver при готовых пакетах)
     if awgs_kmod_already_ready():
+        # v5.5.2 (E2E fi1): даже при готовых пакетах userspace-стабы
+        # от Mode B эпохи затемняют which awg → syncconf уходит в
+        # amneziawg-go (не умеет show/syncconf) → пиры применяются в
+        # conf, но НЕ к живому интерфейсу — handshake молча не сходится
+        _awgs_remove_shadowing_stubs()
         core.success("AmneziaWG уже установлен (awg/awg-quick + kmod найдены) — "
                      "переустановка пакетов не требуется")
         return True
@@ -382,6 +387,17 @@ def awgs_install_dkms() -> bool:
         # apt update (толерантный к кратковременному outage PPA)
         r = core._run(["apt-get", "update", "-y"], capture=True, check=False)
         if r.returncode != 0:
+            # v5.5.2 (E2E fi1): висячий apt.systemd.daily держит lock →
+            # update молча проваливается, PPA-индексы не обновляются.
+            # Лечим (TERM→KILL зависших системных apt) и ретраим.
+            stderr = r.stderr or ""
+            if ("could not get lock" in stderr.lower()
+                    or "held by process" in stderr.lower()):
+                if _awgs_apt_lock_heal():
+                    time.sleep(1)
+                    r = core._run(["apt-get", "update", "-y"],
+                                  capture=True, check=False)
+        if r.returncode != 0:
             # Если ошибка только на PPA Amnezia — продолжаем (issue #68 bivlked)
             stderr = r.stderr or ""
             if "amnezia" in stderr.lower():
@@ -392,11 +408,21 @@ def awgs_install_dkms() -> bool:
                 core.log_to_file("WARN", f"apt update: {stderr[-500:]}")
 
         # Проверяем, что пакет amneziawg-dkms появился в apt-cache
-        r = core._run(["apt-cache", "show", "amneziawg-dkms"],
-                      capture=True, check=False)
-        if r.returncode != 0 or not r.stdout.strip():
+        def _cache_has_dkms() -> bool:
+            rr = core._run(["apt-cache", "show", "amneziawg-dkms"],
+                           capture=True, check=False)
+            return rr.returncode == 0 and bool(rr.stdout.strip())
+
+        if not _cache_has_dkms():
+            # v5.5.2 (E2E fi1): вторая попытка после лечения лока —
+            # индексы PPA могли не обновиться из-за apt-lock.
+            if _awgs_apt_lock_heal():
+                core._run(["apt-get", "update", "-y"],
+                          check=False, quiet=True)
+            if _cache_has_dkms():
+                core.success("amneziawg-dkms найден в apt-cache после ретрая")
+        if not _cache_has_dkms():
             core.warn("Пакет amneziawg-dkms не найден в apt-cache после обновления PPA")
-            core.warn(f"apt-cache stderr: {r.stderr[-300:] if r.stderr else '(пусто)'}")
             core.warn("Возможно PPA amnezia/ppa временно недоступен или GPG-ключ не подошёл")
             return _awgs_install_dkms_fallback()
 
@@ -417,6 +443,10 @@ def awgs_install_dkms() -> bool:
                     core.warn(f"  {line.strip()}")
             core.warn("→ Пробуем Go-версию (userspace) как fallback")
             return _awgs_install_dkms_fallback()
+
+        # v5.5.2 (E2E fi1): пакеты установлены — убрать userspace-стабы,
+        # затемняющие пакетные awg/awg-quick (наследие Mode B эпохи)
+        _awgs_remove_shadowing_stubs()
     except Exception as e:
         core.log_to_file("ERROR", f"awgs_install_dkms exception: {e}")
         core.warn(f"Исключение при установке DKMS: {e}")
@@ -469,10 +499,168 @@ def _awgs_install_dkms_fallback() -> bool:
         from .awg_transport import _awg_install_go_version
         if _awg_install_go_version():
             core.success("amneziawg Go-версия установлена (userspace)")
+            # v5.5.2 (E2E fi1): без пакетного amneziawg-tools юнита
+            # awg-quick@.service не существует → сервис not-found,
+            # туннель не поднимается. Ставим userspace-юнит.
+            if not _awgs_install_userspace_unit():
+                core.warn("userspace: юнит awg-quick@.service создать "
+                          "не удалось — сервис не поднимется")
+            core.warn("userspace-режим (amneziawg-go): производительность "
+                      "ниже kernel-модуля. При возможности установите "
+                      "amneziawg-dkms из PPA amnezia/ppa")
             return True
     except Exception as e:
         core.log_to_file("ERROR", f"awgs_install_dkms_fallback: {e}")
     return False
+
+
+def _awgs_install_userspace_unit() -> bool:
+    """v5.5.2: юнит awg-quick@.service для userspace (go) standalone.
+
+    Пакет amneziawg-tools приносит /lib/systemd/system/awg-quick@.service;
+    в userspace-режиме (go-fallback) пакет не ставится — создаём
+    /etc/systemd/system-юнит на стаб-обёртку awg-quick. Юнит создаём
+    ТОЛЬКО если юнита ещё нигде нет (иначе перекрыли бы пакетный).
+    """
+    core = _core_module()
+    for unit_path in (
+        "/lib/systemd/system/awg-quick@.service",
+        "/usr/lib/systemd/system/awg-quick@.service",
+        "/etc/systemd/system/awg-quick@.service",
+    ):
+        if Path(unit_path).exists():
+            core.info(f"Юнит awg-quick@.service уже существует: {unit_path}")
+            return True
+    content = (
+        "[Unit]\n"
+        "Description=AmneziaWG userspace (amneziawg-go) for %i\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        "ExecStart=/usr/local/bin/awg-quick up %i\n"
+        "ExecStop=/usr/local/bin/awg-quick down %i\n"
+        "TimeoutStartSec=30\n\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+    try:
+        Path("/etc/systemd/system/awg-quick@.service").write_text(content)
+        core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
+        core.success("Юнит awg-quick@.service создан (userspace-режим)")
+        return True
+    except Exception as e:
+        core.log_to_file("ERROR", f"_awgs_install_userspace_unit: {e}")
+        return False
+
+
+def _awgs_remove_shadowing_stubs(paths: dict | None = None) -> None:
+    """v5.5.2 (E2E fi1): убрать userspace-стабы, затемняющие пакетный AWG.
+
+    Наследие userspace-эпохи Mode B: /usr/local/bin/awg и awg-quick
+    (обёртки над amneziawg-go) стоят ВЫШЕ /usr/bin в PATH. При
+    установленных пакетах amneziawg-tools все вызовы which awg → стаб
+    → amneziawg-go, который не умеет show/syncconf: пиры применяются
+    в .conf и state, но НЕ к живому kernel-интерфейсу — handshake
+    молча не сходится (E2E fi1 2026-10-03: cascade_entry в conf,
+    latest-handshakes = 0).
+
+    Удаляем ТОЛЬКО при наличии пакетного аналога (чистый userspace-режим
+    без пакетов не трогаем). Также убираем /etc/systemd/system/
+    awg-quick@.service (userspace-юнит), если есть пакетный юнит —
+    иначе /etc перекрывает /lib.
+
+    paths — DI для тестов (словарь путей); по умолчанию системные пути.
+    """
+    core = _core_module()
+    P = paths or {
+        "stub_awg": "/usr/local/bin/awg",
+        "pkg_awg": "/usr/bin/awg",
+        "stub_quick": "/usr/local/bin/awg-quick",
+        "pkg_quick": "/usr/bin/awg-quick",
+        "etc_unit": "/etc/systemd/system/awg-quick@.service",
+        "lib_unit": "/lib/systemd/system/awg-quick@.service",
+        "usr_unit": "/usr/lib/systemd/system/awg-quick@.service",
+    }
+    removed = []
+    for stub_key, pkg_key in (("stub_awg", "pkg_awg"),
+                              ("stub_quick", "pkg_quick")):
+        stub, pkg = Path(P[stub_key]), Path(P[pkg_key])
+        if stub.exists() and pkg.exists():
+            try:
+                stub.unlink()
+                removed.append(str(stub))
+            except OSError as e:
+                core.log_to_file("WARN", f"unlink {stub}: {e}")
+    etc_unit = Path(P["etc_unit"])
+    pkg_unit = any(Path(P[k]).exists() for k in ("lib_unit", "usr_unit"))
+    if etc_unit.exists() and pkg_unit:
+        try:
+            etc_unit.unlink()
+            removed.append(str(etc_unit))
+        except OSError as e:
+            core.log_to_file("WARN", f"unlink {etc_unit}: {e}")
+    if removed:
+        core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
+        core.warn("Удалены userspace-остатки, затемнявшие пакетный "
+                  f"AmneziaWG: {', '.join(removed)}")
+
+
+def _awgs_apt_lock_heal() -> bool:
+    """v5.5.2: лечение висячих apt-локов перед установкой пакетов.
+
+    Реальный кейс (E2E fi1 2026-10-03): apt.systemd.daily update завис
+    (недоступный репозиторий, http-метод без таймаута) и держит
+    /var/lib/apt/lists/lock сутками → apt-get update инсталлера молча
+    проваливается → PPA-индексы не обновляются → ложный fallback на
+    userspace-go. Держателя локa определяем через fuser; если это
+    системное apt-обслуживание (apt.systemd.daily) или apt-get,
+    висящий дольше 30 минут — завершаем (TERM, затем KILL) и логируем.
+    Чужие/свежие apt-процессы НЕ трогаем.
+    Возвращает True, если что-то было завершено.
+    """
+    core = _core_module()
+    r = core._run(
+        ["bash", "-c",
+         "fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend "
+         "/var/lib/dpkg/lock /var/cache/apt/archives/lock 2>/dev/null"],
+        capture=True, check=False)
+    pids = set()
+    for tok in (r.stdout or "").split():
+        tok = tok.strip().strip(":")
+        if tok.isdigit():
+            pids.add(tok)
+    killed = []
+    for pid in sorted(pids):
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = (f.read().decode("utf-8", "replace")
+                       .replace("\0", " ").strip())
+            et = core._run(["ps", "-o", "etimes=", "-p", pid],
+                           capture=True, check=False).stdout.strip()
+            etime = int(et) if et.isdigit() else 0
+        except (OSError, ValueError):
+            continue
+        is_daily = "apt.systemd.daily" in cmd
+        is_stale_aptget = "apt-get" in cmd and etime > 1800
+        if not (is_daily or is_stale_aptget):
+            continue
+        core.warn(f"Зависший apt-процесс (pid {pid}, {etime}s): "
+                  f"{cmd[:80]}")
+        core._run(
+            ["bash", "-c",
+             f"pkill -TERM -P {pid} 2>/dev/null; kill -TERM {pid} 2>/dev/null; "
+             f"sleep 2; "
+             f"pkill -KILL -P {pid} 2>/dev/null; kill -KILL {pid} 2>/dev/null; "
+             f"true"],
+            check=False, quiet=True)
+        killed.append(pid)
+    if killed:
+        core.warn(f"Зависшие apt-процессы завершены: {', '.join(killed)} "
+                  "(системное apt-обслуживание блокировало установку)")
+        time.sleep(1)
+    return bool(killed)
 
 
 # ============================================================================
@@ -1496,8 +1684,15 @@ def awgs_install(
     # 11. Systemd
     info("Запуск awg-quick@awg0.service...")
     if not awgs_setup_systemd():
-        warn("Не удалось запустить сервис — проверьте journalctl")
-        # Не возвращаем False — конфиг создан, можно дебажить
+        # v5.5.2 (E2E fi1 2026-10-03): честный контракт установки —
+        # успех = поднятый туннель. Раньше здесь был только warn:
+        # userspace-go без юнита давал «Установка завершена» при
+        # мёртвом awg0 (systemctl not-found), каскад получал бокс
+        # данных от неработающего exit. Конфиг сохранён в
+        # /etc/amnezia/amneziawg/awg0.conf — дебаг: journalctl -u awg-quick@awg0.
+        warn("Не удалось запустить awg-quick@awg0 — установка НЕ завершена. "
+             "Конфиг сохранён для дебага: journalctl -u awg-quick@awg0")
+        return False
 
     # 11.1 NAT / маршрутизация — КРИТИЧНО для standalone AWG
     # Без MASQUERADE + ip_forward + FORWARD правил клиенты подключаются,
