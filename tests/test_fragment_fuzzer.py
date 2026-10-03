@@ -87,7 +87,13 @@ class TestBuildTestClientConfigXhttpReality(unittest.TestCase):
         self.assertEqual(rs["serverName"], "dest.example.com")
 
     def test_reality_regression(self):
-        """Классический reality: tcp + REALITY + flow (легаси-SNI)."""
+        """Классический reality (Mode A): SNI = domain (canonical sni_hygiene).
+
+        v5.5.1: прежний тест ассертил баг — SNI брался из reality_dest даже
+        БЕЗ Mode B/AWG, тогда как сервер в Mode A ждёт serverNames=[domain].
+        Канонический рул (как в E2E-проверенной xhttp_reality ветке):
+        Mode B + awg_exit_enabled + reality_dest → reality_dest, иначе domain.
+        """
         cfg = self._build({**self._state, "protocol_mode": "reality",
                            "reality_dest": "dest.example.com:443"})
         ob = cfg["outbounds"][0]
@@ -97,7 +103,15 @@ class TestBuildTestClientConfigXhttpReality(unittest.TestCase):
         self.assertEqual(ob["settings"]["vnext"][0]["users"][0].get("flow"),
                          "xtls-rprx-vision")
         self.assertEqual(ss["realitySettings"]["serverName"],
-                         "dest.example.com")
+                         "vpn.example.com")
+
+    def test_reality_awg_mode_b_sni(self):
+        """Классический reality + AWG Mode B: SNI = reality_dest."""
+        cfg = self._build({**self._state, "protocol_mode": "reality",
+                           "awg_exit_enabled": True, "install_mode": "B",
+                           "reality_dest": "dest.example.com:443"})
+        rs = cfg["outbounds"][0]["streamSettings"]["realitySettings"]
+        self.assertEqual(rs["serverName"], "dest.example.com")
 
     def test_xhttp_regression(self):
         """xhttp (TLS, без REALITY): tlsSettings, нет realitySettings."""

@@ -1852,50 +1852,59 @@ def do_full_diagnostic() -> None:
         # ── 6. TLS / REALITY ─────────────────────────────────────────────────
         _box_top("6 / 14  ·  TLS-сертификат / REALITY")
         if _proto_mode == "reality":
+            # v5.5.1 (sni_hygiene): фолбэк-цепочка без известных ресурсов —
+            # reality_sni → sni → domain → reality_dest; если ничего нет —
+            # проверку пропускаем (прежде бессмысленно уходили на google.com)
             _sni = (_state.get("reality_sni") or _state.get("sni") or
-                    _domain or "www.google.com")
-            # порт SNI-цели: server_port для своего домена
-            # (REALITY-эндпоинт Xray), 443 — только для чужого SNI
-            _sni_port = _diag_sni_port(_sni, _domain, _server_port)
-            _box_info(f"  Режим REALITY: проверяем SNI-цель ({_sni}:{_sni_port})...")
-            _rc = _run(
-                ["bash", "-c",
-                 f"echo Q | timeout 8 openssl s_client "
-                 f"-connect {_sni}:{_sni_port} -servername {_sni} 2>/dev/null "
-                 f"| openssl x509 -noout -dates -subject 2>/dev/null"],
-                capture=True, check=False
-            )
-            if _rc.returncode == 0 and _rc.stdout.strip():
-                # ИСПРАВЛЕНИЕ: строки сертификата (особенно subject=) могут быть очень
-                # длинными и уезжать за границу бокса. Разбиваем на части по _BOX_W-6.
-                _cert_col_w = max(20, _BOX_W - 6)
-                for _ln in _rc.stdout.strip().splitlines():
-                    _ln_s = _ln.strip()
-                    if len(_ln_s) <= _cert_col_w:
-                        _box_row(f"  {DIM}{_ln_s}{NC}")
-                    else:
-                        # Разбиваем длинную строку на несколько строк бокса
-                        # Первая строка — ключ (до '=') + начало значения
-                        _prefix, _, _rest = _ln_s.partition("=")
-                        _prefix = (_prefix + "=").strip() if _ else ""
-                        _first_val_w = _cert_col_w - len(_prefix) - 1
-                        if _prefix and _first_val_w > 8:
-                            _box_row(f"  {DIM}{_prefix} {_rest[:_first_val_w]}{NC}")
-                            _rest = _rest[_first_val_w:]
-                            _indent = " " * (len(_prefix) + 1)
-                        else:
-                            _indent = "  "
-                            _rest = _ln_s
-                        while _rest:
-                            _chunk_w = _cert_col_w - len(_indent)
-                            _box_row(f"  {DIM}{_indent}{_rest[:_chunk_w]}{NC}")
-                            _rest = _rest[_chunk_w:]
-                _box_ok(f"SNI-цель ({_sni}:{_sni_port}) доступна и сертификат валиден")
-                _res("6. TLS/REALITY", _PASS)
+                    _domain or _state.get("reality_dest", "").split(":")[0]
+                    or "").strip()
+            if not _sni:
+                _box_row(f"  {DIM}SNI-цель неизвестна (в state нет "
+                         f"reality_sni/sni/domain/reality_dest) — пропускаем{NC}")
+                _pause("Шаг 6 завершён. Enter — продолжить...")
             else:
-                _box_warn(f"Не удалось получить сертификат от {_sni}:{_sni_port}")
-                _wiz_hint("SNI-домен должен быть доступен с сервера")
-                _res("6. TLS/REALITY", _WARN, f"SNI-цель {_sni}:{_sni_port} недоступна")
+                # порт SNI-цели: server_port для своего домена
+                # (REALITY-эндпоинт Xray), 443 — только для чужого SNI
+                _sni_port = _diag_sni_port(_sni, _domain, _server_port)
+                _box_info(f"  Режим REALITY: проверяем SNI-цель ({_sni}:{_sni_port})...")
+                _rc = _run(
+                    ["bash", "-c",
+                     f"echo Q | timeout 8 openssl s_client "
+                     f"-connect {_sni}:{_sni_port} -servername {_sni} 2>/dev/null "
+                     f"| openssl x509 -noout -dates -subject 2>/dev/null"],
+                    capture=True, check=False
+                )
+                if _rc.returncode == 0 and _rc.stdout.strip():
+                    # ИСПРАВЛЕНИЕ: строки сертификата (особенно subject=) могут быть очень
+                    # длинными и уезжать за границу бокса. Разбиваем на части по _BOX_W-6.
+                    _cert_col_w = max(20, _BOX_W - 6)
+                    for _ln in _rc.stdout.strip().splitlines():
+                        _ln_s = _ln.strip()
+                        if len(_ln_s) <= _cert_col_w:
+                            _box_row(f"  {DIM}{_ln_s}{NC}")
+                        else:
+                            # Разбиваем длинную строку на несколько строк бокса
+                            # Первая строка — ключ (до '=') + начало значения
+                            _prefix, _, _rest = _ln_s.partition("=")
+                            _prefix = (_prefix + "=").strip() if _ else ""
+                            _first_val_w = _cert_col_w - len(_prefix) - 1
+                            if _prefix and _first_val_w > 8:
+                                _box_row(f"  {DIM}{_prefix} {_rest[:_first_val_w]}{NC}")
+                                _rest = _rest[_first_val_w:]
+                                _indent = " " * (len(_prefix) + 1)
+                            else:
+                                _indent = "  "
+                                _rest = _ln_s
+                            while _rest:
+                                _chunk_w = _cert_col_w - len(_indent)
+                                _box_row(f"  {DIM}{_indent}{_rest[:_chunk_w]}{NC}")
+                                _rest = _rest[_chunk_w:]
+                    _box_ok(f"SNI-цель ({_sni}:{_sni_port}) доступна и сертификат валиден")
+                    _res("6. TLS/REALITY", _PASS)
+                else:
+                    _box_warn(f"Не удалось получить сертификат от {_sni}:{_sni_port}")
+                    _wiz_hint("SNI-домен должен быть доступен с сервера")
+                    _res("6. TLS/REALITY", _WARN, f"SNI-цель {_sni}:{_sni_port} недоступна")
         else:
             _cert_path = Path(f"/etc/letsencrypt/live/{_domain}/fullchain.pem") if _domain else None
             if not _cert_path or not _cert_path.exists():
