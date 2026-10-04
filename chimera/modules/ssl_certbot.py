@@ -11,9 +11,11 @@ SSL / certbot: получение сертификата Let's Encrypt, фикс
 2. **fix_letsencrypt_permissions(domain)** — выставляет права на сертификаты
    так, чтобы пользователь xray мог их читать (root:xray 640/644).
 3. **ensure_cert_fix_script(domain)** + **setup_cert_renewal()** — создает
-   systemd-хук и crontab для автообновления сертификата certbot renew.
-4. **Certbot monitor** — cron-задача дважды в день: certbot renew + проверка
-   срока + Telegram-алёрт. Управляется через do_manage_certbot_monitor().
+   systemd-хук автообновления; legacy-crontab больше не ставится (v3) и
+   вычищается от старых установок (_remove_legacy_certbot_crontab).
+4. **Certbot monitor** — cron-задача дважды в день (03:23/15:23): certbot
+   renew (lock-retry) + sanity-проверка срока + Telegram-алёрт. Управляется
+   через do_manage_certbot_monitor().
 
 Точки входа из _core.py:
     from chimera.modules.ssl_certbot import (
@@ -434,13 +436,56 @@ systemctl reload nginx 2>/dev/null || true
 
     hook.chmod(0o755)
 
-    # crontab
-    r = _run(["crontab", "-l"], capture=True, check=False)
-    existing = r.stdout if r.returncode == 0 else ""
-    if "certbot" not in existing:
-        new_crontab = existing.rstrip('\n') + "\n0 3 * * * certbot renew --quiet\n"
-        _run(["crontab", "-"], input_text=new_crontab, check=False, quiet=True)
+    # v3 (2026-10-04): legacy-запись '0 3 * * * certbot renew --quiet' в root
+    # crontab БОЛЬШЕ НЕ СТАВИМ и вычищаем от старых установок: она стартует
+    # в ту же секунду, что и монитор-крон (03:00), оба certbot'а держат
+    # letsencrypt-lock до 480с (внутренний random sleep non-interactive
+    # renew) — проигравший гонку получает "Another instance of Certbot is
+    # already running" и монитор слал ложные FAILED-алерты в TG (инцидент
+    # 04.10.2026: pl1/de/fi1 при полностью валидных сертах). Renew теперь
+    # обеспечивают системный certbot.timer + монитор Химеры (2×/день,
+    # lock-retry + sanity-gate).
+    if _remove_legacy_certbot_crontab():
+        success("Удалена legacy certbot-запись из root crontab (источник lock-гонок)")
     success("Автообновление сертификата настроено")
+
+
+# =============================================================================
+#  ФИЧА 1b: ОЧИСТКА LEGACY-CRONTAB (lock-гонки certbot'ов)
+# =============================================================================
+_LEGACY_CERTBOT_CRON_LINE = "0 3 * * * certbot renew --quiet"
+
+
+def _remove_legacy_certbot_crontab() -> bool:
+    """Удаляет legacy-запись автообновления из root crontab.
+
+    Старые версии установщика добавляли в root crontab строку
+    '0 3 * * * certbot renew --quiet' (см. setup_cert_renewal до v3).
+    С вводом монитор-крона (v2, слот 03:00/15:00) оба certbot'а стали
+    стартовать в одну и ту же секунду: non-interactive renew держит
+    letsencrypt-lock до 480с (внутренний random sleep) — проигравший
+    гонку падает с "Another instance of Certbot is already running",
+    что выливалось в ложные FAILED-алерты в Telegram (инцидент
+    04.10.2026: pl1/de/fi1 при валидных сертах на 88 дней).
+
+    Удаляется ТОЛЬКО точная legacy-строка; прочие записи root crontab
+    (включая другие certbot-команды) не трогаются. True = найдена и удалена.
+    """
+    core = _core_module()
+    _run = core._run
+    r = _run(["crontab", "-l"], capture=True, check=False)
+    if r.returncode != 0 or "certbot" not in r.stdout:
+        return False
+    lines = r.stdout.splitlines()
+    kept = [ln for ln in lines if ln.strip() != _LEGACY_CERTBOT_CRON_LINE]
+    if len(kept) == len(lines):
+        return False
+    new = "\n".join(kept).strip("\n")
+    if new:
+        _run(["crontab", "-"], input_text=new + "\n", check=False, quiet=True)
+    else:
+        _run(["crontab", "-r"], check=False, quiet=True)
+    return True
 
 
 # =============================================================================
@@ -517,6 +562,17 @@ def _certbot_renew_and_notify() -> bool:
 def _certbot_install_monitor_cron() -> None:
     """Cron дважды в день: certbot renew + проверка срока.
 
+    v3 (2026-10-04) — фикс ложных FAILED-алертов (инцидент 04.10, 3 ноды):
+      • lock-гонка certbot'ов (legacy root-cron 03:00:00 + монитор 03:00:01,
+        оба держат letsencrypt-lock до 480с из-за random sleep) разруливается
+        ретраями 60/180/300с;
+      • sanity-gate: renew FAILED при валидном серте (>=14 дн.) больше не
+        будит админа — лог-онли; алерт только если серту <14 дн. или его нет;
+      • cron-слот сдвинут на 03:23/15:23 — вне top-of-hour зоны стартов;
+      • legacy-строка '0 3 * * * certbot renew --quiet' вычищается из
+        root crontab (её ставил setup_cert_renewal старых версий);
+      • log() пишет живое время на момент строки (раньше весь прогон
+        печатал одно время старта — гонки были недоказуемы по логу).
     v2 (2026-10-02) — фикс инцидента со спамом в Telegram:
       • send_tg уважает флаг events.cert_expire из telegram.json: если
         администратор выключил событие в меню [5]→[3], алерты замолкают
@@ -541,12 +597,16 @@ def _certbot_install_monitor_cron() -> None:
         pass
 
     sh = _CERTBOT_MONITOR_SCRIPT
-    sh.write_text(textwrap.dedent(f"""\
+    _body = textwrap.dedent(f"""\
         #!/bin/bash
         # Certbot renew monitor (Chimera / VLESS Installer)
+        # v3 (2026-10-04): lock-гонка certbot'ов не алертит — ретраи
+        #   60/180/300с + sanity-проверка срока серта (инцидент 04.10:
+        #   legacy root-cron 03:00 и монитор 03:00 ловили "Another
+        #   instance of Certbot is already running" на валидных сертах);
+        #   время в логе — живое, на момент записи
         # v2 (2026-10-02): уважает events.cert_expire + анти-спам (1 алерт/сутки)
         LOG="/var/log/xray-certbot-monitor.log"
-        DATE=$(date '+%Y-%m-%d %H:%M:%S')
         TODAY=$(date '+%Y-%m-%d')
         STATE_JSON="/var/lib/xray-installer/state.json"
         STAMP_FAIL="/var/lib/xray-installer/cert-renew-fail.stamp"
@@ -589,49 +649,117 @@ except Exception:
 ' "$1"
         }}
 
-        log() {{ echo "[$DATE] $1" >> "$LOG"; }}
+        # v3: время на момент записи, а не замороженное время старта прогона
+        log() {{ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG"; }}
+
+        # v3: дней до истечения серта (пусто = серта нет/не читается)
+        cert_days_left() {{
+            [ -n "$DOMAIN" ] || return 1
+            local CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+            [ -f "$CERT" ] || return 1
+            local EXPIRY EPOCH
+            EXPIRY=$(openssl x509 -in "$CERT" -noout -enddate 2>/dev/null | cut -d= -f2)
+            [ -n "$EXPIRY" ] || return 1
+            EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null)
+            [ -n "$EPOCH" ] || return 1
+            echo $(( (EPOCH - $(date +%s)) / 86400 ))
+        }}
+
+        # v3: renew с ретраями при lock-конфликте — параллельный certbot
+        # (systemd certbot.timer, legacy root-cron, ручной запуск) держит
+        # letsencrypt-lock до 480с (random sleep) + время самого renew
+        LOCK_RE="Another instance of Certbot is already running"
+        LOCK_TRY=0
+        renew_certbot() {{
+            local OUT RC
+            OUT=$("$CERTBOT" renew --quiet --non-interactive 2>&1); RC=$?
+            echo "$OUT" >> "$LOG"
+            while [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "$LOCK_RE" && [ "$LOCK_TRY" -lt 3 ]; do
+                LOCK_TRY=$((LOCK_TRY + 1))
+                if [ "$LOCK_TRY" -eq 1 ]; then sleep 60
+                elif [ "$LOCK_TRY" -eq 2 ]; then sleep 180
+                else sleep 300
+                fi
+                log "certbot lock busy — ретрай $LOCK_TRY/3 после паузы"
+                OUT=$("$CERTBOT" renew --quiet --non-interactive 2>&1); RC=$?
+                echo "$OUT" >> "$LOG"
+            done
+            return "$RC"
+        }}
 
         log "Running certbot renew..."
-        if "$CERTBOT" renew --quiet --non-interactive >> "$LOG" 2>&1; then
+        if renew_certbot; then
             log "certbot renew OK"
             rm -f "$STAMP_FAIL"
-            if [ -n "$DOMAIN" ]; then
-                CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
-                if [ -f "$CERT" ]; then
-                    EXPIRY=$(openssl x509 -in "$CERT" -noout -enddate 2>/dev/null | cut -d= -f2)
-                    EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || echo 0)
-                    DAYS=$(( (EPOCH - $(date +%s)) / 86400 ))
-                    log "SSL days left: $DAYS"
-                    if [ "$DAYS" -lt 14 ]; then
-                        # Анти-спам: 1 алерт в сутки (метка меняется вместе с днём)
-                        TAG="$TODAY:$DAYS"
-                        if [ "$(cat "$STAMP_EXP" 2>/dev/null)" != "$TAG" ]; then
-                            echo "$TAG" > "$STAMP_EXP"
-                            send_tg "⚠️ <b>certbot renew OK</b>, но сертификат истекает через $DAYS дн.!\\nДомен: $DOMAIN"
-                        fi
-                    else
-                        rm -f "$STAMP_EXP"
+            DAYS=$(cert_days_left)
+            if [ -n "$DAYS" ]; then
+                log "SSL days left: $DAYS"
+                if [ "$DAYS" -lt 14 ]; then
+                    # Анти-спам: 1 алерт в сутки (метка меняется вместе с днём)
+                    TAG="$TODAY:$DAYS"
+                    if [ "$(cat "$STAMP_EXP" 2>/dev/null)" != "$TAG" ]; then
+                        echo "$TAG" > "$STAMP_EXP"
+                        send_tg "⚠️ <b>certbot renew OK</b>, но сертификат истекает через $DAYS дн.!\\nДомен: $DOMAIN"
                     fi
+                else
+                    rm -f "$STAMP_EXP"
                 fi
             fi
         else
-            log "certbot renew FAILED"
-            # Анти-спам: FAILED-алерт максимум 1 раз в сутки
-            if [ "$(cat "$STAMP_FAIL" 2>/dev/null)" != "$TODAY" ]; then
-                echo "$TODAY" > "$STAMP_FAIL"
-                send_tg "❌ <b>certbot renew FAILED</b>\\nДомен: $DOMAIN\\nЛог: /var/log/letsencrypt/letsencrypt.log"
+            # v3: renew не удался — прежде чем будить админа, смотрим на
+            # сам сертификат. Валиден ещё >=14 дней — это транзиент
+            # (lock-гонка, сетевой блуп): логируем и молчим. Алерт —
+            # только когда серту реально плохо (<14 дн.) или его нет.
+            DAYS=$(cert_days_left)
+            if [ -n "$DAYS" ] && [ "$DAYS" -ge 14 ]; then
+                log "certbot renew FAILED, но сертификат валиден ещё $DAYS дн. — алерт не шлём"
+                rm -f "$STAMP_FAIL"
+            else
+                if [ -n "$DAYS" ]; then CERT_INFO="$DAYS дн."; else CERT_INFO="не найден"; fi
+                log "certbot renew FAILED (сертификат: $CERT_INFO)"
+                # Анти-спам: FAILED-алерт максимум 1 раз в сутки
+                if [ "$(cat "$STAMP_FAIL" 2>/dev/null)" != "$TODAY" ]; then
+                    echo "$TODAY" > "$STAMP_FAIL"
+                    send_tg "❌ <b>certbot renew FAILED</b>\\nДомен: $DOMAIN (сертификат: $CERT_INFO)\\nЛог: /var/log/letsencrypt/letsencrypt.log"
+                fi
             fi
         fi
         # Перезагружаем nginx после обновления
         systemctl reload nginx >> "$LOG" 2>&1 || true
-    """))
+    """)
+    # python-хердок внутри send_tg обязан начинаться с колонки 0 — из-за
+    # него textwrap.dedent НЕ срезает общий отступ: v2 деплоился с
+    # 8-пробельным сдвигом (шебанг не с нулевого байта, скрипт работал
+    # только через ENOEXEC-fallback /bin/sh). Срезаем общий 8-пробельный
+    # префикс вручную, но строки хердока НЕ трогаем: его верхний уровень
+    # в исходнике уже на колонке 0, а вложенные (4/8 проб.) обязаны
+    # сохранить отступ для python.
+    _out, _in_py = [], False
+    for _ln in _body.split("\n"):
+        if not _in_py and _ln.lstrip().startswith("python3 -c '"):
+            _in_py = True
+            _out.append(_ln[8:] if _ln.startswith("        ") else _ln)
+        elif _in_py:
+            _out.append(_ln)
+            if _ln.strip() == "' \"$1\"":
+                _in_py = False
+        else:
+            _out.append(_ln[8:] if _ln.startswith("        ") else _ln)
+    sh.write_text("\n".join(_out))
     sh.chmod(0o750)
-    # Дважды в день: 03:00 и 15:00
+    # Дважды в день: 03:23 и 15:23 — вне top-of-hour зоны стартов
+    # (legacy root-cron 03:00:00 + certbot random-sleep до 480с; от
+    # рандомного certbot.timer страхуют lock-retry + sanity-gate)
     _CERTBOT_MONITOR_CRON.write_text(
-        f"0 3,15 * * * root {sh} >> /var/log/xray-certbot-monitor.log 2>&1\n"
+        "# certbot renew monitor v3 (Chimera) — 2×/день: renew + срок + TG\n"
+        "# 03:23/15:23 — вне зоны lock-гонок (certbot.timer / legacy-cron)\n"
+        f"23 3,15 * * * root {sh} >> /var/log/xray-certbot-monitor.log 2>&1\n"
     )
     _CERTBOT_MONITOR_CRON.chmod(0o644)
-    success("Certbot monitor cron установлен (03:00 и 15:00 ежедневно)")
+    # v3: заодно вычищаем legacy-запись из root crontab (источник гонок)
+    if _remove_legacy_certbot_crontab():
+        success("Удалена legacy certbot-запись из root crontab (источник lock-гонок)")
+    success("Certbot monitor cron v3 установлен (03:23 и 15:23 ежедневно)")
 
 
 def do_manage_certbot_monitor() -> None:
@@ -698,7 +826,7 @@ def do_manage_certbot_monitor() -> None:
             _box_row(f"  TG-алерты:    {GREEN+'ВКЛ (событие cert_expire)'+NC if cert_alerts_on else DIM+'ВЫКЛ — уведомления о серте не придут'+NC}")
         else:
             _box_row(f"  TG-алерты:    {DIM}не настроены (меню [5] Безопасность → Telegram){NC}")
-        _box_item("1", f"{'Отключить' if cron_active else 'Включить'} авто-мониторинг (03:00 + 15:00)")
+        _box_item("1", f"{'Отключить' if cron_active else 'Включить'} авто-мониторинг (03:23 + 15:23)")
         _box_item("2", f"Запустить certbot renew прямо сейчас")
         if tg_ready:
             _box_item("3", f"{'Выключить' if cert_alerts_on else 'Включить'} TG-алерты по сертификату (cert_expire)")
