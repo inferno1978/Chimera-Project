@@ -93,8 +93,8 @@ class TestBuildSubscriptionBodyUnchanged(unittest.TestCase):
              patch.object(subscription, "_build_naive_uris", return_value=[]), \
              patch.object(subscription, "_build_fptn_uris", return_value=[]), \
              patch.object(subscription, "_build_telemt_uri", return_value=None), \
-             patch.dict(sys.modules, {"chimera.modules.entry_mirrors": MagicMock(
-                 get_mirror_uris=MagicMock(return_value=["vless://mirror1"]))}):
+             patch("chimera.modules.entry_mirrors.get_mirror_uris",
+                   return_value=["vless://mirror1"]):
             body = subscription.build_subscription_body(user)
 
         decoded = base64.b64decode(body).decode()
@@ -192,8 +192,8 @@ class TestBuildSubscriptionBodyIosNoMirrorShadowUuid(unittest.TestCase):
                    return_value=self._fake_core), \
              patch("chimera.modules.users_manager._users_apply_config",
                    lambda cfg: None), \
-             patch.dict(sys.modules, {"chimera.modules.entry_mirrors": MagicMock(
-                 get_mirror_uris=MagicMock(return_value=mirror_uris))}):
+             patch("chimera.modules.entry_mirrors.get_mirror_uris",
+                   return_value=mirror_uris):
             body = subscription.build_subscription_body_ios(user)
 
         decoded = base64.b64decode(body).decode()
