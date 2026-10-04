@@ -1893,6 +1893,17 @@ def do_manage_telegram() -> None:
             "mieru_exit_up":  "Mieru: Exit восстановился",
             "mieru_no_exits": "Mieru: все Exit-ы недоступны",
             "mieru_stalled":  "Mieru: health-tick не обновляется",
+            # b4 ops-слой (b4_monitor.py; отсутствующий ключ = ВКЛ)
+            "b4_down":        "B4: сервис упал",
+            "b4_up":          "B4: сервис восстановился",
+            "b4_degraded":    "B4: прямой путь деградировал",
+            "b4_recovered":   "B4: прямой путь восстановился",
+            "b4_stalled":     "B4: health-tick не обновляется",
+            "b4_restarted":   "B4: рестарт (self-heal)",
+            "b4_discovery":   "B4: запущен Discovery (ремедия)",
+            "b4_preset":      "B4: ротация пресета (ремедия)",
+            "b4_exempt_empty": "B4: ipset exempt пуст",
+            "b4_exempt_ok":   "B4: ipset exempt заполнен",
         }
 
         print()
@@ -1952,7 +1963,10 @@ def do_manage_telegram() -> None:
             ev_keys = ["xray_down","xray_up","cert_expire","traffic_limit",
                        "health_report","node_down","port_blocked","autoban",
                        "mieru_down","mieru_up","mieru_exit_down",
-                       "mieru_exit_up","mieru_no_exits","mieru_stalled"]
+                       "mieru_exit_up","mieru_no_exits","mieru_stalled",
+                       "b4_down","b4_up","b4_degraded","b4_recovered",
+                       "b4_stalled","b4_restarted","b4_discovery",
+                       "b4_preset","b4_exempt_empty","b4_exempt_ok"]
             ev_labels = [
                 "Xray упал","Xray восстановился","Сертификат истекает",
                 "Лимит трафика","Daily health-отчёт","Exit-нода недоступна",
@@ -1960,6 +1974,11 @@ def do_manage_telegram() -> None:
                 "Mieru: mita упал","Mieru: mita восстановился",
                 "Mieru: Exit недоступен","Mieru: Exit восстановился",
                 "Mieru: все Exit-ы недоступны","Mieru: health-tick не обновляется",
+                "B4: сервис упал","B4: сервис восстановился",
+                "B4: прямой путь деградировал","B4: прямой путь восстановился",
+                "B4: health-tick не обновляется","B4: рестарт (self-heal)",
+                "B4: запущен Discovery (ремедия)","B4: ротация пресета (ремедия)",
+                "B4: ipset exempt пуст","B4: ipset exempt заполнен",
             ]
             events = cfg.get("events", {k: True for k in ev_keys})
             print()
