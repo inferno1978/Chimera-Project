@@ -202,11 +202,17 @@ def awg_peer_add(
     if not client_ip:
         warn("Нет свободных IP в подсети (максимум 253 клиента)")
         return False
-    # IPv6 (если включён)
+    # IPv6 (если включён) — v5.5.8: v6-адрес зеркалит v4 host-id
+    # (172.16.82.5 → fd66:66:82::5) — консистентно с awgs_enable_ipv6()
     state = awgs_state_load()
     client_ipv6 = ""
     if state.get("allow_ipv6_tunnel"):
-        client_ipv6 = awgs_state_next_ipv6()
+        from .awg_net_common import awg_v6_host_from_v4, awg_v6_ula_from_subnet
+        subnet_v6 = state.get("subnet_v6") or awg_v6_ula_from_subnet(
+            state.get("subnet", ""))
+        client_ipv6 = awg_v6_host_from_v4(client_ip, subnet_v6)
+        if not client_ipv6:
+            client_ipv6 = awgs_state_next_ipv6()
         if not client_ipv6:
             client_ipv6 = ""
 

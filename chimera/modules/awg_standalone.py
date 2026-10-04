@@ -45,12 +45,18 @@ from .awg_hw_tuning import awgs_hw_tune_all
 from .awg_apply import awgs_apply, awgs_service_status
 from .awg_net_common import (
     iptables_ensure,
+    ip6tables_ensure,
     build_nat_rule_args,
     build_nat_idempotent_shell,
     build_nat_cleanup_shell,
+    build_nat6_rule_args,
+    build_nat6_idempotent_shell,
+    build_nat6_cleanup_shell,
+    awg_v6_ula_from_subnet,
     build_sysctl_lines,
     apply_rp_filter_per_iface,
     apply_ip_forward,
+    apply_ipv6_forward,
     write_sysctl_conf,
     detect_wan_iface as _awg_net_detect_wan_iface,
     RP_FILTER_DEFAULT,
@@ -1566,17 +1572,23 @@ def awgs_detect_wan_interface() -> str:
 
 
 def awgs_build_nat_helper_body(awg_subnet: str,
-                               awg_iface: str = AWGS_INTERFACE) -> str:
+                               awg_iface: str = AWGS_INTERFACE,
+                               subnet_v6: str = "") -> str:
     """v5.4.5: тело helper-скрипта /usr/local/sbin/awg-nat-rules.sh.
 
     Вынесено в отдельную функцию для юнит-тестирования (см.
     tests/test_awg_standalone.py::TestAwgsNatHelper).
+
+    v5.5.8: subnet_v6 (непустой) → helper применяет и v6-часть
+    (NAT66 MASQUERADE + FORWARD v6 через build_nat6_idempotent_shell)
+    — для standalone-серверов с включённым IPv6-туннелем.
     """
-    return (
+    body = (
         "#!/bin/bash\n"
         "# AWG standalone NAT + FORWARD — сгенерировано chimera (awg_standalone.py)\n"
         "# up|down — идемпотентно применить/убрать правила для " + awg_subnet + "\n"
-        "# Удаляется awgs_uninstall_full().\n"
+        + (f"# IPv6-часть (NAT66) для {subnet_v6}\n" if subnet_v6 else "")
+        + "# Удаляется awgs_uninstall_full().\n"
         "set -u\n"
         "CMD=\"${1:-up}\"\n"
         "WAN=$(ip route show default | awk '{print $5; exit}')\n"
@@ -1587,6 +1599,15 @@ def awgs_build_nat_helper_body(awg_subnet: str,
         "  *) echo \"usage: $0 up|down\" >&2; exit 1 ;;\n"
         "esac\n"
     )
+    if subnet_v6:
+        body += (
+            "# IPv6 (NAT66) — идемпотентно, тот же up/down\n"
+            "case \"$CMD\" in\n"
+            "  up)   " + build_nat6_idempotent_shell(subnet_v6, awg_iface, "$WAN") + " ;;\n"
+            "  down) " + build_nat6_cleanup_shell(subnet_v6, awg_iface, "$WAN") + " ;;\n"
+            "esac\n"
+        )
+    return body
 
 
 def awgs_build_nat_unit_content() -> str:
@@ -1620,7 +1641,8 @@ WantedBy=multi-user.target {AWGS_SYSTEMD_AWG_QUICK}
 """
 
 
-def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
+def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "",
+                               subnet_v6: str = "") -> bool:
     """
     Настраивает NAT/MASQUERADE + FORWARD + sysctl для standalone AWG.
 
@@ -1631,6 +1653,7 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
 
     Также включает:
     • net.ipv4.ip_forward=1 (если ещё не включён)
+    • v5.5.8: net.ipv6.conf.all.forwarding=1 — при непустом subnet_v6
     • rp_filter=2 (loose mode) ТОЛЬКО на awg0 и WAN — точечно, не глобально.
       Loose mode сохраняет anti-spoofing защиту (в отличие от 0=off) и
       достаточно для корректной работы NAT. Раньше сбрасывался global
@@ -1638,6 +1661,12 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
     • iptables MASQUERADE для подсети awg0 → WAN (idempotent через -C check)
     • iptables FORWARD: awg0 → anywhere (ACCEPT), idempotent
     • iptables FORWARD: anywhere → awg0 (ESTABLISHED,RELATED ACCEPT), idempotent
+    • v5.5.8: при непустом subnet_v6 — ip6tables NAT66 (MASQUERADE v6
+      подсети → WAN, GUA-адрес интерфейса) + FORWARD v6 + v6-часть в
+      helper-скрипте awg-nat-rules.sh. На сервере без глобального v6
+      правила безвредны (v6-пакеты из туннеля не маршрутизируются —
+      анти-утечка сохраняется: клиент с AllowedIPs ::/0 не ходит мимо
+      туннеля, браузер фолбэчит на v4 через туннель).
     • systemd-юнит awg-nat.service для перманентности (After=awg-quick@awg0)
 
     Идемпотентность: при повторных вызовах (переустановка, --force, повторный
@@ -1676,6 +1705,9 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
     # 1. sysctl: ip_forward=1 (idempotent)
     info("Настройка sysctl (ip_forward, per-interface rp_filter=2 loose mode)...")
     apply_ip_forward(core)
+    # v5.5.8: v6-forwarding — только при включённом v6-туннеле
+    if subnet_v6:
+        apply_ipv6_forward(core)
 
     # rp_filter=2 (loose mode) ТОЛЬКО на awg0 и WAN — точечно, не глобально.
     # Раньше сбрасывались all/default rp_filter=0 — ослабляло anti-spoofing
@@ -1688,8 +1720,10 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
     sysctl_conf = Path("/etc/sysctl.d/99-awg-standalone.conf")
     try:
         if write_sysctl_conf(sysctl_conf, AWGS_INTERFACE, wan_iface,
-                             rp_filter_value=RP_FILTER_DEFAULT):
-            info(f"  sysctl-конфиг: {sysctl_conf} (per-interface rp_filter=2)")
+                             rp_filter_value=RP_FILTER_DEFAULT,
+                             ipv6_forward=bool(subnet_v6)):
+            info(f"  sysctl-конфиг: {sysctl_conf} (per-interface rp_filter=2"
+                 + (", ipv6.forwarding" if subnet_v6 else "") + ")")
         else:
             warn(f"  Не удалось записать {sysctl_conf}")
     except Exception as e:
@@ -1708,6 +1742,18 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
         iptables_ensure(core, rule_args[1:])
     success(f"iptables: MASQUERADE {awg_subnet} → {wan_iface} + FORWARD правила")
 
+    # v5.5.8: NAT66 — MASQUERADE v6 + FORWARD v6 (idempotent через
+    # ip6tables_ensure). Работает при наличии GUA на WAN; без GUA пакеты
+    # из fd66::/64 не маршрутизируются (правила безвредны, анти-утечка
+    # сохраняется — клиент не ходит по v6 мимо туннеля).
+    if subnet_v6:
+        info("Настройка ip6tables (NAT66 MASQUERADE + FORWARD, idempotent)...")
+        nat6_rules = build_nat6_rule_args(subnet_v6, AWGS_INTERFACE, wan_iface)
+        for rule_args in nat6_rules:
+            # rule_args[0] == "ip6tables" — ip6tables_ensure добавляет префикс сам
+            ip6tables_ensure(core, rule_args[1:])
+        success(f"ip6tables: MASQUERADE {subnet_v6} → {wan_iface} + FORWARD правила (NAT66)")
+
     # 3. systemd-юнит awg-nat.service — для перманентности после reboot.
     # ExecStart использует bash-идиому `iptables -C || iptables -A` (через
     # build_nat_idempotent_shell) — безопасен при многократных restart.
@@ -1724,7 +1770,8 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "") -> bool:
     # юнит вызывает его без shell-кавычек.
     info("Создание systemd-юнита awg-nat.service (idempotent ExecStart)...")
     nat_helper = Path("/usr/local/sbin/awg-nat-rules.sh")
-    helper_body = awgs_build_nat_helper_body(awg_subnet, AWGS_INTERFACE)
+    helper_body = awgs_build_nat_helper_body(awg_subnet, AWGS_INTERFACE,
+                                             subnet_v6=subnet_v6)
     try:
         nat_helper.write_text(helper_body)
         nat_helper.chmod(0o755)
@@ -1797,11 +1844,11 @@ def awgs_stop_systemd() -> bool:
 def awgs_install(
     port: int = AWGS_DEFAULT_PORT,
     subnet: str = AWGS_DEFAULT_SUBNET,
-    subnet_v6: str = AWGS_DEFAULT_SUBNET_V6,
+    subnet_v6: str = "",
     mtu: int = AWGS_DEFAULT_MTU,
     carrier_preset: str = "default",
     endpoint_host: str = "",
-    allow_ipv6_tunnel: bool = False,
+    allow_ipv6_tunnel: bool = True,
     skip_hw_tuning: bool = False,
     force: bool = False,
     custom_params: dict = None,
@@ -1816,6 +1863,16 @@ def awgs_install(
     транспортных параметров), awg0.conf с 3.1-директивами, state с
     protocol_version="3.1". Перед установкой предупреждает о поддержке
     клиентами (AmneziaVPN 5.0.1.5+; роутеры 3.1 НЕ поддерживают).
+
+    v5.5.8 (IPv6): allow_ipv6_tunnel теперь True ПО УМОЛЧАНИЮ — новый
+    дефолт после инцидента «Ютуб работает только с B4» (2026-10-05):
+    IPv4-only туннель при IPv6-сети клиента = AAAA-утечка мимо туннеля
+    (браузер ходит на ютуб напрямую по v6 через провайдера → TSPU душит
+    видео-CDN). subnet_v6="" (новый дефолт) автоматически выводится из
+    v4-подсети через awg_v6_ula_from_subnet (per-node ULA — см. докstring
+    функции в awg_net_common). Клиентские конфиги получают Address v6/128
+    + AllowedIPs ::/0 (анти-утечка), сервер — NAT66 (standalone) или
+    каскадный v6-транзит (entry).
     """
     from .awg_protocol import (
         awg_is_31, awg_protocol_label, awg_vpn_uri_protocol_version,
@@ -1943,6 +2000,10 @@ def awgs_install(
                  "RandomTrailers, DisableCookies")
 
     # 9. Генерация awg0.conf
+    # v5.5.8: subnet_v6 — derived ULA per-node (fd66:66:<okt3>::/64),
+    # если не передан явно. Пустой → дефолт от v4-подсети.
+    if not subnet_v6:
+        subnet_v6 = awg_v6_ula_from_subnet(subnet)
     info("Генерация awg0.conf...")
     conf_content = awgs_build_server_conf(
         server_privkey=server_priv,
@@ -1979,8 +2040,13 @@ def awgs_install(
     # 11.1 NAT / маршрутизация — КРИТИЧНО для standalone AWG
     # Без MASQUERADE + ip_forward + FORWARD правил клиенты подключаются,
     # но не получают интернет (ответный трафик не доходит).
+    # v5.5.8: при allow_ipv6_tunnel — NAT66 (MASQUERADE v6 + FORWARD v6
+    # + sysctl ipv6.forwarding) и v6-часть в helper-скрипте awg-nat-rules.sh.
     info("Настройка NAT/MASQUERADE + ip_forward (для интернета у клиентов)...")
-    awgs_setup_nat_and_routing(subnet=subnet)
+    awgs_setup_nat_and_routing(
+        subnet=subnet,
+        subnet_v6=subnet_v6 if allow_ipv6_tunnel else "",
+    )
 
     # 12. Сохранение state
     info("Сохранение state...")
@@ -2042,6 +2108,158 @@ def awgs_install(
     _box_bottom()
     print()
     info("Добавьте первого клиента: меню → Управление клиентами AWG → Add")
+    return True
+
+
+# ============================================================================
+#  ВКЛЮЧЕНИЕ IPv6 НА СУЩЕСТВУЮЩЕЙ УСТАНОВКЕ (v5.5.8)
+# ============================================================================
+
+def awgs_enable_ipv6(regen_client_confs: bool = True) -> bool:
+    """
+    v5.5.8: включает IPv6 на УЖЕ установленном standalone AWG — без
+    переустановки и без сброса ключей/пиров (upgrade-путь для живых нод).
+
+    Контекст: инцидент 2026-10-05 «Ютуб работает только с B4 на роутере» —
+    IPv4-only туннель (AllowedIPs = 0.0.0.0/0) при IPv6-сети дома =
+    AAAA-утечка: браузер ходит на ютуб по v6 напрямую через провайдера,
+    где TSPU душит видео-CDN. B4 на роутере это маскировал (дуал-стек).
+
+    Что делает (идемпотентно — безопасно перезапускать):
+      1. state: allow_ipv6_tunnel=True, subnet_v6 = derived ULA от v4-подсети
+         (fd66:66:<окт3>::/64 — per-node, без коллизий в мульти-exit каскаде).
+      2. Всем пирам без client_ipv6 выдаётся v6-адрес — ЗЕРКАЛО их v4 host-id
+         (172.16.82.2 → fd66:66:82::2): человекочитаемо и гарантированно
+         без коллизий (v4 уникальны).
+      3. awg0.conf перестраивается (Address v6 + AllowedIPs v6 у пиров)
+         и применяется syncconf'ом — БЕЗ даунтайма (руки не рвутся).
+      4. Интерфейсу добавляется v6-адрес через `ip -6 addr add`
+         (syncconf не трогает Address — только пиры).
+      5. Каскадная entry: awgs_cascade_enable_ipv6() — awg1 v6 + ::/0 +
+         ip6tables-зеркало + routing-скрипт. Иначе — NAT66 (MASQUERADE v6
+         → WAN + helper-скрипт + sysctl ipv6.forwarding).
+      6. Перегенерируются клиентские .conf всех пиров (Address v6/128 +
+         AllowedIPs ::/0) — файлы в /root/awg/keys/<name>.conf.
+
+    Возвращает True при успехе.
+    """
+    core = _core_module()
+    info = core.info
+    success = core.success
+    warn = core.warn
+
+    from .awg_state import awgs_state_load, awgs_state_save
+    from .awg_peers import awg_peer_rebuild_conf
+    from .awg_apply import awgs_apply_syncconf
+    from .awg_net_common import awg_v6_ula_from_subnet, awg_v6_host_from_v4
+
+    state = awgs_state_load()
+    if not state.get("installed"):
+        warn("Standalone AWG не установлен — включать IPv6 не на чем")
+        return False
+
+    subnet = state.get("subnet", "")
+    if not subnet:
+        warn("Подсеть не найдена в state — state повреждён")
+        return False
+
+    # 1. subnet_v6 — derived ULA per-node
+    subnet_v6 = state.get("subnet_v6") or ""
+    # v5.5.8: миграция старого дефолтного fd66:66:66::/64 на per-node
+    # (кроме случая, когда v4-подсеть сама 10.66.66.0/24 — тогда derived =
+    # старый дефолт и миграция не нужна)
+    derived = awg_v6_ula_from_subnet(subnet)
+    if subnet_v6 != derived:
+        if subnet_v6:
+            info(f"Миграция подсети v6: {subnet_v6} → {derived} "
+                 f"(per-node ULA от v4-подсети {subnet})")
+        subnet_v6 = derived
+
+    # 2. Выдаём v6 пирам без него — зеркало v4 host-id
+    peers = state.get("peers", [])
+    used_v6 = {p.get("client_ipv6", "") for p in peers}
+    new_v6 = []
+    for p in peers:
+        if p.get("client_ipv6"):
+            continue
+        v6 = awg_v6_host_from_v4(p.get("client_ip", ""), subnet_v6)
+        if not v6 or v6 in used_v6:
+            warn(f"Пир {p.get('name')}: не удалось выдать v6 "
+                 f"(конфликт/нет v4) — остаётся v4-only")
+            continue
+        p["client_ipv6"] = v6
+        used_v6.add(v6)
+        new_v6.append((p.get("name"), p.get("client_ip"), v6))
+
+    # 3. Сохраняем state
+    state["allow_ipv6_tunnel"] = True
+    state["subnet_v6"] = subnet_v6
+    if not awgs_state_save(state):
+        warn("Не удалось сохранить state")
+        return False
+
+    # 4. Перестраиваем awg0.conf и применяем БЕЗ даунтайма
+    info("Перестройка awg0.conf (Address v6 + AllowedIPs v6 у пиров)...")
+    if not awg_peer_rebuild_conf(apply=False):
+        warn("Не удалось перестроить awg0.conf")
+        return False
+    if not awgs_apply_syncconf():
+        warn("syncconf не удался — fallback на restart (кратковременный разрыв)")
+        if not awgs_apply():
+            warn("Применение конфига НЕ удалось — v6 у пиров не активен")
+            return False
+
+    # 5. v6-адрес интерфейсу (syncconf Address не трогает)
+    v6_base = subnet_v6.split("::")[0].rstrip(":")
+    server_v6 = f"{v6_base}::1/{subnet_v6.split('/')[1] if '/' in subnet_v6 else '64'}"
+    r = core._run(["ip", "-6", "addr", "show", "dev", AWGS_INTERFACE],
+                  capture=True, check=False)
+    if server_v6.split("/")[0] not in (r.stdout or ""):
+        r2 = core._run(["ip", "-6", "addr", "add", server_v6,
+                        "dev", AWGS_INTERFACE], capture=True, check=False)
+        if r2.returncode != 0:
+            warn(f"ip -6 addr add {server_v6} не удался: {r2.stderr} — "
+                 f"v6-адрес появится после рестарта awg-quick@{AWGS_INTERFACE}")
+        else:
+            info(f"{AWGS_INTERFACE}: добавлен адрес {server_v6}")
+    else:
+        info(f"{AWGS_INTERFACE}: адрес {server_v6} уже назначен")
+
+    # 6. Каскадная entry — v6-зеркало каскада; иначе — NAT66 standalone
+    cascade_ok = True
+    if state.get("cascade_role") == "entry":
+        info("Каскад entry: включаю v6-зеркало (клиентский v6 → exit)...")
+        from .awg_cascade import awgs_cascade_enable_ipv6
+        cascade_ok = awgs_cascade_enable_ipv6()
+    else:
+        info("NAT66 для standalone (MASQUERADE v6 → WAN + helper)...")
+        awgs_setup_nat_and_routing(subnet=subnet, subnet_v6=subnet_v6)
+
+    # 7. Перегенерация клиентских конфигов (Address v6/128 + ::/0)
+    regen = []
+    if regen_client_confs:
+        from .awg_qr import awgs_qr_export_peer
+        for p in state.get("peers", []):
+            try:
+                result = awgs_qr_export_peer(p, show_terminal=False)
+                if result.get("conf_path"):
+                    regen.append(str(result["conf_path"]))
+            except Exception as e:
+                core.log_to_file("WARN", f"enable_ipv6: regen {p.get('name')}: {e}")
+
+    # 8. Отчёт
+    success(f"IPv6 включён: подсеть {subnet_v6}, сервер {v6_base}::1")
+    for name, v4, v6 in new_v6:
+        info(f"  пир {name}: {v4} → +{v6}")
+    if regen:
+        info(f"Перегенерировано клиентских конфигов: {len(regen)} "
+             f"(первый: {regen[0]})")
+    info("ВАЖНО: клиентам нужно пересохранить .conf (в них появились "
+         "Address v6 и AllowedIPs ::/0) — старые конфиги продолжат "
+         "работать по v4, но без анти-утечки v6.")
+    if not cascade_ok:
+        warn("Каскадное v6-зеркало не включено полностью — см. warnings выше")
+        return False
     return True
 
 
@@ -2159,6 +2377,8 @@ def do_manage_awg_standalone() -> None:
         _box_item("5", f"Backup / Restore")
         _box_item("6", f"Полное удаление")
         _box_item("7", f"Ротация обфускации (Jc/Jmin/Jmax/I1 без разрыва)")
+        _box_item("8", f"IPv6: включить на существующей установке "
+                       f"(анти-утечка AAAA, без сброса пиров)")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -2184,6 +2404,10 @@ def do_manage_awg_standalone() -> None:
             do_awg_uninstall_menu()
         elif ch == "7":
             do_awgs_rotate_menu()
+        elif ch == "8":
+            # v5.5.8: включение IPv6 на живой установке (upgrade без сброса)
+            awgs_enable_ipv6()
+            input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch in ("q", ""):
             break
         else:
@@ -2296,9 +2520,9 @@ def _awgs_menu_custom_params(protocol_version: str = "2.0") -> None:
 
     subnet = input(f"{CYAN}Подсеть IPv4 [10.66.66.0/24]: {NC}").strip() or AWGS_DEFAULT_SUBNET
 
-    ipv6_ch = input(f"{CYAN}Включить IPv6 в туннеле? [y/N]: {NC}").strip().lower()
-    allow_ipv6 = ipv6_ch in ("y", "yes", "д", "да")
-    subnet_v6 = AWGS_DEFAULT_SUBNET_V6 if allow_ipv6 else ""
+    ipv6_ch = input(f"{CYAN}Включить IPv6 в туннеле? [Y/n] — рекомендуется (анти-утечка AAAA при IPv6 у клиента): {NC}").strip().lower()
+    allow_ipv6 = ipv6_ch not in ("n", "no", "н", "нет")
+    subnet_v6 = awg_v6_ula_from_subnet(subnet) if allow_ipv6 else ""
 
     mtu_str = input(f"{CYAN}MTU [1280]: {NC}").strip()
     mtu = int(mtu_str) if mtu_str.isdigit() else AWGS_DEFAULT_MTU
@@ -2391,9 +2615,9 @@ def _awgs_menu_advanced(protocol_version: str = "2.0") -> None:
     subnet = input(f"{CYAN}Подсеть IPv4 [10.66.66.0/24]: {NC}").strip() or AWGS_DEFAULT_SUBNET
 
     # IPv6
-    ipv6_ch = input(f"{CYAN}Включить IPv6 в туннеле? [y/N]: {NC}").strip().lower()
-    allow_ipv6 = ipv6_ch in ("y", "yes", "д", "да")
-    subnet_v6 = AWGS_DEFAULT_SUBNET_V6 if allow_ipv6 else ""
+    ipv6_ch = input(f"{CYAN}Включить IPv6 в туннеле? [Y/n] — рекомендуется (анти-утечка AAAA при IPv6 у клиента): {NC}").strip().lower()
+    allow_ipv6 = ipv6_ch not in ("n", "no", "н", "нет")
+    subnet_v6 = awg_v6_ula_from_subnet(subnet) if allow_ipv6 else ""
 
     # MTU
     mtu_str = input(f"{CYAN}MTU [1280]: {NC}").strip()

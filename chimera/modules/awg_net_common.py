@@ -24,16 +24,19 @@ chimera/modules/awg_net_common.py
 
 Публичные функции:
   • iptables_ensure(core, args)        — idempotent -A через -C check
+  • ip6tables_ensure(core, args)       — то же для ip6tables (IPv6)
   • build_nat_rule_args(...)           — список iptables-правил для NAT (IPv4)
   • build_nat_idempotent_shell(...)    — bash-сниппет для PostUp (с -C check, IPv4)
   • build_nat_cleanup_shell(...)       — bash-сниппет для PostDown (с -D, IPv4)
   • build_nat6_rule_args(...)          — список ip6tables-правил для NAT (IPv6)
   • build_nat6_idempotent_shell(...)   — bash-сниппет для PostUp (с -C check, IPv6)
   • build_nat6_cleanup_shell(...)      — bash-сниппет для PostDown (с -D, IPv6)
+  • awg_v6_ula_from_subnet(subnet_v4)  — derived ULA-подсеть из v4-подсети
   • build_sysctl_lines(...)            — строки для /etc/sysctl.d/XX-awg.conf
   • detect_wan_iface(core)             — имя WAN-интерфейса (default route)
   • apply_rp_filter_per_iface(core, awg_iface, wan_iface, value=2)
                                         — runtime sysctl -w для per-interface
+  • apply_ipv6_forward(core)           — runtime net.ipv6.conf.all.forwarding=1
 
 MASQUERADE scope (scope_source parameter):
   • scope_source=True (default)  → MASQUERADE только трафика из awg_subnet
@@ -72,7 +75,7 @@ RP_FILTER_DEFAULT = 2
 #  IPTABLES IDEMPOTENT HELPER
 # ============================================================================
 
-def iptables_ensure(core, args: list) -> None:
+def iptables_ensure(core, args: list, binary: str = "iptables") -> None:
     """
     Добавляет iptables-правило только если его ещё нет (idempotent).
 
@@ -87,6 +90,9 @@ def iptables_ensure(core, args: list) -> None:
     Используется как для runtime-установки (awgs_setup_nat_and_routing),
     так и доступен для других модулей, которым нужна идемпотентная
     установка iptables-правил (NAT, mangle, filter).
+
+    v5.5.8: параметр binary ("iptables" | "ip6tables") — та же логика
+    для IPv6-правил (ip6tables_ensure — обёртка ниже).
     """
     if "-A" not in args:
         # Защита: args без -A нельзя безопасно конвертировать в -C.
@@ -103,10 +109,99 @@ def iptables_ensure(core, args: list) -> None:
 
     check_args = list(args)
     check_args[check_args.index("-A")] = "-C"
-    r = core._run(["iptables"] + check_args, capture=True, check=False)
+    r = core._run([binary] + check_args, capture=True, check=False)
     if r.returncode != 0:
         # Правила ещё нет — добавляем
-        core._run(["iptables"] + args, check=False, quiet=True)
+        core._run([binary] + args, check=False, quiet=True)
+
+
+def ip6tables_ensure(core, args: list) -> None:
+    """
+    v5.5.8: идемпотентное добавление ip6tables-правила (IPv6).
+
+    Обёртка над iptables_ensure с binary="ip6tables" — идентичная логика
+    -C/-A, но для стека IPv6. Используется NAT66 (MASQUERADE v6) и
+    каскадными v6-правилами (MARK/FORWARD/TCPMSS).
+    """
+    iptables_ensure(core, args, binary="ip6tables")
+
+
+# ============================================================================
+# IPv6 ULA DERIVATION (v5.5.8)
+# ============================================================================
+
+def awg_v6_ula_from_subnet(subnet_v4: str, default: str = "fd66:66:66::/64") -> str:
+    """
+    v5.5.8: выводит ULA-подсеть IPv6 из v4-подсети туннеля.
+
+    Правило: третий октет v4-базы становится третьим hextet'ом ULA
+    (ДЕСЯТИЧНАЯ запись октета — 82 значит hextet '82', НЕ 0x52;
+    читается человеком так же, как v4-подсеть):
+      10.66.66.0/24   → fd66:66:66::/64   (дефолт — совместимость со старыми
+                                            установками, где subnet_v6 был
+                                            именно таким)
+      172.16.81.0/24  → fd66:66:81::/64
+      172.16.82.0/24  → fd66:66:82::/64
+      172.16.91.0/24  → fd66:66:91::/64
+
+    ЗАЧЕМ: в мульти-exit каскаде несколько RU-entry работают через один
+    exit. Если бы у всех entry была одна и та же v6-подсеть клиентов
+    (fd66:66:66::/64), v6-адреса на awg1 entry после NAT66 не конфликтуют,
+    но при без-NAT транзите cryptokey-routing exit не смог бы различить
+    пиры. Per-node производный префикс делает каждую entry уникальной
+    по построению (v4-подсети entry обязаны быть уникальны — иначе каскад
+    не работает и в v4).
+
+    Фолбэк: при непарсибельной v4-подсети возвращается default
+    (AWGS_DEFAULT_SUBNET_V6).
+    """
+    try:
+        base = (subnet_v4 or "").split("/")[0]
+        parts = base.split(".")
+        if len(parts) != 4:
+            return default
+        third = int(parts[2])
+        if not (0 < third < 256):
+            return default
+        # ДЕСЯТИЧНАЯ запись октета как hextet: нам важна не арифметика,
+        # а УНИКАЛЬНОСТЬ и ЧИТАЕМОСТЬ — разные октеты → разные hextet-строки
+        # → разные подсети. Любые 1-3 цифры валидны как hextet (≤ 0xFFFF).
+        return f"fd66:66:{third}::/64"
+    except Exception:
+        return default
+
+
+def awg_v6_host_from_v4(client_ip_v4: str, subnet_v6: str) -> str:
+    """
+    v5.5.8: выводит v6-адрес хоста с host-id из последнего октета v4.
+
+    Примеры (subnet_v6 = fd66:66:82::/64):
+      172.16.82.2  → fd66:66:82::2
+      172.16.82.17 → fd66:66:82::17
+
+    Правило «v6-адрес зеркалит v4 host-id» даёт два свойства:
+      1. Адреса клиентов entry (172.16.82.2 → fd66:66:82::2) читаются
+         человеком так же легко, как их v4-зеркала.
+      2. В каскаде v6-адрес awg1 на entry (172.16.91.3 → fd66:66:91::3)
+         ГАРАНТИРОВАННО совпадает с AllowedIPs пира cascade_entry_* на
+         exit-ноде (там тот же принцип) — cryptokey routing сходится без
+         ручной синхронизации.
+
+    Возвращает "" если v4-адрес или подсеть непарсибельны.
+    """
+    try:
+        v4 = (client_ip_v4 or "").split("/")[0]
+        parts = v4.split(".")
+        if len(parts) != 4:
+            return ""
+        host = int(parts[3])
+        base = (subnet_v6 or "").split("::")[0].rstrip(":")
+        if not base or not (0 < host < 256):
+            return ""
+        # Десятичная запись host-id как hextet (::17 — зеркалит .17)
+        return f"{base}::{host}"
+    except Exception:
+        return ""
 
 
 # ============================================================================
@@ -292,7 +387,8 @@ def build_nat6_cleanup_shell(subnet: str, awg_iface: str, wan_iface_expr: str = 
 # ============================================================================
 
 def build_sysctl_lines(awg_iface: str, wan_iface: str,
-                       rp_filter_value: int = RP_FILTER_DEFAULT) -> List[str]:
+                       rp_filter_value: int = RP_FILTER_DEFAULT,
+                       ipv6_forward: bool = False) -> List[str]:
     """
     Возвращает строки для /etc/sysctl.d/XX-awg.conf.
 
@@ -307,16 +403,21 @@ def build_sysctl_lines(awg_iface: str, wan_iface: str,
       • wan_iface       — имя WAN-интерфейса (eth0, ens3, …)
       • rp_filter_value — 0/1/2 (default 2 = loose mode). 0 только как явный
                           fallback если 2 не решает проблему на конкретном ядре.
+      • ipv6_forward    — v5.5.8: добавить net.ipv6.conf.all.forwarding = 1
+                          (нужно для NAT66/транзита v6 из туннеля).
 
     Дополнительно: net.ipv4.ip_forward=1 (без этого NAT-трафик не форвардится).
     """
     if rp_filter_value not in (0, 1, 2):
         rp_filter_value = RP_FILTER_DEFAULT
-    return [
+    lines = [
         "net.ipv4.ip_forward = 1",
         f"net.ipv4.conf.{awg_iface}.rp_filter = {rp_filter_value}",
         f"net.ipv4.conf.{wan_iface}.rp_filter = {rp_filter_value}",
     ]
+    if ipv6_forward:
+        lines.append("net.ipv6.conf.all.forwarding = 1")
+    return lines
 
 
 def apply_rp_filter_per_iface(core, awg_iface: str, wan_iface: str,
@@ -370,9 +471,32 @@ def apply_ip_forward(core) -> None:
             pass
 
 
+def apply_ipv6_forward(core) -> None:
+    """
+    v5.5.8: включает net.ipv6.conf.all.forwarding=1 в runtime — без этого
+    ядро не форвардит IPv6-пакеты из туннеля (NAT66/транзит в каскаде).
+    Idempotent: проверяет текущее значение перед sysctl -w.
+    """
+    r = core._run(["sysctl", "-n", "net.ipv6.conf.all.forwarding"],
+                  capture=True, check=False)
+    if r.returncode == 0 and r.stdout.strip() != "1":
+        core._run(["sysctl", "-w", "net.ipv6.conf.all.forwarding=1"],
+                  check=False, quiet=True)
+        try:
+            core.info("  net.ipv6.conf.all.forwarding: 0 → 1")
+        except Exception:
+            pass
+    elif r.returncode == 0:
+        try:
+            core.info("  net.ipv6.conf.all.forwarding: уже 1")
+        except Exception:
+            pass
+
+
 def write_sysctl_conf(path: Path, awg_iface: str, wan_iface: str,
                       rp_filter_value: int = RP_FILTER_DEFAULT,
-                      extra_lines: list = None) -> bool:
+                      extra_lines: list = None,
+                      ipv6_forward: bool = False) -> bool:
     """
     Перезаписывает /etc/sysctl.d/XX-awg*.conf с per-interface rp_filter.
 
@@ -380,10 +504,15 @@ def write_sysctl_conf(path: Path, awg_iface: str, wan_iface: str,
     но вычищает старые global all/default rp_filter записи (которые были
     ошибочно добавлены предыдущей версией кода).
 
+    v5.5.8: ipv6_forward=True добавляет net.ipv6.conf.all.forwarding = 1
+    в управляемые строки (managed_prefixes расширен соответствующе — старая
+    строка ipv6.forwarding из файла вычищается и перезаписывается нашей).
+
     Возвращает True при успехе, False при ошибке записи.
     """
     extra_lines = extra_lines or []
-    new_lines = build_sysctl_lines(awg_iface, wan_iface, rp_filter_value) + extra_lines
+    new_lines = build_sysctl_lines(awg_iface, wan_iface, rp_filter_value,
+                                   ipv6_forward=ipv6_forward) + extra_lines
 
     # Ключи, которые мы управляем — вычищаем их старые вхождения
     managed_prefixes = (
@@ -392,6 +521,7 @@ def write_sysctl_conf(path: Path, awg_iface: str, wan_iface: str,
         "net.ipv4.conf.default.rp_filter",
         f"net.ipv4.conf.{awg_iface}.rp_filter",
         f"net.ipv4.conf.{wan_iface}.rp_filter",
+        "net.ipv6.conf.all.forwarding",
     )
 
     kept = []
