@@ -192,6 +192,72 @@ def awgs_kmod_already_ready() -> bool:
     return "KMOD_OK" in (probe.stdout or "")
 
 
+def _awgs_apt_repair() -> bool:
+    """
+    Автовосстановление сломанного состояния apt (dpkg/зависимости).
+
+    Кейс из продакшена (host1889848, Ubuntu 24.04, 2026-10-04): установка
+    падает с
+      'E: Unmet dependencies. Try "apt --fix-broken install" with no
+       packages (or specify a solution).'
+    из-за полусобранных пакетов от прерванной ранее установки. Не путать с
+    _awgs_apt_lock_heal() (висячие ЛОКИ — там kill процессов, здесь —
+    чиним dpkg-состояние).
+    apt сам подсказывает решение — выполняем его автоматически:
+      0. _awgs_apt_lock_heal() — снять висячий лок, иначе dpkg молча упадёт
+      1. dpkg --configure -a   (безопасно: донастраивает полусобранные)
+      2. apt-get -f install -y (чинит зависимости; ставит недостающее)
+    Возвращает True, если apt-get check после ремонта проходит.
+    """
+    core = _core_module()
+    core.warn("Сломанные зависимости apt — запускаю авто-восстановление "
+              "(dpkg --configure -a + apt --fix-broken)...")
+    _awgs_apt_lock_heal()  # лок может держать полусобранный dpkg-процесс
+    core._run(["dpkg", "--configure", "-a"],
+              capture=True, check=False, quiet=True)
+    r = core._run(["apt-get", "--fix-broken", "install", "-y"],
+                  capture=True, check=False, quiet=True)
+    if r.returncode != 0:
+        core.log_to_file("WARN",
+                         f"apt --fix-broken rc={r.returncode}: "
+                         f"{((r.stderr or '') + (r.stdout or ''))[-400:]}")
+    # Верификация: apt-get check должен пройти
+    r = core._run(["apt-get", "check"], capture=True, check=False, quiet=True)
+    ok = r.returncode == 0
+    if ok:
+        core.success("Зависимости apt восстановлены")
+    else:
+        core.warn("Авто-восстановление apt не помогло — продолжаем с fallback'ами")
+    return ok
+
+
+def _awgs_apt_install(pkg: str) -> bool:
+    """
+    apt-get install с авто-восстановлением broken-зависимостей и ретраем.
+    Возвращает True, если пакет реально установлен (which-проверка не входит —
+    проверяется код возврата apt).
+    """
+    core = _core_module()
+    r = core._run(["apt-get", "install", "-y", pkg],
+                  capture=True, check=False, quiet=True)
+    if r.returncode == 0:
+        return True
+    err = (r.stderr or "") + (r.stdout or "")
+    core.log_to_file("WARN", f"apt install {pkg}: {err[-300:]}")
+    # Ретрай после ремонта: чинит 'E: Unmet dependencies' на VPS
+    # с полусобранными пакетами (типовой кейс на свежих VPS-шаблонах)
+    if ("Unmet dependencies" in err or "fix-broken" in err
+            or "unmet dependencies" in err.lower()):
+        _awgs_apt_repair()
+        r2 = core._run(["apt-get", "install", "-y", pkg],
+                       capture=True, check=False, quiet=True)
+        if r2.returncode == 0:
+            core.success(f"Пакет {pkg} установлен после авто-восстановления apt")
+            return True
+        core.log_to_file("WARN", f"apt install {pkg} retry: {(r2.stderr or '')[-300:]}")
+    return False
+
+
 def awgs_install_dkms() -> bool:
     """
     Устанавливает amneziawg-tools + DKMS kernel module через PPA amnezia/ppa.
@@ -227,12 +293,18 @@ def awgs_install_dkms() -> bool:
     # (awg genkey не существует в userspace-режиме amneziawg-go).
     core.info("Установка базовых зависимостей (wireguard-tools, curl, qrencode)...")
     core._run(["apt-get", "update", "-y"], check=False, quiet=True)
-    # Ставим по одному пакету — если один упадёт, остальные всё равно установятся
+
+    # Профилактический ремонт apt: на VPS с полусобранными пакетами ЛЮБАЯ
+    # установка падает с 'E: Unmet dependencies' (кейс продакшена).
+    # Лечим ДО установки: dpkg --configure -a + apt --fix-broken install.
+    r = core._run(["apt-get", "check"], capture=True, check=False, quiet=True)
+    if r.returncode != 0:
+        _awgs_apt_repair()
+
+    # Ставим по одному пакету — если один упадёт, остальные всё равно установятся.
+    # _awgs_apt_install сам чинит зависимости и ретраит при Unmet dependencies
     for pkg in ("curl", "qrencode", "wireguard-tools", "gpg", "dkms", "build-essential"):
-        r = core._run(["apt-get", "install", "-y", pkg],
-                      capture=True, check=False, quiet=True)
-        if r.returncode != 0:
-            core.log_to_file("WARN", f"apt install {pkg}: {r.stderr[-300:]}")
+        _awgs_apt_install(pkg)
 
     # linux-headers — отдельно, зависит от архитектуры и дистрибутива
     arch = core._run(["uname", "-m"], capture=True, check=False).stdout.strip()
@@ -441,8 +513,34 @@ def awgs_install_dkms() -> bool:
             for line in err_tail.splitlines()[-5:]:
                 if line.strip():
                     core.warn(f"  {line.strip()}")
-            core.warn("→ Пробуем Go-версию (userspace) как fallback")
-            return _awgs_install_dkms_fallback()
+            # Ретрай после авто-восстановления apt: типовая причина падения —
+            # 'E: Unmet dependencies' из-за полусобранных пакетов на VPS
+            # (инцидент host1889848, 2026-10-04). apt сам советует
+            # 'apt --fix-broken install' — делаем это и ретраим.
+            retried_ok = False
+            full_err = (r.stderr or "") + (r.stdout or "")
+            if ("Unmet dependencies" in full_err or "fix-broken" in full_err
+                    or "unmet dependencies" in full_err.lower()):
+                if _awgs_apt_repair():
+                    core.info("Ретраим установку amneziawg после ремонта apt...")
+                    r2 = core._run(
+                        ["apt-get", "install", "-y",
+                         "amneziawg-tools", "amneziawg-dkms",
+                         "wireguard-tools", "qrencode"],
+                        capture=True, check=False,
+                    )
+                    if r2.returncode == 0:
+                        core.success("Пакеты amneziawg установлены после "
+                                     "авто-восстановления apt")
+                        retried_ok = True
+                    else:
+                        core.log_to_file(
+                            "ERROR",
+                            f"apt install amneziawg retry: {(r2.stderr or '')[-500:]}",
+                        )
+            if not retried_ok:
+                core.warn("→ Пробуем Go-версию (userspace) как fallback")
+                return _awgs_install_dkms_fallback()
 
         # v5.5.2 (E2E fi1): пакеты установлены — убрать userspace-стабы,
         # затемняющие пакетные awg/awg-quick (наследие Mode B эпохи)
@@ -667,13 +765,88 @@ def _awgs_apt_lock_heal() -> bool:
 #  ГЕНЕРАЦИЯ КЛЮЧЕЙ
 # ============================================================================
 
+def _awgs_x25519(scalar: bytes, u: bytes) -> bytes:
+    """
+    X25519 (RFC 7748) на чистом Python — без внешних зависимостей
+    (ни wg/awg-бинарников, ни пакета cryptography).
+
+    Нужна как последний fallback генерации ключей: на VPS со сломанным apt
+    (E: Unmet dependencies) может отсутствовать и wg, и рабочий awg
+    (stub-обёртка после Go-fallback проксирует в amneziawg-go, который
+    НЕ поддерживает genkey/pubkey/genpsk). Ключи WireGuard/AWG — это
+    clamped X25519, поэтому pure-Python реализация байт-в-байт совместима
+    с `wg genkey`/`awg genkey` (проверена тестами против cryptography).
+    """
+    P = 2**255 - 19
+    A24 = 121665
+
+    k = int.from_bytes(scalar, "little")
+    k &= (1 << 254) - 8          # k[0] &= 248; k[31] &= 127 (сброс бита 255)
+    k |= 1 << 254                # k[31] |= 64
+    x1 = int.from_bytes(u, "little") & ((1 << 255) - 1)
+
+    x2, z2, x3, z3, swap = 1, 0, x1, 1, 0
+    for t in range(254, -1, -1):
+        k_t = (k >> t) & 1
+        swap ^= k_t
+        if swap:
+            x2, x3 = x3, x2
+            z2, z3 = z3, z2
+        swap = k_t
+
+        A = (x2 + z2) % P
+        AA = A * A % P
+        B = (x2 - z2) % P
+        BB = B * B % P
+        E = (AA - BB) % P
+        C = (x3 + z3) % P
+        D = (x3 - z3) % P
+        DA = D * A % P
+        CB = C * B % P
+        x3 = (DA + CB) ** 2 % P
+        z3 = ((DA - CB) ** 2 % P) * x1 % P
+        x2 = AA * BB % P
+        z2 = E * (AA + A24 * E) % P
+
+    if swap:
+        x2, x3 = x3, x2
+        z2, z3 = z3, z2
+    return ((x2 * pow(z2, P - 2, P)) % P).to_bytes(32, "little")
+
+
+def _awgs_py_keygen_pair() -> tuple:
+    """
+    Pure-Python генерация пары ключей (priv+pub), формат идентичен wg genkey.
+    Возвращает (privkey_b64, pubkey_b64).
+    """
+    import base64
+    priv = bytearray(os.urandom(32))
+    priv[0] &= 248                # RFC 7748 clamp
+    priv[31] &= 127
+    priv[31] |= 64
+    priv_raw = bytes(priv)
+    pub_raw = _awgs_x25519(priv_raw, b"\x09" + b"\x00" * 31)
+    return (
+        base64.b64encode(priv_raw).decode(),
+        base64.b64encode(pub_raw).decode(),
+    )
+
+
+def _awgs_py_genpsk() -> str:
+    """Pure-Python PresharedKey: 32 случайных байта в base64 (как wg genpsk)."""
+    import base64
+    return base64.b64encode(os.urandom(32)).decode()
+
+
 def awgs_generate_keys() -> tuple:
     """
     Генерирует пару ключей сервера (priv+pub).
-    Пробует `awg genkey`/`awg pubkey` (kernel-module версия), fallback на
-    `wg genkey`/`wg pubkey` (из wireguard-tools).
-    Ключи Curve25519 совместимы между WG и AWG.
-    Если ни awg, ни wg не доступны — пытается доустановить wireguard-tools.
+    Цепочка (каждый следующий шаг — если предыдущий недоступен):
+      1. `wg genkey`/`wg pubkey` — нативный бинарник из wireguard-tools
+      2. `awg genkey`/`awg pubkey` — из amneziawg-tools (kernel-режим)
+      3. Pure-Python X25519 (RFC 7748) — работает ВСЕГДА, даже при сломанном
+         apt и userspace-заглушке awg (amneziawg-go не умеет genkey)
+    Ключи Curve25519 полностью совместимы между WG и AWG.
     Возвращает (privkey, pubkey) или ("", "") при ошибке.
     """
     core = _core_module()
@@ -689,43 +862,44 @@ def awgs_generate_keys() -> tuple:
         core._run(["apt-get", "install", "-y", "wireguard-tools"],
                   check=False, quiet=True)
         wg_path = core._run(["which", "wg"], capture=True, check=False).stdout.strip()
-        if not wg_path:
-            core.log_to_file("ERROR", "awgs_generate_keys: wg не установлен даже после apt install")
-            return "", ""
 
-    # ВАЖНО: prefer wg over awg для генерации ключей.
-    # Причина: stub-обёртка awg (после fallback на amneziawg-go) проксирует
-    # вызовы на amneziawg-go, который НЕ поддерживает genkey/pubkey/genpsk.
+    # prefer wg over awg: stub-обёртка awg (после fallback на amneziawg-go)
+    # проксирует вызовы на amneziawg-go, который НЕ поддерживает genkey/pubkey.
     # wg (из wireguard-tools) — нативный бинарник, всегда работает.
     bin_for_genkey = wg_path or awg_path
-    if wg_path:
-        core.info(f"Генерация ключей через wg ({wg_path})")
-    else:
-        core.info(f"Генерация ключей через awg ({awg_path}) — wg недоступен")
 
-    # Приватный ключ (genkey читает /dev/urandom, не требует stdin, но подаём пустой)
-    r = core._run([bin_for_genkey, "genkey"],
-                  capture=True, check=False, input_text="")
-    if r.returncode != 0:
-        core.log_to_file("ERROR", f"{bin_for_genkey} genkey failed (rc={r.returncode}): {r.stderr}")
-        return "", ""
-    privkey = r.stdout.strip()
+    privkey, pubkey = "", ""
+    if bin_for_genkey:
+        if wg_path:
+            core.info(f"Генерация ключей через wg ({wg_path})")
+        else:
+            core.info(f"Генерация ключей через awg ({awg_path}) — wg недоступен")
 
-    if not privkey:
-        core.log_to_file("ERROR", "awgs_generate_keys: пустой privkey")
-        return "", ""
+        # Приватный ключ (genkey читает /dev/urandom, не требует stdin, но подаём пустой)
+        r = core._run([bin_for_genkey, "genkey"],
+                      capture=True, check=False, input_text="")
+        if r.returncode == 0:
+            privkey = r.stdout.strip()
 
-    # Публичный из приватного (pubkey читает privkey из stdin)
-    r = core._run([bin_for_genkey, "pubkey"],
-                  capture=True, check=False, input_text=privkey + "\n")
-    if r.returncode != 0:
-        core.log_to_file("ERROR", f"{bin_for_genkey} pubkey failed (rc={r.returncode}): {r.stderr}")
-        return "", ""
-    pubkey = r.stdout.strip()
+        # Публичный из приватного (pubkey читает privkey из stdin)
+        if privkey:
+            r = core._run([bin_for_genkey, "pubkey"],
+                          capture=True, check=False, input_text=privkey + "\n")
+            if r.returncode == 0:
+                pubkey = r.stdout.strip()
 
-    if not pubkey:
-        core.log_to_file("ERROR", "awgs_generate_keys: пустой pubkey")
-        return "", ""
+    # Last-resort: pure-Python X25519 — не зависит ни от apt, ни от бинарников.
+    # Покрывает кейс: wg не установлен (broken apt), awg — userspace-заглушка.
+    if not privkey or not pubkey:
+        core.warn("Бинарники wg/awg недоступны или не поддерживают genkey — "
+                  "включаю pure-Python генерацию ключей (X25519, RFC 7748)")
+        try:
+            privkey, pubkey = _awgs_py_keygen_pair()
+            core.success("Ключи сгенерированы pure-Python X25519 "
+                         "(формат идентичен wg genkey)")
+        except Exception as e:
+            core.log_to_file("ERROR", f"awgs_generate_keys pure-python: {e}")
+            return "", ""
 
     return privkey, pubkey
 
@@ -733,17 +907,25 @@ def awgs_generate_keys() -> tuple:
 def awgs_generate_preshared_key() -> str:
     """
     Генерирует PresharedKey (опциональный, для per-client PSK).
-    Prefer wg (нативный), fallback на awg.
+    Prefer wg (нативный), fallback на awg, last-resort — pure-Python
+    (32 случайных байта base64, как wg genpsk; работает даже когда
+    оба бинарника недоступны/нерабочие).
     """
     core = _core_module()
     wg_path = core._run(["which", "wg"], capture=True, check=False).stdout.strip()
     awg_path = core._run(["which", AWGS_BIN], capture=True, check=False).stdout.strip()
     bin_for_genpsk = wg_path or awg_path
-    if not bin_for_genpsk:
-        return ""
-    r = core._run([bin_for_genpsk, "genpsk"],
-                  capture=True, check=False, input_text="")
-    return r.stdout.strip() if r.returncode == 0 else ""
+    if bin_for_genpsk:
+        r = core._run([bin_for_genpsk, "genpsk"],
+                      capture=True, check=False, input_text="")
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+        core.log_to_file(
+            "WARN",
+            f"awgs_generate_preshared_key: {bin_for_genpsk} genpsk failed "
+            f"(rc={r.returncode}) — использую pure-Python fallback",
+        )
+    return _awgs_py_genpsk()
 
 
 # ============================================================================

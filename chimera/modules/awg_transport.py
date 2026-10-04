@@ -406,11 +406,81 @@ def _awg_detect_implementation() -> str:
 
 
 def _awg_create_userspace_stubs() -> None:
-    """Создаёт stub-обёртки awg и awg-quick для userspace режима."""
+    """Создаёт stub-обёртки awg и awg-quick для userspace режима.
+
+    Stub awg — «умный»: amneziawg-go НЕ поддерживает genkey/pubkey/genpsk,
+    поэтому эти команды обрабатываются локально через pure-Python X25519
+    (RFC 7748; байт-в-байт совместимо с wg genkey из wireguard-tools).
+    Остальные вызовы (set/showconf/etc.) проксируются в amneziawg-go.
+    Без этого фикса генерация ключей на VPS со сломанным apt (нет wg)
+    падала: 'Не удалось сгенерировать ключи сервера'.
+    """
     core = _core_module()
+
+    # Pure-Python X25519 (RFC 7748) — только двойные кавычки внутри,
+    # т.к. код инкапсулируется в одинарные кавычки bash.
+    _py_keygen = (
+        "import sys, os, base64\n"
+        "cmd = sys.argv[1]\n"
+        "P = 2**255 - 19\n"
+        "A24 = 121665\n"
+        "def x25519(scalar, u):\n"
+        "    k = int.from_bytes(scalar, \"little\")\n"
+        "    k &= (1 << 254) - 8\n"
+        "    k |= 1 << 254\n"
+        "    x1 = int.from_bytes(u, \"little\") & ((1 << 255) - 1)\n"
+        "    x2, z2, x3, z3, swap = 1, 0, x1, 1, 0\n"
+        "    for t in range(254, -1, -1):\n"
+        "        k_t = (k >> t) & 1\n"
+        "        swap ^= k_t\n"
+        "        if swap:\n"
+        "            x2, x3 = x3, x2\n"
+        "            z2, z3 = z3, z2\n"
+        "        swap = k_t\n"
+        "        A = (x2 + z2) % P\n"
+        "        AA = A * A % P\n"
+        "        B = (x2 - z2) % P\n"
+        "        BB = B * B % P\n"
+        "        E = (AA - BB) % P\n"
+        "        C = (x3 + z3) % P\n"
+        "        D = (x3 - z3) % P\n"
+        "        DA = D * A % P\n"
+        "        CB = C * B % P\n"
+        "        x3 = (DA + CB) ** 2 % P\n"
+        "        z3 = ((DA - CB) ** 2 % P) * x1 % P\n"
+        "        x2 = AA * BB % P\n"
+        "        z2 = E * (AA + A24 * E) % P\n"
+        "    if swap:\n"
+        "        x2, x3 = x3, x2\n"
+        "        z2, z3 = z3, z2\n"
+        "    return ((x2 * pow(z2, P - 2, P)) % P).to_bytes(32, \"little\")\n"
+        "if cmd == \"genkey\":\n"
+        "    priv = bytearray(os.urandom(32))\n"
+        "    priv[0] &= 248\n"
+        "    priv[31] &= 127\n"
+        "    priv[31] |= 64\n"
+        "    print(base64.b64encode(bytes(priv)).decode())\n"
+        "elif cmd == \"pubkey\":\n"
+        "    priv = base64.b64decode(sys.stdin.read().strip())\n"
+        "    pub = x25519(priv, b\"\\x09\" + b\"\\x00\" * 31)\n"
+        "    print(base64.b64encode(pub).decode())\n"
+        "elif cmd == \"genpsk\":\n"
+        "    print(base64.b64encode(os.urandom(32)).decode())\n"
+    )
+
     stub_awg = (
         "#!/bin/bash\n"
-        "exec /usr/local/bin/amneziawg-go \"$@\"\n"
+        "# Stub awg (userspace-режим). genkey/pubkey/genpsk обрабатываются\n"
+        "# локально (amneziawg-go их НЕ поддерживает), остальное — в amneziawg-go.\n"
+        f"PYKEYGEN='{_py_keygen}'\n"
+        "case \"$1\" in\n"
+        "  genkey|pubkey|genpsk)\n"
+        "    exec python3 -c \"$PYKEYGEN\" \"$1\"\n"
+        "    ;;\n"
+        "  *)\n"
+        "    exec /usr/local/bin/amneziawg-go \"$@\"\n"
+        "    ;;\n"
+        "esac\n"
     )
     stub_quick = (
         "#!/bin/bash\n"
