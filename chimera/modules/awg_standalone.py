@@ -796,26 +796,64 @@ AWGS_PARAMS_SPEC_HEX = [
     # (key, label, recommended, description)
     ("i1", "I1 (Init packet junk — CPS-цепочка)",
      "random",
-     "CPS-цепочка из тегов amneziawg-go: <b 0xHEX>, <t>, <r N>, <rc N>, "
-     "<rd N>, <d>, <ds>, <dz N> (+ <c> — только kernel-module, "
-     "НЕ для клиентов-приложений). Шорткаты: auto = <r N>, "
-     "quic = QUIC Initial (RFC 9000, порт 443), dns = DNS A-запрос "
-     "(RFC 1035, порт 53), tls = TLS ClientHello (RFC 8446). "
+     "CPS-цепочка из кросс-движковых тегов (kernel + go-клиенты): "
+     "<b 0xHEX>, <t>, <r N>, <rc N>, <rd N>. Шорткаты профилей: "
+     "auto, quic, quic0rtt, burst (QUIC-всплеск I1-I5), dns, tls, "
+     "altsvc, dtls12, dtls13, noise, http3, sip, binary. "
      "Tele2 Красноярск/Мегафон: ОСТАВИТЬ ПУСТЫМ (иначе блокировка). "
      "Голый hex — формат AWG 1.5, принимается, но НЕ рекомендуется."),
-    ("i2", "I2 (Response packet junk — CPS-цепочка)",
+    ("i2", "I2 (decoy-пакет №2 — CPS-цепочка)",
      "",
-     "Опционально. Рекомендуется пустым."),
-    ("i3", "I3 (Under-load packet junk — CPS-цепочка)",
+     "Опционально. Пусто = без пакета; 'fill' — нейтральная цепочка "
+     "автоматически (как автозаполнение I2-I5 в генераторах 3.1)."),
+    ("i3", "I3 (decoy-пакет №3 — CPS-цепочка)",
      "",
-     "Опционально. Рекомендуется пустым."),
-    ("i4", "I4 (Transport packet junk — CPS-цепочка)",
+     "Опционально. Пусто = без пакета; 'fill' — нейтральная цепочка."),
+    ("i4", "I4 (decoy-пакет №4 — CPS-цепочка)",
      "",
-     "Опционально. Рекомендуется пустым."),
-    ("i5", "I5 (Transport packet junk IPv6 — CPS-цепочка)",
+     "Опционально. Пусто = без пакета; 'fill' — нейтральная цепочка."),
+    ("i5", "I5 (decoy-пакет №5 — CPS-цепочка)",
      "",
-     "Опционально. Рекомендуется пустым."),
+     "Опционально. Пусто = без пакета; 'fill' — нейтральная цепочка."),
 ]
+
+# v5.5.5: шорткаты профилей мимикрии для интерактивного ввода (полный
+# реестр — AWG_I1_MIMICRY_PROFILES в awg_presets, 13 профилей).
+AWGS_MIMICRY_SHORTCUTS: dict = {
+    "auto":     "random",
+    "random":   "random",
+    "quic":     "quic_mimicry",
+    "quic0rtt": "quic_0rtt",
+    "0rtt":     "quic_0rtt",
+    "burst":    "quic_burst",
+    "dns":      "dns_mimicry",
+    "tls":      "tls_mimicry",
+    "altsvc":   "tls_altsvc",
+    "h3alt":    "tls_altsvc",
+    "dtls":     "dtls12",
+    "dtls12":   "dtls12",
+    "dtls13":   "dtls13",
+    "noise":    "noise_ik",
+    "noiseik":  "noise_ik",
+    "http3":    "http3_host",
+    "h3":       "http3_host",
+    "sip":      "sip",
+    "binary":   "binary",
+}
+
+# Рекомендованный порт под маскировку (подсказка после генерации).
+AWGS_MIMICRY_PORT_HINTS: dict = {
+    "quic_mimicry": "443 (QUIC)",
+    "quic_0rtt":    "443 (QUIC)",
+    "quic_burst":   "443 (QUIC)",
+    "http3_host":   "443 (HTTP/3)",
+    "dns_mimicry":  "53 (DNS)",
+    "tls_mimicry":  "443 (TLS)",
+    "tls_altsvc":   "443 (TLS + Alt-Svc)",
+    "dtls12":       "443 (DTLS)",
+    "dtls13":       "443 (DTLS)",
+    "sip":          "5060 (SIP)",
+}
 
 
 def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
@@ -826,11 +864,18 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
 
     v5.5.1 — полная поддержка официального синтаксиса:
       • H1-H4 — «N» или диапазон «N-M» (0..INT32_MAX, без пересечений);
-      • I1-I5 — CPS-цепочки всех тегов amneziawg-go + шорткаты профилей
-        мимикрии (auto/quic/dns/tls);
+      • I1-I5 — CPS-цепочки кросс-движковых тегов + шорткаты ВСЕХ 13
+        профилей мимикрии (auto/quic/quic0rtt/burst/dns/tls/altsvc/
+        dtls12/dtls13/noise/http3/sip/binary) + 'fill' для I2-I5;
       • 3.1 — ручной ввод и 9 транспортных директив (HeaderProtectionKey,
         ContentPaddingAddition «N»/«N-M», таймеры, RandomTrailers/
         DisableCookies «on»/«off»).
+
+    v5.5.5 — защита от несовместимых параметров (kernel-сервер +
+    go-клиенты): теги <c> (kernel-only) и <d>/<ds>/<dz N> (go-only,
+    no-op) БЛОКИРУЮТСЯ на этапе ввода с переспросом; финальная
+    валидация — strict_cross_engine=True. Ввести конфиг, который
+    заведомо не заработает, невозможно.
 
     Возвращает dict с ключами jc/jmin/jmax/s1-s4/h1-h4/i1-i5 (+ 9 ключей
     3.1 при protocol_version="3.1"), либо None при провале валидации.
@@ -848,8 +893,9 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
     )
     from .awg_presets import (
         _generate_non_overlapping_h_values, _generate_non_overlapping_h_values_31,
-        awg_i1_mimicry_generate, _is_valid_cps_or_legacy_hex,
-        _cps_has_kernel_only_tags,
+        awg_i1_mimicry_generate, awg_i_chain_mimicry_generate,
+        _generate_neutral_i_chain, _is_valid_cps_or_legacy_hex,
+        _cps_has_kernel_only_tags, _cps_has_go_only_tags,
     )
 
     is_31 = awg_is_31(protocol_version)
@@ -873,7 +919,17 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
     params = {}
 
     # Числовые параметры (Jc/Jmin/Jmax/S1-S4)
+    # v5.5.5: для 3.1 рекомендации/диапазоны S1-S4 — из констрейнтов
+    # GenerateObfuscation31. Прежние «рекомендуется 0» (2.0-специфика)
+    # проваливали финальную валидацию 3.1 при вводе «всё по Enter»
+    # (S1=0 < 15) — кастомный 3.1-конфиг было невозможно собрать с
+    # дефолтами.
+    _S_RANGES_31 = {"s1": (15, 150), "s2": (15, 150),
+                    "s3": (12, 55), "s4": (12, 27)}
     for key, label, vmin, vmax, recommended, desc in AWGS_PARAMS_SPEC:
+        if is_31 and key in _S_RANGES_31:
+            vmin, vmax = _S_RANGES_31[key]
+            recommended = (vmin + vmax) // 2
         print(f"{BOLD}{label}{NC}")
         print(f"  {DIM}{desc}{NC}")
         print(f"  {GREEN}Рекомендуется:{NC} {recommended}  {DIM}(диапазон: {vmin}-{vmax}){NC}")
@@ -961,8 +1017,12 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
     # CPS-параметры (I1-I5)
     print(f"{BOLD}Опциональные параметры (I1-I5) — CPS-цепочки:{NC}")
     print(f"  {DIM}Оставьте пустым (Enter) если не уверены — большинство операторов не требуют.{NC}")
+    print(f"  {DIM}Профили мимикрии: auto quic quic0rtt burst dns tls altsvc dtls12 dtls13 noise http3 sip binary{NC}")
     print()
+    _burst_filled = False
     for key, label, recommended, desc in AWGS_PARAMS_SPEC_HEX:
+        if _burst_filled:
+            break
         print(f"{BOLD}{label}{NC}")
         print(f"  {DIM}{desc}{NC}")
         if recommended == "random":
@@ -972,37 +1032,64 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
         else:
             print(f"  {GREEN}Рекомендуется:{NC} пусто")
         while True:
-            val = input(f"  {CYAN}Значение (Enter=пусто, auto/quic/dns/tls/CPS-цепочка): {NC}").strip()
+            val = input(f"  {CYAN}Значение (Enter=пусто, профиль, fill, CPS-цепочка): {NC}").strip()
             if not val:
                 val = ""
                 break
             _low = val.lower()
-            if _low == "auto":
-                val = awg_i1_mimicry_generate("random")
-                info(f"  Сгенерирован {key}: {val}")
+            # v5.5.5: 'fill' — нейтральная цепочка (та же форма, что
+            # автозаполнение I2-I5 в генераторах 3.1)
+            if _low == "fill":
+                val = _generate_neutral_i_chain()
+                info(f"  Сгенерирована нейтральная цепочка {key}: {val}")
                 break
-            if _low in ("quic", "dns", "tls"):
-                val = awg_i1_mimicry_generate(_low + "_mimicry")
-                info(f"  Сгенерирован {key} (профиль {_low}): {val}")
-                if _low in ("quic", "dns"):
-                    info(f"  Под маскировку {_low.upper()} желательно подходящее "
-                         f"значение AWG-порта (QUIC — 443, DNS — 53)")
+            if _low in AWGS_MIMICRY_SHORTCUTS:
+                _profile = AWGS_MIMICRY_SHORTCUTS[_low]
+                if _profile == "quic_burst":
+                    # full-chain профиль: I1-I5 заполняются «всплеском»
+                    # QUIC-пакетов разного типа (Initial/0-RTT/Handshake/1-RTT)
+                    _chain = awg_i_chain_mimicry_generate("quic_burst")
+                    params["i1"], params["i2"], params["i3"], \
+                        params["i4"], params["i5"] = _chain
+                    info("  Сгенерирован QUIC-всплеск (I1-I5):")
+                    for _ik in ("i1", "i2", "i3", "i4", "i5"):
+                        info(f"    {_ik.upper()} = {params[_ik]}")
+                    _burst_filled = True
+                    break
+                val = awg_i1_mimicry_generate(_profile)
+                info(f"  Сгенерирован {key} (профиль {_profile}): {val}")
+                _port_hint = AWGS_MIMICRY_PORT_HINTS.get(_profile)
+                if _port_hint:
+                    info(f"  Под маскировку желательно значение AWG-порта: {_port_hint}")
                 break
             if not _is_valid_cps_or_legacy_hex(val):
                 warn(f"  Не похоже на CPS-цепочку (<b 0x...>, <t>, <r N>, <rc N>, "
-                     f"<rd N>, <d>, <ds>, <dz N>) и не hex — попробуйте ещё раз")
+                     f"<rd N>) и не hex — попробуйте ещё раз")
                 continue
+            # v5.5.5: наш стандартный деплой — kernel-сервер + go-клиенты;
+            # теги одного движка БЛОКИРУЮТСЯ с переспросом (раньше <c>
+            # только предупреждал — можно было собрать конфиг, который
+            # не подключится ни на одном клиенте-приложении)
             if _cps_has_kernel_only_tags(val):
-                warn(f"  В цепочке есть <c> — тег ТОЛЬКО модуля ядра Linux; "
-                     f"клиентские приложения Amnezia (Android/iOS/Windows/macOS) "
-                     f"отвергнут весь junk-пакет. Продолжаем только для "
-                     f"kernel-module клиентов")
+                warn(f"  <c> — тег ТОЛЬКО модуля ядра Linux; клиентские "
+                     f"приложения Amnezia (Windows/Android/iOS/macOS) "
+                     f"отвергнут весь junk-пакет — подключение не "
+                     f"состоялось бы. Используйте кросс-движковые теги: "
+                     f"<b 0x...>/<t>/<r N>/<rc N>/<rd N>")
+                continue
+            if _cps_has_go_only_tags(val):
+                warn(f"  <d>/<ds>/<dz N> — теги ТОЛЬКО amneziawg-go (и no-op); "
+                     f"серверный модуль ядра amneziawg-tools такой конфиг "
+                     f"не загрузит. Используйте кросс-движковые теги: "
+                     f"<b 0x...>/<t>/<r N>/<rc N>/<rd N>")
+                continue
             if all(c in "0123456789abcdefABCDEF" for c in val) and "<" not in val:
                 warn(f"  Голый hex — формат AWG 1.5; на Keenetic/amneziawg-go "
                      f"может не работать. Рекомендуется CPS-формат, напр. "
                      f"'<r {len(val)//2}>'")
             break
-        params[key] = val
+        if not _burst_filled:
+            params[key] = val
         print()
 
     # AWG 3.1: 9 транспортных директив (v5.5.1 — полный ручной контроль)
@@ -1089,8 +1176,12 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
                      f"{params.get(_k31, '')}")
     _box_bottom()
 
-    # Валидация
-    ok, err = awgs_presets_validate_params(params, protocol_version=protocol_version)
+    # Валидация (v5.5.5: strict_cross_engine — конфиг пойдёт и на
+    # kernel-сервер, и на go-клиентов; одно-движковые теги уже
+    # заблокированы на вводе — здесь защита остальным правилам:
+    # S1+56≠S2, пересечения H, таймерная иерархия 3.1 и т.д.)
+    ok, err = awgs_presets_validate_params(params, protocol_version=protocol_version,
+                                           strict_cross_engine=True)
     if not ok:
         warn(f"Валидация: {err}")
         return None
@@ -2254,9 +2345,12 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
             i1_display = _i1_val[:16] + "..."
         else:
             i1_display = _i1_val
+        # v5.5.5: сколько I-цепочек заполнено (3.1 — все 5 по умолчанию)
+        _i_filled = sum(1 for _k in ("i1", "i2", "i3", "i4", "i5")
+                        if new_params.get(_k))
         msg = (f"Параметры обновлены: Jc={new_params['jc']} "
                f"Jmin={new_params['jmin']} Jmax={new_params['jmax']} "
-               f"I1={i1_display}")
+               f"I1={i1_display} I-цепочек: {_i_filled}/5")
         if awg_is_31(protocol_version):
             msg += " (+ новые HeaderProtectionKey/таймеры AWG 3.1)"
         success(msg)

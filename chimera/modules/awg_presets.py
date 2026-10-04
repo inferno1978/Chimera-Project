@@ -28,6 +28,22 @@ amneziawg-go:
 
 Пакеты отправляются в порядке I1→I2→I3→I4→I5 перед каждым хендшейком; если I1
 не задан — I2-I5 пропускаются тоже (I1 — обязательный якорь для остальных).
+
+v5.5.5 (по итогам сверки с генератором ARCHITECT, Task 31):
+  • для AWG 3.1 генераторы по умолчанию заполняют ВСЕ пять I-цепочек:
+    I2-I5 — нейтральные кросс-движковые CPS-цепочки (awg_generate_i2_i5);
+    для 2.0 прежний контракт сохранён (I2-I5 пустые), i_chain_fill
+    управляет явно;
+  • реестр профилей мимикрии расширен до 13 (AWG_I1_MIMICRY_PROFILES):
+    + QUIC 0-RTT, QUIC Burst (full-chain I1-I5), DTLS 1.2, DTLS 1.3,
+    Noise_IK, HTTP/3 Host (host-база AWG_HTTP3_MIMICRY_HOSTS),
+    TLS+ALPN Alt-Svc, SIP INVITE;
+  • размерные подсказки S1-S4 под мимикрируемый протокол
+    (AWG_I1_MIMICRY_S_HINTS + awg_mimicry_s_hint);
+  • строгий кросс-движковый режим валидатора (strict_cross_engine=True
+    в awgs_presets_validate_params): блокирует <c> (kernel-only) и
+    <d>/<ds>/<dz> (go-only) — человек не может ввести конфиг, который
+    не заработает ни на сервере (kernel), ни на клиентах (go).
 """
 from __future__ import annotations
 
@@ -38,6 +54,7 @@ from typing import Optional
 from .awg_protocol import (
     awg_is_31, awg_normalize_version, awg31_generate_extra_params,
     awg31_validate_extra_params, awg31_merge_into_params, AWG_VERSION_20,
+    AWG_VERSION_31,
 )
 
 
@@ -165,13 +182,24 @@ def awgs_presets_get(name: str) -> Optional[dict]:
     return AWGS_CARRIER_PRESETS.get(name)
 
 
-def awgs_presets_generate(name: str = "default", protocol_version: str = AWG_VERSION_20) -> dict:
+def awgs_presets_generate(name: str = "default",
+                          protocol_version: str = AWG_VERSION_20,
+                          i_chain_fill: Optional[bool] = None) -> dict:
     """
     Генерирует конкретные значения параметров обфускации по пресету.
     Возвращает dict с ключами: jc, jmin, jmax, s1, s2, s3, s4, h1, h2, h3, h4, i1..i5
     (при protocol_version="3.1" — плюс 9 ключей 3.1: header_protection_key,
     content_padding_addition, rekey_*, reject_after_time, keepalive_timeout,
     max_handshake_attempts, random_trailers, disable_cookies).
+
+    i_chain_fill (v5.5.5): заполнение decoy-цепочек I2-I5.
+      None  — авто: 3.1 → заполнять все 5 цепочек (ARCHITECT-parity,
+              нейтральные кросс-движковые цепочки <b>/<r>),
+              2.0 → пустые (прежний контракт байт-в-байт);
+      True  — заполнять в обеих версиях;
+      False — не заполнять ни в одной.
+    Цепочки генерируются только при непустом I1 — движок пропускает
+    I2-I5, если I1 не задан (якорь цепочки).
 
     protocol_version="3.1" (AWG 3.1, v5.5) — диапазоны сужаются до констрейнтов
     GenerateObfuscation31 (как в wpp_awg.py):
@@ -200,8 +228,10 @@ def awgs_presets_generate(name: str = "default", protocol_version: str = AWG_VER
     пресете (подтверждено пользователем zvshka: byte-identical S1-S4/H1-H4
     на разных серверах с Default preset).
 
-    I2-I5 — пустые по умолчанию для пресетного пути (опциональные
-    decoy-пакеты; полный контроль даёт пункт «5. Ручная настройка»).
+    I2-I5 — опциональные decoy-пакеты; полный контроль даёт пункт
+    «5. Ручная настройка».
+    v5.5.5: по умолчанию (i_chain_fill=None) для 3.1 — заполняются все
+    5 цепочек (ARCHITECT-parity), для 2.0 — пустые (прежний контракт).
 
     Каждый вызов (install/rotation) генерирует НОВЫЕ уникальные
     S3/S4/H1-H4 — это явно требуется для «Обновить параметры обфускации»
@@ -245,27 +275,35 @@ def awgs_presets_generate(name: str = "default", protocol_version: str = AWG_VER
     #
     # AWG 3.1: S1/S2 15-150 (S ≥ 12 под HeaderProtectionKey), S3 12-55,
     # S4 12-27 — как в GenerateObfuscation31 (wpp_awg._parameters).
-    if is_31:
-        s1 = random.randint(15, 150)
-        s2 = random.randint(15, 150)
-    else:
-        s1 = random.randint(_FULL_MANUAL_RANGES["s1"][0], _FULL_MANUAL_RANGES["s1"][1])
-        s2 = random.randint(_FULL_MANUAL_RANGES["s2"][0], _FULL_MANUAL_RANGES["s2"][1])
+    #
+    # v5.5.5: если i1_mode пресета — профиль мимикрии с размерной
+    # подсказкой (AWG_I1_MIMICRY_S_HINTS), S1-S4 берутся из подсказки,
+    # клампленной к протокольным пределам версии (ARCHITECT-parity:
+    # junk-пакеты совпадают по размеру с трафиком мимикрируемого
+    # протокола). У существующих пресетов (random/absent/binary)
+    # подсказок нет — поведение не меняется.
+    _s_hint = AWG_I1_MIMICRY_S_HINTS.get(preset["i1_mode"], {})
+    _s1_range = _s_hint_range("s1", _s_hint, is_31) or (
+        (15, 150) if is_31 else _FULL_MANUAL_RANGES["s1"])
+    _s2_range = _s_hint_range("s2", _s_hint, is_31) or (
+        (15, 150) if is_31 else _FULL_MANUAL_RANGES["s2"])
+    s1 = random.randint(*_s1_range)
+    s2 = random.randint(*_s2_range)
     # Правило S1 + 56 != S2 (паттерн, выдающий VPN) — перегенерация при коллизии
     for _attempt in range(10):
         if s1 + 56 != s2:
             break
-        s2 = random.randint(15, 150) if is_31 else random.randint(
-            _FULL_MANUAL_RANGES["s2"][0], _FULL_MANUAL_RANGES["s2"][1])
+        s2 = random.randint(*_s2_range)
 
     # S3, S4 — случайные в общих диапазонах (общегигиенические, не per-preset).
     # Переиспользуем диапазоны из _FULL_MANUAL_RANGES чтобы не дублировать.
-    if is_31:
-        s3 = random.randint(12, 55)
-        s4 = random.randint(12, 27)
-    else:
-        s3 = random.randint(_FULL_MANUAL_RANGES["s3"][0], _FULL_MANUAL_RANGES["s3"][1])
-        s4 = random.randint(_FULL_MANUAL_RANGES["s4"][0], _FULL_MANUAL_RANGES["s4"][1])
+    # v5.5.5: подсказки мимикрии применяются и здесь (кламп к пределам).
+    _s3_range = _s_hint_range("s3", _s_hint, is_31) or (
+        (12, 55) if is_31 else _FULL_MANUAL_RANGES["s3"])
+    _s4_range = _s_hint_range("s4", _s_hint, is_31) or (
+        (12, 27) if is_31 else _FULL_MANUAL_RANGES["s4"])
+    s3 = random.randint(*_s3_range)
+    s4 = random.randint(*_s4_range)
 
     # H1-H4 — непересекающиеся случайные значения (см. комментарий выше).
     # AWG 3.1: одиночные int в бандах от 5 (GenerateObfuscation31-стиль),
@@ -323,8 +361,16 @@ def awgs_presets_generate(name: str = "default", protocol_version: str = AWG_VER
     else:  # absent (только 2.0)
         i1 = ""
 
-    # I2-I5 — пустые (опциональные decoy-пакеты)
-    i2 = i3 = i4 = i5 = ""
+    # I2-I5 — опциональные decoy-пакеты (v5.5.5 — см. сигнатуру).
+    # Заполняются только при непустом I1 (якорь цепочки: движок
+    # пропускает I2-I5, если I1 не задан).
+    if i_chain_fill is None:
+        i_chain_fill = is_31
+    if i_chain_fill and i1:
+        _i25 = awg_generate_i2_i5()
+        i2, i3, i4, i5 = _i25["i2"], _i25["i3"], _i25["i4"], _i25["i5"]
+    else:
+        i2 = i3 = i4 = i5 = ""
 
     params = {
         "jc":   jc,
@@ -386,7 +432,9 @@ def _generate_non_overlapping_h_values_31():
     return tuple(out)
 
 
-def awgs_presets_validate_params(params: dict, protocol_version: str = AWG_VERSION_20) -> tuple[bool, str]:
+def awgs_presets_validate_params(params: dict,
+                                 protocol_version: str = AWG_VERSION_20,
+                                 strict_cross_engine: bool = False) -> tuple[bool, str]:
     """
     Валидирует параметры обфускации.
     Возвращает (ok, error_message).
@@ -398,6 +446,17 @@ def awgs_presets_validate_params(params: dict, protocol_version: str = AWG_VERSI
     (HeaderProtectionKey/ContentPaddingAddition/Rekey*/...) через
     awg_protocol.awg31_validate_extra_params, S1-S4 ≥ 12, Jmax ≤ 339,
     I1 — строго «<r N>» (GenerateObfuscation31-констрейнты; см. wpp_awg).
+
+    strict_cross_engine=True (v5.5.5): конфиг пойдёт ОДНОВРЕМЕННО на
+    kernel-сервер (amneziawg-tools) и go-клиентов (amneziawg-go —
+    Windows/Android/iOS/macOS) → в I1-I5 допустимы только теги
+    пересечения движков <b>/<t>/<r>/<rc>/<rd>. Блокируются:
+      <c>           — kernel-only (клиентские приложения отвергают
+                      весь junk-пакет);
+      <d>/<ds>/<dz> — go-only no-op (kernel-сервер не загрузит конфиг).
+    Включается там, где параметры вводит человек (awgs_prompt_custom_params):
+    «накрутить» нерабочий конфиг невозможно. Для импорта внешних конфигов
+    (ARCHITECT/3x-ui) оставлен мягкий режим по умолчанию (False).
     """
     from .awg_constants import (
         AWGS_JC_MIN, AWGS_JC_MAX, AWGS_JMIN_MAX, AWGS_JMAX_MAX,
@@ -513,6 +572,21 @@ def awgs_presets_validate_params(params: dict, protocol_version: str = AWG_VERSI
                           f"(+ <c> — только kernel-module), либо голый hex "
                           f"(AWG 1.5). "
                           f"Фактически: {v[:64]}{'...' if len(v) > 64 else ''}")
+        # v5.5.5 — строгий кросс-движковый режим (см. докстринг функции).
+        if strict_cross_engine and v:
+            if _cps_has_kernel_only_tags(v):
+                return False, (f"{key.upper()}: тег <c> поддерживается только "
+                               f"модулем ядра Linux — клиентские приложения "
+                               f"Amnezia (Windows/Android/iOS/macOS) отвергают "
+                               f"весь junk-пакет, подключение не состоится. "
+                               f"Кросс-движковые замены: <b 0x...>/<r N>")
+            if _cps_has_go_only_tags(v):
+                return False, (f"{key.upper()}: теги <d>/<ds>/<dz N> есть "
+                               f"только в amneziawg-go (и являются no-op) — "
+                               f"серверный модуль ядра amneziawg-tools "
+                               f"отвергнет конфиг при загрузке. "
+                               f"Кросс-движковые теги: <b 0x...>/<t>/"
+                               f"<r N>/<rc N>/<rd N>")
 
     # H1-H4: диапазоны/значения НЕ должны пересекаться между собой —
     # получатель классифицирует пакет по попаданию 4 байт в СВОЙ диапазон
@@ -848,6 +922,24 @@ def _generate_non_overlapping_h_values() -> tuple:
 # валидны только для kernel-module клиентов. Для предупреждений в UI.
 CPS_KERNEL_ONLY_TAGS: tuple = ("<c>",)
 
+# Теги, которых НЕТ в модуле ядра amneziawg-tools — парсятся только
+# amneziawg-go (клиентские приложения). В текущем релизе это НООП-теги
+# (I-цепочки не несут полезной нагрузки; задел под AWG 4.0 — DI/DR/DC/DT).
+# Конфиг с такими тегами НЕ ЗАГРУЗИТСЯ на kernel-сервере → блокируются
+# строгим валидатором (strict_cross_engine=True) и интерактивным вводом.
+CPS_GO_ONLY_TAGS: tuple = ("<d>", "<ds>", "<dz")
+_CPS_GO_ONLY_RE = re.compile(r"<d(?:s|z\s*\d*)?>")
+
+
+def _cps_has_go_only_tags(value: str) -> bool:
+    """True если в I-цепочке есть go-only тег <d>/<ds>/<dz N>.
+
+    amneziawg-go парсит и молча игнорирует их (no-op), а модуль ядра
+    amneziawg-tools (все серверы Chimera) отвергает конфиг при загрузке
+    (unknown tag) — тупик для связки kernel-сервер + go-клиент.
+    """
+    return isinstance(value, str) and bool(_CPS_GO_ONLY_RE.search(value))
+
 # Теги с обязательным целочисленным аргументом N (obf_rand.go и др.:
 # strconv.Atoi(val) — пустой/нечисловой аргумент = ошибка сборки тега).
 _CPS_INT_ARG_TAGS: frozenset = frozenset(("r", "rc", "rd", "dz"))
@@ -947,6 +1039,56 @@ def _is_valid_cps_or_legacy_hex(value: str) -> bool:
     return False
 
 
+# ── I2-I5: нейтральное автозаполнение decoy-цепочек (v5.5.5) ─────────
+# До v5.5.5 заполнялся только I1 (I2-I5 — пустые). Сверка с генератором
+# ARCHITECT (Task 31) показала: официальный wiki-рекомендованный
+# генератор заполняет все 5 цепочек — junk-передача перед handshake
+# становится длиннее и разнообразнее по энтропийному профилю флоу.
+# Нейтральные цепочки используют ТОЛЬКО кросс-движковые теги <b>/<r>
+# в трёх формах:
+#   <r N>              — чистая энтропия
+#   <b 0xHEX><r N>     — статичный префикс + энтропия
+#   <r N><b 0xHEX>     — энтропия + статичный хвост
+# I2-I5 короче I1 (16-96 байт против 32-256): суммарный junk-объём
+# остаётся умеренным, задержка handshake не растёт заметно.
+I_CHAIN_FILL_SIZES: tuple = ((16, 48), (24, 64), (16, 72), (20, 96))  # I2..I5
+
+
+def _generate_neutral_i_chain(rng: Optional[random.Random] = None,
+                              lo: int = 16, hi: int = 96) -> str:
+    """Одна нейтральная кросс-движковая CPS-цепочка для I2-I5.
+
+    Форма цепочки выбирается случайно из трёх (см. блок констант выше),
+    длина — в [lo, hi]. Совместима и с kernel (amneziawg-tools), и с
+    amneziawg-go (клиентские приложения Amnezia).
+    """
+    r = rng or random
+    n = r.randint(lo, hi)
+    shape = r.randint(0, 2)
+    if shape == 0:
+        return f"<r {n}>"
+    blob = "".join(r.choices("0123456789abcdef", k=r.choice((2, 4, 6, 8)) * 2))
+    if shape == 1:
+        return f"<b 0x{blob}><r {n}>"
+    return f"<r {n}><b 0x{blob}>"
+
+
+def awg_generate_i2_i5(rng: Optional[random.Random] = None) -> dict:
+    """Нейтральные CPS-цепочки I2-I5 (общий генератор всех AWG-миров).
+
+    Возвращает {"i2": ..., "i3": ..., "i4": ..., "i5": ...} — четыре
+    различающиеся по форме/размеру цепочки; валидны для обоих движков
+    (kernel amneziawg-tools + amneziawg-go). Диапазоны длин — из
+    I_CHAIN_FILL_SIZES (I2..I5 соответственно).
+    """
+    r = rng or random
+    out = {}
+    for idx, key in enumerate(("i2", "i3", "i4", "i5")):
+        lo, hi = I_CHAIN_FILL_SIZES[idx]
+        out[key] = _generate_neutral_i_chain(r, lo, hi)
+    return out
+
+
 def _generate_quic_mimicry_i1() -> str:
     """Генерирует I1 в формате QUIC Initial packet mimicry.
 
@@ -1020,20 +1162,194 @@ def _generate_tls_mimicry_i1() -> str:
             "<r 32>")
 
 
+def _generate_quic_0rtt_i1() -> str:
+    """Генерирует I1 в формате QUIC v1 0-RTT packet (RFC 9000 §17.3.2).
+
+    Тот же каркас, что и у Initial (версия 0x00000001, DCID/SCID,
+    токен-зона, timestamp), но первый байт 0xd3 = 1101_0011:
+      1 = long header, 1 = fixed bit, 01 = packet type 0-RTT,
+      00 = reserved, 11 = packet number length.
+    SCID длиннее (16 байт) — размерный профиль 0-RTT отличается от
+    Initial; рантайм-уникальность дают <r>/<t>. Порт — 443 (QUIC).
+    """
+    return "<b 0xd30000000108><r 8><b 0x10><r 16><b 0x0045dc><t><r 16>"
+
+
+def _generate_dtls12_i1() -> str:
+    """Генерирует I1 в формате DTLS 1.2 записи handshake (RFC 6347).
+
+    Структура записи: ContentType=0x16 (handshake) + version 0xfefd
+    (DTLS 1.2) + epoch (2 байта, случайные) + sequence_number
+    (6 байт, случайные) + length + тело. Поле length самосогласовано:
+    0x0033 = 51 = фактический размер тела (1 байт handshake-типа 0x01
+    + 50 случайных байт) — глубокий DTLS-парсер увидит корректную
+    запись. Типичный размер фрагмента DTLS ClientHello.
+    """
+    return "<b 0x16fefd><r 2><r 6><b 0x0033><b 0x01><r 50>"
+
+
+def _generate_dtls13_i1() -> str:
+    """Генерирует I1 в формате DTLS 1.3 unified header (RFC 9147).
+
+    Первый байт 0x2f = 0010_1111 — диапазон 0x20-0x3f, в котором
+    начинаются реальные DTLS 1.3-записи (WebRTC и др.); далее —
+    sequence_number (2 байта), packet_number (2 байта) и length
+    0x0018 = 24 = размер зашифрованного тела (<r 24>). Малый размер —
+    типичен для 1-RTT-записей DTLS 1.3.
+    """
+    return "<b 0x2f><r 2><r 2><b 0x0018><r 24>"
+
+
+def _generate_noise_ik_i1() -> str:
+    """Генерирует I1 — размерный профиль Noise_IK initiation.
+
+    У Noise-протоколов (Noise Framework) нет фиксированного magic-
+    заголовка, поэтому профиль чисто размерный (как у реальных
+    WireGuard-подобных реализаций ~148 байт):
+      <r 4>   — sender index
+      <r 32>  — ephemeral public key
+      <r 48>  — encrypted static key (Noise_IK шифрует статику сразу)
+      <t>     — anti-replay timestamp (unix)
+      <r 24>  — MAC1/MAC2-хвост
+    """
+    return "<r 4><r 32><r 48><t><r 24>"
+
+
+def _generate_tls_altsvc_i1() -> str:
+    """Генерирует I1 — TLS ClientHello с ALPN h2 (профиль HTTP/3 Alt-Svc).
+
+    Как tls_mimicry (RFC 8446), но в хвосте — расширение ALPN
+    (RFC 7301): type 0x0010, length 0x0003, "h2" (0x02 0x68 0x32).
+    Это профиль сайта, который анонсирует QUIC Alt-Svc: DPI-видимая
+    часть — обычный ClientHello с ALPN, как у любого крупного сайта с
+    HTTP/3. Порт — 443 (TLS).
+    """
+    return ("<b 0x160301>"
+            "<r 2>"
+            "<b 0x01>"
+            "<r 3>"
+            "<b 0x0303>"
+            "<r 32>"
+            "<b 0x20>"
+            "<r 32>"
+            "<b 0x00100003026832>")
+
+
+# ── Host-база HTTP/3-мимикрии (v5.5.5, ARCHITECT-parity) ────────────
+# Популярные хосты, чей H3/QUIC-трафик массово встречается в РФ-сегменте:
+# SNI такого хоста внутри I1-цепочки статистически неотличим от легитимных
+# повторных заходов на тот же сайт. Хост кодируется в DNS-wire формате
+# (len-байт + метка + завершающий 0x00) — как SNI в TLS/QUIC ClientHello.
+AWG_HTTP3_MIMICRY_HOSTS: tuple = (
+    "www.google.com", "www.youtube.com", "www.googleapis.com",
+    "fonts.googleapis.com", "facebook.com", "www.instagram.com",
+    "x.com", "api.x.com", "discord.com", "discord.gg",
+    "t.me", "web.telegram.org", "openai.com", "api.openai.com",
+    "www.wikipedia.org", "ru.wikipedia.org", "github.com",
+    "api.github.com", "store.steampowered.com", "api.twitch.tv",
+    "www.reddit.com", "www.netflix.com", "spotify.com", "cloudflare.com",
+)
+
+
+def _dns_wire_host_hex(host: str) -> str:
+    """Кодирует hostname в DNS-wire hex (метки с len-байтами + 0x00)."""
+    return "".join("%02x%s" % (len(part), part.encode("ascii").hex())
+                   for part in host.split(".")) + "00"
+
+
+def _generate_http3_host_i1() -> str:
+    """Генерирует I1 — HTTP/3 QUIC Initial с SNI-хостом из host-базы.
+
+    Поверх QUIC Initial-заголовка (как quic_mimicry) — видимая часть
+    ClientHello с SNI: случайный хост из AWG_HTTP3_MIMICRY_HOSTS в
+    DNS-wire кодировке (статичен в пределах конфигурации — как
+    повторные заходы на один сайт), рантайм-уникальность дают <r>/<t>.
+    Порт — 443 (HTTP/3 = QUIC).
+    """
+    host = random.choice(AWG_HTTP3_MIMICRY_HOSTS)
+    sni_hex = _dns_wire_host_hex(host)
+    return ("<b 0xc30000000108><r 8><b 0x08><r 8><b 0x0045dc>"
+            f"<t><b 0x{sni_hex}><r 16>")
+
+
+def _generate_sip_i1() -> str:
+    """Генерирует I1 — SIP INVITE поверх UDP (RFC 3261), ASCII-профиль.
+
+    Стартовая строка и Via-заголовок — реальные байты SIP (ASCII),
+    динамические поля — тегами: пользователь/домен — <rc N> (буквы,
+    как у реальных UA), порт — <rd N> (цифры), branch-токен — <rd>+<r>.
+    Текстовые UDP-флоу встречаются у VoIP-шлюзов и WebRTC-инфраструктуры;
+    порт — 5060 (SIP).
+    """
+    return ("<b 0x494e56495445207369703a>"        # "INVITE sip:"
+            "<rc 8><b 0x40><rc 10>"               # user @ domain
+            "<b 0x205349502f322e300d0a>"          # " SIP/2.0\r\n"
+            "<b 0x5669613a205349502f322e302f5544502031302e302e302e313a>"
+                                                  # "Via: SIP/2.0/UDP 10.0.0.1:"
+            "<rd 5>"                              # порт (цифры)
+            "<b 0x0d0a3b62>"                      # "\r\n;b" (branch)
+            "<rd 10><r 8>")                       # branch-токен + хвост
+
+
+def _generate_quic_burst_chain() -> tuple:
+    """QUIC burst — полный набор I1-I5 из QUIC-пакетов разных типов.
+
+    Реальный QUIC-handshake — ПАКЕТНЫЙ ВСПЛЕСК (Initial → 0-RTT →
+    Handshake подряд, затем 1-RTT-датаграммы). Профиль заполняет ВСЕ
+    пять I-цепочек: I1 Initial (0xc3), I2 0-RTT (0xd3), I3 Handshake
+    (0xe3 = long header type 10), I4/I5 — короткие 1-RTT protected
+    пакеты (short header 0x40-0x7f: 0x43/0x5f). Единственный профиль,
+    чей генератор возвращает кортеж из 5 цепочек (см.
+    awg_i_chain_mimicry_generate). Порт — 443 (QUIC).
+    """
+    initial = _generate_quic_mimicry_i1()
+    zero_rtt = _generate_quic_0rtt_i1()
+    handshake = "<b 0xe30000000108><r 8><b 0x08><r 8><b 0x0045dc><t><r 12>"
+    protected1 = "<b 0x43><r 28>"   # 0x43 = 0100_0011: short header, pn len 3
+    protected2 = "<b 0x5f><r 20>"   # 0x5f = 0101_1111: short header вариация
+    return (initial, zero_rtt, handshake, protected1, protected2)
+
+
 # ── Реестр профилей мимикрии I1 (доступны и 2.0, и 3.1) ─────────────
 # Регистр имён — как в i1_mode пресетов + новые режимы. Все профили
-# используют ТОЛЬКО go-совместимые теги (<b>/<r>/<rc>/<t>) — без <c>
-# (kernel-only) и без no-op <d>/<ds>/<dz> (в текущем релизе amneziawg-go
-# I-цепочки зовутся с пустой полезной нагрузкой — они ничего не дают).
+# используют ТОЛЬКО кросс-движковые теги (<b>/<r>/<rc>/<rd>/<t>) — без <c>
+# (kernel-only) и без no-op <d>/<ds>/<dz> (go-only): и сервер (kernel
+# amneziawg-tools), и клиенты (amneziawg-go) обязаны понимать каждую
+# цепочку.
+#
+# v5.5.5: реестр расширен до 13 профилей (сверка с ARCHITECT, Task 31).
+# Генератор профиля возвращает ЛИБО строку (только I1), ЛИБО кортеж из
+# 5 цепочек (full-chain профили — сейчас quic_burst, заполняет весь
+# набор I1-I5 «всплеском» пакетов мимикрируемого протокола).
 AWG_I1_MIMICRY_PROFILES: dict = {
     "random":       ("Случайные байты (нейтральная энтропия)",
                      lambda: f"<r {random.randint(32, 256)}>", "2.0+3.1"),
     "quic_mimicry": ("Мимикрия под QUIC v1 Initial (RFC 9000), порт 443",
                      _generate_quic_mimicry_i1, "2.0+3.1"),
+    "quic_0rtt":    ("Мимикрия под QUIC v1 0-RTT (RFC 9000 §17.3.2), порт 443",
+                     _generate_quic_0rtt_i1, "2.0+3.1"),
+    "quic_burst":   ("QUIC-всплеск: I1-I5 = Initial/0-RTT/Handshake/1-RTT "
+                     "пакеты подряд (как реальный QUIC handshake), порт 443",
+                     _generate_quic_burst_chain, "2.0+3.1"),
     "dns_mimicry":  ("Мимикрия под DNS-запрос A (RFC 1035), порт 53",
                      _generate_dns_mimicry_i1, "2.0+3.1"),
-    "tls_mimicry":  ("Мимикрия под TLS ClientHello (RFC 8446)",
+    "tls_mimicry":  ("Мимикрия под TLS ClientHello (RFC 8446), порт 443",
                      _generate_tls_mimicry_i1, "2.0+3.1"),
+    "tls_altsvc":   ("TLS ClientHello + ALPN h2 (RFC 7301) — профиль сайта "
+                     "с HTTP/3 Alt-Svc, порт 443",
+                     _generate_tls_altsvc_i1, "2.0+3.1"),
+    "dtls12":       ("DTLS 1.2 запись handshake (RFC 6347), порт 443",
+                     _generate_dtls12_i1, "2.0+3.1"),
+    "dtls13":       ("DTLS 1.3 unified header (RFC 9147), порт 443",
+                     _generate_dtls13_i1, "2.0+3.1"),
+    "noise_ik":     ("Noise_IK initiation — размерный профиль Noise-фреймворка "
+                     "(WireGuard-подобные, ~148B)",
+                     _generate_noise_ik_i1, "2.0+3.1"),
+    "http3_host":   ("HTTP/3: QUIC Initial с SNI-хостом из базы "
+                     "AWG_HTTP3_MIMICRY_HOSTS, порт 443",
+                     _generate_http3_host_i1, "2.0+3.1"),
+    "sip":          ("SIP INVITE поверх UDP (RFC 3261), порт 5060",
+                     _generate_sip_i1, "2.0+3.1"),
     "binary":       ("Статичный blob <b 0x...>",
                      lambda: "<b 0x%s>" % "".join(random.choices(
                          "0123456789abcdef", k=32)), "2.0+3.1"),
@@ -1044,11 +1360,100 @@ def awg_i1_mimicry_generate(mode: str) -> str:
     """Генерирует I1 по имени профиля мимикрии (см. AWG_I1_MIMICRY_PROFILES).
 
     Неизвестный режим → нейтральный <r N> (безопасен для всех клиентов).
+    Для full-chain профилей (генератор возвращает кортеж) берётся первый
+    элемент — I1 (полный набор даёт awg_i_chain_mimicry_generate).
     """
     entry = AWG_I1_MIMICRY_PROFILES.get(mode)
     if not entry:
         return f"<r {random.randint(32, 256)}>"
-    return entry[1]()
+    value = entry[1]()
+    if isinstance(value, tuple):
+        return value[0]
+    return value
+
+
+def awg_i_chain_mimicry_generate(mode: str) -> tuple:
+    """Полный набор I1-I5 по профилю мимикрии (v5.5.5).
+
+    Возвращает кортеж из 5 строк (i1..i5):
+      • full-chain профили (quic_burst) — все пять цепочек «всплеском»;
+      • обычные профили — (i1, "", "", "", "") — только I1;
+      • неизвестный режим — нейтральный <r N> в I1, остальные пустые.
+    """
+    entry = AWG_I1_MIMICRY_PROFILES.get(mode)
+    if not entry:
+        return (f"<r {random.randint(32, 256)}>", "", "", "", "")
+    value = entry[1]()
+    if isinstance(value, tuple):
+        return tuple(value) + ("",) * (5 - len(value))
+    return (value, "", "", "", "")
+
+
+# ── Размерные подсказки S1-S4 под мимикрируемые протоколы (v5.5.5) ────
+# S1/S2 — junk-пакеты фаз init/response, S3/S4 — under-load/transport:
+# подгонка под типичные размеры пакетов мимикрируемого протокола даёт
+# совпадение размерного профиля флоу с легитимным трафиком
+# (ARCHITECT-parity, Task 31-гэп №4). Для 3.1 значения клампятся к
+# констрейнтам GenerateObfuscation31 (S1/S2 15-150, S3 12-55, S4 12-27):
+# полный размерный диапазон (напр. QUIC Initial ≥ 1200) достижим только
+# в 2.0; в 3.1 размер добирают ContentPaddingAddition + RandomTrailers.
+AWG_I1_MIMICRY_S_HINTS: dict = {
+    #                      S1 (init)        S2 (response)    S3 (load)      S4 (transp)
+    "quic_mimicry":   {"s1": (1150, 1250), "s2": (1100, 1200), "s3": (55, 64), "s4": (27, 32)},
+    "quic_0rtt":      {"s1": (1100, 1230), "s2": (1150, 1250), "s3": (55, 64), "s4": (27, 32)},
+    "quic_burst":     {"s1": (1150, 1250), "s2": (1100, 1200), "s3": (55, 64), "s4": (27, 32)},
+    "dns_mimicry":    {"s1": (30, 80),     "s2": (60, 120),   "s3": (12, 40), "s4": (12, 27)},
+    "tls_mimicry":    {"s1": (250, 500),   "s2": (60, 120),   "s3": (30, 64), "s4": (20, 32)},
+    "tls_altsvc":     {"s1": (250, 517),   "s2": (60, 120),   "s3": (30, 64), "s4": (20, 32)},
+    "dtls12":         {"s1": (200, 400),   "s2": (80, 200),   "s3": (30, 64), "s4": (20, 32)},
+    "dtls13":         {"s1": (80, 200),    "s2": (60, 160),   "s3": (24, 55), "s4": (16, 27)},
+    "noise_ik":       {"s1": (130, 160),   "s2": (92, 130),   "s3": (12, 55), "s4": (12, 27)},
+    "http3_host":     {"s1": (1150, 1250), "s2": (1100, 1200), "s3": (55, 64), "s4": (27, 32)},
+    "sip":            {"s1": (300, 600),   "s2": (200, 400),  "s3": (40, 64), "s4": (20, 32)},
+}
+
+
+# Протокольные пределы S-параметров по версиям (для клампа подсказок).
+_AWG_S_LIMITS: dict = {
+    AWG_VERSION_20: {"s1": (0, 1280), "s2": (0, 1280), "s3": (0, 64), "s4": (0, 32)},
+    AWG_VERSION_31: {"s1": (15, 150), "s2": (15, 150), "s3": (12, 55), "s4": (12, 27)},
+}
+
+
+def _s_hint_range(key: str, hint: Optional[dict], is_31: bool) -> Optional[tuple]:
+    """Диапазон S-параметра с учётом подсказки профиля мимикрии.
+
+    Возвращает (lo, hi) или None (подсказки нет — использовать базовый
+    диапазон генератора). Подсказка клампится к протокольным пределам
+    версии: 3.1 — GenerateObfuscation31 (S1/S2 15-150, S3 12-55,
+    S4 12-27), 2.0 — общие пределы валидатора (S1/S2 0-1280, S3 0-64,
+    S4 0-32). Гарантирует lo <= hi даже после клампа (одно-точечный
+    диапазон (150,150) для QUIC-подсказки в 3.1 — корректен).
+    """
+    h = (hint or {}).get(key)
+    if not h:
+        return None
+    lo_lim, hi_lim = _AWG_S_LIMITS[AWG_VERSION_31 if is_31 else AWG_VERSION_20][key]
+    lo = max(lo_lim, min(h[0], hi_lim))
+    hi = max(lo, min(h[1], hi_lim))
+    return lo, hi
+
+
+def awg_mimicry_s_hint(mode: str, protocol_version: str = AWG_VERSION_20) -> dict:
+    """S1-S4 подсказки профиля мимикрии (v5.5.5), клампленные под версию.
+
+    Возвращает {"s1": (lo, hi), ...} — только ключи с подсказкой
+    (random/binary → {}). Используется генераторами (awgs_presets_
+    generate при i1_mode=профиль) и UI-подсказками при ручном вводе.
+    """
+    hint = AWG_I1_MIMICRY_S_HINTS.get(mode) or {}
+    is_31 = awg_is_31(protocol_version)
+    out = {}
+    for key in ("s1", "s2", "s3", "s4"):
+        r = _s_hint_range(key, hint, is_31)
+        if r:
+            out[key] = r
+    return out
 
 
 # Рекомендованные диапазоны для авто-генерации (взяты из спеки AWG 2.0
@@ -1069,7 +1474,8 @@ _FULL_MANUAL_RANGES: dict = {
 
 
 def awgs_generate_full_manual_params(overrides: dict | None = None,
-                                     protocol_version: str = AWG_VERSION_20) -> dict:
+                                     protocol_version: str = AWG_VERSION_20,
+                                     i_chain_fill: bool | None = None) -> dict:
     """Генерирует ПОЛНЫЙ набор параметров AWG (все 16: Jc/Jmin/Jmax/
     S1-S4/H1-H4/I1-I5 — а при protocol_version="3.1" плюс 9 транспортных
     параметров 3.1) со случайными значениями в рекомендованных
@@ -1080,6 +1486,11 @@ def awgs_generate_full_manual_params(overrides: dict | None = None,
     + HeaderProtectionKey/ContentPaddingAddition/Rekey*/RejectAfterTime/
     KeepaliveTimeout/MaxHandshakeAttempts/RandomTrailers/DisableCookies
     (констрейнты GenerateObfuscation31, см. awg_protocol).
+
+    i_chain_fill (v5.5.5): как в awgs_presets_generate — None = авто
+    (3.1: заполнять I2-I5 нейтральными цепочками, 2.0: пустые),
+    True/False — явное управление. Override пользователя по i2-i5
+    имеет приоритет в любой версии.
 
     overrides — словарь с значениями, явно введёнными пользователем
     интерактивно (см. awgs_prompt_custom_params в awg_standalone.py).
@@ -1096,9 +1507,10 @@ def awgs_generate_full_manual_params(overrides: dict | None = None,
     I1 — CPS tag-строка формата AWG 2.0 (``<r N>`` по умолчанию,
     24-32 случайных байт). v5.1: раньше генерировался голый hex (AWG 1.5),
     но он ломает некоторых клиентов (Keenetic native AWG 2.0, amneziawg-go).
-    Override принимается as-is — если пользователь явно ввёл ``<b 0x...>``
-    или голый hex, валидатор оба примет (см. _is_valid_cps_or_legacy_hex).
-    I2-I5 — по умолчанию пустые, но принимают override.
+    Override принимается as-is (через _is_valid_cps_or_legacy_hex проходит
+    и CPS, и legacy hex).
+    I2-I5 — по умолчанию: 3.1 → нейтральные автозаполненные цепочки,
+    2.0 → пустые; override принимается в обеих версиях (v5.5.5).
 
     Правило совместимости S1 + 56 != S2 проверяется при генерации —
     если случайно совпало (padded init и padded response совпадут по
@@ -1230,11 +1642,21 @@ def awgs_generate_full_manual_params(overrides: dict | None = None,
         i1_size = random.randint(24, 32)
         i1 = f"<r {i1_size}>"
 
-    # ── I2-I5 — по умолчанию пустые, но принимают override ────────────────
-    i2 = str(overrides["i2"]) if "i2" in overrides and overrides["i2"] else ""
-    i3 = str(overrides["i3"]) if "i3" in overrides and overrides["i3"] else ""
-    i4 = str(overrides["i4"]) if "i4" in overrides and overrides["i4"] else ""
-    i5 = str(overrides["i5"]) if "i5" in overrides and overrides["i5"] else ""
+    # ── I2-I5 — override > автозаполнение > пустые (v5.5.5) ─────────────
+    # Явный override пользователя (в т.ч. пустая строка = «без пакета»)
+    # имеет приоритет; при отсутствии override — автозаполнение
+    # нейтральными цепочками (3.1 по умолчанию, см. i_chain_fill).
+    if i_chain_fill is None:
+        i_chain_fill = is_31
+    _i25_defaults = awg_generate_i2_i5() if i_chain_fill else {}
+    i2 = str(overrides["i2"]) if "i2" in overrides and overrides["i2"] \
+        else _i25_defaults.get("i2", "")
+    i3 = str(overrides["i3"]) if "i3" in overrides and overrides["i3"] \
+        else _i25_defaults.get("i3", "")
+    i4 = str(overrides["i4"]) if "i4" in overrides and overrides["i4"] \
+        else _i25_defaults.get("i4", "")
+    i5 = str(overrides["i5"]) if "i5" in overrides and overrides["i5"] \
+        else _i25_defaults.get("i5", "")
 
     params = {
         "jc":   jc,

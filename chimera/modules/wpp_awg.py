@@ -87,6 +87,25 @@ def _allocate_network(users):
     raise RuntimeError("No free AWG address block is available")
 
 
+def _i_chain_field(rng):
+    """Neutral cross-engine CPS chain (<b>/<r> only) for the I2-I5 decoys.
+
+    Mirrors awg_presets.awg_generate_i2_i5 shapes (v5.5.5); kept local
+    to preserve the self-contained WPP module (no chimera imports).
+    Three forms: <r N>, <b 0xHEX><r N>, <r N><b 0xHEX> — valid for both
+    the kernel module (amneziawg-tools) and amneziawg-go clients.
+    """
+    n = rng.randint(16, 96)
+    shape = rng.randint(0, 2)
+    blob = "".join(rng.choice("0123456789abcdef")
+                   for _ in range(rng.choice((2, 4, 6, 8)) * 2))
+    if shape == 0:
+        return "<r %d>" % n
+    if shape == 1:
+        return "<b 0x%s><r %d>" % (blob, n)
+    return "<r %d><b 0x%s>" % (n, blob)
+
+
 def _parameters(protocol):
     rng = secrets.SystemRandom()
     # Match the constraints used by 3x-ui 3.8.5's GenerateObfuscation31.
@@ -120,8 +139,14 @@ def _parameters(protocol):
         timeout_low = rng.randint(3, 6)
         keepalive_low = rng.randint(8, 12)
         attempts_low = rng.randint(15, 25)
+        # v5.5.5: I2-I5 filled with neutral cross-engine decoy chains
+        # (ARCHITECT-parity, see awg_presets.awg_generate_i2_i5).
         values.update({
             "I1": "<r %d>" % rng.randint(32, 256),
+            "I2": _i_chain_field(rng),
+            "I3": _i_chain_field(rng),
+            "I4": _i_chain_field(rng),
+            "I5": _i_chain_field(rng),
             "HeaderProtectionKey": _key(),
             "ContentPaddingAddition": "%d-%d" % (cp_low, cp_low + rng.randint(8, 40)),
             "RekeyAfterTime": "%d-%d" % (rekey_low, rekey_high),
