@@ -785,5 +785,79 @@ class TestPublicContract(unittest.TestCase):
             self.assertTrue(callable(getattr(bm, fn)), fn)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  TUI-меню (регрессия v5.5.7): AttributeError '_box_kv' — b4_monitor звал
+#  ytb._box_kv, которого youtube_b4 не реэкспортировал (kv был только
+#  локальным хелпером mieru/vk_bypass_menu/slipgate/wdtt); меню падало на
+#  первой же строке «Сервис:» после отрисовки шапки.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestMonitorMenuSmoke(unittest.TestCase):
+    """do_b4_monitor_menu отрисовывается и выходит по Q без падений."""
+
+    _MX_FULL = {
+        "installed": True,
+        "monitor": {"installed": True, "interval": 5, "timer_active": True},
+        "service": True, "version": "1.2.3", "preset": "default",
+        "sets": ["youtube"],
+        "probe": {"healthy": True, "ttfb_ema": 342.7, "fail_streak": 0},
+        "queue": {"counters": {"out443": {"pkts": 681, "bytes": 1000000}},
+                  "rates": {"out443": 42}},
+        "exempt": {"applicable": True, "entries": 293},
+        "policy": {"restart": True, "discovery": True, "presets": True},
+        "actions": [{"ts": 1759500000, "type": "preset",
+                     "detail": "default -> aggressive"}],
+    }
+
+    def _run_menu(self, mx):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with patch.object(bm, "matrix", return_value=mx), \
+             patch("builtins.input", return_value="q"), \
+             patch("os.system", return_value=0), \
+             redirect_stdout(buf):
+            bm.do_b4_monitor_menu()  # регрессия: здесь падало AttributeError
+        return buf.getvalue()
+
+    def test_menu_full_path_no_crash(self):
+        out = self._run_menu(dict(self._MX_FULL))
+        self.assertIn("МОНИТОРИНГ B4", out)
+        self.assertIn("Сервис:", out)
+        self.assertIn("Пресет:", out)
+        self.assertIn("Политика:", out)
+
+    def test_menu_not_installed_path(self):
+        mx = {"installed": False,
+              "monitor": {"installed": False, "interval": 0,
+                          "timer_active": False}}
+        out = self._run_menu(mx)
+        self.assertIn("МОНИТОРИНГ B4", out)
+        self.assertIn("не установлен", out)
+
+    def test_ytb_exports_full_box_set(self):
+        """youtube_b4 обязан реэкспортировать весь box-набор, который
+        дергает b4_monitor (box = ytb) — иначе меню падает в рантайме."""
+        from chimera.modules import youtube_b4 as ytb
+        for fn in ("_box_top", "_box_row", "_box_sep", "_box_bottom",
+                   "_box_item", "_box_back", "_box_warn", "_box_ok",
+                   "_box_kv"):
+            self.assertTrue(hasattr(ytb, fn), fn)
+
+    def test_box_kv_alignment(self):
+        """Канон mieru: отступ 2, ключ дополняется до kw=22, +2 до значения."""
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import box_renderer as br
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            br._box_kv("Сервис:", "active")
+        vis = br._plain(buf.getvalue())
+        i_key = vis.index("Сервис:")
+        i_val = vis.index("active")
+        # конец ключа → начало значения: (22 - 7) колонок паддинга + 2
+        self.assertEqual(i_val - (i_key + len("Сервис:")), 15 + 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
