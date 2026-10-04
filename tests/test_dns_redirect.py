@@ -824,9 +824,11 @@ class TestCleanupAllRules(unittest.TestCase):
         without_rule.stdout = "-P PREROUTING ACCEPT\n"
         # Первый вызов -S → with_rule, второй -S → without_rule
         # Затем -D (любой returncode)
+        # Цикл идёт по двум семействам: iptables (3 вызова: -S/-D/-S)
+        # и ip6tables (1 вызов: -S без правил → break)
         with patch("chimera.modules.dns_redirect._run",
                    side_effect=[with_rule, MagicMock(returncode=0),
-                                without_rule]):
+                                without_rule, without_rule]):
             dns_redirect._cleanup_all_dns_redirect_rules()
 
 
