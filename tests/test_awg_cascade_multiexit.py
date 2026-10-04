@@ -417,7 +417,9 @@ class TestActivateExit(_CascadeTestBase):
                           "_awgs_cascade_create_routing_script") as m_rs:
             ok = self.awg_cascade.awgs_cascade_activate_exit("de")
         self.assertTrue(ok)
-        m_rs.assert_called_once_with("172.16.92.0/24")
+        # v5.5.8: activate_exit передаёт и v6-подсеть каскада (пустая строка
+        # при выключенном allow_ipv6_tunnel — как в этом fixture)
+        m_rs.assert_called_once_with("172.16.92.0/24", subnet_v6="")
 
 
 # ── 5. remove_exit ──────────────────────────────────────────────────────────

@@ -260,6 +260,13 @@ def awgs_cascade_setup_awg0(
         cascade_subnet=exit_subnet,
     )
 
+    # v5.5.8: IPv6-зеркало каскада — если v6 включён в standalone state
+    # ЭТОЙ entry (allow_ipv6_tunnel), awg1 получает v6-адрес + ::/0,
+    # весь клиентский v6 уходит через awg1 на exit (NAT66 на exit → GUA).
+    from .awg_net_common import awg_v6_ula_from_subnet
+    _own_v6 = bool(awgs_state_load().get("allow_ipv6_tunnel"))
+    _cascade_v6 = awg_v6_ula_from_subnet(exit_subnet) if _own_v6 else ""
+
     # 1. Создаём конфиг awg1 (туннель к AWG1)
     info("Создание конфига awg1 (туннель к AWG1)...")
     if exit_params:
@@ -275,6 +282,7 @@ def awgs_cascade_setup_awg0(
         exit_peer_ip=exit_peer_ip,
         exit_params=exit_params,
         exit_protocol_version=exit_protocol_version,
+        allow_ipv6=bool(_cascade_v6),
     )
     awg1_path = AWGS_AWG1_CONF
     awg1_path.parent.mkdir(parents=True, exist_ok=True)
@@ -310,11 +318,11 @@ def awgs_cascade_setup_awg0(
 
     # 4. Применяем iptables-маршрутизацию
     info("Применение iptables-маршрутизации...")
-    _awgs_cascade_apply_iptables(exit_subnet)
+    _awgs_cascade_apply_iptables(exit_subnet, subnet_v6=_cascade_v6)
 
     # 5. Создаём awg-routing.sh (для пересоздания правил при ребуте)
     info("Создание awg-routing.sh + systemd-юнита...")
-    _awgs_cascade_create_routing_script(exit_subnet)
+    _awgs_cascade_create_routing_script(exit_subnet, subnet_v6=_cascade_v6)
     _awgs_cascade_create_systemd_unit()
 
     # 6. Cron для обновления ru.zone
@@ -371,6 +379,8 @@ def _awgs_cascade_build_awg1_conf(
     exit_peer_ip: str = "",
     exit_params: dict = None,
     exit_protocol_version: str = "",
+    allow_ipv6: bool = False,
+    exit_peer_ipv6: str = "",
 ) -> str:
     """Генерирует awg1.conf — клиентский туннель к AWG1.
 
@@ -397,6 +407,15 @@ def _awgs_cascade_build_awg1_conf(
     peer_addr = exit_peer_ip if exit_peer_ip else f"{base}.2"
     client_ip = f"{peer_addr}/32"
 
+    # v5.5.8 (IPv6): v6-зеркало адреса awg1 в каскадной ULA-подсети
+    # (fd66:66:<okt3>::/64 от exit_subnet). Тот же host-id, что у v4 —
+    # гарантия совпадения с AllowedIPs пира cascade_entry_* на exit.
+    client_ipv6 = ""
+    if allow_ipv6:
+        from .awg_net_common import awg_v6_ula_from_subnet, awg_v6_host_from_v4
+        cascade_v6 = awg_v6_ula_from_subnet(exit_subnet)
+        client_ipv6 = exit_peer_ipv6 or awg_v6_host_from_v4(peer_addr, cascade_v6)
+
     # Параметры AWG 2.0: приоритет — exit_params (синхронизация с AWG1),
     # fallback — собственный state (legacy, НЕ гарантирует handshake)
     state = awgs_state_load()
@@ -409,6 +428,12 @@ def _awgs_cascade_build_awg1_conf(
         "[Interface]",
         f"PrivateKey = {client_privkey}",
         f"Address = {client_ip}",
+    ]
+    if allow_ipv6 and client_ipv6:
+        # v5.5.8: v6-адрес awg1 (зеркало host-id) — нужен как source для
+        # MASQUERADE v6 -o awg1 (NAT66 подставляет адрес интерфейса).
+        lines.append(f"Address = {client_ipv6}/128")
+    lines += [
         f"MTU = {state.get('mtu', 1280)}",
         # Table = off — КРИТИЧЕСКИ важно для каскада: awg-quick НЕ должен
         # автоматически создавать маршрут 0.0.0.0/0 dev awg1, иначе весь
@@ -442,12 +467,15 @@ def _awgs_cascade_build_awg1_conf(
     # непустые «Key = value», пустые «# Key = ».
     if awg_is_31(exit_protocol_version):
         lines.append(awg_render_31_lines(params))
+    # v5.5.8: при включённом v6 — ::/0 в AllowedIPs (cryptokey routing
+    # пускает v6-пакеты в туннель; сами маршруты — через ip -6 rule)
+    allowed_ips = "0.0.0.0/0, ::/0" if (allow_ipv6 and client_ipv6) else "0.0.0.0/0"
     lines += [
         "",
         "[Peer]",
         f"PublicKey = {exit_pubkey}",
         f"Endpoint = {exit_host}:{exit_port}",
-        "AllowedIPs = 0.0.0.0/0",   # весь трафик (маршрутизация через iptables)
+        f"AllowedIPs = {allowed_ips}",   # весь трафик (маршрутизация через iptables)
         "PersistentKeepalive = 25",
     ]
     if psk:
@@ -455,7 +483,7 @@ def _awgs_cascade_build_awg1_conf(
     return "\n".join(lines) + "\n"
 
 
-def _awgs_cascade_apply_iptables(exit_subnet: str) -> bool:
+def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     """Применяет iptables-правила для каскада.
 
     v5.4.5 ГЛАВНЫЙ ФИКС: MARK переносится из mangle FORWARD в mangle
@@ -471,6 +499,13 @@ def _awgs_cascade_apply_iptables(exit_subnet: str) -> bool:
     Основная идея:
     1. Трафик клиентов awg0 к RU-сетям → напрямую через host (без mark)
     2. Весь остальной клиентский → mark 0x2000 (PREROUTING!) → table 2000 → awg1
+
+    v5.5.8 (IPv6): при непустом subnet_v6 — v6-зеркало каскада:
+    ВЕСЬ клиентский v6 (без RU-ipset — v6-ру-сетей в ru.zone нет, а
+    весь v6 из РФ под TSPU-риском) → mark 0x2000 → ip -6 rule → table 2000
+    → awg1 → exit, где NAT66 (MASQUERADE v6) выпускает в GUA exit-ноды.
+    На entry MASQUERADE v6 -o awg1 переписывает src на v6-адрес awg1
+    (fd66:66:<okt3>::X) — зеркало v4-дизайна каскада.
     """
     core = _core_module()
 
@@ -550,10 +585,51 @@ def _awgs_cascade_apply_iptables(exit_subnet: str) -> bool:
                f"ip rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000"],
               check=False, quiet=True)
 
+    # v5.5.8: IPv6-зеркало каскада — весь клиентский v6 через exit
+    if subnet_v6:
+        from .awg_net_common import apply_ipv6_forward
+        apply_ipv6_forward(core)
+        rules6 = [
+            # Весь v6 из awg0 → mark 0x2000 (PREROUTING, до route decision —
+            # тот же фикс v5.4.5, но для v6; RU-ipset для v6 не применяется:
+            # в ru.zone v6-сетей нет, весь v6 из РФ под TSPU-риском → через exit)
+            f"ip6tables -t mangle -A PREROUTING -i awg0 -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
+            # NAT66 на выходе в awg1: src → v6-адрес awg1 (зеркало v4-MASQUERADE)
+            "ip6tables -t nat -A POSTROUTING -o awg1 -j MASQUERADE",
+            # FORWARD: клиенты → awg1 и обратно
+            "ip6tables -A FORWARD -i awg0 -o awg1 -j ACCEPT",
+            "ip6tables -A FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+            # TCPMSS clamp (двойное туннелирование — тот же 1140 что в v4)
+            "ip6tables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140",
+            "ip6tables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140",
+        ]
+        for rule in rules6:
+            check = rule.replace(" -A ", " -C ", 1)
+            r = core._run(["bash", "-c", f"{check} 2>/dev/null || {rule}"],
+                          capture=True, check=False, quiet=True)
+            if r.returncode != 0:
+                core.log_to_file("WARN", f"ip6tables rule failed: {rule}: {r.stderr}")
+        # v6 policy routing: fwmark → table 2000 → awg1 (default без via —
+        # WG p2p onlink; v6-адрес подсети exit на awg1 не нужен для транзита)
+        core._run(["ip", "-6", "route", "replace", "default", "dev", "awg1",
+                   "table", "2000"], check=False, quiet=True)
+        core._run(["bash", "-c",
+                   f"while ip -6 rule del fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null; do :; done; "
+                   f"ip -6 rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000"],
+                  check=False, quiet=True)
+        # Контроль: default v6-маршрут в table 2000 реально встал
+        r = core._run(["ip", "-6", "route", "show", "table", "2000"],
+                      capture=True, check=False)
+        if "default" not in (r.stdout or ""):
+            core.log_to_file("ERROR", "cascade: table 2000 has no IPv6 default route!")
+            core.warn("IPv6 default в table 2000 НЕ установлен — клиентский v6 "
+                      "не уйдёт через awg1! Проверьте awg1 (Address v6).")
+
     return True
 
 
-def _awgs_cascade_create_routing_script(exit_subnet: str) -> None:
+def _awgs_cascade_create_routing_script(exit_subnet: str,
+                                        subnet_v6: str = "") -> None:
     """Создаёт awg-routing.sh для пересоздания правил при ребуте.
 
     v5.4.5: Скрипт приводит правила В ТОЧНОСТИ к live-набору из
@@ -618,7 +694,29 @@ ip route replace default via {exit_gw} dev awg1 table 2000
 # с разными автоприоритетами; E2E: после setup+reboot — 2 правила)
 while ip rule del fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null; do :; done
 ip rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000
-
+"""
+    if subnet_v6:
+        script += f"""
+# 4. v5.5.8: IPv6-зеркало каскада — весь клиентский v6 → awg1 → exit
+# (idempotent, идентично live-набору _awgs_cascade_apply_iptables)
+sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+ip6tables -t mangle -C PREROUTING -i awg0 -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null || \
+    ip6tables -t mangle -A PREROUTING -i awg0 -j MARK --set-mark {AWGS_CASCADE_FWMARK}
+ip6tables -t nat -C POSTROUTING -o awg1 -j MASQUERADE 2>/dev/null || \
+    ip6tables -t nat -A POSTROUTING -o awg1 -j MASQUERADE
+ip6tables -C FORWARD -i awg0 -o awg1 -j ACCEPT 2>/dev/null || \
+    ip6tables -A FORWARD -i awg0 -o awg1 -j ACCEPT
+ip6tables -C FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+    ip6tables -A FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+ip6tables -t mangle -C FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || \
+    ip6tables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
+ip6tables -t mangle -C FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || \
+    ip6tables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
+ip -6 route replace default dev awg1 table 2000
+while ip -6 rule del fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null; do :; done
+ip -6 rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000
+"""
+    script += """
 echo "AWG Cascade routing started"
 """
     AWGS_ROUTING_SCRIPT.write_text(script)
@@ -923,6 +1021,12 @@ def awgs_cascade_activate_exit(name: str, probe_timeout: int = 0) -> bool:
 
     subnet = box.get("subnet", AWGS_DEFAULT_SUBNET)
 
+    # v5.5.8: v6-зеркало каскада — пробросляем флаг из standalone state
+    # (переключение exit не должно молча выключать IPv6-туннель)
+    from .awg_net_common import awg_v6_ula_from_subnet
+    _v6_on = bool(awgs_state_load().get("allow_ipv6_tunnel"))
+    _cascade_v6 = awg_v6_ula_from_subnet(subnet) if _v6_on else ""
+
     # 1. awg1.conf из бокса exit (обфускация/версия — синхронно с exit)
     conf = _awgs_cascade_build_awg1_conf(
         exit_host=box.get("endpoint", ""),
@@ -934,6 +1038,7 @@ def awgs_cascade_activate_exit(name: str, probe_timeout: int = 0) -> bool:
         exit_peer_ip=box.get("peer_ip", ""),
         exit_params=box.get("params") or None,
         exit_protocol_version=box.get("protocol_version", "2.0"),
+        allow_ipv6=bool(_cascade_v6),
     )
     awg1_path = AWGS_AWG1_CONF
     awg1_path.parent.mkdir(parents=True, exist_ok=True)
@@ -943,7 +1048,7 @@ def awgs_cascade_activate_exit(name: str, probe_timeout: int = 0) -> bool:
     # 2. Routing-скрипт под подсеть exit + рестарт туннеля
     #    (PartOf=awg-quick@awg1 перезапустит routing-юнит и пересоздаст
     #    table 2000; явный restart — страховка для старых юнит-файлов)
-    _awgs_cascade_create_routing_script(subnet)
+    _awgs_cascade_create_routing_script(subnet, subnet_v6=_cascade_v6)
     core._run(["systemctl", "enable", "awg-quick@awg1"], check=False, quiet=True)
     r = core._run(["systemctl", "restart", "awg-quick@awg1"],
                   capture=True, check=False)
@@ -1192,6 +1297,95 @@ def awgs_cascade_failover_teardown() -> bool:
 #  AWG1 (выход) — спец-пир для AWG0
 # ============================================================================
 
+def awgs_cascade_enable_ipv6() -> bool:
+    """
+    v5.5.8: включает v6-зеркало каскада на УЖЕ настроенной entry-ноде —
+    без переустановки каскада (upgrade-путь для живых установок).
+
+    Что делает:
+      1. Патчит awg1.conf: добавляет Address v6/128 (зеркало host-id
+         из текущего v4-адреса awg1 в каскадной ULA fd66:66:<okt3>::/64)
+         и ::/0 в AllowedIPs пира.
+      2. Рестарт awg-quick@awg1 — интерфейс получает v6-адрес (source
+         для MASQUERADE v6 -o awg1).
+      3. Применяет ip6tables-зеркало (MARK 0x2000 в PREROUTING для всего
+         клиентского v6 + FORWARD + TCPMSS + NAT66 -o awg1) и
+         ip -6 rule fwmark → table 2000 → default dev awg1.
+      4. Перегенерирует awg-routing.sh с v6-частью (переживает ребут).
+
+    Вызывается из awg_standalone.awgs_enable_ipv6() при cascade_role == "entry".
+    """
+    core = _core_module()
+    info = core.info
+    warn = core.warn
+    success = core.success
+
+    from .awg_net_common import awg_v6_ula_from_subnet, awg_v6_host_from_v4
+
+    if not AWGS_AWG1_CONF.exists():
+        warn("awg1.conf не найден — каскад не настроен на этой ноде")
+        return False
+
+    state = awgs_state_load()
+    exit_subnet = state.get("cascade_subnet", "")
+    if not exit_subnet:
+        warn("cascade_subnet не найден в state — перенастройте каскад")
+        return False
+
+    cascade_v6 = awg_v6_ula_from_subnet(exit_subnet)
+
+    # 1. Патчим awg1.conf: Address v6 + AllowedIPs ::/0 (idempotent)
+    conf_lines = AWGS_AWG1_CONF.read_text().splitlines()
+    v4_addr = next((l.split("=", 1)[1].strip().split("/")[0]
+                    for l in conf_lines if l.startswith("Address = ")), "")
+    v6_addr = awg_v6_host_from_v4(v4_addr, cascade_v6)
+    if not v6_addr:
+        warn(f"Не удалось вычислить v6-адрес awg1 (v4={v4_addr!r}, "
+             f"подсеть={cascade_v6})")
+        return False
+
+    out, v6_added = [], False
+    for line in conf_lines:
+        if line.startswith(f"Address = {v6_addr}/128"):
+            v6_added = True  # уже есть (повторный запуск)
+            out.append(line)
+            continue
+        if line.startswith("Address = ") and not v6_added:
+            out.append(line)
+            out.append(f"Address = {v6_addr}/128")
+            v6_added = True
+            continue
+        if line.strip() == "AllowedIPs = 0.0.0.0/0":
+            out.append("AllowedIPs = 0.0.0.0/0, ::/0")
+            continue
+        out.append(line)
+    if not v6_added:
+        warn("Не найден Address в awg1.conf — каскад повреждён")
+        return False
+    AWGS_AWG1_CONF.write_text("\n".join(out) + "\n")
+    AWGS_AWG1_CONF.chmod(0o600)
+    info(f"awg1.conf: Address {v6_addr}/128 + AllowedIPs ::/0")
+
+    # 2. Рестарт awg1 — перечитывает Address (краткий блэкаут каскада ~1с)
+    r = core._run(["systemctl", "restart", "awg-quick@awg1"],
+                  capture=True, check=False)
+    if r.returncode != 0:
+        warn(f"awg1 не перезапустился: {r.stderr}")
+        return False
+
+    # 3. ip6tables-зеркало + policy routing v6
+    _awgs_cascade_apply_iptables(exit_subnet, subnet_v6=cascade_v6)
+
+    # 4. Перманентность: routing-скрипт с v6-частью
+    _awgs_cascade_create_routing_script(exit_subnet, subnet_v6=cascade_v6)
+    core._run(["systemctl", "restart", "awg-cascade-routing"],
+              check=False, quiet=True)
+
+    success(f"Каскадный IPv6 включён: awg1 = {v6_addr}/128, "
+            f"весь клиентский v6 → exit ({exit_subnet} → {cascade_v6})")
+    return True
+
+
 def awgs_cascade_setup_awg1(protocol_version: str = "2.0") -> bool:
     """
     Настраивает AWG1 (выход каскада):
@@ -1262,6 +1456,10 @@ def awgs_cascade_setup_awg1(protocol_version: str = "2.0") -> bool:
     core._box_row(f"  {core.GREEN}Port:{core.NC}           {state.get('port', 51820)}")
     core._box_row(f"  {core.GREEN}Server pubkey:{core.NC}  {state.get('server_pubkey', '?')}")
     core._box_row(f"  {core.GREEN}Cascade peer IP:{core.NC} {peer.get('client_ip', '?')}")
+    # v5.5.8: v6-зеркало пира (если v6 включён на ЭТОМ exit) — передаётся
+    # на AWG0 для сверки с Address v6 в awg1.conf (host-id совпадает с v4)
+    if peer.get("client_ipv6"):
+        core._box_row(f"  {core.GREEN}Cascade peer IPv6:{core.NC} {peer['client_ipv6']}")
     core._box_row(f"  {core.GREEN}Cascade subnet:{core.NC}  {state.get('subnet', '?')}")
     # v5.5.3 FIX-E: privkey пира cascade_entry — ОБЯЗАТЕЛЬНАЯ часть бокса.
     # AWG0 подставляет его в [Interface] awg1.conf; без него exit ждёт

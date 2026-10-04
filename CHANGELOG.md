@@ -1,5 +1,76 @@
 # Changelog
 
+# Changelog new entry — v5.5.8: IPv6 во всех режимах AmneziaWG (default-on) — анти-утечка AAAA + NAT66 + каскадный v6-транзит через Exit — 5 октября 2026
+
+
+## FEAT(awg): v5.5.8 — IPv6 в туннеле по умолчанию: standalone / каскад / пиры / upgrade живых установок
+
+**Контекст (владелец):** ютуб работал у клиента «только пока на
+роутере живёт B4». Диагностика E2E показала рут-коз: клиентский
+конфиг AWG был IPv4-only (AllowedIPs = 0.0.0.0/0), а домашняя сеть
+клиента — с IPv6 (GUA): браузер резолвит AAAA ютуба и ходит на
+видео-CDN НАПРЯМУЮ по v6 через провайдера, мимо туннеля — где
+TSPU душит googlevideo. B4 на роутере (дуал-стек) маскировал
+проблему; без него v6-утечка убивала ютуб полностью. Фикс —
+IPv6 в туннеле: весь клиентский v6 (AllowedIPs ::/0) уходит в
+туннель и выпускается через сервер/каскад, утечка невозможна.
+
+**Реализация (пер-node ULA + NAT66 + зеркала v4-дизайна):**
+1. **Derived per-node ULA** — `awg_v6_ula_from_subnet()`
+   (awg_net_common): fd66:66:<окт3>::/64 от v4-подсети туннеля
+   (172.16.82.0/24 → fd66:66:82::/64; дефолт 10.66.66.0/24 →
+   fd66:66:66::/64 — байт-в-байт совместимо со старыми state).
+   Per-node префиксы исключают коллизии cryptokey-routing в
+   мульти-exit каскаде. v6-адреса хостов зеркалят v4 host-id
+   (`awg_v6_host_from_v4`: 172.16.82.2 → fd66:66:82::2).
+2. **Default-on** — `awgs_install(allow_ipv6_tunnel=True)`; все
+   TUI-промпты [y/N] → [Y/n]; subnet_v6="" авто-выводится из
+   v4-подсети (миграция старого дефолта на per-node ULA).
+3. **Standalone NAT66** — `awgs_setup_nat_and_routing(subnet_v6=)`:
+   ip6tables MASQUERADE + FORWARD (идемпотентно), sysctl
+   net.ipv6.conf.all.forwarding=1 (runtime+persist, managed-ключ),
+   v6-блок в helper-скрипте awg-nat-rules.sh (up/down). На сервере
+   без GUA правила безвредны, анти-утечка сохраняется (браузер
+   фолбэчит на v4 через туннель).
+4. **Каскадный v6-транзит** — зеркало v4-дизайна: на entry awg1
+   получает v6-адрес (каскадная ULA, host-id = v4 awg1) +
+   AllowedIPs ::/0; весь клиентский v6 маркируется fwmark 0x2000
+   (ip6tables mangle PREROUTING, без RU-ipset — v6-ру-сетей в
+   ru.zone нет) → ip -6 rule → table 2000 → awg1 → exit; NAT66
+   MASQUERADE -o awg1 на entry, на exit — NAT66 → GUA exit.
+   v6-часть в awg-routing.sh (переживает ребут); activate_exit
+   сохраняет v6 при failover. Настройка AWG1 (exit) передаёт
+   Cascade peer IPv6 в боксе данных.
+5. **awgs_enable_ipv6()** — upgrade ЖИВЫХ установок без
+   переустановки: state+subnet_v6 миграция, выдача v6 всем
+   существующим пирам (зеркало v4 host-id), rebuild awg0.conf +
+   syncconf БЕЗ даунтайма, ip -6 addr add интерфейсу, каскадное
+   v6-зеркало (awgs_cascade_enable_ipv6) либо NAT66, перегенерация
+   клиентских .conf. Пункт [8] меню AmneziaWG standalone.
+6. **awg_peer_add** — новые пиры получают v6-зеркало сразу
+   (консистентно с enable_ipv6).
+
+**Совместимость:** AWG 2.0 и 3.1 (обфускация не тронута);
+allow_ipv6_tunnel=False в живых state сохраняет v4-only поведение
+байт-в-байт до явного включения; Mode B транспорт не тронут
+(сервер-серверный v4-туннель, клиентского v6 там нет).
+
+**Тесты:** новый сьют tests/test_awg_ipv6_v558.py (24 теста:
+ULA-деривация/уникальность, v6-зеркало, ip6tables_ensure, NAT66 в
+helper, awg1.conf с ::/0 и без, routing-скрипт v6-блок, серверный
+AllowedIPs v6, клиентский конфиг v6, сигнатуры install,
+enable_ipv6 state/пиры/NAT66-ветка) + обновлены контракт-тесты
+(sysctl ipv6.forwarding managed-ключ; activate_exit subnet_v6
+kwarg). Прогон AWG-сьютов: 916 passed.
+
+## FIX(awg): v5.5.8 — тесты под новый контракт v5.5.8
+
+- test_awg_net_common: ipv6.forwarding — managed-ключ (вычищается
+  при ipv6_forward=False, пишется при True, без дублирования);
+  новый тест test_ipv6_forward_flag_writes_and_replaces.
+- test_awg_cascade_multiexit: activate_exit вызывает
+  create_routing_script(subnet, subnet_v6=) — обновлённый контракт.
+
 # Changelog new entry — v5.5.4: весовые стратегии mieru-каскада — EMA-сглаживание метрик + гистерезис + cooldown: health-тик больше не пересобирает правила и не перезаписывает /etc/iptables/rules.v4 каждую минуту — 4 октября 2026
 
 

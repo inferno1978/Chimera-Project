@@ -718,11 +718,33 @@ class TestWriteSysctlConf(unittest.TestCase):
             content = p.read_text()
             self.assertNotIn("conf.all.rp_filter", content)
             self.assertNotIn("conf.default.rp_filter", content)
-            # Чужая строка (ipv6 forwarding) должна сохраниться
-            self.assertIn("net.ipv6.conf.all.forwarding = 1", content)
+            # v5.5.8: ipv6.forwarding стал managed-ключом — при ipv6_forward=False
+            # он вычищается (управляется только нашим флагом), при True — пишется.
+            # Старое поведение «чужая строка сохраняется» заменено сознательно:
+            # двойные источники правды для одного ключа давали гонки значений.
+            self.assertNotIn("net.ipv6.conf.all.forwarding", content)
             # per-interface записи должны быть добавлены
             self.assertIn("net.ipv4.conf.awg0.rp_filter = 2", content)
             self.assertIn("net.ipv4.conf.eth0.rp_filter = 2", content)
+
+    def test_ipv6_forward_flag_writes_and_replaces(self):
+        """v5.5.8: ipv6_forward=True пишет net.ipv6.conf.all.forwarding = 1
+        и заменяет старое вхождение (managed-ключ, без дублирования)."""
+        from chimera.modules.awg_net_common import write_sysctl_conf
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "99-test.conf"
+            # Уже есть строка (от прошлой версии chimera) — должна замениться
+            p.write_text("net.ipv6.conf.all.forwarding = 1\n")
+            ok = write_sysctl_conf(p, "awg0", "eth0", ipv6_forward=True)
+            self.assertTrue(ok)
+            content = p.read_text()
+            self.assertEqual(content.count("net.ipv6.conf.all.forwarding = 1"), 1)
+            self.assertIn("net.ipv4.ip_forward = 1", content)
+
+            # ipv6_forward=False — ключ вычищается полностью
+            ok = write_sysctl_conf(p, "awg0", "eth0", ipv6_forward=False)
+            self.assertTrue(ok)
+            self.assertNotIn("net.ipv6.conf.all.forwarding", p.read_text())
 
     def test_replaces_old_per_iface_with_new_value(self):
         """Если в файле есть старая per-interface запись — заменяется на новую."""
