@@ -244,8 +244,12 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
              patch.object(subscription, "_build_fptn_uris", return_value=[]), \
              patch.object(subscription, "_build_telemt_uri", return_value=None), \
              patch.object(subscription, "_resolve_ios_shadow_user", side_effect=lambda u: u):
-            with patch.dict(sys.modules, {"chimera.modules.entry_mirrors": MagicMock(
-                    get_mirror_uris=MagicMock(return_value=[]))}):
+            # Патчим функцию на реальном модуле: patch.dict(sys.modules, ...)
+            # на выходе выметает из sys.modules ВСЁ, что лениво импортировалось
+            # внутри (например linkqr_lib) — атрибуты пакетов остаются, и
+            # последующие тесты ловят разъезд экземпляров модулей.
+            with patch("chimera.modules.entry_mirrors.get_mirror_uris",
+                       return_value=[]):
                 body = subscription.build_subscription_body_ios(user)
 
         decoded = base64.b64decode(body).decode()
@@ -299,8 +303,10 @@ class TestSubscriptionBodyRegression(unittest.TestCase):
         for p in common_patches:
             p.start()
         try:
-            entry_mirrors_mock = MagicMock(get_mirror_uris=MagicMock(return_value=[]))
-            with patch.dict(sys.modules, {"chimera.modules.entry_mirrors": entry_mirrors_mock}):
+            # Функцию мокаем на реальном модуле — patch.dict(sys.modules)
+            # выметает на выходе лениво импортированные внутри модули.
+            with patch("chimera.modules.entry_mirrors.get_mirror_uris",
+                       return_value=[]):
                 body_plain = subscription.build_subscription_body(user)
                 body_ios = subscription.build_subscription_body_ios(user)
         finally:
@@ -535,8 +541,7 @@ class TestSanityAllFourPoints(unittest.TestCase):
              patch.object(subscription, "_build_fptn_uris", return_value=[]), \
              patch.object(subscription, "_build_telemt_uri", return_value=None), \
              patch.object(subscription, "_resolve_ios_shadow_user", side_effect=lambda u: u), \
-             patch.dict(sys.modules, {"chimera.modules.entry_mirrors": MagicMock(
-                 get_mirror_uris=MagicMock(return_value=[]))}):
+             patch("chimera.modules.entry_mirrors.get_mirror_uris", return_value=[]):
             body = subscription.build_subscription_body_ios(user)
 
         decoded = base64.b64decode(body).decode()
