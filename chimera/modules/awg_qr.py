@@ -56,13 +56,22 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     if allow_ipv6 and client_ipv6:
         allowed_ips += f", ::/0"
 
+    # v5.5.10: dual-stack Address ОДНОЙ строкой через запятую — формат
+    # bivlked (awg_common.sh render_client_config) и wg-quick. Две отдельные
+    # строки Address ломают разбор в официальном клиенте Amnezia
+    # (инцидент 2026-10-05: клиент висел на «Подключение»), а также
+    # не поддерживаются тулингом bivlked ("Address в несколько строк" —
+    # warning в awg_common.sh). v4-only клиенты — прежний формат.
+    if allow_ipv6 and client_ipv6:
+        address_line = f"{client_ip}/32, {client_ipv6}/128"
+    else:
+        address_line = f"{client_ip}/32"
+
     lines = [
         "[Interface]",
         f"PrivateKey = {client_privkey}",
-        f"Address = {client_ip}/32",
+        f"Address = {address_line}",
     ]
-    if allow_ipv6 and client_ipv6:
-        lines.append(f"Address = {client_ipv6}/128")
     lines.append(f"DNS = {dns1}, {dns2}")
     lines.append(f"MTU = {mtu}")
     # v5.4.3: Параметры AWG 2.0 внутри [Interface] (как в эталонном конфиге Amnezia).
@@ -160,6 +169,7 @@ def awgs_qr_build_vpn_uri(peer: dict, server_state: dict) -> str:
     client_ipv6 = peer.get("client_ipv6", "")
     client_privkey = peer.get("client_privkey", "")
     psk = peer.get("preshared_key", "")
+    allow_ipv6 = server_state.get("allow_ipv6_tunnel", False)
 
     # Build inner config (raw .conf content)
     raw_conf = awgs_qr_build_client_conf(peer, server_state)
@@ -191,7 +201,13 @@ def awgs_qr_build_vpn_uri(peer: dict, server_state: dict) -> str:
             v = params.get(k, "")
             if v:
                 inner[AWG31_DIRECTIVE_NAMES[k]] = str(v)
-    inner["allowed_ips"] = ["0.0.0.0/0"]
+    # v5.5.10: при включённом v6-туннеле — ::/0 рядом с 0.0.0.0/0,
+    # иначе Amnezia Client после импорта vpn:// URI рендерит маршруты
+    # v4-only и IPv6 утекает мимо туннеля (несмотря на client_ipv6).
+    allowed_list = ["0.0.0.0/0"]
+    if allow_ipv6 and client_ipv6:
+        allowed_list.append("::/0")
+    inner["allowed_ips"] = allowed_list
     inner["client_ip"] = client_ip
     inner["client_ipv6"] = client_ipv6 or ""
     inner["client_priv_key"] = client_privkey
