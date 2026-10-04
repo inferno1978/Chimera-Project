@@ -2577,6 +2577,13 @@ def get_admin_info() -> dict:
     """Полный статус для Admin Panel."""
     s = status()
     s["presets"] = [{"name": k, "label": v[0]} for k, v in PRESETS.items()]
+    # ops-слой (b4_monitor): матрица для admin panel — без жёсткой
+    # зависимости (нет модуля/сбоя = нет ключа, панель не падает)
+    try:
+        from chimera.modules import b4_monitor
+        s["monitor"] = b4_monitor.summary()
+    except Exception:
+        pass
     # Логи (последние 20 строк journalctl).
     s["logs"] = []
     try:
@@ -2728,6 +2735,8 @@ def do_youtube_b4_menu() -> None:
                 _box_item("9", f"🌐 nginx front (TLS) — {YELLOW}выключить{NC}  {DIM}({ng_url}){NC}")
             else:
                 _box_item("9", f"🌐 nginx front (TLS) — {DIM}включить прямой доступ к Web UI по HTTPS{NC}")
+            _box_row()
+            _box_item("M", "🩺 Мониторинг B4 (health-tick + TG-алерты)")
             _box_row()
             _box_item("R", f"{RED}🗑️  Удалить b4 полностью{NC}")
             _box_row()
@@ -2961,6 +2970,12 @@ def do_youtube_b4_menu() -> None:
                 else:
                     _err(f"Не удалось установить nginx front: {msg}")
             input(f"\n{BOLD}Enter…{NC}")
+
+        elif s["installed"] and ch == "m":
+            # Ops-слой B4 (b4_monitor): health-tick + self-heal + ремедия
+            # + TG-монитор — как у mieru-каскада.
+            from chimera.modules.b4_monitor import do_b4_monitor_menu
+            do_b4_monitor_menu()
 
         elif s["installed"] and ch == "r":
             # Удаление.

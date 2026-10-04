@@ -24985,3 +24985,83 @@ root один раз за сессию и использует его для в�
 - Базовая установка VLESS + REALITY
 - Режим B (каскад)
 - Управление пользователями, диагностика
+
+
+# Changelog new entry — v5.5.6: ops-слой B4 — «фишки VLESS-нод и Mieru-каскада, теперь для B4» — 4 октября 2026
+
+
+## FEAT(b4_monitor): health-tick + self-heal + ремедия + TG-монитор + матрица
+
+**Контекст (владелец):** для VLESS-нод (smart_balancer, dpi_detector,
+node_health_monitor) и mieru-каскада (health-tick, весовые стратегии,
+TG-монитор) годами выстроен ops-слой; B4 на entry-нодах (RU) оставался
+ручным: youtube_b4.menu = установка/пресеты/discovery, состояние не
+мониторится, падение сервиса и деградация ТСПУ-обхода замечаются
+только юзером по «Ютуб тормозит». По запросу владельца — parity.
+
+**Новый модуль `chimera/modules/b4_monitor.py`** (двухслойная схема,
+зеркало mieru_cascade + mieru_cascade_monitor):
+
+1. **health-tick (b4-health.timer, \*/1 мин):**
+   - сервис: `systemctl is-active b4`; упал → self-heal рестарт
+     (max 1 попытка/тик, журнал actions);
+   - проба прямого пути: youtube.com + i.ytimg.com через NFQUEUE b4
+     (ровно путь юзера; коды 2/3/4xx = ответ, таймаут/резет = фейл —
+     канон health_check_youtube);
+   - fail_streak ≥ 2 → degraded (порог каскадный);
+   - EMA ttfb (α=0.35, TTL 15 мин — константы каскада);
+   - очередь: парсер нативных правил `table inet b4_mangle`
+     (nft list ruleset; классификация out443/in443/quic/dns,
+     суммирование sport-RST/SYNACK в in443) + скорости Δ/мин;
+   - exempt: контроль ipset mieru_b4_direct (пустой = YouTube уйдёт
+     в каскад = потеря RU-зоны и DPI-защиты).
+2. **Ремедия при degraded (cooldown 600с, одно действие на окно):**
+   - классические установки (сет id "youtube"): ротация пресетов
+     default→aggressive→light по кругу, pin помнит пользовательский
+     выбор;
+   - кастомные сеты (флот: Youtube-Fat/YT-Wide/Meta/XHamster-семейства,
+     id-UUID): Discovery b4 (перебор стратегий — аналог «проб всех
+     Exit-ов» каскада);
+   - A/B-возврат к исходному пресету не делается сознательно: неактивный
+     пресет b4 пробировать не умеет (документировано в шапке модуля).
+3. **TG-монитор (cron \*/5 мин):** алерты ТОЛЬКО при смене состояния
+   (первое наблюдение молча); события b4_down/up, b4_degraded/
+   recovered, b4_stalled, b4_restarted/discovery/preset (новые
+   действия тика), b4_exempt_empty/ok; events.<event> в telegram.json
+   (отсутствующий = ВКЛ); {H}-заголовок [host | ip].
+4. **Матрица matrix()/summary():** сервис/версия/пресет/сеты/очередь
+   (счётчики+скорости)/TTFB-EMA/exempt/журнал — для TUI и admin panel.
+
+**Интеграция:**
+- `youtube_b4.do_youtube_b4_menu`: пункт [M] — меню мониторинга
+  (тик/чек/политика рестарты-discovery-пресеты/установка/удаление);
+- `youtube_b4.get_admin_info`: + s["monitor"] (без жёсткой
+  зависимости — сбой модуля не роняет панель);
+- `tg_bot.py`: 10 событий b4_* в реестрах событий (метки + вкл/выкл).
+
+**Установка/удаление:** `install_b4_monitor(interval)` — systemd
+timer OnCalendar=\*:0/1 + cron \*/interval, wrapper'ы PYTHONPATH-safe
+(паттерн v5.1, logger -t b4-health); uninstall — полный cleanup
+(timer+units+скрипты+cron+tg-state).
+
+**Тесты:** tests/test_b4_monitor.py — 47 кейсов: парсер nft (живая
+фикстура с ноды 91: out443=1896991, in443=737063+44+864,
+quic=62659, dns=1920663), EMA (быстрый старт/сглаживание/протухшая),
+стейт-машина тика (1 промах «скорельно жив» / 2 подряд → degraded /
+восстановление), self-heal (+policy off), discovery-ремедия
+(+cooldown одно на окно + после истечения), ротация пресетов
+(по кругу + wrap + pin), счётчики очереди (rates Δ/мин), TG-слой
+(first-seen молча / down+up / degraded+recovered с TTFB в сообщении /
+exempt пуст-заполнен / stalled / actions без дублей / events-фильтр /
+нет telegram.json / нет state), install-контент (timer OnCalendar,
+cron, bash -n, PYTHONPATH), uninstall-cleanup, матрица, публичный
+контракт (константы parity каскада, реестр событий, API).
+
+**Прочее:**
+- парсер nft — чистая функция (тестируется на фикстуре); таблица
+  без queue-правил → None (b4 правила не стоят);
+- b4 не установлен → тик тихий noop (как health_tick каскада на
+  exit-нодах); standalone-b4 без каскада → exempt «не применимо»
+  (ipset нет — не алертим);
+- политика по умолчанию: рестарты вкл, discovery вкл, пресеты вкл
+  (последнее действует только при сете id "youtube").
