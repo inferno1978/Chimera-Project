@@ -560,5 +560,288 @@ class TestUninstallNatParityV545(unittest.TestCase):
                       "uninstall должен удалять PPA keyring (v5.4.5)")
 
 
+class TestAwgsPurePythonKeygen(unittest.TestCase):
+    """Pure-Python X25519 keygen (RFC 7748) — fallback при сломанном apt.
+
+    Кейс продакшена: на VPS с 'E: Unmet dependencies' не встают ни
+    wireguard-tools (wg), ни amneziawg-tools (awg); stub-обёртка awg после
+    Go-fallback проксирует в amneziawg-go, который НЕ поддерживает genkey.
+    Pure-Python X25519 закрывает этот кейс навсегда.
+    """
+
+    def _try_cryptography(self):
+        try:
+            from cryptography.hazmat.primitives.asymmetric.x25519 import (
+                X25519PrivateKey,
+            )
+            return X25519PrivateKey
+        except ImportError:
+            return None
+
+    def test_x25519_rfc7748_vector(self):
+        """Официальный тест-вектор RFC 7748 section 5.2 (scalar=basepoint*1... )."""
+        from chimera.modules.awg_standalone import _awgs_x25519
+
+        # RFC 7748 §6.1: Diffie-Hellman тест (Alice/Bob) — canonical вектор
+        alice_priv = bytes.fromhex(
+            "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+        bob_priv = bytes.fromhex(
+            "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
+        bob_pub_expected = bytes.fromhex(
+            "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
+        shared_expected = bytes.fromhex(
+            "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
+
+        # Публичный ключ Боба: X25519(bob_priv, basepoint)
+        bob_pub = _awgs_x25519(bob_priv, b"\x09" + b"\x00" * 31)
+        self.assertEqual(bob_pub, bob_pub_expected,
+                         "X25519(bob_priv, 9) != RFC 7748 §6.1 bob_pub")
+
+        # Shared secret: X25519(alice_priv, bob_pub) == X25519(bob_priv, alice_pub)
+        alice_pub = _awgs_x25519(alice_priv, b"\x09" + b"\x00" * 31)
+        shared_a = _awgs_x25519(alice_priv, bob_pub)
+        shared_b = _awgs_x25519(bob_priv, alice_pub)
+        self.assertEqual(shared_a, shared_expected, "shared(A) != RFC 7748")
+        self.assertEqual(shared_b, shared_expected, "shared(B) != RFC 7748")
+
+    def test_x25519_against_cryptography(self):
+        """Свемка со ссылкой на 20 случайных ключей (если cryptography доступна)."""
+        X25519PrivateKey = self._try_cryptography()
+        if X25519PrivateKey is None:
+            self.skipTest("cryptography не установлена — пропускаю свемку")
+        import base64
+        import os as _os
+        from chimera.modules.awg_standalone import _awgs_x25519
+
+        for _ in range(20):
+            scalar = bytearray(_os.urandom(32))
+            scalar[0] &= 248
+            scalar[31] &= 127
+            scalar[31] |= 64
+            scalar = bytes(scalar)
+            ref = (X25519PrivateKey.from_private_bytes(scalar)
+                   .public_key().public_bytes_raw())
+            mine = _awgs_x25519(scalar, b"\x09" + b"\x00" * 31)
+            self.assertEqual(mine, ref)
+            self.assertEqual(len(base64.b64encode(mine)), 44)
+
+    def test_py_keygen_pair_format(self):
+        """Формат пары идентичен wg genkey: 44 символа base64, '=' на конце."""
+        import base64
+        import re
+        from chimera.modules.awg_standalone import _awgs_py_keygen_pair
+
+        priv, pub = _awgs_py_keygen_pair()
+        self.assertRegex(priv, r"^[A-Za-z0-9+/]{43}=$")
+        self.assertRegex(pub, r"^[A-Za-z0-9+/]{43}=$")
+        priv_raw = base64.b64decode(priv)
+        self.assertEqual(priv_raw[0] & 7, 0, "clamp k[0]&=248 нарушен")
+        self.assertEqual(priv_raw[31] & 128, 0, "clamp k[31]&=127 нарушен")
+        self.assertEqual(priv_raw[31] & 64, 64, "clamp k[31]|=64 нарушен")
+
+        X25519PrivateKey = self._try_cryptography()
+        if X25519PrivateKey is not None:
+            ref = base64.b64encode(
+                X25519PrivateKey.from_private_bytes(priv_raw)
+                .public_key().public_bytes_raw()).decode()
+            self.assertEqual(pub, ref, "pub != cryptography-эталону")
+
+    def test_py_genpsk_format(self):
+        """PSK = 32 случайных байта base64 — формат wg genpsk."""
+        import base64
+        from chimera.modules.awg_standalone import _awgs_py_genpsk
+
+        psk = _awgs_py_genpsk()
+        self.assertRegex(psk, r"^[A-Za-z0-9+/]{43}=$")
+        self.assertEqual(len(base64.b64decode(psk)), 32)
+        self.assertNotEqual(psk, _awgs_py_genpsk(), "PSK не случайный")
+
+
+class TestAwgsKeygenFallbackChain(unittest.TestCase):
+    """awgs_generate_keys: цепочка wg → awg → pure-Python.
+
+    Главный кейс: wg нет, awg — нерабочая userspace-заглушка
+    (amneziawg-go не поддерживает genkey) → pure-Python fallback спасает.
+    """
+
+    def _make_core(self, genkey_rc=1):
+        """Fake core: which → пусто (нет wg/awg), _run возвращает rc=1."""
+        core = MagicMock()
+        # which-вызовы возвращают пустой stdout → бинари "не найдены"
+        core._run = MagicMock(
+            side_effect=self._fake_run_factory(genkey_rc))
+        return core
+
+    def _fake_run_factory(self, genkey_rc):
+        def _run(cmd, capture=False, check=False, quiet=False, input_text=None):
+            m = MagicMock()
+            m.returncode = 0 if cmd[:2] == ["apt-get", "update"] else genkey_rc
+            # which → пусто; genkey/pubkey → ошибка (заглушка не умеет)
+            if cmd[0] == "which":
+                m.returncode = 1
+                m.stdout = ""
+            elif cmd[1:2] == ["genkey"] or cmd[1:2] == ["pubkey"]:
+                m.returncode = genkey_rc
+                m.stdout = ""
+            else:
+                m.returncode = 0
+                m.stdout = ""
+            m.stderr = "amneziawg-go: unknown command"
+            return m
+        return _run
+
+    def test_fallback_to_pure_python_when_binaries_broken(self):
+        """wg нет, awg-заглушка падает на genkey → pure-Python ключи."""
+        import base64
+        from cryptography.hazmat.primitives.asymmetric.x25519 import (
+            X25519PrivateKey,
+        )
+        from chimera.modules import awg_standalone
+
+        core = self._make_core(genkey_rc=1)
+        with patch.object(awg_standalone, "_core_module", return_value=core):
+            priv, pub = awg_standalone.awgs_generate_keys()
+
+        self.assertTrue(priv and pub, "pure-Python fallback не сработал")
+        self.assertRegex(priv, r"^[A-Za-z0-9+/]{43}=$")
+        self.assertRegex(pub, r"^[A-Za-z0-9+/]{43}=$")
+        # Валидность пары против эталона
+        ref = base64.b64encode(
+            X25519PrivateKey.from_private_bytes(base64.b64decode(priv))
+            .public_key().public_bytes_raw()).decode()
+        self.assertEqual(pub, ref)
+
+    def test_preshared_key_fallback_when_genpsk_unsupported(self):
+        """genpsk от заглушки падает → pure-Python PSK."""
+        from chimera.modules import awg_standalone
+
+        core = self._make_core(genkey_rc=1)
+        with patch.object(awg_standalone, "_core_module", return_value=core):
+            psk = awg_standalone.awgs_generate_preshared_key()
+
+        self.assertRegex(psk, r"^[A-Za-z0-9+/]{43}=$")
+
+    def test_wg_preferred_when_available(self):
+        """При живом wg ключи идут через него (нативный путь)."""
+        from chimera.modules import awg_standalone
+
+        fake_priv = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        fake_pub = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+
+        def _run(cmd, capture=False, check=False, quiet=False, input_text=None):
+            m = MagicMock()
+            m.stderr = ""
+            if cmd[0] == "which":
+                m.returncode = 0 if cmd[1] == "wg" else 1
+                m.stdout = "/usr/bin/wg" if cmd[1] == "wg" else ""
+            elif cmd[1:2] == ["genkey"]:
+                m.returncode = 0
+                m.stdout = fake_priv
+            elif cmd[1:2] == ["pubkey"]:
+                m.returncode = 0
+                m.stdout = fake_pub
+            else:
+                m.returncode = 0
+                m.stdout = ""
+            return m
+
+        core = MagicMock()
+        core._run = MagicMock(side_effect=_run)
+        with patch.object(awg_standalone, "_core_module", return_value=core):
+            priv, pub = awg_standalone.awgs_generate_keys()
+
+        self.assertEqual((priv, pub), (fake_priv, fake_pub))
+
+
+class TestAwgsAptAutoRepair(unittest.TestCase):
+    """apt-авторемонт: dpkg --configure -a + --fix-broken + ретрай.
+
+    Кейс продакшена: 'E: Unmet dependencies. Try apt --fix-broken install'
+    на VPS с полусобранными пакетами — раньше валил установку AWG целиком.
+    """
+
+    def _make_core(self, install_results):
+        """install_results: список кодов возврата apt-get install по порядку."""
+        core = MagicMock()
+        calls = {"install": 0}
+
+        def _run(cmd, capture=False, check=False, quiet=False, input_text=None):
+            m = MagicMock()
+            m.stdout = ""
+            m.stderr = ""
+            if cmd[:2] == ["apt-get", "install"]:
+                idx = min(calls["install"], len(install_results) - 1)
+                rc = install_results[idx]
+                calls["install"] += 1
+                m.returncode = rc
+                if rc != 0:
+                    m.stderr = ("E: Unmet dependencies. Try 'apt --fix-broken "
+                                "install' with no packages (or specify a solution).")
+            elif cmd[:2] == ["apt-get", "check"]:
+                # В этом тесте ремонт проходит: check после dpkg --configure -a
+                # и --fix-broken возвращает 0 (зависимости починены)
+                m.returncode = 0
+            else:
+                m.returncode = 0
+            return m
+
+        core._run = MagicMock(side_effect=_run)
+        return core, calls
+
+    def test_apt_install_retries_after_repair(self):
+        """Первый install падает (Unmet) → ремонт → ретрай успешен."""
+        from chimera.modules import awg_standalone
+
+        core, calls = self._make_core(install_results=[1, 0])
+        with patch.object(awg_standalone, "_core_module", return_value=core):
+            ok = awg_standalone._awgs_apt_install("wireguard-tools")
+
+        self.assertTrue(ok, "ретрай после авто-ремонта не сработал")
+        self.assertGreaterEqual(calls["install"], 2, "не было ретрая")
+        # Ремонт действительно вызывался
+        ran_cmds = [c.args[0] for c in core._run.call_args_list]
+        self.assertIn(["dpkg", "--configure", "-a"], ran_cmds)
+
+    def test_apt_install_gives_up_when_repair_fails(self):
+        """Ремонт не помог (check всё ещё падает) → честный False."""
+        from chimera.modules import awg_standalone
+
+        core = MagicMock()
+
+        def _run(cmd, capture=False, check=False, quiet=False, input_text=None):
+            m = MagicMock()
+            m.stdout = ""
+            m.stderr = ""
+            if cmd[:2] == ["apt-get", "install"]:
+                m.returncode = 1
+                m.stderr = "E: Unmet dependencies. Try 'apt --fix-broken install'"
+            elif cmd[:2] == ["apt-get", "check"]:
+                m.returncode = 1  # сломан даже после ремонта
+            else:
+                m.returncode = 0
+            return m
+
+        core._run = MagicMock(side_effect=_run)
+        with patch.object(awg_standalone, "_core_module", return_value=core):
+            ok = awg_standalone._awgs_apt_install("wireguard-tools")
+
+        self.assertFalse(ok)
+
+    def test_apt_install_no_retry_on_unrelated_error(self):
+        """Ошибка не про зависимости (например 404) → без ремонта, сразу False."""
+        from chimera.modules import awg_standalone
+
+        core = MagicMock()
+        core._run = MagicMock(return_value=MagicMock(
+            returncode=100, stdout="", stderr="E: Unable to locate package foo"))
+        with patch.object(awg_standalone, "_core_module", return_value=core):
+            ok = awg_standalone._awgs_apt_install("foo")
+
+        self.assertFalse(ok)
+        # Никакого dpkg --configure -a не выполнялось
+        ran_cmds = [c.args[0] for c in core._run.call_args_list]
+        self.assertNotIn(["dpkg", "--configure", "-a"], ran_cmds)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
