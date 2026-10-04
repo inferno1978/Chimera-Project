@@ -33,7 +33,8 @@ from pathlib import Path
 
 from .awg_constants import (
     AWGS_CASCADE_DIR, AWGS_RU_ZONE_FILE, AWGS_ROUTING_SCRIPT,
-    AWGS_IPSET_NAME, AWGS_CASCADE_FWMARK,
+    AWGS_IPSET_NAME, AWGS_CASCADE_FWMARK, AWGS_CASCADE_FWMARK_LEGACY,
+    AWGS_B4_EXEMPT_BIT,
     AWGS_CRON_RU_UPDATE, AWGS_CRON_RU_UPDATE_SCRIPT, AWGS_SYSTEMD_CASCADE,
     AWGS_RU_ZONE_URL, AWGS_RU_ZONE_FALLBACK_GH,
     AWGS_CASCADE_ENTRY_PEER, AWGS_DEFAULT_SUBNET,
@@ -526,19 +527,25 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
         f"iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT",
 
         # v5.4.5: TCPMSS clamp — двойное туннелирование (awg0 MTU 1280 внутри
-        # awg1 MTU 1280 + оверхед обфускации) даёт effective MTU ~1200:
-        # без клампа TCP-сессии с MSS 1240 зависают на больших пакетах
-        # (TLS-certs) — классический MTU blackhole. Transport Mode B делает
-        # TCPMSS 1240, cascade теперь тоже (E2E 2026-10-03).
-        "iptables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140",
-        "iptables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140",
+        # awg1 MTU 1280 + оверхед обфускации снаружи). v5.5.9: значение поднято
+        # с 1140 до 1240/1220 (точное попадание в MTU 1280: 1240+40=1280 v4,
+        # 1220+60=1280 v6 — клиентские конфиги ставят MTU=1280 и MSS и так
+        # равен этим значениям; кламп остаётся страховкой для клиентов с
+        # MTU 1500. E2E 2026-10-05: 1220/1240 — YouTube 200 OK + 2.8MB/s).
+        "iptables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240",
+        "iptables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240",
     ]
 
     # v5.4.5: подчистить дубли от старых прогонов (голые -A до идемпотентного
     # фикса + MARK из FORWARD от бажных версий) перед применением
+    # v5.5.9: + cleanup легаси-марки 0x2000 (v5.5.8 и старее — без b4-exempt
+    # бита; если её не убрать, обе MARK-правила конкурируют и последняя
+    # затирает fwmark — каскадный трафик теряет b4-exempt)
     core._run(["bash", "-c",
                f"while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
                f"while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
+               f"while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done; "
+               f"while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done; "
                f"while iptables -t nat -D POSTROUTING -o awg1 -j MASQUERADE 2>/dev/null; do :; done; "
                f"while iptables -D FORWARD -i awg0 -o awg1 -j ACCEPT 2>/dev/null; do :; done; "
                f"while iptables -D FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; do :; done; "
@@ -579,10 +586,25 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     # Правило policy routing по fwmark — ИДЕМПОТЕНТНО (v5.4.5: ядро НЕ
     # отклоняет дубли «fwmark→table» — оно добавляет их с разными
     # автоприоритетами; E2E: после setup+boot-скрипта висело 2 правила).
-    # Сначала удаляем все существующие fwmark-правила, затем добавляем одно.
+    # Сначала удаляем все существующие fwmark-правила (включая легаси
+    # 0x2000 — v5.5.9), затем добавляем одно.
     core._run(["bash", "-c",
                f"while ip rule del fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null; do :; done; "
+               f"while ip rule del fwmark {AWGS_CASCADE_FWMARK_LEGACY} lookup 2000 2>/dev/null; do :; done; "
                f"ip rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000"],
+              check=False, quiet=True)
+
+    # v5.5.9: b4-exempt — ранний nft-коннтрек-марк для awg0/awg1.
+    # DPI-bypass b4 на entry-нодах проверяет ct mark (prerouting) и
+    # meta mark (b4_chain) на бит 0x8000 — помеченные флоу пропускаются
+    # мимо nfqueue-перехвата. Идемпотентно; на системах без nft/b4 — no-op.
+    core._run(["bash", "-c",
+               f"nft add table inet awg_b4exempt 2>/dev/null; "
+               f"nft add chain inet awg_b4exempt prerouting '{{ type filter hook prerouting priority mangle - 10; policy accept; }}' 2>/dev/null; "
+               f"nft list table inet awg_b4exempt 2>/dev/null | grep -q 'iifname \"awg0\"' || "
+               f"nft add rule inet awg_b4exempt prerouting iifname 'awg0' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT}; "
+               f"nft list table inet awg_b4exempt 2>/dev/null | grep -q 'iifname \"awg1\"' || "
+               f"nft add rule inet awg_b4exempt prerouting iifname 'awg1' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT}; true"],
               check=False, quiet=True)
 
     # v5.5.8: IPv6-зеркало каскада — весь клиентский v6 через exit
@@ -599,9 +621,10 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
             # FORWARD: клиенты → awg1 и обратно
             "ip6tables -A FORWARD -i awg0 -o awg1 -j ACCEPT",
             "ip6tables -A FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
-            # TCPMSS clamp (двойное туннелирование — тот же 1140 что в v4)
-            "ip6tables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140",
-            "ip6tables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140",
+            # TCPMSS clamp (v5.5.9: 1220 = точное попадание в awg1 MTU 1280
+            # для v6: 1220+60=1280; см. комментарий в v4-блоке)
+            "ip6tables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220",
+            "ip6tables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220",
         ]
         for rule in rules6:
             check = rule.replace(" -A ", " -C ", 1)
@@ -615,6 +638,7 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
                    "table", "2000"], check=False, quiet=True)
         core._run(["bash", "-c",
                    f"while ip -6 rule del fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null; do :; done; "
+                   f"while ip -6 rule del fwmark {AWGS_CASCADE_FWMARK_LEGACY} lookup 2000 2>/dev/null; do :; done; "
                    f"ip -6 rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000"],
                   check=False, quiet=True)
         # Контроль: default v6-маршрут в table 2000 реально встал
@@ -668,6 +692,10 @@ iptables -t mangle -C PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} 
     iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK}
 # подчистка старых FORWARD-MARK правил от предыдущих версий chimera
 while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done
+# v5.5.9: легаси-марка 0x2000 (без b4-exempt бита) — убрать, чтобы не
+# конкурировала с актуальной (последняя MARK в цепочке затирает fwmark)
+while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done
+while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done
 # 2.2 NAT для выхода через awg1
 iptables -t nat -C POSTROUTING -o awg1 -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -o awg1 -j MASQUERADE
@@ -679,12 +707,24 @@ iptables -C FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -
 # 2.4 RU-сети — напрямую через host
 iptables -C FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT 2>/dev/null || \
     iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT
-# 2.5 v5.4.5: TCPMSS clamp (двойное туннелирование → effective MTU ~1200;
-# без клампа TCP зависает на TLS-certs — MTU blackhole; E2E 2026-10-03)
-iptables -t mangle -C FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || \
-    iptables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
-iptables -t mangle -C FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || \
-    iptables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
+# 2.5 v5.5.9: TCPMSS clamp (точное попадание в awg1 MTU 1280: v4 1240+40,
+# v6 1220+60; клиентские конфиги ставят MTU=1280 — кламп как страховка
+# для клиентов с MTU 1500; E2E 2026-10-05)
+iptables -t mangle -C FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || \
+    iptables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
+iptables -t mangle -C FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || \
+    iptables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
+# 2.6 v5.5.9: b4-exempt — ранний nft-марк (бит {AWGS_B4_EXEMPT_BIT:#x}) для
+#     awg0/awg1: DPI-bypass b4 (nft inet b4_mangle → nfqueue) пропускает
+#     помеченные флоу — иначе его пере-инжектированные пакеты теряют fwmark
+#     и уходят raw с WAN (TSPU/Google убивают по SNI — E2E 2026-10-05).
+#     Каскад шифруется до exit — DPI-bypass ему не нужен. Без b4 — no-op.
+nft add table inet awg_b4exempt 2>/dev/null
+nft add chain inet awg_b4exempt prerouting '{{ type filter hook prerouting priority mangle - 10; policy accept; }}' 2>/dev/null
+nft list table inet awg_b4exempt 2>/dev/null | grep -q 'iifname "awg0"' || \
+    nft add rule inet awg_b4exempt prerouting iifname 'awg0' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT}
+nft list table inet awg_b4exempt 2>/dev/null | grep -q 'iifname "awg1"' || \
+    nft add rule inet awg_b4exempt prerouting iifname 'awg1' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT}
 
 # 3. Policy routing (v5.4.5: on-link подсеть перед default — иначе
 #    "Nexthop has invalid gateway" при Address=base.N/32 + Table=off)
@@ -693,6 +733,7 @@ ip route replace default via {exit_gw} dev awg1 table 2000
 # v5.4.5: дедуп fwmark-правил (ядро не отклоняет дубли — они висят
 # с разными автоприоритетами; E2E: после setup+reboot — 2 правила)
 while ip rule del fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null; do :; done
+while ip rule del fwmark {AWGS_CASCADE_FWMARK_LEGACY} lookup 2000 2>/dev/null; do :; done
 ip rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000
 """
     if subnet_v6:
@@ -708,12 +749,13 @@ ip6tables -C FORWARD -i awg0 -o awg1 -j ACCEPT 2>/dev/null || \
     ip6tables -A FORWARD -i awg0 -o awg1 -j ACCEPT
 ip6tables -C FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
     ip6tables -A FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-ip6tables -t mangle -C FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || \
-    ip6tables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
-ip6tables -t mangle -C FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140 2>/dev/null || \
-    ip6tables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140
+ip6tables -t mangle -C FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || \
+    ip6tables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220
+ip6tables -t mangle -C FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220 2>/dev/null || \
+    ip6tables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220
 ip -6 route replace default dev awg1 table 2000
 while ip -6 rule del fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null; do :; done
+while ip -6 rule del fwmark {AWGS_CASCADE_FWMARK_LEGACY} lookup 2000 2>/dev/null; do :; done
 ip -6 rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000
 """
     script += """

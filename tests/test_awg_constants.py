@@ -219,10 +219,16 @@ class TestAwgConstantsCascadeFwmark(unittest.TestCase):
         from chimera.modules.awg_constants import AWGS_CASCADE_FWMARK
         self.assertNotEqual(AWGS_CASCADE_FWMARK, 1000)
 
-    def test_fwmark_is_8192(self):
-        from chimera.modules.awg_constants import AWGS_CASCADE_FWMARK
-        self.assertEqual(AWGS_CASCADE_FWMARK, 0x2000)
-        self.assertEqual(AWGS_CASCADE_FWMARK, 8192)
+    def test_fwmark_is_b4_exempt_composed(self):
+        # v5.5.9: 0x8200 = бит 0x8000 (b4-exempt DPI-bypass) | 0x0200 (тег каскада)
+        from chimera.modules.awg_constants import (
+            AWGS_CASCADE_FWMARK, AWGS_B4_EXEMPT_BIT, AWGS_CASCADE_FWMARK_LEGACY)
+        self.assertEqual(AWGS_CASCADE_FWMARK, 0x8200)
+        self.assertEqual(AWGS_CASCADE_FWMARK, 33280)
+        self.assertEqual(AWGS_CASCADE_FWMARK & AWGS_B4_EXEMPT_BIT, AWGS_B4_EXEMPT_BIT)
+        self.assertEqual(AWGS_B4_EXEMPT_BIT, 0x8000)
+        self.assertEqual(AWGS_CASCADE_FWMARK_LEGACY, 0x2000)
+        self.assertNotEqual(AWGS_CASCADE_FWMARK, AWGS_CASCADE_FWMARK_LEGACY)
 
 
 if __name__ == "__main__":

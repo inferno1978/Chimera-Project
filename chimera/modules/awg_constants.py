@@ -172,7 +172,18 @@ AWGS_PEER_IP_START: int = 2
 AWGS_PEER_IP_END:   int = 254
 
 # ── Fwmark для каскада (не конфликтует с chain Mode B, который использует 1000) ─
-AWGS_CASCADE_FWMARK: int = 0x2000  # 8192 — отличается от AWG_FWMARK=1000
+# v5.5.9: марка каскада = 0x2000 | 0x8000. Бит 0x8000 — «b4-exempt»: на нодах
+# с DPI-bypass b4 (nft inet b4_mangle: tcp/443 ct<20 → nfqueue 537-540)
+# помеченные этим битом флоу пропускаются мимо перехвата. Без бита b4
+# пере-инжектирует обработанные (fragmentation/desync) пакеты БЕЗ fwmark —
+# они уходят raw с WAN entry-ноды, и TSPU/Google убивают их по SNI
+# (E2E 2026-10-05: YouTube через каскад не работал у юзера ровно по этой
+# причине; api64/cloudflare при этом работали). Каскадный трафик
+# шифруется до exit-ноды — DPI-bypass ему не нужен. На системах без b4
+# бит 0x8000 безвреден (никем не проверяется).
+AWGS_B4_EXEMPT_BIT: int = 0x8000
+AWGS_CASCADE_FWMARK_LEGACY: int = 0x2000  # v5.5.8 и старее — только для cleanup
+AWGS_CASCADE_FWMARK: int = 0x8200  # 33280 = 0x8000 (b4-exempt) | 0x0200 (тег каскада)
 
 # ── Источники ru.zone для каскада ───────────────────────────────────────────
 AWGS_RU_ZONE_URL: str = "https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone"
