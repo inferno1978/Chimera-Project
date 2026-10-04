@@ -91,7 +91,7 @@ def _err(msg: str)     -> None: print(f"{RED}[ERR]{NC}   {msg}");   _log("ERR", 
 # ── box_renderer (UI меню, общий для всех модулей) ────────────────────────
 from chimera.modules.box_renderer import (
     _box_top, _box_sep, _box_bottom, _box_row, _box_item, _box_item_exit,
-    _box_back, _box_info, _box_warn, _box_ok, _box_link, _box_desc,
+    _box_back, _box_info, _box_warn, _box_ok, _box_link, _box_desc, _box_kv,
 )
 
 # ── Делегирование в _core.py ──────────────────────────────────────────────

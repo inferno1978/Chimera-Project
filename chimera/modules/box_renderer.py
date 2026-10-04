@@ -11,7 +11,7 @@ Box-рендеринг для интерактивных меню Chimera Projec
         _get_box_width, _plain, _wcslen,
         _box_line_top, _box_line_sep, _box_line_bot,
         _box_row, _box_row_auto, _box_link, _box_top, _box_sep, _box_bottom,
-        _box_item, _box_item_exit, _box_back, _box_desc,
+        _box_item, _box_item_exit, _box_back, _box_desc, _box_kv,
         _box_wrap_msg, _box_info, _box_warn, _box_ok, _box_dim, _box_input,
         _submenu_header, _submenu_item, _submenu_back,
     )
@@ -457,6 +457,19 @@ def _box_back() -> None:
     """Строка возврата в нижней части рамки."""
     text = f"  {DIM}[{NC}{RED}{BOLD}Q{NC}{DIM}]{NC}  {DIM}← Назад в главное меню{NC}"
     _box_row(text)
+
+
+def _box_kv(key: str, val: str, kw: int = 22) -> None:
+    """Строка «ключ — значение» с выравниванием ключа по колонкам.
+
+    Канон паттерна mieru/mieru_cascade (там _box_kv локальный): ключ цианетом,
+    значение через два пробела, ключ дополняется до kw видимых колонок
+    (_wcslen учитывает ANSI-коды и wide-char). Перенос длинных значений
+    делает _box_row — правая граница рамки остаётся ровной.
+    """
+    key_colored = f"{CYAN}{key}{NC}"
+    key_pad = kw - _wcslen(key_colored)
+    _box_row(f"  {key_colored}{' ' * max(0, key_pad)}  {val}")
 
 
 def _box_desc(text: str) -> None:
