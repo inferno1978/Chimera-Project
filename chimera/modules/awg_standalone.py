@@ -2138,8 +2138,9 @@ def awgs_enable_ipv6(regen_client_confs: bool = True) -> bool:
       5. Каскадная entry: awgs_cascade_enable_ipv6() — awg1 v6 + ::/0 +
          ip6tables-зеркало + routing-скрипт. Иначе — NAT66 (MASQUERADE v6
          → WAN + helper-скрипт + sysctl ipv6.forwarding).
-      6. Перегенерируются клиентские .conf всех пиров (Address v6/128 +
-         AllowedIPs ::/0) — файлы в /root/awg/keys/<name>.conf.
+      6. Перегенерируются клиентские .conf всех пиров (dual-stack Address
+         одной строкой "v4/32, v6/128" + AllowedIPs ::/0) — файлы в
+         /root/awg/keys/<name>.conf.
 
     Возвращает True при успехе.
     """

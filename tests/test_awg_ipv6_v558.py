@@ -328,8 +328,8 @@ class TestClientConfV6(unittest.TestCase):
                           "mtu": 1280, "allow_ipv6_tunnel": True,
                           "params": {}, "endpoint": "203.0.113.103"},
         )
-        self.assertIn("Address = 172.16.82.2/32", conf)
-        self.assertIn("Address = fd66:66:82::2/128", conf)
+        self.assertIn("Address = 172.16.82.2/32, fd66:66:82::2/128", conf)
+        self.assertNotIn("Address = fd66:66:82::2/128\n", conf)
         self.assertIn("AllowedIPs = 0.0.0.0/0, ::/0", conf)
 
 
