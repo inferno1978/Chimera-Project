@@ -2385,7 +2385,7 @@ def _select_domain(telemt_port: int = 8443):
         _box_top("ВЫБОР FAKE TLS ДОМЕНА")
         _box_row()
         _box_info("Telemt маскируется под HTTPS сайта — DPI меньше подозревает.")
-        # v5.5.1 (sni_hygiene): ПРИОРИТЕТ — свой домен (own-site: nginx +
+        # (sni_hygiene): ПРИОРИТЕТ — свой домен (own-site: nginx +
         # LE-сертификат, IP↔домен↔сертификат совпадают). Маскарад под
         # известные ресурсы (microsoft.com, yandex и т.п.) — триггер ToS
         # РФ-хостингов и эвристик РКН; остаётся как явная кастомизация.
@@ -2469,7 +2469,7 @@ def _select_own_domain_submenu(telemt_port: int):
     _box_sep(); _box_item("Q", "← Назад")
     _box_bot(); print()
 
-    # v5.5.1: дефолт — own-site (2): IP↔домен↔сертификат совпадают,
+    # дефолт — own-site (2): IP↔домен↔сертификат совпадают,
     # никаких известных ресурсов (sni_hygiene).
     mode = proto_ask(f"{CYAN}Режим [1/2] (Enter=2 — рекомендуется): {NC}",
                      default="2", c=True).strip() or "2"

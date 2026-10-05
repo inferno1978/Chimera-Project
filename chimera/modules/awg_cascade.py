@@ -1,7 +1,7 @@
 """
 chimera/modules/awg_cascade.py
 ───────────────────────────────────────────────────────────────────────────────
-Каскад AmneziaWG: RU (вход) → зарубеж (выход). С v5.5.3 — МУЛЬТИ-EXIT:
+Каскад AmneziaWG: RU (вход) → зарубеж (выход). МУЛЬТИ-EXIT:
 несколько зарубежных выходов в одном каскаде, активен один awg1-туннель,
 авто-failover переключает на следующий выход при смерти активного.
 
@@ -16,7 +16,7 @@ chimera/modules/awg_cascade.py
   • Entry-нода (RU): standalone AWG + клиентский туннель awg1 к АКТИВНОМУ
     exit + ipset RU-сетей + iptables/fwmark-маршрутизация + systemd-юнит
     + cron обновления ru.zone
-  • Мульти-exit (v5.5.3): список cascade_exits в state (порядок = приоритет
+  • Мульти-exit: список cascade_exits в state (порядок = приоритет
     failover), awgs_cascade_activate_exit — переключение, таймер
     awg-cascade-failover.timer (health-тик каждую минуту) — авто-failover
     с двухступенчатой проверкой (handshake → ping → перебор кандидатов)
@@ -166,8 +166,7 @@ def awgs_cascade_setup_awg0(
       • Создаёт awg-routing.sh + systemd-юнит
       • Cron для обновления ru.zone
 
-    v5.4.5:
-      • exit_peer_ip — IP пира cascade_entry на стороне AWG1 (из бокса
+    • exit_peer_ip — IP пира cascade_entry на стороне AWG1 (из бокса
         «Cascade peer IP»). Раньше хардкодился base.2 — если у exit уже
         были пиры (например VLESS-юзеры), cascade_entry получал .3+ →
         address mismatch → handshake никогда не сходился.
@@ -180,7 +179,7 @@ def awgs_cascade_setup_awg0(
       • Валидация: exit_subnet не должен совпадать с подсетью awg0 entry
         и exit_host не должен быть собственным IP (self-loop).
 
-    v5.5 (AWG 3.1):
+    AWG 3.1:
       • exit_protocol_version — версия протокола exit-ноды ("2.0"/"3.1"
         из бокса AWG1). Версии ОБЯЗАНЫ совпадать на обеих сторонах
         туннеля awg1 — при расхождении handshake не сойдётся (3.1-
@@ -200,7 +199,7 @@ def awgs_cascade_setup_awg0(
 
     exit_protocol_version = awg_normalize_version(exit_protocol_version)
 
-    # v5.5: версионная валидация — версии протокола entry и exit обязаны
+    # версионная валидация — версии протокола entry и exit обязаны
     # совпадать (3.1-директивы синхронны на обоих концах или отсутствуют
     # на обоих). Расхождение = гарантированно мёртвый handshake.
     _own_protocol = awgs_state_load().get("protocol_version", "2.0")
@@ -213,7 +212,7 @@ def awgs_cascade_setup_awg0(
              "(меню установки → выбор версии).")
         return False
 
-    # v5.4.5: валидация подсети и self-loop (E2E: у юзера exit_subnet
+    # валидация подсети и self-loop (E2E: у юзера exit_subnet
     # мог совпасть с 10.66.66.0/24 entry — маршрутная каша)
     _own_state = awgs_state_load()
     _own_subnet = _own_state.get("subnet", "")
@@ -261,7 +260,7 @@ def awgs_cascade_setup_awg0(
         cascade_subnet=exit_subnet,
     )
 
-    # v5.5.8: IPv6-зеркало каскада — если v6 включён в standalone state
+    # IPv6-зеркало каскада — если v6 включён в standalone state
     # ЭТОЙ entry (allow_ipv6_tunnel), awg1 получает v6-адрес + ::/0,
     # весь клиентский v6 уходит через awg1 на exit (NAT66 на exit → GUA).
     from .awg_net_common import awg_v6_ula_from_subnet
@@ -291,7 +290,7 @@ def awgs_cascade_setup_awg0(
     awg1_path.chmod(0o600)
 
     # 2. Запускаем awg1 (отдельный сервис awg-quick@awg1)
-    # v5.4.5: RESTART, а не start — при повторной настройке каскада юнит
+    # RESTART, а не start — при повторной настройке каскада юнит
     # уже активен и start = no-op: интерфейс продолжал жить со СТАРЫМ
     # конфигом (E2E: перезаписали awg1.conf с правильной обфускацией, но
     # handshake так и не появился — параметры не перечитались).
@@ -307,7 +306,7 @@ def awgs_cascade_setup_awg0(
     info("Загрузка ru.zone в ipset...")
     awgs_cascade_download_ru_zone()
     awgs_cascade_load_ipset()
-    # v5.4.5: пустой ipset = весь клиентский трафик уйдёт НАПРЯМУЮ
+    # пустой ipset = весь клиентский трафик уйдёт НАПРЯМУЮ
     # с entry-сервера (mangle MARK не сработает — правило ссылается на
     # несуществующий set и не добавится) — каскад молча не каскадирует.
     # Проверяем и предупреждаем ЯВНО (E2E: у юзера именно так и было).
@@ -330,7 +329,7 @@ def awgs_cascade_setup_awg0(
     info("Создание cron для обновления ru.zone...")
     _awgs_cascade_setup_cron()
 
-    # 7. Запуск routing-юнита (v5.4.5: restart — при повторной настройке
+    # 7. Запуск routing-юнита (restart — при повторной настройке
     # юнит уже активен, start = no-op, скрипт не перезапускался)
     core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
     core._run(["systemctl", "enable", "awg-cascade-routing"],
@@ -340,7 +339,7 @@ def awgs_cascade_setup_awg0(
     if r.returncode != 0:
         warn(f"awg-cascade-routing не запустился: {r.stderr}")
 
-    # 8. v5.5.3: регистрируем exit в мульти-exit списке каскада
+    # 8. регистрируем exit в мульти-exit списке каскада
     #    (переключение/авто-failover). Дедуп — по имени и endpoint:port.
     _name = _awgs_cascade_slug_name(exit_name or exit_host)
     _exits = [e for e in awgs_state_load().get(AWGS_CASCADE_EXITS_KEY) or []
@@ -385,30 +384,29 @@ def _awgs_cascade_build_awg1_conf(
 ) -> str:
     """Генерирует awg1.conf — клиентский туннель к AWG1.
 
-    v5.4.5:
-      • exit_peer_ip — фактический IP пира cascade_entry на AWG1
+    • exit_peer_ip — фактический IP пира cascade_entry на AWG1
         (раньше хардкод base.2 — при занятых IP на exit получали mismatch).
       • exit_params — параметры обфускации AWG1 (dict с ключами
         jc/jmin/jmax/s1-s4/h1-h4/i1-i5). Обфускация ОБЯЗАНА совпадать
         на обеих сторонах туннеля: раньше брались из state entry →
         случайные значения пресета не совпадали с exit → handshake
         никогда не сходился (E2E: 0 B received).
-      • I1-I5 добавлены (правило v5.4.5: непустые как есть, пустые
+      • I1-I5 добавлены (правило непустые как есть, пустые
         комментируются) — раньше отсутствовали полностью, что ломало
         handshake с exit-серверами, использующими I1 (default preset).
 
-    v5.5 (AWG 3.1): exit_protocol_version="3.1" → после I1-I5 добавляются
+    AWG 3.1: exit_protocol_version="3.1" → после I1-I5 добавляются
     9 транспортных директив (HeaderProtectionKey/ContentPaddingAddition/
     Rekey*/... — из exit_params, тот же расширенный JSON из бокса AWG1).
-    Пусто/"2.0" — конфиг байт-в-байт как в v5.4.5.
+    Пусто/"2.0" — конфиг байт-в-байт как раньше.
     """
     from .awg_protocol import awg_is_31, awg_render_31_lines
     base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
-    # v5.4.5: приоритет — явно переданный peer IP, fallback — base.2
+    # приоритет — явно переданный peer IP, fallback — base.2
     peer_addr = exit_peer_ip if exit_peer_ip else f"{base}.2"
     client_ip = f"{peer_addr}/32"
 
-    # v5.5.8 (IPv6): v6-зеркало адреса awg1 в каскадной ULA-подсети
+    # (IPv6): v6-зеркало адреса awg1 в каскадной ULA-подсети
     # (fd66:66:<okt3>::/64 от exit_subnet). Тот же host-id, что у v4 —
     # гарантия совпадения с AllowedIPs пира cascade_entry_* на exit.
     client_ipv6 = ""
@@ -431,7 +429,7 @@ def _awgs_cascade_build_awg1_conf(
         f"Address = {client_ip}",
     ]
     if allow_ipv6 and client_ipv6:
-        # v5.5.8: v6-адрес awg1 (зеркало host-id) — нужен как source для
+        # v6-адрес awg1 (зеркало host-id) — нужен как source для
         # MASQUERADE v6 -o awg1 (NAT66 подставляет адрес интерфейса).
         lines.append(f"Address = {client_ipv6}/128")
     lines += [
@@ -443,7 +441,7 @@ def _awgs_cascade_build_awg1_conf(
         # policy routing (table 2000, fwmark) в _awgs_cascade_apply_iptables.
         "Table = off",
         # Параметры обфускации — ДОЛЖНЫ совпадать с сервером AWG1
-        # (v5.4.5: берём из exit_params)
+        # (берём из exit_params)
         f"Jc = {_p('jc', 4)}",
         f"Jmin = {_p('jmin', 40)}",
         f"Jmax = {_p('jmax', 70)}",
@@ -456,19 +454,19 @@ def _awgs_cascade_build_awg1_conf(
         f"H3 = {_p('h3', 3)}",
         f"H4 = {_p('h4', 4)}",
     ]
-    # v5.4.5: I1-I5 — по единому правилу (непустые как есть, пустые #)
+    # I1-I5 — по единому правилу (непустые как есть, пустые #)
     for key in ("i1", "i2", "i3", "i4", "i5"):
         val = _p(key, "")
         if val:
             lines.append(f"{key.upper()} = {val}")
         else:
             lines.append(f"# {key.upper()} = ")
-    # v5.5 — AWG 3.1: 9 транспортных директив из exit_params (тот же
-    # расширенный JSON обфускации из бокса AWG1). Правило v5.4.5 —
+    # AWG 3.1: 9 транспортных директив из exit_params (тот же
+    # расширенный JSON обфускации из бокса AWG1). Правило —
     # непустые «Key = value», пустые «# Key = ».
     if awg_is_31(exit_protocol_version):
         lines.append(awg_render_31_lines(params))
-    # v5.5.8: при включённом v6 — ::/0 в AllowedIPs (cryptokey routing
+    # при включённом v6 — ::/0 в AllowedIPs (cryptokey routing
     # пускает v6-пакеты в туннель; сами маршруты — через ip -6 rule)
     allowed_ips = "0.0.0.0/0, ::/0" if (allow_ipv6 and client_ipv6) else "0.0.0.0/0"
     lines += [
@@ -485,9 +483,9 @@ def _awgs_cascade_build_awg1_conf(
 
 
 def _awgs_cascade_b4_split_excl() -> str:
-    """v5.5.11: доп. матч '-m set ! --match-set awg_b4_direct dst' для
+    """доп. матч '-m set ! --match-set awg_b4_direct dst' для
     каскадного mark-правила, когда активен B4-сплит (awg_b4_split).
-    Пустая строка — сплит выключен/модуля нет (v5.5.9-форма правила)."""
+    Пустая строка — сплит выключен/модуля нет (blanket-форма правила)."""
     try:
         from . import awg_b4_split
         return awg_b4_split.mark_rule_exclusion()
@@ -498,7 +496,7 @@ def _awgs_cascade_b4_split_excl() -> str:
 def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     """Применяет iptables-правила для каскада.
 
-    v5.4.5 ГЛАВНЫЙ ФИКС: MARK переносится из mangle FORWARD в mangle
+    ГЛАВНЫЙ ФИКС: MARK переносится из mangle FORWARD в mangle
     PREROUTING. Раньше (-A FORWARD ... -j MARK) метка ставилась ПОСЛЕ
     route decision: транзитный пакет клиента уже был маршрутизирован по
     main-таблице (oif=ens3), не попадал под FORWARD -i awg0 -o awg1 и
@@ -512,7 +510,7 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     1. Трафик клиентов awg0 к RU-сетям → напрямую через host (без mark)
     2. Весь остальной клиентский → mark 0x2000 (PREROUTING!) → table 2000 → awg1
 
-    v5.5.8 (IPv6): при непустом subnet_v6 — v6-зеркало каскада:
+    (IPv6): при непустом subnet_v6 — v6-зеркало каскада:
     ВЕСЬ клиентский v6 (без RU-ipset — v6-ру-сетей в ru.zone нет, а
     весь v6 из РФ под TSPU-риском) → mark 0x2000 → ip -6 rule → table 2000
     → awg1 → exit, где NAT66 (MASQUERADE v6) выпускает в GUA exit-ноды.
@@ -521,12 +519,12 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     """
     core = _core_module()
 
-    # v5.5.11: B4-сплит — mark-правило получает исключение direct-плеча
+    # B4-сплит — mark-правило получает исключение direct-плеча
     # (dst ∈ awg_b4_direct НЕ маркируется → main → WAN → b4 → RU-IP)
     _b4x = _awgs_cascade_b4_split_excl()
 
     rules = [
-        # v5.4.5: PREROUTING — ДО route decision (иначе транзит не
+        # PREROUTING — ДО route decision (иначе транзит не
         # попадает в table 2000; см. докстринг). -i awg0 — только
         # клиентский трафик, серверный (ens3 in) не трогаем.
         f"iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
@@ -541,8 +539,8 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
         # Для RU-сетей — forward напрямую через host-интерфейс
         f"iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT",
 
-        # v5.4.5: TCPMSS clamp — двойное туннелирование (awg0 MTU 1280 внутри
-        # awg1 MTU 1280 + оверхед обфускации снаружи). v5.5.9: значение поднято
+        # TCPMSS clamp — двойное туннелирование (awg0 MTU 1280 внутри
+        # awg1 MTU 1280 + оверхед обфускации снаружи). значение поднято
         # с 1140 до 1240/1220 (точное попадание в MTU 1280: 1240+40=1280 v4,
         # 1220+60=1280 v6 — клиентские конфиги ставят MTU=1280 и MSS и так
         # равен этим значениям; кламп остаётся страховкой для клиентов с
@@ -551,12 +549,12 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
         "iptables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240",
     ]
 
-    # v5.4.5: подчистить дубли от старых прогонов (голые -A до идемпотентного
+    # подчистить дубли от старых прогонов (голые -A до идемпотентного
     # фикса + MARK из FORWARD от бажных версий) перед применением
-    # v5.5.9: + cleanup легаси-марки 0x2000 (v5.5.8 и старее — без b4-exempt
+    # + cleanup легаси-марки 0x2000 (без b4-exempt
     # бита; если её не убрать, обе MARK-правила конкурируют и последняя
     # затирает fwmark — каскадный трафик теряет b4-exempt)
-    # v5.5.11: + обе формы mark-правила (с b4-сплит-исключением и без)
+    # + обе формы mark-правила (с b4-сплит-исключением и без)
     core._run(["bash", "-c",
                f"while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
                f"while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
@@ -569,7 +567,7 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
                f"while iptables -D FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT 2>/dev/null; do :; done"],
               check=False, quiet=True)
 
-    # Применяем правила — ИДЕМПОТЕНТНО (v5.4.5: -C || -A)
+    # Применяем правила — ИДЕМПОТЕНТНО (-C || -A)
     for rule in rules:
         check = rule.replace(" -A ", " -C ", 1)
         r = core._run(["bash", "-c", f"{check} 2>/dev/null || {rule}"],
@@ -578,7 +576,7 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
             core.log_to_file("WARN", f"iptables rule failed: {rule}: {r.stderr}")
 
     # Policy routing: marked-трафик → через awg1
-    # v5.4.5: КРИТИЧЕСКИЙ фикс — `ip route add default via {gw} dev awg1
+    # КРИТИЧЕСКИЙ фикс — `ip route add default via {gw} dev awg1
     # table 2000` молча падал с "Nexthop has invalid gateway" при
     # Address=base.2/32 + Table=off (gateway НЕ on-link). Таблица 2000
     # оставалась ПУСТОЙ → fwmark-трафик падал в main → весь не-RU
@@ -600,22 +598,22 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
         core.warn("Маршрут default в table 2000 НЕ установлен — не-RU "
                   "трафик будет уходить напрямую! Проверьте awg1.")
 
-    # Правило policy routing по fwmark — ИДЕМПОТЕНТНО (v5.4.5: ядро НЕ
+    # Правило policy routing по fwmark — ИДЕМПОТЕНТНО (ядро НЕ
     # отклоняет дубли «fwmark→table» — оно добавляет их с разными
     # автоприоритетами; E2E: после setup+boot-скрипта висело 2 правила).
     # Сначала удаляем все существующие fwmark-правила (включая легаси
-    # 0x2000 — v5.5.9), затем добавляем одно.
+    # 0x2000 — легаси), затем добавляем одно.
     core._run(["bash", "-c",
                f"while ip rule del fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null; do :; done; "
                f"while ip rule del fwmark {AWGS_CASCADE_FWMARK_LEGACY} lookup 2000 2>/dev/null; do :; done; "
                f"ip rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000"],
               check=False, quiet=True)
 
-    # v5.5.9: b4-exempt — ранний nft-коннтрек-марк для awg0/awg1.
+    # b4-exempt — ранний nft-коннтрек-марк для awg0/awg1.
     # DPI-bypass b4 на entry-нодах проверяет ct mark (prerouting) и
     # meta mark (b4_chain) на бит 0x8000 — помеченные флоу пропускаются
     # мимо nfqueue-перехвата. Идемпотентно; на системах без nft/b4 — no-op.
-    # v5.5.11: при активном B4-сплите форму таблицы управляет модуль
+    # при активном B4-сплите форму таблицы управляет модуль
     # awg_b4_split (условный exempt: awg0+@awg_b4direct → return, т.е.
     # b4 ОБРАБАТЫВАЕТ direct-плечо; + output-защита AGH-ответов) —
     # минутный тик таймера сплита её же и поддерживает (self-heal).
@@ -635,13 +633,13 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
                    f"nft add rule inet awg_b4exempt prerouting iifname 'awg1' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT}; true"],
                   check=False, quiet=True)
 
-    # v5.5.8: IPv6-зеркало каскада — весь клиентский v6 через exit
+    # IPv6-зеркало каскада — весь клиентский v6 через exit
     if subnet_v6:
         from .awg_net_common import apply_ipv6_forward
         apply_ipv6_forward(core)
         rules6 = [
             # Весь v6 из awg0 → mark 0x2000 (PREROUTING, до route decision —
-            # тот же фикс v5.4.5, но для v6; RU-ipset для v6 не применяется:
+            # тот же фикс, но для v6; RU-ipset для v6 не применяется:
             # в ru.zone v6-сетей нет, весь v6 из РФ под TSPU-риском → через exit)
             f"ip6tables -t mangle -A PREROUTING -i awg0 -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
             # NAT66 на выходе в awg1: src → v6-адрес awg1 (зеркало v4-MASQUERADE)
@@ -649,7 +647,7 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
             # FORWARD: клиенты → awg1 и обратно
             "ip6tables -A FORWARD -i awg0 -o awg1 -j ACCEPT",
             "ip6tables -A FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
-            # TCPMSS clamp (v5.5.9: 1220 = точное попадание в awg1 MTU 1280
+            # TCPMSS clamp (1220 = точное попадание в awg1 MTU 1280
             # для v6: 1220+60=1280; см. комментарий в v4-блоке)
             "ip6tables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220",
             "ip6tables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220",
@@ -684,7 +682,7 @@ def _awgs_cascade_create_routing_script(exit_subnet: str,
                                         subnet_v6: str = "") -> None:
     """Создаёт awg-routing.sh для пересоздания правил при ребуте.
 
-    v5.4.5: Скрипт приводит правила В ТОЧНОСТИ к live-набору из
+    Скрипт приводит правила В ТОЧНОСТИ к live-набору из
     _awgs_cascade_apply_iptables. Раньше скрипт маркировал OUTPUT
     (серверный трафик!) вместо FORWARD -i awg0 (клиентский) и ставил
     conntrack-ACCEPT в OUTPUT — после ребута разметка молча меняла
@@ -697,14 +695,14 @@ def _awgs_cascade_create_routing_script(exit_subnet: str,
     exit_base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
     exit_gw = f"{exit_base}.1"
 
-    # v5.5.11: B4-сплит — форма mark-правила/nft-таблицы зависит от его
+    # B4-сплит — форма mark-правила/nft-таблицы зависит от его
     # состояния (скрипт перегенерируется при вкл/выкл сплита и смене exit)
     _b4x = _awgs_cascade_b4_split_excl()
     _split_on = bool(_b4x)
 
     if _split_on:
         _B4_SPLIT_IPSET_BLOCK = (
-            "# v5.5.11: B4-сплит — ipset direct-плеча (b4 дурит ТСПУ, RU-IP)\n"
+            "# B4-сплит — ipset direct-плеча (b4 дурит ТСПУ, RU-IP)\n"
             "ipset create awg_b4_direct hash:ip hashsize 1024 maxelem 65536 -exist\n"
             "ipset create awg_b4_direct_new hash:ip hashsize 1024 maxelem 65536 -exist\n"
             "if [ -f \"/etc/awg-cascade/awg_b4_direct.snapshot\" ]; then\n"
@@ -715,7 +713,7 @@ def _awgs_cascade_create_routing_script(exit_subnet: str,
             "B4-сплит ВКЛЮЧЁН — dst ∈ awg_b4_direct НЕ маркируется "
             "(main → WAN → b4 → RU-IP), остальное → каскад")
         _B4_SPLIT_NFT_BLOCK = (
-            "# v5.5.11: сплит-форма awg_b4exempt — ПОРЯДОК КРИТИЧЕН:\n"
+            "# сплит-форма awg_b4exempt — ПОРЯДОК КРИТИЧЕН:\n"
             "# @awg_b4direct-return ДО blanket-awg0 (b4 обрабатывает direct-плечо)\n"
             f"nft add set inet awg_b4exempt awg_b4direct '{{ type ipv4_addr; }}' 2>/dev/null\n"
             f"nft add chain inet awg_b4exempt output '{{ type filter hook output priority mangle - 10; policy accept; }}' 2>/dev/null\n"
@@ -732,16 +730,16 @@ def _awgs_cascade_create_routing_script(exit_subnet: str,
     else:
         _B4_SPLIT_IPSET_BLOCK = ""
         _B4_SPLIT_RULE_NOTE = (
-            "B4-сплит выключен — вся не-RU destination → каскад (v5.5.9)")
+            "B4-сплит выключен — вся не-RU destination → каскад")
         _B4_SPLIT_NFT_BLOCK = ""
 
     script = f"""#!/bin/bash
 # AWG Cascade routing — пересоздаёт правила при старте системы
-# Автоматически сгенерировано chimera/modules/awg_cascade.py (v5.4.5)
+# Автоматически сгенерировано chimera/modules/awg_cascade.py
 # Идемпотентно: безопасен при многократном запуске (-C || -A, replace).
 
 # 1. Загрузить ipset из ru.zone
-# v5.4.5: через `ipset restore` (один pipe) — построчный `ipset add`
+# через `ipset restore` (один pipe) — построчный `ipset add`
 # грузил 12k+ сетей МИНУТЫ; юнит теперь рестартует по PartOf и не
 # должен подвешивать systemd надолго.
 ipset create {AWGS_IPSET_NAME} hash:net family inet hashsize 4096 maxelem 65536 -exist
@@ -750,18 +748,18 @@ if [ -f "{AWGS_RU_ZONE_FILE}" ]; then
 fi
 {_B4_SPLIT_IPSET_BLOCK}
 # 2. iptables правила (идентичны live-набору _awgs_cascade_apply_iptables)
-# 2.1 v5.4.5 ГЛАВНЫЙ ФИКС: маркируем КЛИЕНТСКИЙ трафик в PREROUTING
+# 2.1 ГЛАВНЫЙ ФИКС: маркируем КЛИЕНТСКИЙ трафик в PREROUTING
 #     (ДО route decision — метка в FORWARD ставилась ПОСЛЕ маршрутизации,
 #     транзит уходил в main → DROP; метка в OUTPUT маркировала серверный
 #     трафик — SSH-lockout). -i awg0 — только клиентский трафик.
-#     v5.5.11: {_B4_SPLIT_RULE_NOTE}
+#     {_B4_SPLIT_RULE_NOTE}
 iptables -t mangle -C PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null || \
     iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK}
 # подчистка старых FORWARD-MARK правил от предыдущих версий chimera
 while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done
-# v5.5.9: легаси-марка 0x2000 (без b4-exempt бита) — убрать, чтобы не
+# легаси-марка 0x2000 (без b4-exempt бита) — убрать, чтобы не
 # конкурировала с актуальной (последняя MARK в цепочке затирает fwmark)
-# v5.5.11: + другая форма mark-правила (сплит вкл/выкл)
+# + другая форма mark-правила (сплит вкл/выкл)
 while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -m set ! --match-set awg_b4_direct dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done
 while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done
 while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done
@@ -776,19 +774,19 @@ iptables -C FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -
 # 2.4 RU-сети — напрямую через host
 iptables -C FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT 2>/dev/null || \
     iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT
-# 2.5 v5.5.9: TCPMSS clamp (точное попадание в awg1 MTU 1280: v4 1240+40,
+# 2.5 TCPMSS clamp (точное попадание в awg1 MTU 1280: v4 1240+40,
 # v6 1220+60; клиентские конфиги ставят MTU=1280 — кламп как страховка
 # для клиентов с MTU 1500; E2E 2026-10-05)
 iptables -t mangle -C FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || \
     iptables -t mangle -A FORWARD -i awg0 -o awg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
 iptables -t mangle -C FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240 2>/dev/null || \
     iptables -t mangle -A FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
-# 2.6 v5.5.9: b4-exempt — ранний nft-марк (бит {AWGS_B4_EXEMPT_BIT:#x}) для
+# 2.6 b4-exempt — ранний nft-марк (бит {AWGS_B4_EXEMPT_BIT:#x}) для
 #     awg0/awg1: DPI-bypass b4 (nft inet b4_mangle → nfqueue) пропускает
 #     помеченные флоу — иначе его пере-инжектированные пакеты теряют fwmark
 #     и уходят raw с WAN (TSPU/Google убивают по SNI — E2E 2026-10-05).
 #     Каскад шифруется до exit — DPI-bypass ему не нужен. Без b4 — no-op.
-#     v5.5.11: при активном B4-сплите — условная форма (direct-плечо
+#     при активном B4-сплите — условная форма (direct-плечо
 #     НЕ exempt → b4 обрабатывает его ClientHello/ответы) + output-цепь
 #     (AGH-ответы sport 53 мимо b4). Форму поддерживает таймер сплита.
 {_B4_SPLIT_NFT_BLOCK}nft add table inet awg_b4exempt 2>/dev/null
@@ -798,11 +796,11 @@ nft list table inet awg_b4exempt 2>/dev/null | grep -q 'iifname "awg0"' || \
 nft list table inet awg_b4exempt 2>/dev/null | grep -q 'iifname "awg1"' || \
     nft add rule inet awg_b4exempt prerouting iifname 'awg1' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT}
 
-# 3. Policy routing (v5.4.5: on-link подсеть перед default — иначе
+# 3. Policy routing (on-link подсеть перед default — иначе
 #    "Nexthop has invalid gateway" при Address=base.N/32 + Table=off)
 ip route replace {exit_base}.0/24 dev awg1 table 2000
 ip route replace default via {exit_gw} dev awg1 table 2000
-# v5.4.5: дедуп fwmark-правил (ядро не отклоняет дубли — они висят
+# дедуп fwmark-правил (ядро не отклоняет дубли — они висят
 # с разными автоприоритетами; E2E: после setup+reboot — 2 правила)
 while ip rule del fwmark {AWGS_CASCADE_FWMARK} lookup 2000 2>/dev/null; do :; done
 while ip rule del fwmark {AWGS_CASCADE_FWMARK_LEGACY} lookup 2000 2>/dev/null; do :; done
@@ -810,7 +808,7 @@ ip rule add fwmark {AWGS_CASCADE_FWMARK} lookup 2000
 """
     if subnet_v6:
         script += f"""
-# 4. v5.5.8: IPv6-зеркало каскада — весь клиентский v6 → awg1 → exit
+# 4. IPv6-зеркало каскада — весь клиентский v6 → awg1 → exit
 # (idempotent, идентично live-набору _awgs_cascade_apply_iptables)
 sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
 ip6tables -t mangle -C PREROUTING -i awg0 -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null || \
@@ -840,7 +838,7 @@ echo "AWG Cascade routing started"
 def _awgs_cascade_create_systemd_unit() -> None:
     """Создаёт systemd-юнит awg-cascade-routing.service.
 
-    v5.4.5: PartOf=awg-quick@awg0/@awg1 — при рестарте/стопе этих юнитов
+    PartOf=awg-quick@awg0/@awg1 — при рестарте/стопе этих юнитов
     routing-юнит рестартует вместе с ними и восстанавливает правила и
     table 2000. Иначе после `systemctl restart awg-quick@awg1` ядро
     удаляло маршруты удалённого dev awg1 из table 2000 (default via
@@ -933,7 +931,7 @@ def awgs_cascade_update_ru_zone() -> bool:
 
 
 # ============================================================================
-#  МУЛЬТИ-EXIT КАСКАД (v5.5.3)
+#  МУЛЬТИ-EXIT КАСКАД
 #  RU (вход) → НЕСКОЛЬКО зарубежных выходов. Активен один awg1-туннель;
 #  порядок cascade_exits = приоритет failover. Таймер раз в минуту
 #  проверяет handshake активного exit и при его смерти переключает awg1
@@ -954,7 +952,7 @@ def _awgs_cascade_slug_name(name: str) -> str:
 def _awgs_cascade_exits_load() -> list:
     """Список exit-боксов из state + ленивая миграция legacy-каскада.
 
-    Legacy (v5.4.x/v5.5.2): единственный exit хранился в плоских полях
+    Legacy (старый формат): единственный exit хранился в плоских полях
     cascade_peer_*. При первом обращении синтезируем из них бокс и
     сохраняем в cascade_exits. Плоские поля остаются зеркалом активного
     exit (обратная совместимость чтения).
@@ -1007,7 +1005,7 @@ def awgs_cascade_register_exit(
     mtu: int = 1280,
     activate: bool = False,
 ) -> bool:
-    """Регистрирует exit-ноду в мульти-exit каскаде (v5.5.3).
+    """Регистрирует exit-ноду в мульти-exit каскаде.
 
     Бокс данных берётся с exit-ноды (awgs_cascade_setup_awg1 / меню
     «Настроить как AWG1»). Валидации те же, что в awgs_cascade_setup_awg0
@@ -1135,7 +1133,7 @@ def awgs_cascade_activate_exit(name: str, probe_timeout: int = 0) -> bool:
 
     subnet = box.get("subnet", AWGS_DEFAULT_SUBNET)
 
-    # v5.5.8: v6-зеркало каскада — пробросляем флаг из standalone state
+    # v6-зеркало каскада — пробросляем флаг из standalone state
     # (переключение exit не должно молча выключать IPv6-туннель)
     from .awg_net_common import awg_v6_ula_from_subnet
     _v6_on = bool(awgs_state_load().get("allow_ipv6_tunnel"))
@@ -1351,7 +1349,7 @@ def awgs_cascade_failover_setup() -> bool:
 
     wrapper = (
         "#!/bin/bash\n"
-        "# AWG cascade multi-exit failover — health-тик (v5.5.3).\n"
+        "# AWG cascade multi-exit failover — health-тик.\n"
         "mkdir -p /root/awg\n"
         f"export PYTHONPATH=\"{installer_path}:$PYTHONPATH\"\n"
         f"/usr/bin/python3 -c \"\n"
@@ -1413,7 +1411,7 @@ def awgs_cascade_failover_teardown() -> bool:
 
 def awgs_cascade_enable_ipv6() -> bool:
     """
-    v5.5.8: включает v6-зеркало каскада на УЖЕ настроенной entry-ноде —
+    включает v6-зеркало каскада на УЖЕ настроенной entry-ноде —
     без переустановки каскада (upgrade-путь для живых установок).
 
     Что делает:
@@ -1507,7 +1505,7 @@ def awgs_cascade_setup_awg1(protocol_version: str = "2.0") -> bool:
       • Создаёт спец-пир 'cascade_entry' для подключения AWG0
       • Возвращает данные для настройки AWG0 (host/port/pubkey)
 
-    v5.5: protocol_version="3.1" — установка exit на AWG 3.1 (полный
+    protocol_version="3.1" — установка exit на AWG 3.1 (полный
     3.1-набор обфускации + директивы в awg0.conf). Бокс данных для AWG0
     теперь содержит строку Protocol version + расширенный JSON обфускации
     (включая HeaderProtectionKey и таймеры для 3.1).
@@ -1528,7 +1526,7 @@ def awgs_cascade_setup_awg1(protocol_version: str = "2.0") -> bool:
             warn("Установка standalone AWG не удалась")
             return False
     else:
-        # v5.5: если уже установлен — проверяем совпадение версий
+        # если уже установлен — проверяем совпадение версий
         _installed_v = awgs_state_load().get("protocol_version", "2.0")
         if awg_normalize_version(_installed_v) != protocol_version:
             warn(f"Standalone AWG на этом сервере — {awg_protocol_label(_installed_v)}, "
@@ -1570,21 +1568,21 @@ def awgs_cascade_setup_awg1(protocol_version: str = "2.0") -> bool:
     core._box_row(f"  {core.GREEN}Port:{core.NC}           {state.get('port', 51820)}")
     core._box_row(f"  {core.GREEN}Server pubkey:{core.NC}  {state.get('server_pubkey', '?')}")
     core._box_row(f"  {core.GREEN}Cascade peer IP:{core.NC} {peer.get('client_ip', '?')}")
-    # v5.5.8: v6-зеркало пира (если v6 включён на ЭТОМ exit) — передаётся
+    # v6-зеркало пира (если v6 включён на ЭТОМ exit) — передаётся
     # на AWG0 для сверки с Address v6 в awg1.conf (host-id совпадает с v4)
     if peer.get("client_ipv6"):
         core._box_row(f"  {core.GREEN}Cascade peer IPv6:{core.NC} {peer['client_ipv6']}")
     core._box_row(f"  {core.GREEN}Cascade subnet:{core.NC}  {state.get('subnet', '?')}")
-    # v5.5.3 FIX-E: privkey пира cascade_entry — ОБЯЗАТЕЛЬНАЯ часть бокса.
+    # FIX-E: privkey пира cascade_entry — ОБЯЗАТЕЛЬНАЯ часть бокса.
     # AWG0 подставляет его в [Interface] awg1.conf; без него exit ждёт
     # чужой pubkey и handshake никогда не сойдётся (TUI-флоу был сломан —
     # ключ генерировался заново на entry, см. _awgs_cascade_menu_awg0).
     core._box_row(f"  {core.GREEN}Cascade peer privkey:{core.NC}")
     core._box_row(f"  {peer.get('client_privkey', '?')}")
-    # v5.5: версия протокола — ОБЯЗАТЕЛЬНА для передачи на AWG0 (при
+    # версия протокола — ОБЯЗАТЕЛЬНА для передачи на AWG0 (при
     # расхождении версий handshake не сойдётся)
     core._box_row(f"  {core.GREEN}Protocol version:{core.NC} {protocol_version}")
-    # v5.4.5: параметры обфускации — КРИТИЧНО для handshake awg1
+    # параметры обфускации — КРИТИЧНО для handshake awg1
     # (должны совпадать на обеих сторонах; раньше не передавались).
     # Для 3.1 JSON содержит и 9 транспортных параметров.
     import json as _json
@@ -1646,7 +1644,7 @@ def do_manage_awg_cascade() -> None:
                   "при смерти активного таймер переключает на следующий. "
                   "Порядок списка = приоритет.")
         _box_item("6", f"B4-сплит: домены (YouTube и др.) напрямую с RU-ноды")
-        _box_desc("v5.5.11: выбранные сеты b4 → напрямую через DPI-bypass "
+        _box_desc("выбранные сеты b4 → напрямую через DPI-bypass "
                   "(цель видит RU-IP — YouTube без рекламы), остальное — "
                   "каскадом на exit. Требует b4 (меню 3 → Y → B).")
         _box_item("Q", f"Назад")
@@ -1657,7 +1655,7 @@ def do_manage_awg_cascade() -> None:
             _awgs_cascade_menu_awg0()
             input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch == "2":
-            # v5.5: выбор версии протокола перед настройкой exit
+            # выбор версии протокола перед настройкой exit
             _pv = _awgs_cascade_prompt_exit_version()
             awgs_cascade_setup_awg1(protocol_version=_pv)
             input(f"{core.BLUE}Нажмите Enter...{NC}")
@@ -1674,7 +1672,7 @@ def do_manage_awg_cascade() -> None:
         elif ch == "5":
             _awgs_cascade_menu_multiexit()
         elif ch == "6":
-            # v5.5.11: B4-сплит — подменю awg_b4_split
+            # B4-сплит — подменю awg_b4_split
             from .awg_b4_split import do_manage_awg_b4_split
             do_manage_awg_b4_split()
         elif ch in ("q", ""):
@@ -1682,7 +1680,7 @@ def do_manage_awg_cascade() -> None:
 
 
 def _awgs_cascade_prompt_exit_version() -> str:
-    """v5.5: выбор версии протокола exit-ноды (AWG1) перед настройкой.
+    """выбор версии протокола exit-ноды (AWG1) перед настройкой.
 
     Возвращает "2.0" или "3.1".
     """
@@ -1743,7 +1741,7 @@ def _awgs_cascade_menu_awg0() -> None:
     exit_port_str = input(f"{CYAN}UDP-порт AWG1 [51820]: {NC}").strip()
     exit_port = int(exit_port_str) if exit_port_str.isdigit() else 51820
 
-    # v5.5.3 FIX-E: privkey пира cascade_entry (строка «Cascade peer
+    # FIX-E: privkey пира cascade_entry (строка «Cascade peer
     # privkey» из бокса AWG1). КРИТИЧНО: exit ждёт pubkey именно этого
     # ключа в своём [Peer]. Раньше промпта не было и setup_awg0 молча
     # генерировал НОВЫЙ ключ — handshake никогда не сходился в TUI-флоу.
@@ -1761,12 +1759,12 @@ def _awgs_cascade_menu_awg0() -> None:
 
     exit_subnet = input(f"{CYAN}Подсеть AWG1 [172.16.61.0/24]: {NC}").strip() or "172.16.61.0/24"
 
-    # v5.4.5: IP пира cascade_entry на AWG1 (из бокса "Cascade peer IP").
+    # IP пира cascade_entry на AWG1 (из бокса "Cascade peer IP").
     # Enter = base.2 (для чистого exit без других пиров).
     _base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
     exit_peer_ip = input(f"{CYAN}Cascade peer IP на AWG1 [{_base}.2]: {NC}").strip() or f"{_base}.2"
 
-    # v5.4.5: параметры обфускации AWG1 (строка Obfuscation из бокса AWG1).
+    # параметры обфускации AWG1 (строка Obfuscation из бокса AWG1).
     # Обфускация обязана совпадать на обеих сторонах — иначе handshake
     # никогда не сойдётся. Enter = параметры этого сервера (только если
     # вы УВЕРЕНЫ, что пресеты совпадают).
@@ -1781,7 +1779,7 @@ def _awgs_cascade_menu_awg0() -> None:
                  "параметры этого сервера (handshake может не сойлись!)")
             exit_params = None
 
-    # v5.5: версия протокола AWG1 (строка Protocol version из бокса AWG1).
+    # версия протокола AWG1 (строка Protocol version из бокса AWG1).
     # Обязательна для 3.1-каскада — версии должны совпадать на обоих концах.
     _pv_raw = input(f"{CYAN}Версия протокола AWG1 [1=2.0, 2=3.1, Enter=2.0]: {NC}").strip()
     exit_protocol_version = "3.1" if _pv_raw == "2" else "2.0"
@@ -1804,7 +1802,7 @@ def _awgs_cascade_menu_awg0() -> None:
 
 
 def _awgs_cascade_menu_multiexit() -> None:
-    """v5.5.3: управление мульти-exit каскадом (список выходов + failover)."""
+    """управление мульти-exit каскадом (список выходов + failover)."""
     core = _core_module()
     _box_top = core._box_top
     _box_row = core._box_row
@@ -2011,7 +2009,7 @@ def _awgs_cascade_status() -> None:
         _box_row(f"  Exit port: {state.get('cascade_peer_port', '?')}")
         _box_row(f"  Exit subnet: {state.get('cascade_subnet', '?')}")
 
-        # v5.5.3: мульти-exit каскад
+        # мульти-exit каскад
         exits = _awgs_cascade_exits_load()
         if len(exits) > 1 or state.get(AWGS_CASCADE_ACTIVE_KEY):
             _active = _awgs_cascade_active_name(exits, state)
@@ -2033,7 +2031,7 @@ def _awgs_cascade_status() -> None:
                      f"{GREEN}active{NC}" if timer_on
                      else f"{DIM}off{NC}")
 
-        # v5.5.11: B4-сплит (краткая строка статуса)
+        # B4-сплит (краткая строка статуса)
         try:
             from . import awg_b4_split
             _sp = awg_b4_split.status_info()

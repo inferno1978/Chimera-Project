@@ -1,6 +1,6 @@
 """tests/test_mieru_cascade_weights_hysteresis.py
 
-Гистерезис дрейфа весов в health-тике mieru-каскада (v5.5.4).
+Гистерезис дрейфа весов в health-тике mieru-каскада.
 
 Живой кейс (октябрь 2026, entry-нода с leastping): без порога джиттер
 метрик каждый тик давал «новые» вероятности → weights_drift=True →

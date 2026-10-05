@@ -907,7 +907,7 @@ async function loadAWG() {
     const s = statusRes.value;
     const active = s.service && s.service.active;
     const enabled = s.service && s.service.enabled;
-    // v5.5 (AWG 3.1): бейдж версии протокола из /api/awg/status
+    // AWG 3.1: бейдж версии протокола из /api/awg/status
     const awgPv = s.protocol_version === '3.1' ? '3.1' : '2.0';
     statusEl.innerHTML = `
       <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">

@@ -24,7 +24,7 @@ State management для sing-box backend.
       "version": 3,
       "password": "...",
       "handshake": {
-        // v5.5.1 (sni_hygiene): дефолт — СВОЙ домен (см.
+        // (sni_hygiene): дефолт — СВОЙ домен (см.
         // singbox_common.shadowtls_handshake_default); cloudflare —
         // только если своего домена нет / явный выбор пользователя.
         "server": "<свой домен из state.json>",

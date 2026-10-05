@@ -111,7 +111,7 @@ class TestBuildServerConf31(unittest.TestCase):
         self.assertGreater(hpk_pos, conf.find("I1 = <r 32>"))
 
     def test_31_empty_extra_commented(self):
-        # Правило v5.4.5: пустые 3.1-параметры комментируются
+        # Правило: пустые 3.1-параметры комментируются
         params = dict(_PARAMS_31)
         params["rekey_timeout"] = ""
         conf = self._build("3.1", params)

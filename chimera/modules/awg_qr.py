@@ -40,7 +40,7 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     server_pubkey = server_state.get("server_pubkey", "")
     mtu = server_state.get("mtu", 1280)
     allow_ipv6 = server_state.get("allow_ipv6_tunnel", False)
-    # v5.5: версия протокола из state (отсутствие = "2.0" = прежнее
+    # версия протокола из state (отсутствие = "2.0" = прежнее
     # поведение байт-в-байт; "3.1" — 9 транспортных директив в [Interface])
     is_31 = awg_is_31(server_state.get("protocol_version", "2.0"))
 
@@ -56,7 +56,7 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     if allow_ipv6 and client_ipv6:
         allowed_ips += f", ::/0"
 
-    # v5.5.10: dual-stack Address ОДНОЙ строкой через запятую — формат
+    # Dual-stack Address ОДНОЙ строкой через запятую — формат
     # bivlked (awg_common.sh render_client_config) и wg-quick. Две отдельные
     # строки Address ломают разбор в официальном клиенте Amnezia
     # (инцидент 2026-10-05: клиент висел на «Подключение»), а также
@@ -74,7 +74,7 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     ]
     lines.append(f"DNS = {dns1}, {dns2}")
     lines.append(f"MTU = {mtu}")
-    # v5.4.3: Параметры AWG 2.0 внутри [Interface] (как в эталонном конфиге Amnezia).
+    # Параметры AWG 2.0 внутри [Interface] (как в эталонном конфиге Amnezia).
     # Раньше были после [Peer] — некоторые парсеры не принимают AWG-параметры
     # вне [Interface]. Подтверждено zvshka: рабочая конфигурация Amnezia
     # имеет Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5 внутри [Interface].
@@ -89,7 +89,7 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     lines.append(f"H2 = {params.get('h2', 2)}")
     lines.append(f"H3 = {params.get('h3', 3)}")
     lines.append(f"H4 = {params.get('h4', 4)}")
-    # v5.4.5: I1-I5 в КЛИЕНТСКОМ конфиге — непустые пишем как есть,
+    # I1-I5 в КЛИЕНТСКОМ конфиге — непустые пишем как есть,
     # ПУСТЫЕ комментируем (# I2 = ).
     # E2E 2026-10-03 (de1→nl1, ubuntu 24.04, amneziawg-tools
     # 1.0.20210914-0~202608130144 из PPA): Linux-клиент awg-quick падает
@@ -97,7 +97,7 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
     # (awg setconf требует значение после '='). '# I2 = ' принимается
     # и сервером, и клиентом; приложения (Keenetic/Amnezia Client)
     # комментарии игнорируют, поэтому правило безопасно для всех.
-    # (v5.4.2 правило "клиенту без #" касалось только приложений и
+    # (раньше правило "клиенту без #" касалось только приложений и
     # ломало awg-quick на Linux — см. test_client_i1_to_i5_empty_commented_v545)
     for key in ("i1", "i2", "i3", "i4", "i5"):
         val = params.get(key, "")
@@ -105,11 +105,11 @@ def awgs_qr_build_client_conf(peer: dict, server_state: dict) -> str:
             lines.append(f"{key.upper()} = {val}")
         else:
             lines.append(f"# {key.upper()} = ")
-    # v5.5 — AWG 3.1: 9 транспортных директив сразу после I1-I5
+    # AWG 3.1: 9 транспортных директив сразу после I1-I5
     # (HeaderProtectionKey, ContentPaddingAddition, таймеры, RandomTrailers,
     # DisableCookies) — в [Interface], тем же блоком что и в серверном
     # конфиге (awg_standalone.awgs_build_server_conf). Единое правило
-    # v5.4.5: пустые комментируются «# Key = ».
+    # пустые комментируются «# Key = ».
     if is_31:
         lines.append(awg_render_31_lines(params))
     lines.append("")
@@ -193,7 +193,7 @@ def awgs_qr_build_vpn_uri(peer: dict, server_state: dict) -> str:
         v = params.get(k, "")
         if v:
             inner[k.upper()] = str(v)
-    # v5.5 — AWG 3.1: 9 транспортных параметров в inner JSON (строками,
+    # AWG 3.1: 9 транспортных параметров в inner JSON (строками,
     # как остальные значения — контракт формата Amnezia Client).
     # HeaderProtectionKey и прочие директивы клиентского .conf.
     if awg_is_31(server_state.get("protocol_version", "2.0")):
@@ -201,7 +201,7 @@ def awgs_qr_build_vpn_uri(peer: dict, server_state: dict) -> str:
             v = params.get(k, "")
             if v:
                 inner[AWG31_DIRECTIVE_NAMES[k]] = str(v)
-    # v5.5.10: при включённом v6-туннеле — ::/0 рядом с 0.0.0.0/0,
+    # при включённом v6-туннеле — ::/0 рядом с 0.0.0.0/0,
     # иначе Amnezia Client после импорта vpn:// URI рендерит маршруты
     # v4-only и IPv6 утекает мимо туннеля (несмотря на client_ipv6).
     allowed_list = ["0.0.0.0/0"]
@@ -229,7 +229,7 @@ def awgs_qr_build_vpn_uri(peer: dict, server_state: dict) -> str:
                 "isThirdPartyConfig": True,
                 "last_config": inner_json,
                 "port": str(port),
-                # v5.5: версия протокола из state — "2" для 2.0
+                # версия протокола из state — "2" для 2.0
                 # (историческое значение), "3" для 3.1 (AmneziaVPN
                 # 5.0.1.5+ ожидает мажор протокола в этом поле).
                 "protocol_version": awg_vpn_uri_protocol_version(

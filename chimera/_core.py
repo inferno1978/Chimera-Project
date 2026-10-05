@@ -948,7 +948,7 @@ PARAM_USER_EMAIL:      str  = ""
 PARAM_USER_NAME:       str  = ""
 PARAM_SPIDERX:         str  = ""
 PARAM_SOCKET_PATH:     str  = ""
-PARAM_REALITY_DEST:    str  = ""   # dest/sni для REALITY при AWG-транспорте. v5.5.1: приоритет — СВОЙ домен (Self-SNI: dest=nginx-сокет, serverNames=домен); чужой домен — явный выбор пользователя (sni_hygiene.py, ToS РФ-хостингов/РКН)
+PARAM_REALITY_DEST:    str  = ""   # dest/sni для REALITY при AWG-транспорте. приоритет — СВОЙ домен (Self-SNI: dest=nginx-сокет, serverNames=домен); чужой домен — явный выбор пользователя (sni_hygiene.py, ToS РФ-хостингов/РКН)
 PARAM_DOMAIN_STRATEGY: str  = ""
 PARAM_SITE_TEMPLATE:   str  = "0"   # индекс шаблона сайта (0-15), дефолт "0" — должен быть int-конвертируемой строкой
 PARAM_FINGERPRINT:     str  = "chrome"   # TLS/uTLS fingerprint, выбирается при установке
@@ -1106,7 +1106,7 @@ AWG_I5:   str = ""      # Transport packet junk IPv6 allowed IP (hex)
 #               с установками до введения полного набора параметров)
 AWG_OBFUSCATION_SOURCE: str = "default"
 
-# ── AWG 3.1 (v5.5): версия протокола + транспортные параметры ────────────
+# ── AWG 3.1: версия протокола + транспортные параметры ────────────
 # AWG_PROTOCOL_VERSION — "2.0" (дефолт, обратная совместимость) | "3.1"
 # (transport protection). Единая точка правды — chimera/modules/awg_protocol.py.
 AWG_PROTOCOL_VERSION: str = "2.0"
@@ -2732,7 +2732,7 @@ def _assert_reality_dest_sane() -> None:
             "reality_dest в state.json."
         )
 
-    # v5.5.1 Self-SNI (Mode B): dest = свой домен → xray обязан работать
+    # Self-SNI (Mode B): dest = свой домен → xray обязан работать
     # через ЛОКАЛЬНЫЙ nginx-сокет (иначе петля: domain:443 указывает на этот
     # же сервер, чей inbound снова лезет на domain:443). Сокет нужен
     # обязательно; пустой PARAM_SOCKET_PATH при self-SNI = ловим здесь.
@@ -3135,7 +3135,7 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
     # и перезапустить nginx чтобы он подхватил его.
     # BUGFIX: nginx создаёт unix-сокет при своём bind; ждать сокет ДО restart nginx —
     # deadlock. Сначала перезапускаем nginx, потом ждём подтверждения сокета.
-    # v5.5.1: self-SNI Mode B (reality_dest = свой домен) тоже использует
+    # self-SNI Mode B (reality_dest = свой домен) тоже использует
     # nginx-сокет как dest — синхронизируем nginx с новым сокетом и здесь.
     from chimera.modules.sni_hygiene import reality_self_sni as _rsn_chk
     _self_sni_b = bool(AWG_EXIT_ENABLED and PARAM_DOMAIN
@@ -3233,7 +3233,7 @@ def do_rebuild_xray_config() -> None:
     info("Параметры загружены из state.json.")
     info(f"  Режим: {INSTALL_MODE}, протокол: {PROTOCOL_MODE}, домен: {PARAM_DOMAIN}")
     # Если PARAM_SOCKET_PATH пустой — что-то не так с state.json.
-    # (v5.5.1: self-SNI Mode B тоже требует сокет — проверка ниже.)
+    # (self-SNI Mode B тоже требует сокет — проверка ниже.)
     from chimera.modules.sni_hygiene import reality_self_sni as _rsn_chk2
     _self_sni_b = bool(AWG_EXIT_ENABLED and PARAM_DOMAIN
                        and _rsn_chk2(PARAM_REALITY_DEST, PARAM_DOMAIN))
@@ -4193,7 +4193,7 @@ def do_full_install() -> None:
     _run(["systemctl", "start", "nginx"], check=False, quiet=True)
     nginx_ok = _wait_service_active("nginx", 15)
 
-    # Проверка сокета — в классическом REALITY и в v5.5.1 self-SNI Mode B
+    # Проверка сокета — в классическом REALITY и в self-SNI Mode B
     # (reality_dest = свой домен → dest = nginx-сокет). В AWG-режиме с ЧУЖИМ
     # dest Xray слушает напрямую TCP-порт, unix-сокета нет.
     from chimera.modules.sni_hygiene import reality_self_sni as _rsn_chk3
@@ -4336,7 +4336,7 @@ def do_full_install() -> None:
             "awg_i4":              AWG_I4,
             "awg_i5":              AWG_I5,
             "awg_obfuscation_source": AWG_OBFUSCATION_SOURCE,
-            # AWG 3.1 (v5.5): версия протокола + 9 транспортных параметров
+            # AWG 3.1: версия протокола + 9 транспортных параметров
             "awg_protocol_version": AWG_PROTOCOL_VERSION,
             "awg_header_protection_key": AWG_HEADER_PROTECTION_KEY,
             "awg_content_padding_addition": AWG_CONTENT_PADDING_ADDITION,
@@ -9729,7 +9729,7 @@ def _load_state_into_globals() -> None:
     global AWG_H1, AWG_H2, AWG_H3, AWG_H4
     global AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5
     global AWG_OBFUSCATION_SOURCE
-    # AWG 3.1 (v5.5): версия протокола + 9 транспортных параметров
+    # AWG 3.1: версия протокола + 9 транспортных параметров
     global AWG_PROTOCOL_VERSION
     global AWG_HEADER_PROTECTION_KEY, AWG_CONTENT_PADDING_ADDITION
     global AWG_REKEY_AFTER_TIME, AWG_REKEY_TIMEOUT, AWG_REJECT_AFTER_TIME
@@ -9859,7 +9859,7 @@ def _load_state_into_globals() -> None:
         AWG_I4 = state.get("awg_i4",  AWG_I4)
         AWG_I5 = state.get("awg_i5",  AWG_I5)
         AWG_OBFUSCATION_SOURCE = state.get("awg_obfuscation_source", AWG_OBFUSCATION_SOURCE)
-        # AWG 3.1 (v5.5): версия протокола + 9 транспортных параметров
+        # AWG 3.1: версия протокола + 9 транспортных параметров
         AWG_PROTOCOL_VERSION = state.get("awg_protocol_version", AWG_PROTOCOL_VERSION)
         AWG_HEADER_PROTECTION_KEY = state.get("awg_header_protection_key", AWG_HEADER_PROTECTION_KEY)
         AWG_CONTENT_PADDING_ADDITION = state.get("awg_content_padding_addition", AWG_CONTENT_PADDING_ADDITION)

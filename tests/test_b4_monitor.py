@@ -786,7 +786,7 @@ class TestPublicContract(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TUI-меню (регрессия v5.5.7): AttributeError '_box_kv' — b4_monitor звал
+#  TUI-меню (регрессия): AttributeError '_box_kv' — b4_monitor звал
 #  ytb._box_kv, которого youtube_b4 не реэкспортировал (kv был только
 #  локальным хелпером mieru/vk_bypass_menu/slipgate/wdtt); меню падало на
 #  первой же строке «Сервис:» после отрисовки шапки.

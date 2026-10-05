@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-chimera/modules/awg_b4_split.py — v5.5.11
+chimera/modules/awg_b4_split.py — B4-сплит каскада AmneziaWG
 ───────────────────────────────────────────────────────────────────────────────
 B4-сплит для AWG-каскада: выбранные домены (сеты b4 + ручные) напрямую
 с RU-entry ноды через DPI-bypass b4, всё остальное — каскадом на exit.
@@ -72,7 +72,7 @@ _IPSET         = "awg_b4_direct"
 _IPSET_TMP     = "awg_b4_direct_new"
 _SNAPSHOT      = AWGS_CASCADE_DIR / "awg_b4_direct.snapshot"
 
-_NFT_TABLE     = "awg_b4exempt"          # таблица из v5.5.9 (inet)
+_NFT_TABLE     = "awg_b4exempt"          # inet-таблица b4-exempt
 _NFT_SET       = "awg_b4direct"          # named set ВНУТРИ таблицы
 
 _AGH_YAML      = Path("/opt/AdGuardHome/AdGuardHome.yaml")
@@ -604,7 +604,7 @@ def nft_apply_split() -> bool:
 
 
 def nft_apply_blanket() -> bool:
-    """v5.5.9-форма (сплит выключен): blanket awg0/awg1, без сета/output-цепи."""
+    """blanket-форма (сплит выключен): blanket awg0/awg1, без сета/output-цепи."""
     if not _nft_ensure_base():
         return False
     batch = (
@@ -706,7 +706,7 @@ def routing_script_regen() -> bool:
     """Перегенерировать awg-routing.sh под текущее состояние сплита.
 
     Генератор awg_cascade сам спросит mark_rule_exclusion()/is_active()
-    (хук v5.5.11) — здесь только подтягиваем параметры каскада из state.
+    (хук B4-сплита) — здесь только подтягиваем параметры каскада из state.
     """
     try:
         from .awg_cascade import _awgs_cascade_create_routing_script
@@ -1052,7 +1052,7 @@ def timer_install(refresh_sec: int = 60) -> bool:
 
     wrapper = (
         "#!/bin/bash\n"
-        "# AWG B4-split refresh (v5.5.11) — резолв split-доменов → ipset/nft.\n"
+        "# AWG B4-split refresh — резолв split-доменов → ipset/nft.\n"
         "mkdir -p /root/awg\n"
         f"export PYTHONPATH=\"{installer}:$PYTHONPATH\"\n"
         f"/usr/bin/python3 -c \"\n"
@@ -1155,9 +1155,9 @@ def apply_all(verbose: bool = True) -> bool:
 
 
 def deactivate(verbose: bool = True) -> None:
-    """Выключить сплит и вернуть каскад в v5.5.9-форму (полный cleanup).
+    """Выключить сплит и вернуть каскад в blanket-форму (полный cleanup).
 
-    Порядок важен (v5.5.11.3):
+    Порядок важен:
       1. enabled=False ДО регена — иначе routing_script_regen()/генератор
          каскада увидят «включён» и запишут split-форму в boot-скрипт;
       2. mark-правило без исключения ДО ipset_destroy — иначе iptables
@@ -1175,7 +1175,7 @@ def deactivate(verbose: bool = True) -> None:
     ipset_destroy()
     _SNAPSHOT.unlink(missing_ok=True)
     routing_script_regen()
-    _info("deactivate: сплит выключен, каскад в v5.5.9-форме")
+    _info("deactivate: сплит выключен, каскад в blanket-форме")
     if verbose:
         print("  [OK] сплит снят: blanket-exempt + mark без исключения")
 
@@ -1300,7 +1300,7 @@ def do_manage_awg_b4_split() -> None:
         elif ch == "1":
             st = state_load()
             if st.get("enabled"):
-                print("\n  Выключаю сплит (возврат к v5.5.9-форме)...")
+                print("\n  Выключаю сплит (возврат к blanket-форме)...")
                 deactivate()
             else:
                 # валидация контекста

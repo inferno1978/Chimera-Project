@@ -144,13 +144,13 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         self.assertIn("I1 = deadbeef", conf)
 
     def test_empty_i1_to_i5_commented(self):
-        """v5.4: Пустые I1-I5 КОММЕНТИРУЮТСЯ (как в эталонном конфиге Amnezia).
+        """Пустые I1-I5 КОММЕНТИРУЮТСЯ (как в эталонном конфиге Amnezia).
 
         КОРЕНЬ ПРОБЛЕМЫ (подтверждено zvshka): старые amneziawg-tools падают
         с 'Line unrecognized: I2=' при виде пустой строки 'I2 = '. zvshka
         подтвердил: комментирование строк '# I2 = ' решает проблему.
 
-        РЕШЕНИЕ v5.4: пустые I1-I5 пишутся как '# I1 = ' (закомментировано).
+        РЕШЕНИЕ: пустые I1-I5 пишутся как '# I1 = ' (закомментировано).
         Непустые — без комментария. Это работает везде: старые tools
         игнорируют '#', современные тоже игнорируют, Keenetic принимает
         (эталонный Amnezia конфиг имеет все I1-I5 закомментированными).
@@ -165,12 +165,12 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         for key in ("I1", "I2", "I3", "I4", "I5"):
             self.assertIn(f"# {key} = ", conf,
                           f"# {key} = должен присутствовать (закомментирован) "
-                          f"когда значение пустое (v5.4)")
+                          f"когда значение пустое")
             # Не должно быть незакомментированной пустой строки
             # (т.е. 'I2 = ' без '#' перед ней — это ломает старые tools)
 
     def test_non_empty_i1_to_i5_uncommented(self):
-        """v5.4: Непустые I1-I5 пишутся БЕЗ комментария (как раньше)."""
+        """Непустые I1-I5 пишутся БЕЗ комментария (как раньше)."""
         from chimera.modules.awg_standalone import awgs_build_server_conf
         params = _default_params()
         params["i1"] = "<r 24>"
@@ -189,7 +189,7 @@ class TestAwgsBuildServerConf(unittest.TestCase):
         self.assertIn("# I5 = ", conf)
 
     def test_no_bare_empty_i_keys(self):
-        """v5.4: Regression — НЕ должно быть 'I2 = ' без '#' (ломает старые tools).
+        """Regression — НЕ должно быть 'I2 = ' без '#' (ломает старые tools).
 
         Это КЛЮЧЕВОЙ regression-тест на жалобу zvshka: пустая строка
         'I2 = ' (без '#') вызывает 'Line unrecognized: I2=' в старых
@@ -355,7 +355,7 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
         self.assertTrue(ok)
 
         # awgs_presets_generate был вызван (с "default")
-        # v5.5: контракт расширен — ротация передаёт protocol_version из
+        # контракт расширен — ротация передаёт protocol_version из
         # state (отсутствие ключа = "2.0" — старые установки)
         mock_gen.assert_called_once_with("default", protocol_version="2.0")
 
@@ -482,7 +482,7 @@ class TestAwgsRotateObfuscation(unittest.TestCase):
 
 
 class TestAwgsNatHelperV545(unittest.TestCase):
-    """v5.4.5: NAT-персистентность — helper-скрипт вместо сломанного инлайна.
+    """NAT-персистентность — helper-скрипт вместо сломанного инлайна.
 
     E2E 2026-10-03 (de1): инлайн `ExecStart=/bin/bash -c '...awk '{print $5}'...'`
     разрывался systemd-токенизатором на вложенной кавычке, $WAN разворачивал
@@ -498,10 +498,10 @@ class TestAwgsNatHelperV545(unittest.TestCase):
         # Инлайн-баш с кавычками ЗАПРЕЩЁН (systemd разрывает аргумент)
         self.assertNotIn("bash -c '", unit,
                          "инлайн bash -c '<...>' в ExecStart разрывается "
-                         "systemd-токенизатором (баг v5.4.4, E2E de1)")
+                         "systemd-токенизатором (баг, E2E de1)")
 
     def test_nat_unit_wanted_by_awg_quick(self):
-        """v5.5.3 FIX-F: WantedBy содержит awg-quick@awg0.service — старт
+        """FIX-F: WantedBy содержит awg-quick@awg0.service — старт
         туннеля тянет за собой NAT (иначе stop/start awg0 = чёрная дыра:
         Requires гасит NAT, повторный старт его не поднимает)."""
         from chimera.modules.awg_standalone import awgs_build_nat_unit_content
@@ -520,7 +520,7 @@ class TestAwgsNatHelperV545(unittest.TestCase):
         # up: идемпотентное добавление (с -o $WAN — иначе дубли правил)
         self.assertIn("-C POSTROUTING -s 10.66.66.0/24 -o $WAN -j MASQUERADE", body)
         self.assertIn("-t nat -A POSTROUTING -s 10.66.66.0/24 -o $WAN -j MASQUERADE", body)
-        # down: удаление с -o $WAN (симметрия с установкой — баг v5.4.4
+        # down: удаление с -o $WAN (симметрия с установкой
         # в uninstall: -D без -o НЕ матчил правило)
         self.assertIn("-D POSTROUTING -s 10.66.66.0/24 -o $WAN -j MASQUERADE", body)
         # кейс-структура
@@ -530,7 +530,7 @@ class TestAwgsNatHelperV545(unittest.TestCase):
 
 
 class TestUninstallNatParityV545(unittest.TestCase):
-    """v5.4.5: uninstall удаляет NAT правилА теми же спеками, что ставил.
+    """uninstall удаляет NAT правилА теми же спеками, что ставил.
 
     E2E 2026-10-03 (de1): MASQUERADE пережила uninstall — -D был без -o WAN.
     """
@@ -549,15 +549,15 @@ class TestUninstallNatParityV545(unittest.TestCase):
         удаляет helper/wrapper/PPA (не только ручные -D без -o)."""
         src = Path(_PROJECT_ROOT / "chimera" / "modules" / "awg_uninstall.py").read_text()
         self.assertIn("build_nat_cleanup_shell", src,
-                      "uninstall должен использовать cleanup-сниппет (v5.4.5)")
+                      "uninstall должен использовать cleanup-сниппет")
         self.assertIn("awg-nat-rules.sh", src,
-                      "uninstall должен удалять helper awg-nat-rules.sh (v5.4.5)")
+                      "uninstall должен удалять helper awg-nat-rules.sh")
         self.assertIn("awg-expires-check.sh", src,
-                      "uninstall должен удалять wrapper awg-expires-check.sh (v5.4.5)")
+                      "uninstall должен удалять wrapper awg-expires-check.sh")
         self.assertIn("amnezia-ppa.sources", src,
-                      "uninstall должен удалять PPA sources (v5.4.5)")
+                      "uninstall должен удалять PPA sources")
         self.assertIn("amnezia-ppa.gpg", src,
-                      "uninstall должен удалять PPA keyring (v5.4.5)")
+                      "uninstall должен удалять PPA keyring")
 
 
 class TestAwgsPurePythonKeygen(unittest.TestCase):

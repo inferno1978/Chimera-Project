@@ -90,7 +90,7 @@ def _allocate_network(users):
 def _i_chain_field(rng):
     """Neutral cross-engine CPS chain (<b>/<r> only) for the I2-I5 decoys.
 
-    Mirrors awg_presets.awg_generate_i2_i5 shapes (v5.5.5); kept local
+    Mirrors awg_presets.awg_generate_i2_i5 shapes; kept local
     to preserve the self-contained WPP module (no chimera imports).
     Three forms: <r N>, <b 0xHEX><r N>, <r N><b 0xHEX> — valid for both
     the kernel module (amneziawg-tools) and amneziawg-go clients.
@@ -139,7 +139,7 @@ def _parameters(protocol):
         timeout_low = rng.randint(3, 6)
         keepalive_low = rng.randint(8, 12)
         attempts_low = rng.randint(15, 25)
-        # v5.5.5: I2-I5 filled with neutral cross-engine decoy chains
+        # I2-I5 filled with neutral cross-engine decoy chains
         # (ARCHITECT-parity, see awg_presets.awg_generate_i2_i5).
         values.update({
             "I1": "<r %d>" % rng.randint(32, 256),

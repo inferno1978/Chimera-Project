@@ -405,7 +405,7 @@ def _shadowtls_menu() -> None:
         listen = ib.get("listen", "127.0.0.1")
         port = ib.get("listen_port", DEFAULT_PORT_SHADOWTLS)
         handshake = ib.get("handshake", {})
-        # v5.5.1 (sni_hygiene): фолбэк — СВОЙ домен из state.json (Self-SNI),
+        # (sni_hygiene): фолбэк — СВОЙ домен из state.json (Self-SNI),
         # не известный ресурс; старая константа — только последний резорт.
         try:
             from chimera.modules.singbox_common import shadowtls_handshake_default
@@ -532,7 +532,7 @@ def _enable_shadowtls_custom() -> None:
         return
 
     # SNI-пресеты для handshake-домена (адаптировано из HYDRA-ULTIMATE)
-    # v5.5.1 (sni_hygiene): СВОЙ домен — пункт [1] и рекомендация; пресеты
+    # (sni_hygiene): СВОЙ домен — пункт [1] и рекомендация; пресеты
     # известных ресурсов — явный выбор с предупреждением (ToS РФ-хостингов).
     try:
         from chimera.modules.singbox_common import shadowtls_handshake_default
@@ -690,7 +690,7 @@ def _change_handshake_domain() -> None:
     # Показываем меню пресетов
     os.system("clear")
     print()
-    # v5.5.1 (sni_hygiene): свой домен — первый пункт и рекомендация
+    # (sni_hygiene): свой домен — первый пункт и рекомендация
     try:
         from chimera.modules.singbox_common import shadowtls_handshake_default
         _own_hs = shadowtls_handshake_default()
@@ -2130,7 +2130,7 @@ def _gen_shadowtls_client_uri(state_ib: dict, public_ip: str, port: int,
     Если передан user_record — использует его name для тэга (#name) вместо users[0].
     """
     handshake = state_ib.get("handshake", {})
-    # v5.5.1 (sni_hygiene): фолбэк — свой домен, не известный ресурс
+    # (sni_hygiene): фолбэк — свой домен, не известный ресурс
     try:
         from chimera.modules.singbox_common import shadowtls_handshake_default
         _sni_fb = shadowtls_handshake_default()
@@ -2270,7 +2270,7 @@ def _gen_singbox_client_json(protocol: str, state_ib: dict,
 
     if protocol == "shadowtls":
         handshake = state_ib.get("handshake", {})
-        # v5.5.1 (sni_hygiene): фолбэк — свой домен, не известный ресурс
+        # (sni_hygiene): фолбэк — свой домен, не известный ресурс
         try:
             from chimera.modules.singbox_common import shadowtls_handshake_default
             _sni_fb = shadowtls_handshake_default()

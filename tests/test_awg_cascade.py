@@ -98,7 +98,7 @@ class TestAwgsCascadeBuildAwg1Conf(unittest.TestCase):
         self.assertIn("172.16.61.2/32", conf)
 
     def test_exit_peer_ip_overrides_base2_v545(self):
-        """v5.4.5: exit_peer_ip переопределяет хардкод base.2.
+        """exit_peer_ip переопределяет хардкод base.2.
 
         Если у exit уже есть пиры (VLESS-юзеры), cascade_entry
         получает .3+ от awgs_state_next_ip — хардкод .2 давал
@@ -116,7 +116,7 @@ class TestAwgsCascadeBuildAwg1Conf(unittest.TestCase):
                 exit_peer_ip="172.16.61.7",
             )
         self.assertIn("172.16.61.7/32", conf,
-                      "peer IP должен браться из exit_peer_ip (v5.4.5)")
+                      "peer IP должен браться из exit_peer_ip")
         self.assertNotIn("172.16.61.2/32", conf,
                          "хардкод base.2 не должен применяться при заданном peer IP")
 
@@ -225,7 +225,7 @@ class TestAwgsCascadeApplyIptablesRules(unittest.TestCase):
         return core
 
     def test_mark_rule_uses_prerouting_v545(self):
-        """Regression v5.4.5 ГЛАВНЫЙ ФИКС: MARK-правило в mangle PREROUTING.
+        """Regression ГЛАВНЫЙ ФИКС: MARK-правило в mangle PREROUTING.
 
         История бага (3 итерации):
         1. '-A OUTPUT' — маркировало весь исходящий трафик сервера
@@ -247,24 +247,24 @@ class TestAwgsCascadeApplyIptablesRules(unittest.TestCase):
         all_cmds = [" ".join(cmd) for cmd in self._run_calls]
         all_text = "\n".join(all_cmds)
 
-        # Должна быть команда с PREROUTING -i awg0 и MARK (v5.4.5)
+        # Должна быть команда с PREROUTING -i awg0 и MARK
         has_prerouting_mark = any(
             "PREROUTING" in c and "-i" in c and "awg0" in c and "MARK" in c
             for c in all_cmds
         )
         self.assertTrue(has_prerouting_mark,
-                        f"Expected PREROUTING -i awg0 MARK rule (v5.4.5), "
+                        f"Expected PREROUTING -i awg0 MARK rule, "
                         f"got: {all_cmds}")
 
         # НЕ должно быть MARK в FORWARD (ставится ПОСЛЕ route decision —
-        # транзит не попадает в table 2000; v5.4.5)
+        # транзит не попадает в table 2000)
         has_forward_mark = any(
             "FORWARD" in c and "MARK" in c and " -C " not in c and " -D " not in c
             for c in all_cmds
         )
         self.assertFalse(has_forward_mark,
                          f"FORWARD + MARK rule found (после route decision — "
-                         "транзит не каскадируется; v5.4.5), got: {all_cmds}")
+                         "транзит не каскадируется), got: {all_cmds}")
 
         # НЕ должно быть команды с OUTPUT и MARK одновременно (SSH lockout)
         has_output_mark = any(
@@ -340,7 +340,7 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
 
     def test_writes_script_with_ipset_references(self):
         """Скрипт содержит ссылки на ipset и exit_gw (base.1 из exit_subnet).
-        v5.4.5: ipset грузится через `ipset restore` (один pipe) —
+        ipset грузится через `ipset restore` (один pipe) —
         построчный `ipset add` грузил 12k+ сетей минуты."""
         from chimera.modules.awg_cascade import (
             _awgs_cascade_create_routing_script, AWGS_IPSET_NAME,
@@ -352,9 +352,9 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
         # exit_gw = base.1 где base = exit_subnet без последнего октета и /CIDR
         # 172.16.61.0/24 → base=172.16.61 → exit_gw=172.16.61.1
         self.assertIn("172.16.61.1", content)
-        # v5.4.5: быстрая загрузка ipset через restore
+        # быстрая загрузка ipset через restore
         self.assertIn("ipset restore -exist", content,
-                      "ipset должен грузиться через restore (v5.4.5, скорость)")
+                      "ipset должен грузиться через restore (скорость)")
         # старый медленный построчный цикл удалён
         self.assertNotIn("ipset add " + AWGS_IPSET_NAME + " \"$line\"", content)
 
@@ -370,7 +370,7 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
         self.assertTrue(mode & 0o100)  # executable bit
 
     def test_script_marks_prerouting_v545(self):
-        """v5.4.5 ГЛАВНЫЙ ФИКС: MARK в PREROUTING (до route decision).
+        """ГЛАВНЫЙ ФИКС: MARK в PREROUTING (до route decision).
 
         FORWARD-MARK ставился ПОСЛЕ маршрутизации — транзит клиентов
         уходил в main → DROP (E2E 138x: MARK 236 pkt, FORWARD=0).
@@ -383,18 +383,18 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
             _awgs_cascade_create_routing_script("172.16.61.0/24")
         content = self._script.read_text()
         self.assertIn("-A PREROUTING -i awg0 -m set ! --match-set", content,
-                      "бут-скрипт должен ставить MARK в PREROUTING (v5.4.5)")
+                      "бут-скрипт должен ставить MARK в PREROUTING")
         self.assertNotIn("-A OUTPUT -m set", content,
                          "бут-скрипт НЕ должен маркировать OUTPUT (серверный "
                          "трафик — SSH-lockout)")
         self.assertNotIn("-A OUTPUT -m conntrack", content,
-                         "conntrack-ACCEPT в OUTPUT не нужен (v5.4.5)")
+                         "conntrack-ACCEPT в OUTPUT не нужен")
         self.assertNotIn("-A FORWARD -i awg0 -m set ! --match-set", content,
                          "MARK в FORWARD слишком поздний для транзита "
-                         "(после route decision — v5.4.5)")
+                         "(после route decision)")
 
     def test_script_routes_onlink_before_default_v545(self):
-        """v5.4.5: перед default via base.1 идёт on-link подсеть
+        """перед default via base.1 идёт on-link подсеть
         base.0/24 — иначе 'Nexthop has invalid gateway' при
         Address=base.N/32 + Table=off и table 2000 остаётся пустой."""
         from chimera.modules.awg_cascade import (
@@ -404,11 +404,11 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
             _awgs_cascade_create_routing_script("172.16.61.0/24")
         content = self._script.read_text()
         self.assertIn("ip route replace 172.16.61.0/24 dev awg1 table 2000", content,
-                      "on-link подсеть обязательна перед default (v5.4.5)")
+                      "on-link подсеть обязательна перед default")
         self.assertIn("ip route replace default via 172.16.61.1 dev awg1 table 2000", content)
 
     def test_script_idempotent_rules_v545(self):
-        """v5.4.5: правила через -C || -A (идемпотентность при
+        """правила через -C || -A (идемпотентность при
         повторном запуске — раньше голые -A дублировались)."""
         from chimera.modules.awg_cascade import (
             _awgs_cascade_create_routing_script,
@@ -417,9 +417,9 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
             _awgs_cascade_create_routing_script("172.16.61.0/24")
         content = self._script.read_text()
         self.assertIn("-C FORWARD -i awg0 -o awg1 -j ACCEPT", content,
-                      "FORWARD awg0→awg1 должен проверяться -C перед -A (v5.4.5)")
+                      "FORWARD awg0→awg1 должен проверяться -C перед -A")
         self.assertIn("-C POSTROUTING -o awg1 -j MASQUERADE", content,
-                      "MASQ должен проверяться -C перед -A (v5.4.5)")
+                      "MASQ должен проверяться -C перед -A")
 
 
 class TestAwgsCascadeCreateSystemdUnit(unittest.TestCase):
@@ -451,7 +451,7 @@ class TestAwgsCascadeCreateSystemdUnit(unittest.TestCase):
         self.assertIn(str(AWGS_ROUTING_SCRIPT), content)
 
     def test_unit_has_partof_v545(self):
-        """v5.4.5: PartOf=awg-quick@awg0/@awg1 — при рестарте туннеля
+        """PartOf=awg-quick@awg0/@awg1 — при рестарте туннеля
         routing-юнит восстанавливает table 2000 (иначе ядро удаляет
         маршруты удалённого dev и каскад молча умирает — E2E)."""
         from chimera.modules.awg_cascade import (
@@ -461,7 +461,7 @@ class TestAwgsCascadeCreateSystemdUnit(unittest.TestCase):
             _awgs_cascade_create_systemd_unit()
         content = self._unit.read_text()
         self.assertIn("PartOf=awg-quick@awg0.service awg-quick@awg1.service", content,
-                      "PartOf-зависимость обязательна (v5.4.5, table 2000)")
+                      "PartOf-зависимость обязательна (table 2000)")
 
 
 class TestAwgsCascadeSetupCron(unittest.TestCase):

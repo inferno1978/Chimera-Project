@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-tests/test_awg_ipv6_v558.py
+tests/test_awg_ipv6_dualstack.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для IPv6-интеграции AWG (v5.5.8).
+Unit-тесты для IPv6-интеграции AWG.
 
 Контекст: инцидент 2026-10-05 «Ютуб работает только с B4 на роутере» —
 IPv4-only туннель при IPv6-сети клиента = AAAA-утечка мимо туннеля.
-v5.5.8 делает IPv6 default-on во всех режимах AWG.
+IPv6 default-on во всех режимах AWG.
 
 Покрывает:
   1. awg_v6_ula_from_subnet      — derived per-node ULA (fd66:66:<okt3>::/64)
@@ -217,7 +217,7 @@ class TestCascadeAwg1V6(unittest.TestCase):
         self.assertIn("Table = off", conf)
 
     def test_v6_off_byte_compatible(self):
-        """allow_ipv6=False (default) — конфиг без v6, как в v5.5.3."""
+        """allow_ipv6=False (default) — конфиг без v6 (старое поведение)."""
         from chimera.modules import awg_cascade
         self._state.write_text(json.dumps({"installed": True, "params": {}}))
         with self._patch():
@@ -290,7 +290,7 @@ class TestCascadeRoutingScriptV6(unittest.TestCase):
 # ============================================================================
 
 class TestBuildServerConfPeerV6(unittest.TestCase):
-    """awgs_build_server_conf — peer AllowedIPs v6 (regression, было до v5.5.8)."""
+    """awgs_build_server_conf — peer AllowedIPs v6 (regression, раньше)."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -338,7 +338,7 @@ class TestClientConfV6(unittest.TestCase):
 # ============================================================================
 
 class TestInstallDefaultsV6(unittest.TestCase):
-    """awgs_install: allow_ipv6_tunnel теперь True по умолчанию (v5.5.8)."""
+    """awgs_install: allow_ipv6_tunnel теперь True по умолчанию."""
 
     def setUp(self):
         _setup_core_in_sysmodules()

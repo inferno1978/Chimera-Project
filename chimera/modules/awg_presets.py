@@ -29,7 +29,7 @@ amneziawg-go:
 Пакеты отправляются в порядке I1→I2→I3→I4→I5 перед каждым хендшейком; если I1
 не задан — I2-I5 пропускаются тоже (I1 — обязательный якорь для остальных).
 
-v5.5.5 (по итогам сверки с генератором ARCHITECT, Task 31):
+По итогам сверки с генератором ARCHITECT (Task 31):
   • для AWG 3.1 генераторы по умолчанию заполняют ВСЕ пять I-цепочек:
     I2-I5 — нейтральные кросс-движковые CPS-цепочки (awg_generate_i2_i5);
     для 2.0 прежний контракт сохранён (I2-I5 пустые), i_chain_fill
@@ -192,7 +192,7 @@ def awgs_presets_generate(name: str = "default",
     content_padding_addition, rekey_*, reject_after_time, keepalive_timeout,
     max_handshake_attempts, random_trailers, disable_cookies).
 
-    i_chain_fill (v5.5.5): заполнение decoy-цепочек I2-I5.
+    i_chain_fill: заполнение decoy-цепочек I2-I5.
       None  — авто: 3.1 → заполнять все 5 цепочек (ARCHITECT-parity,
               нейтральные кросс-движковые цепочки <b>/<r>),
               2.0 → пустые (прежний контракт байт-в-байт);
@@ -201,7 +201,7 @@ def awgs_presets_generate(name: str = "default",
     Цепочки генерируются только при непустом I1 — движок пропускает
     I2-I5, если I1 не задан (якорь цепочки).
 
-    protocol_version="3.1" (AWG 3.1, v5.5) — диапазоны сужаются до констрейнтов
+    protocol_version="3.1" (AWG 3.1) — диапазоны сужаются до констрейнтов
     GenerateObfuscation31 (как в wpp_awg.py):
       • S1/S2 15-150, S3 12-55, S4 12-27 (S-паддинг ≥ 12 под HeaderProtectionKey);
       • Jmin 40-89, Jmax = Jmin + 50..250 (≤ 339);
@@ -230,7 +230,7 @@ def awgs_presets_generate(name: str = "default",
 
     I2-I5 — опциональные decoy-пакеты; полный контроль даёт пункт
     «5. Ручная настройка».
-    v5.5.5: по умолчанию (i_chain_fill=None) для 3.1 — заполняются все
+    по умолчанию (i_chain_fill=None) для 3.1 — заполняются все
     5 цепочек (ARCHITECT-parity), для 2.0 — пустые (прежний контракт).
 
     Каждый вызов (install/rotation) генерирует НОВЫЕ уникальные
@@ -267,7 +267,7 @@ def awgs_presets_generate(name: str = "default",
     jmax = jmin + jmax_delta
 
     # S1, S2 — случайные ненулевые (как в эталонном конфиге Amnezia).
-    # v5.4.2: РАНЬШЕ были 0 (как в bivlked). Но рабочий конфиг от приложения
+    # РАНЬШЕ были 0 (как в bivlked). Но рабочий конфиг от приложения
     # Amnezia использует S1=125, S2=47 — ненулевые. Подтверждено zvshka:
     # с S1=0, S2=0 handshake не завершается. С ненулевыми S1/S2 — работает.
     # S1/S2 — это junk packet size для init/response фазы handshake.
@@ -276,7 +276,7 @@ def awgs_presets_generate(name: str = "default",
     # AWG 3.1: S1/S2 15-150 (S ≥ 12 под HeaderProtectionKey), S3 12-55,
     # S4 12-27 — как в GenerateObfuscation31 (wpp_awg._parameters).
     #
-    # v5.5.5: если i1_mode пресета — профиль мимикрии с размерной
+    # если i1_mode пресета — профиль мимикрии с размерной
     # подсказкой (AWG_I1_MIMICRY_S_HINTS), S1-S4 берутся из подсказки,
     # клампленной к протокольным пределам версии (ARCHITECT-parity:
     # junk-пакеты совпадают по размеру с трафиком мимикрируемого
@@ -297,7 +297,7 @@ def awgs_presets_generate(name: str = "default",
 
     # S3, S4 — случайные в общих диапазонах (общегигиенические, не per-preset).
     # Переиспользуем диапазоны из _FULL_MANUAL_RANGES чтобы не дублировать.
-    # v5.5.5: подсказки мимикрии применяются и здесь (кламп к пределам).
+    # подсказки мимикрии применяются и здесь (кламп к пределам).
     _s3_range = _s_hint_range("s3", _s_hint, is_31) or (
         (12, 55) if is_31 else _FULL_MANUAL_RANGES["s3"])
     _s4_range = _s_hint_range("s4", _s_hint, is_31) or (
@@ -315,7 +315,7 @@ def awgs_presets_generate(name: str = "default",
 
     # I1 — зависит от per-preset i1_mode.
     #
-    # v5.5.1: AWG 3.1 поддерживает ВЕСЬ официальный CPS-язык (amneziawg-go
+    # AWG 3.1 поддерживает ВЕСЬ официальный CPS-язык (amneziawg-go
     # device/obf.go: <b>/<t>/<r>/<rc>/<rd>/<d>/<ds>/<dz> — те же 8 тегов,
     # что и в 2.0; wiki.amnezia.host «AmneziaWG: как устроен», таблица
     # «Что добавила каждая версия»). Поэтому в 3.1 i1_mode пресета больше
@@ -353,15 +353,15 @@ def awgs_presets_generate(name: str = "default",
         # (RFC 9000). Официально валидна и в 2.0, и в 3.1.
         i1 = _generate_quic_mimicry_i1()
     elif i1_mode == "dns_mimicry":
-        # DNS A-запрос mimicry (RFC 1035) — v5.5.1.
+        # DNS A-запрос mimicry (RFC 1035).
         i1 = _generate_dns_mimicry_i1()
     elif i1_mode == "tls_mimicry":
-        # TLS ClientHello mimicry (RFC 8446) — v5.5.1.
+        # TLS ClientHello mimicry (RFC 8446).
         i1 = _generate_tls_mimicry_i1()
     else:  # absent (только 2.0)
         i1 = ""
 
-    # I2-I5 — опциональные decoy-пакеты (v5.5.5 — см. сигнатуру).
+    # I2-I5 — опциональные decoy-пакеты (см. сигнатуру).
     # Заполняются только при непустом I1 (якорь цепочки: движок
     # пропускает I2-I5, если I1 не задан).
     if i_chain_fill is None:
@@ -393,7 +393,7 @@ def awgs_presets_generate(name: str = "default",
 def _generate_non_overlapping_h_values_31():
     """Генерирует H1-H4 для AWG 3.1 — УЗКИЕ непересекающиеся диапазоны 'N-M'.
 
-    v5.5.1: приведение к ОФИЦИАЛЬНОМУ формату AWG 2.0+ (wiki.amnezia.host,
+    приведение к ОФИЦИАЛЬНОМУ формату AWG 2.0+ (wiki.amnezia.host,
     «AmneziaWG: как устроен»: одиночные числа — формат legacy 1.0,
     диапазоны — формат 2.0/3.0/3.1; amneziawg-tools config.c парсит оба,
     uapi.go H1-H4 — UintRange).
@@ -447,7 +447,7 @@ def awgs_presets_validate_params(params: dict,
     awg_protocol.awg31_validate_extra_params, S1-S4 ≥ 12, Jmax ≤ 339,
     I1 — строго «<r N>» (GenerateObfuscation31-констрейнты; см. wpp_awg).
 
-    strict_cross_engine=True (v5.5.5): конфиг пойдёт ОДНОВРЕМЕННО на
+    strict_cross_engine=True: конфиг пойдёт ОДНОВРЕМЕННО на
     kernel-сервер (amneziawg-tools) и go-клиентов (amneziawg-go —
     Windows/Android/iOS/macOS) → в I1-I5 допустимы только теги
     пересечения движков <b>/<t>/<r>/<rc>/<rd>. Блокируются:
@@ -554,7 +554,7 @@ def awgs_presets_validate_params(params: dict,
     # словарь тегов amneziawg-go) или голый hex (AWG 1.5, для обратной
     # совместимости со старыми state.json).
     #
-    # v5.5.1: валидатор принимает ВСЕ 9 официальных тегов (8 go-движка
+    # валидатор принимает ВСЕ 9 официальных тегов (8 go-движка
     # <b>/<t>/<r>/<rc>/<rd>/<d>/<ds>/<dz> + kernel-only <c>) — конфиги из
     # внешних генераторов (ARCHITECT — рекомендован wiki Amnezia) и
     # собранные вручную по документации импортируются без правок.
@@ -572,7 +572,7 @@ def awgs_presets_validate_params(params: dict,
                           f"(+ <c> — только kernel-module), либо голый hex "
                           f"(AWG 1.5). "
                           f"Фактически: {v[:64]}{'...' if len(v) > 64 else ''}")
-        # v5.5.5 — строгий кросс-движковый режим (см. докстринг функции).
+        # строгий кросс-движковый режим (см. докстринг функции).
         if strict_cross_engine and v:
             if _cps_has_kernel_only_tags(v):
                 return False, (f"{key.upper()}: тег <c> поддерживается только "
@@ -631,7 +631,7 @@ def awgs_presets_validate_params(params: dict,
                        f"отпечаток VPN. Сдвиньте S2")
 
     # AWG 3.1: I1 — любая валидная CPS-цепочка из официального словаря
-    # тегов (v5.5.1; прежний форс «только <r N>» был констрейнтом
+    # тегов (прежде форс «только <r N>» был констрейнтом
     # GenerateObfuscation31/3x-ui, а не протокола — ARCHITECT и официальные
     # генераторы выдают для 3.1 в т.ч. профили мимикрии QUIC/DNS/TLS).
     if is_31:
@@ -867,7 +867,7 @@ def _generate_non_overlapping_h_ranges(used_ranges: list[tuple[int, int]],
 def _generate_non_overlapping_h_values() -> tuple:
     """Генерирует 4 непересекающихся диапазона H1-H4 в формате 'N-M'.
 
-    v5.4.2: Диапазоны H1-H4 ПОДДЕРЖИВАЮТСЯ всеми версиями amneziawg-tools
+    Диапазоны H1-H4 ПОДДЕРЖИВАЮТСЯ всеми версиями amneziawg-tools
     (подтверждено zvshka: рабочая конфигурация Amnezia с диапазонами
     работает на его сервере со старыми amneziawg-tools). Убираем
     условную проверку awgs_supports_h_ranges() — всегда генерируем
@@ -1021,7 +1021,7 @@ def _is_valid_cps_or_legacy_hex(value: str) -> bool:
       1. ПОЛНЫЙ CPS tag-формат AWG 2.0/3.1 — все 9 официальных тегов
          (8 go-движка + kernel-only <c>): ``<b 0x...>``, ``<t>``, ``<r N>``,
          ``<rc N>``, ``<rd N>``, ``<d>``, ``<ds>``, ``<dz N>``, ``<c>``
-         (v5.5.1 — сверено с amneziawg-go device/obf.go, obfBuilders);
+         (сверено с amneziawg-go device/obf.go, obfBuilders);
       2. Голый hex без тегов — СТАРЫЙ формат AWG 1.5, остаётся для
          обратной совместимости с уже установленными конфигами;
       3. Пустая строка (I1-I5 опциональны).
@@ -1039,8 +1039,8 @@ def _is_valid_cps_or_legacy_hex(value: str) -> bool:
     return False
 
 
-# ── I2-I5: нейтральное автозаполнение decoy-цепочек (v5.5.5) ─────────
-# До v5.5.5 заполнялся только I1 (I2-I5 — пустые). Сверка с генератором
+# ── I2-I5: нейтральное автозаполнение decoy-цепочек ─────────
+# Раньше заполнялся только I1 (I2-I5 — пустые). Сверка с генератором
 # ARCHITECT (Task 31) показала: официальный wiki-рекомендованный
 # генератор заполняет все 5 цепочек — junk-передача перед handshake
 # становится длиннее и разнообразнее по энтропийному профилю флоу.
@@ -1235,7 +1235,7 @@ def _generate_tls_altsvc_i1() -> str:
             "<b 0x00100003026832>")
 
 
-# ── Host-база HTTP/3-мимикрии (v5.5.5, ARCHITECT-parity) ────────────
+# ── Host-база HTTP/3-мимикрии (ARCHITECT-parity) ────────────
 # Популярные хосты, чей H3/QUIC-трафик массово встречается в РФ-сегменте:
 # SNI такого хоста внутри I1-цепочки статистически неотличим от легитимных
 # повторных заходов на тот же сайт. Хост кодируется в DNS-wire формате
@@ -1317,7 +1317,7 @@ def _generate_quic_burst_chain() -> tuple:
 # amneziawg-tools), и клиенты (amneziawg-go) обязаны понимать каждую
 # цепочку.
 #
-# v5.5.5: реестр расширен до 13 профилей (сверка с ARCHITECT, Task 31).
+# реестр расширен до 13 профилей (сверка с ARCHITECT, Task 31).
 # Генератор профиля возвращает ЛИБО строку (только I1), ЛИБО кортеж из
 # 5 цепочек (full-chain профили — сейчас quic_burst, заполняет весь
 # набор I1-I5 «всплеском» пакетов мимикрируемого протокола).
@@ -1373,7 +1373,7 @@ def awg_i1_mimicry_generate(mode: str) -> str:
 
 
 def awg_i_chain_mimicry_generate(mode: str) -> tuple:
-    """Полный набор I1-I5 по профилю мимикрии (v5.5.5).
+    """Полный набор I1-I5 по профилю мимикрии.
 
     Возвращает кортеж из 5 строк (i1..i5):
       • full-chain профили (quic_burst) — все пять цепочек «всплеском»;
@@ -1389,7 +1389,7 @@ def awg_i_chain_mimicry_generate(mode: str) -> tuple:
     return (value, "", "", "", "")
 
 
-# ── Размерные подсказки S1-S4 под мимикрируемые протоколы (v5.5.5) ────
+# ── Размерные подсказки S1-S4 под мимикрируемые протоколы ────
 # S1/S2 — junk-пакеты фаз init/response, S3/S4 — under-load/transport:
 # подгонка под типичные размеры пакетов мимикрируемого протокола даёт
 # совпадение размерного профиля флоу с легитимным трафиком
@@ -1440,7 +1440,7 @@ def _s_hint_range(key: str, hint: Optional[dict], is_31: bool) -> Optional[tuple
 
 
 def awg_mimicry_s_hint(mode: str, protocol_version: str = AWG_VERSION_20) -> dict:
-    """S1-S4 подсказки профиля мимикрии (v5.5.5), клампленные под версию.
+    """S1-S4 подсказки профиля мимикрии, клампленные под версию.
 
     Возвращает {"s1": (lo, hi), ...} — только ключи с подсказкой
     (random/binary → {}). Используется генераторами (awgs_presets_
@@ -1487,7 +1487,7 @@ def awgs_generate_full_manual_params(overrides: dict | None = None,
     KeepaliveTimeout/MaxHandshakeAttempts/RandomTrailers/DisableCookies
     (констрейнты GenerateObfuscation31, см. awg_protocol).
 
-    i_chain_fill (v5.5.5): как в awgs_presets_generate — None = авто
+    i_chain_fill: как в awgs_presets_generate — None = авто
     (3.1: заполнять I2-I5 нейтральными цепочками, 2.0: пустые),
     True/False — явное управление. Override пользователя по i2-i5
     имеет приоритет в любой версии.
@@ -1510,7 +1510,7 @@ def awgs_generate_full_manual_params(overrides: dict | None = None,
     Override принимается as-is (через _is_valid_cps_or_legacy_hex проходит
     и CPS, и legacy hex).
     I2-I5 — по умолчанию: 3.1 → нейтральные автозаполненные цепочки,
-    2.0 → пустые; override принимается в обеих версиях (v5.5.5).
+    2.0 → пустые; override принимается в обеих версиях.
 
     Правило совместимости S1 + 56 != S2 проверяется при генерации —
     если случайно совпало (padded init и padded response совпадут по
@@ -1593,7 +1593,7 @@ def awgs_generate_full_manual_params(overrides: dict | None = None,
         s4 = random.randint(_s4_lo, _s4_hi)
 
     # ── H1-H4 — непересекающиеся диапазоны в формате 'N-M' (AWG 2.0) ─────
-    # v5.4.2: Всегда генерируем диапазоны (подтверждено zvshka — работает).
+    # Всегда генерируем диапазоны (подтверждено zvshka — работает).
     # Overrides: если пользователь явно ввёл H1-H4, используем как есть.
     # AWG 3.1: одиночные int в НЕПЕРЕСЕКАЮЩИХСЯ бандах от 5
     # (GenerateObfuscation31-стиль, как в wpp_awg) — не диапазоны.
@@ -1642,7 +1642,7 @@ def awgs_generate_full_manual_params(overrides: dict | None = None,
         i1_size = random.randint(24, 32)
         i1 = f"<r {i1_size}>"
 
-    # ── I2-I5 — override > автозаполнение > пустые (v5.5.5) ─────────────
+    # ── I2-I5 — override > автозаполнение > пустые ─────────────
     # Явный override пользователя (в т.ч. пустая строка = «без пакета»)
     # имеет приоритет; при отсутствии override — автозаполнение
     # нейтральными цепочками (3.1 по умолчанию, см. i_chain_fill).

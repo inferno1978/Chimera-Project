@@ -172,7 +172,7 @@ def awgs_state_init(
 def awgs_state_get_protocol_version() -> str:
     """Возвращает protocol_version из state ("2.0" | "3.1").
 
-    Отсутствие ключа (старые установки до v5.5) = "2.0" — миграция
+    Отсутствие ключа (старые установки) = "2.0" — миграция
     не требуется: awg_protocol.awg_state_protocol_version нормализует.
     """
     return awg_state_protocol_version(awgs_state_load())

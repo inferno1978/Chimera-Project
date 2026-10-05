@@ -1852,7 +1852,7 @@ def do_full_diagnostic() -> None:
         # ── 6. TLS / REALITY ─────────────────────────────────────────────────
         _box_top("6 / 14  ·  TLS-сертификат / REALITY")
         if _proto_mode == "reality":
-            # v5.5.1 (sni_hygiene): фолбэк-цепочка без известных ресурсов —
+            # (sni_hygiene): фолбэк-цепочка без известных ресурсов —
             # reality_sni → sni → domain → reality_dest; если ничего нет —
             # проверку пропускаем (прежде бессмысленно уходили на google.com)
             _sni = (_state.get("reality_sni") or _state.get("sni") or

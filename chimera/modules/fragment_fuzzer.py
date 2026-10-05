@@ -270,7 +270,7 @@ def _build_test_client_config(
             },
         }
     else:
-        # REALITY — v5.5.1: канонический SNI-рул (sni_hygiene.client_sni_for_state):
+        # REALITY — канонический SNI-рул (sni_hygiene.client_sni_for_state):
         # Mode B + AWG-exit + reality_dest → reality_dest, иначе — domain.
         # Прежний безусловный reality_dest с фолбэком www.cloudflare.com
         # ломал Mode A и светил известный домен в SNI.

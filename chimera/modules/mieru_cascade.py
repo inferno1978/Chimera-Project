@@ -996,7 +996,7 @@ def _probe_exit_ttfb(exit_node: dict, timeout: float = 5.0) -> Optional[float]:
     return None
 
 
-# EMA-сглаживание метрик (v5.5.4): свежие пробы качаются (TTFB через
+# EMA-сглаживание метрик: свежие пробы качаются (TTFB через
 # CDN-хоп ±сотни мс, load скачкообразный) — мгновенные метрики качали
 # доли ±10 п.п. на ровном месте, и каждый health-тик считал это
 # «материальным дрейфом». Сглаживаем по истории st['metrics_ema'].
@@ -1059,7 +1059,7 @@ def _balance_shares(st: dict, act: list) -> Optional[dict]:
             mm["load"] = _count_exit_load(e)
         if strategy == "smart":
             mm["ttfb_ms"] = _probe_exit_ttfb(e)
-        # EMA-сглаживание (v5.5.4): всплеск пробы (TTFB CDN-хоп) не
+        # EMA-сглаживание: всплеск пробы (TTFB CDN-хоп) не
         # должен качать доли — смешиваем с историей st['metrics_ema'].
         sm = _ema_metrics(st, lbl, mm)
         lat = sm.get("lat_ms")
@@ -1720,7 +1720,7 @@ def _install_redsocks() -> bool:
     Fallback (все зеркала упали): apt-get с честным warn — это отступление
     от DM, но лучше работающий модуль, чем отказ установки.
 
-    v5.4.6: после установки (и при уже установленном бинарнике)
+    после установки (и при уже установленном бинарнике)
     нейтрализуется СИСТЕМНЫЙ redsocks.service + dnstc-блок дефолтного
     /etc/redsocks.conf (fake-DNS :5300 = порт dnscrypt-proxy; пакет
     включает сервис в автозагрузку → после ребута гонка за :5300 →
@@ -2588,7 +2588,7 @@ def _ensure_local_services(st: dict) -> list:
     return restarted
 
 
-# Гистерезис дрейфа весов (v5.5.4): без порога микро-джиттер метрик
+# Гистерезис дрейфа весов: без порога микро-джиттер метрик
 # каждый тик давал «новые» вероятности — и health-тик ежеминутно делал
 # полную пересборку правил каскада + persist rules.v4 (живой кейс
 # entry-ноды с leastping, октябрь 2026).
@@ -2675,7 +2675,7 @@ def _health_tick_locked(verbose: bool = False) -> dict:
             bal = _balance_shares(st, _active_exits(st))
             result["balance"] = bal
             fresh = _rule_specs(st, bal)
-            # Гистерезис + cooldown (v5.5.4): доли в пределах
+            # Гистерезис + cooldown: доли в пределах
             # WEIGHTS_HYSTERESIS от последней применённой — НЕ повод
             # для пересборки; даже материальный дрейф — не чаще раза в
             # WEIGHTS_REBUILD_COOLDOWN_S (EMA-сглаженные метрики

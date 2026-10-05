@@ -220,7 +220,7 @@ class TestAwgConstantsCascadeFwmark(unittest.TestCase):
         self.assertNotEqual(AWGS_CASCADE_FWMARK, 1000)
 
     def test_fwmark_is_b4_exempt_composed(self):
-        # v5.5.9: 0x8200 = бит 0x8000 (b4-exempt DPI-bypass) | 0x0200 (тег каскада)
+        # 0x8200 = бит 0x8000 (b4-exempt DPI-bypass) | 0x0200 (тег каскада)
         from chimera.modules.awg_constants import (
             AWGS_CASCADE_FWMARK, AWGS_B4_EXEMPT_BIT, AWGS_CASCADE_FWMARK_LEGACY)
         self.assertEqual(AWGS_CASCADE_FWMARK, 0x8200)

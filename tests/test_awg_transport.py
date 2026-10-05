@@ -542,7 +542,7 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
                       f"I1 должен быть в conf когда задан, фактически:\n{conf}")
 
     def test_server_conf_writes_i_lines_commented(self):
-        """v5.4: _awg_server_conf_text пишет пустые I1-I5 ЗАКОММЕНТИРОВАННЫМИ.
+        """_awg_server_conf_text пишет пустые I1-I5 ЗАКОММЕНТИРОВАННЫМИ.
 
         См. test_empty_i1_to_i5_commented_ в test_awg_standalone.py.
         Коротко: старые amneziawg-tools падают на 'I2 = ' (пустая),
@@ -555,7 +555,7 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
         for key in ("I1", "I2", "I3", "I4", "I5"):
             self.assertIn(f"# {key} = ", conf,
                           f"# {key} = должен присутствовать (закомментирован) "
-                          f"в server conf (v5.4)")
+                          f"в server conf")
 
     def test_server_conf_writes_all_i_when_set(self):
         """_awg_server_conf_text пишет I1-I5 если все заданы."""
@@ -588,7 +588,7 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
         self.assertIn(f"I1 = {_i1_val}", conf)
 
     def test_client_conf_writes_i_lines_commented_v545(self):
-        """v5.4.5: _awg_client_conf_text комментирует ПУСТЫЕ I1-I5 (# I2 = ).
+        """_awg_client_conf_text комментирует ПУСТЫЕ I1-I5 (# I2 = ).
 
         E2E 2026-10-03: awg setconf (amneziawg-tools 2026 PPA) падает
         на голой пустой 'I2 = ' —"Line unrecognized: I2=".
@@ -599,10 +599,10 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
         for key in ("I1", "I2", "I3", "I4", "I5"):
             self.assertIn(f"# {key} = ", conf,
                           f"# {key} = должен присутствовать (закомментирован) "
-                          f"в client conf (v5.4.5)")
+                          f"в client conf")
             self.assertNotIn(f"\n{key} = \n", conf,
                              f"голая пустая '{key} = ' НЕ должна быть "
-                             f"в client conf (v5.4.5)")
+                             f"в client conf")
 
     # ── _awg_client_conf_for_node ─────────────────────────────────────────
     def test_client_conf_for_node_has_s3_s4(self):
@@ -625,7 +625,7 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
         self.assertIn(f"I1 = {_i1_val}", conf)
 
     def test_client_conf_for_node_writes_i_lines_commented_v545(self):
-        """v5.4.5: _awg_client_conf_for_node комментирует ПУСТЫЕ I1-I5 (# I2 = )."""
+        """_awg_client_conf_for_node комментирует ПУСТЫЕ I1-I5 (# I2 = )."""
         from chimera.modules import awg_transport
         node = self._mock_node()
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
@@ -633,10 +633,10 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
         for key in ("I1", "I2", "I3", "I4", "I5"):
             self.assertIn(f"# {key} = ", conf,
                           f"# {key} = должен присутствовать (закомментирован) "
-                          f"в client_conf_for_node (v5.4.5)")
+                          f"в client_conf_for_node")
             self.assertNotIn(f"\n{key} = \n", conf,
                              f"голая пустая '{key} = ' НЕ должна быть "
-                             f"в client_conf_for_node (v5.4.5)")
+                             f"в client_conf_for_node")
 
     # ── _awg_server_conf_for_node ─────────────────────────────────────────
     def test_server_conf_for_node_has_s3_s4(self):
@@ -659,7 +659,7 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
         self.assertIn(f"I1 = {_i1_val}", conf)
 
     def test_server_conf_for_node_writes_i_lines_commented(self):
-        """v5.4: _awg_server_conf_for_node пишет пустые I1-I5 ЗАКОММЕНТИРОВАННЫМИ."""
+        """_awg_server_conf_for_node пишет пустые I1-I5 ЗАКОММЕНТИРОВАННЫМИ."""
         from chimera.modules import awg_transport
         node = self._mock_node()
         with patch.object(awg_transport, "_core_module", return_value=_mock_core()):
@@ -667,13 +667,13 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
         for key in ("I1", "I2", "I3", "I4", "I5"):
             self.assertIn(f"# {key} = ", conf,
                           f"# {key} = должен присутствовать (закомментирован) "
-                          f"в server_conf_for_node (v5.4)")
+                          f"в server_conf_for_node")
 
     # ── Полный набор — regression на жалобу zvshka ────────────────────────
     def test_all_4_functions_have_full_param_set(self):
         """Все 4 Cascade-функции пишут ПОЛНЫЙ набор: Jc/Jmin/Jmax/S1-S4/H1-H4 + I1-I5.
 
-        v5.4.5: ПУСТЫЕ I1-I5 комментируются ВЕЗДА (# I2 = ) — и на сервере,
+        ПУСТЫЕ I1-I5 комментируются ВЕЗДА (# I2 = ) — и на сервере,
         и на клиенте: Linux-клиентский awg-quick падает на голой пустой
         'I2 = ' (awg setconf, amneziawg-tools 2026 PPA). Проверяем что все
         16 параметров присутствуют в каждой функции.
@@ -703,15 +703,15 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
                     self.assertIn(param, conf,
                                   f"{fname}: отсутствует '{param}' — "
                                   f"неполный набор AWG 2.0 (баг zvshka):\n{conf}")
-                # v5.4.5: I1-I5 (пустые в дефолтном _mock_core)
+                # I1-I5 (пустые в дефолтном _mock_core)
                 # комментируются ВЕЗДА — сервер и клиент
                 for key in ("I1", "I2", "I3", "I4", "I5"):
                     self.assertIn(f"# {key} = ", conf,
                                   f"{fname}: # {key} = должен быть "
-                                  f"(пустые комментируются, v5.4.5)")
+                                  f"(пустые комментируются)")
                     self.assertNotIn(f"\n{key} = \n", conf,
                                      f"{fname}: голая пустая '{key} = ' НЕ должна "
-                                     f"быть (awg setconf падает, v5.4.5)")
+                                     f"быть (awg setconf падает)")
 
 
 if __name__ == "__main__":

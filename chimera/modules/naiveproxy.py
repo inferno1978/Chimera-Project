@@ -143,7 +143,7 @@ _GITHUB_API      = "https://api.github.com/repos/klzgrad/naiveproxy/releases/lat
 # и перебираются автоматически через fetch_package(NAIVEPROXY_SPEC).
 
 _DEFAULT_PORT    = 443
-# v5.5.1 (sni_hygiene): прежний дефолт https://www.bing.com — домен
+# (sni_hygiene): прежний дефолт https://www.bing.com — домен
 # известного ресурса: probe_resistance редиректит чужие подключения на
 # этот URL (Location-заголовок = bing.com) — маскарад под чужой сайт на
 # нашем IP. Теперь дефолт — свой домен из state.json (https://<domain>/ —

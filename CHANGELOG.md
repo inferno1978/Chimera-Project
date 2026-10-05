@@ -1,9 +1,9 @@
 # Changelog
 
-# Changelog new entry — v5.5.11: B4-сплит каскада AmneziaWG — домены сетов b4 (YouTube и др.) напрямую с RU-ноды: цель видит RU-IP (YouTube без рекламы), остальное — каскад на Exit — 5 октября 2026
+# Changelog new entry — B4-сплит каскада AmneziaWG — домены сетов b4 (YouTube и др.) напрямую с RU-ноды: цель видит RU-IP (YouTube без рекламы), остальное — каскад на Exit — 5 октября 2026
 
 
-## FEAT(awg): v5.5.11 — новый модуль awg_b4_split + TUI-меню (14→3→6)
+## FEAT(awg): новый модуль awg_b4_split — B4-сплит каскада + TUI-меню (14→3→6)
 
 **Контекст (владелец):** цель — YouTube с RU-IP: Google не
 показывает рекламу для RU-IP, а обычный каскад выпускает клиентский
@@ -41,7 +41,7 @@ querylog) — переиспользован и адаптирован под AW
    марки → main → WAN → MASQUERADE (существующие правила каскада)
    → цель видит RU-IP ноды.
 4. **Условный b4-exempt (nft inet awg_b4exempt)** — было blanket:
-   весь iif awg0/awg1 |= 0x8000 (v5.5.9, b4 не трогает каскад).
+   весь iif awg0/awg1 |= 0x8000 (b4 не трогает каскад).
    Стало split-форма: awg1-exempt (каскадное плечо не трогаем) →
    awg0 ip daddr @awg_b4direct return (сплит-плечо БЕЗ 0x8000 —
    его перехватывает postrouting в b4_mangle и обрабатывает по
@@ -70,7 +70,7 @@ querylog) — переиспользован и адаптирован под AW
    домены, [4] DNS→AGH, [5] AAAA-фильтр, [6] интервал рефреша,
    [7] полный статус (живые правила/сеты/сет-лист), [8] ручной
    тик, [9] полное снятие. awg_uninstall тоже снимает сплит.
-9. **deactivate()** — полный демонтаж до v5.5.9-формы: blanket-
+9. **deactivate()** — полный демонтаж до формы без сплита: blanket-
    exempt, mark без исключения, DNAT/v6-DNS/AAAA-правила сняты,
    таймер off, ipset/nft-сет уничтожены, boot-скрипт
    перегенерён.
@@ -93,13 +93,13 @@ mark-правила, split-aware boot-скрипт, порядок deactivate).
 Прогон AWG-сьютов: 941 passed (2 — известные порядок-зависимые
 флаки traffic_collectors, в изоляции зелёные).
 
-## FIX(awg): v5.5.11.1 — apply_all/меню сетов пишут aaaa_domains
+## FIX(awg): B4-сплит — apply_all/меню сетов пишут aaaa_domains
 
 - Первый тик после включения дописывал AAAA-правила повторно поверх
   применённых в apply_all (двойная запись). State теперь фиксирует
   aaaa_domains сразу в apply_all и в меню выбора сетов.
 
-## FIX(awg): v5.5.11.2 — бессмаркерная AAAA-хирургия (живой кейс)
+## FIX(awg): B4-сплит — бессмаркерная AAAA-хирургия (живой кейс)
 
 - AGH при рестарте сам перезаписывает yaml: СРЕЗАЕТ комментарии-маркеры
   и сортирует user_rules → маркерная логика AAAA-фильтра падала в
@@ -108,17 +108,76 @@ mark-правила, split-aware boot-скрипт, порядок deactivate).
   шаблону $dnstype=AAAA, чужие сохраняются выше наших, дедуп,
   идемпотентность при любой нормализации AGH.
 
-## FIX(awg): v5.5.11.3 — порядок deactivate
+## FIX(awg): B4-сплит — порядок deactivate
 
 - enabled=False и state_save — ДО routing_script_regen (иначе
   boot-скрипт генерился со split-формой при выключенном сплите);
 - mark-правило возвращается к форме без исключения ДО ipset_destroy
   (иначе ссылка iptables держала сет и destroy не проходил).
 
-# Changelog new entry — v5.5.8: IPv6 во всех режимах AmneziaWG (default-on) — анти-утечка AAAA + NAT66 + каскадный v6-транзит через Exit — 5 октября 2026
+# Changelog new entry — AWG клиенты: dual-stack Address одной строкой + ::/0 в vpn:// URI — фикс «вечного Подключения» официального клиента Amnezia и v6-утечки после импорта URI — 5 октября 2026
 
 
-## FEAT(awg): v5.5.8 — IPv6 в туннеле по умолчанию: standalone / каскад / пиры / upgrade живых установок
+## FIX(awg): клиентский конфиг — dual-stack Address ОДНОЙ строкой «v4/32, v6/128»
+
+**Контекст (владелец):** после перехода серверов на dual-stack
+официальный клиент Amnezia вис на «Подключение» (хендшейк не
+сходился), старые v4-only конфиги при этом подключались. Два корня:
+(1) генератор писал Address ДВУМЯ строками (v4 + v6) — нестандартный
+формат; эталонный рендер bivlked (awg_common.sh) пишет ОДНОЙ строкой
+«v4/32, v6/128» и его тулинг прямо предупреждает про multi-line
+Address — клиент конфиг не поднимал. (2) vpn:// URI имел allowed_ips
+жёстко v4-only (0.0.0.0/0) — после импорта URI v6-утечка
+возвращалась даже при корректном .conf.
+
+**Фикс (awg_qr.py):**
+1. Dual-stack Address — одной строкой «172.16.x.y/32,
+   fd66:66:xx::y/128» (формат bivlked, совместим со всеми клиентами).
+2. vpn:// URI — allowed_ips [0.0.0.0/0, ::/0] при включённом
+   v6-туннеле.
+
+**Валидация:** клиентские конфиги регенерированы из живого state
+серверов, автосверка параметров обфускации с живым awg0.conf, E2E
+хендшейк+v4+v6+YouTube на всех трёх RU-entry нодах.
+
+**Тесты:** сьют IPv6 обновлён (single-line Address, отсутствие
+v4-only allowed_ips в URI). AWG-сьюты зелёные.
+
+# Changelog new entry — b4-exempt для каскадного трафика AWG (fwmark 0x8200) — корень «Ютуб через каскад не работает, всё остальное работает» — 5 октября 2026
+
+
+## FIX(awg): каскадный fwmark 0x8200 + ранний nft awg_b4exempt + TCPMSS 1240/1220
+
+**Контекст (владелец):** после включения IPv6 в туннеле YouTube у
+реальных клиентов умирал на ClientHello (api64/cloudflare при этом
+отвечали), локальные тесты на узле — зелёные. 4-точечные трассировки
+(entry: awg0/WAN, exit: awg0/WAN + LOG-правила mangle
+PREROUTING/FORWARD/POSTROUTING) показали: SYN/ACK идут через каскад,
+а ClientHello пере-инжектируется DPI-bypass b4 на RU-entry нодах
+(nft inet b4_mangle: tcp/443 → nfqueue) крафтовыми сегментами БЕЗ
+каскадной марки → по v4 raw-исходником с WAN-IP ноды через
+RU-uplink (ТСПУ режет по SNI), по v6 — с ULA-источником (погибал на
+маршрутизации). Каскадный трафик обязан выходить из-под b4.
+
+**Фикс:**
+1. AWGS_CASCADE_FWMARK 0x2000 → 0x8200: бит 0x8000 = «b4-exempt» —
+   помеченные флоу пропускаются b4 (b4_chain по meta mark,
+   prerouting по ct mark).
+2. Ранний nft inet awg_b4exempt (priority mangle-10): blanket
+   meta|ct mark |= 0x8000 для iif awg0/awg1 — клиентское каскадное
+   плечо и ответы DNS не перехватываются DPI-bypass.
+3. Легаси-cleanup марки 0x2000 в apply-пути и routing-скрипте.
+4. TCPMSS clamp 1140 → 1240 (v4) / 1220 (v6) — точное попадание в
+   MTU 1280 туннеля awg1 (без фрагментации обфусцированных пакетов).
+
+**Результат:** YouTube v4+v6 = 200 на всех трёх RU-entry нодах,
+скорость каскада до 6.6 МБ/с. Тест test_fwmark обновлён под новый
+контракт; AWG-сьюты зелёные.
+
+# Changelog new entry — IPv6 во всех режимах AmneziaWG (default-on) — анти-утечка AAAA + NAT66 + каскадный v6-транзит через Exit — 5 октября 2026
+
+
+## FEAT(awg): IPv6 в туннеле по умолчанию: standalone / каскад / пиры / upgrade живых установок
 
 **Контекст (владелец):** ютуб работал у клиента «только пока на
 роутере живёт B4». Диагностика E2E показала рут-коз: клиентский
@@ -178,7 +237,7 @@ enable_ipv6 state/пиры/NAT66-ветка) + обновлены контрак
 (sysctl ipv6.forwarding managed-ключ; activate_exit subnet_v6
 kwarg). Прогон AWG-сьютов: 916 passed.
 
-## FIX(awg): v5.5.8 — тесты под новый контракт v5.5.8
+## FIX(awg): тесты под новый контракт IPv6-фичи
 
 - test_awg_net_common: ipv6.forwarding — managed-ключ (вычищается
   при ipv6_forward=False, пишется при True, без дублирования);
@@ -186,10 +245,10 @@ kwarg). Прогон AWG-сьютов: 916 passed.
 - test_awg_cascade_multiexit: activate_exit вызывает
   create_routing_script(subnet, subnet_v6=) — обновлённый контракт.
 
-# Changelog new entry — v5.5.4: весовые стратегии mieru-каскада — EMA-сглаживание метрик + гистерезис + cooldown: health-тик больше не пересобирает правила и не перезаписывает /etc/iptables/rules.v4 каждую минуту — 4 октября 2026
+# Changelog new entry — весовые стратегии mieru-каскада — EMA-сглаживание метрик + гистерезис + cooldown: health-тик больше не пересобирает правила и не перезаписывает /etc/iptables/rules.v4 каждую минуту — 4 октября 2026
 
 
-## FIX(mieru_cascade): v5.5.4 — стабилизация весовых стратегий в health-тике
+## FIX(mieru_cascade): стабилизация весовых стратегий в health-тике
 
 **Контекст (владелец):** на entry-ноде mieru-каскада с весовой
 стратегией (leastping/leastload/smart) файл /etc/iptables/rules.v4
@@ -236,10 +295,10 @@ rules.v4. Замер на живой ноде: доля одного Exit-а к�
 после cooldown зовёт), _rules_apply пишет weights_applied_ts.
 Регрессии: mieru-семья 350 passed, cascade-семья 196 passed.
 
-# Changelog new entry — AWG 3.1 (сводная по релизу v5.5–v5.5.3): полная интеграция официального AmneziaWG 3.1 — standalone + мульти-exit каскад с авто-failover + Mode B транспорт + SNI/dest-гигиена; AWG 2.0 байт-в-байт не тронута — 4 октября 2026
+# Changelog new entry — AWG 3.1 (сводная): полная интеграция официального AmneziaWG 3.1 — standalone + мульти-exit каскад с авто-failover + Mode B транспорт + SNI/dest-гигиена; AWG 2.0 байт-в-байт не тронута — 4 октября 2026
 
 
-## FEAT(awg): v5.5 — AmneziaWG 3.1 во всех режимах: standalone, каскад, Mode B транспорт (2.0 байт-в-байт не тронута)
+## FEAT(awg): AmneziaWG 3.1 во всех режимах: standalone, каскад, Mode B транспорт (2.0 байт-в-байт не тронута)
 
 **Контекст (владелец):** официальный AmneziaWG 3.1 (анонс 28.08.2026) —
 шифрование заголовков (HeaderProtectionKey под S1-S4≥12), ContentPadding,
@@ -291,7 +350,7 @@ GenerateObfuscation31).
   diagnose — секция protocol (версия/директивы awg0.conf/инструменты/
   S≥12/I1-формат); диагностика секции 11 с версией.
 
-## FEAT(awg31+sni): v5.5.1 — полная поддержка ВСЕХ ключей/режимов обфускации официальной 3.1 + SNI/dest-гигиена (приоритет — свой домен)
+## FEAT(awg31+sni): полная поддержка ВСЕХ ключей/режимов обфускации официальной 3.1 + SNI/dest-гигиена (приоритет — свой домен)
 
 **Часть 1 — паритет параметров официальной 3.1:**
 - H1-H4 для 3.1 = ОФИЦИАЛЬНЫЙ формат узких непересекающихся диапазонов
@@ -345,7 +404,7 @@ SNI/dest — домены известных ресурсов; РКН палит
   fake-пакеты анти-DPI), DNS-коннективити-пробы, adblock-списки клиентских
   конфигов, WPP (использует DOMAIN).
 
-## FIX(awg): v5.5.2 — 4 фикса живых E2E AWG 3.1
+## FIX(awg): 4 фикса живых E2E AWG 3.1
 
 - **FIX-A**: awgs_install — честный False при мёртвом awg-quick@awg0 (был
   молчаливый warn → «успех» при not-found юните).
@@ -359,7 +418,7 @@ SNI/dest — домены известных ресурсов; РКН палит
   conf, но НЕ в живом интерфейсе, handshake молча 0; чистка в обоих путях
   install_dkms.
 
-## FEAT(awg_cascade): v5.5.3 — мульти-exit каскад + авто-failover (сводно; детальная запись — следующей ниже)
+## FEAT(awg_cascade): мульти-exit каскад + авто-failover (сводно; детальная запись — следующей ниже)
 
 cascade_exits (порядок = приоритет) + cascade_active_exit в state, ленивая
 миграция legacy-каскада; register/activate/remove exit (валидации как
@@ -389,15 +448,15 @@ mismatch-отказ (exit 2.0 vs own 3.1), REST 10/10; uninstall + полная
 test_awg_presets_31.py, test_awg_standalone_31.py, test_awg_cascade_31.py,
 test_awg_transport_31.py, test_awg_compat_31.py, test_awg_qr_31.py,
 test_awg_install_fixes_v552.py, test_awg_cascade_multiexit.py,
-test_sni_hygiene.py); полный сьют на v5.5.2 — 7228 passed / 0 failed;
-регресс AWG-сьютов на v5.5.3 — ~830 passed / 0 failed; регресс AWG 2.0
+test_sni_hygiene.py); полный сьют на момент E2E-фиксов — 7228 passed / 0 failed;
+регресс AWG-сьютов после мульти-exit — ~830 passed / 0 failed; регресс AWG 2.0
 байт-в-байт чистый; full_test.py 74/74, готовность 10/10.
 
 **Мерж:** ветка awg-31 (4 коммита: a862da2 → 9634ff6 → 834f286 → a478e51)
 слита в chimera-v5 через MR !1 (merge-коммит f092fd49), зеркало GitHub
 main синхронизировано.
 
-# Changelog new entry — AWG каскад v5.5.3: МУЛЬТИ-EXIT (все зарубежные выходы в одном каскаде) + авто-failover + FIX-E — 4 октября 2026
+# Changelog new entry — AWG каскад: МУЛЬТИ-EXIT (все зарубежные выходы в одном каскаде) + авто-failover + FIX-E — 4 октября 2026
 
 
 ## FEAT(awg_cascade): мульти-exit каскад — несколько exit-нод с приоритетами, переключение в один клик и авто-failover при смерти активного выхода
@@ -411,7 +470,7 @@ main синхронизировано.
   = приоритет failover), `cascade_active_exit` — имя активного. Каждый
   бокс: name/endpoint/port/server_pubkey/peer_privkey/peer_psk/peer_ip/
   subnet/protocol_version/params/mtu. Леничная миграция legacy-каскада
-  (v5.4.x/v5.5.2): при первом обращении плоские поля синтезируются в
+  (старый формат): при первом обращении плоские поля синтезируются в
   список из 1 бокса, плоские поля остаются зеркалом активного exit.
 - **`awgs_cascade_register_exit()`** — регистрация exit из бокса AWG1
   с полным набором валидаций setup_awg0 (версия протокола/подсеть/
@@ -25173,7 +25232,7 @@ root один раз за сессию и использует его для в�
 - Управление пользователями, диагностика
 
 
-# Changelog new entry — v5.5.6: ops-слой B4 — «фишки VLESS-нод и Mieru-каскада, теперь для B4» — 4 октября 2026
+# Changelog new entry — ops-слой B4 — «фишки VLESS-нод и Mieru-каскада, теперь для B4» — 4 октября 2026
 
 
 ## FEAT(b4_monitor): health-tick + self-heal + ремедия + TG-монитор + матрица

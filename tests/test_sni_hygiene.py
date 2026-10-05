@@ -1,5 +1,5 @@
 """
-tests/test_sni_hygiene.py — v5.5.1 SNI/dest-гигиена.
+tests/test_sni_hygiene.py — SNI/dest-гигиена.
 
 Требование владельца: домены известных ресурсов (Microsoft/Cloudflare/Google/
 Яндекс и т.п.) НЕ должны фигурировать в SNI/dest по умолчанию — приоритет

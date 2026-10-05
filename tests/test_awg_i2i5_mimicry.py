@@ -2,7 +2,7 @@
 """
 tests/test_awg_i2i5_mimicry.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты расширений v5.5.5 (сверка с генератором ARCHITECT, Task 31):
+Unit-тесты автозаполнения I2-I5 (сверка с генератором ARCHITECT, Task 31):
 
   1. I2-I5 — автозаполнение decoy-цепочек в 3.1 (awgs_presets_generate,
      awgs_generate_full_manual_params): дефолт 3.1 = заполнены все 5,

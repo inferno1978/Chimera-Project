@@ -30,7 +30,7 @@ AWGS_DEFAULT_MTU:      int  = 1280             # безопасный MTU для
 # ── Пути ─────────────────────────────────────────────────────────────────────
 AWGS_CONF_DIR:        Path = Path("/etc/amnezia/amneziawg")
 AWGS_SERVER_CONF:     Path = AWGS_CONF_DIR / "awg0.conf"
-# v5.5.3: конфиг каскадного туннеля awg1 на entry-ноде (RU → активный exit).
+# конфиг каскадного туннеля awg1 на entry-ноде (RU → активный exit).
 # Константа (не литерал в коде) — тестируемость + единая точка правды.
 AWGS_AWG1_CONF:       Path = AWGS_CONF_DIR / "awg1.conf"
 AWGS_AWG_DIR:         Path = Path("/root/awg")
@@ -68,7 +68,7 @@ AWGS_CRON_RU_UPDATE_SCRIPT:  Path = Path("/usr/local/sbin/awg-cascade-ru-update.
 AWGS_SYSTEMD_AWG_QUICK: str = "awg-quick@awg0.service"
 AWGS_SYSTEMD_CASCADE:   Path = Path("/etc/systemd/system/awg-cascade-routing.service")
 
-# ── Мульти-exit каскад + авто-failover (v5.5.3) ──────────────────────────────
+# ── Мульти-exit каскад + авто-failover ──────────────────────────────
 # Каскад RU (вход) → несколько зарубежных выходов. Активен один awg1-туннель;
 # failover-таймер раз в минуту проверяет handshake и при смерти активного
 # exit переключает awg1 на следующий по списку (порядок = приоритет).
@@ -172,7 +172,7 @@ AWGS_PEER_IP_START: int = 2
 AWGS_PEER_IP_END:   int = 254
 
 # ── Fwmark для каскада (не конфликтует с chain Mode B, который использует 1000) ─
-# v5.5.9: марка каскада = 0x2000 | 0x8000. Бит 0x8000 — «b4-exempt»: на нодах
+# марка каскада = 0x2000 | 0x8000. Бит 0x8000 — «b4-exempt»: на нодах
 # с DPI-bypass b4 (nft inet b4_mangle: tcp/443 ct<20 → nfqueue 537-540)
 # помеченные этим битом флоу пропускаются мимо перехвата. Без бита b4
 # пере-инжектирует обработанные (fragmentation/desync) пакеты БЕЗ fwmark —
@@ -182,7 +182,7 @@ AWGS_PEER_IP_END:   int = 254
 # шифруется до exit-ноды — DPI-bypass ему не нужен. На системах без b4
 # бит 0x8000 безвреден (никем не проверяется).
 AWGS_B4_EXEMPT_BIT: int = 0x8000
-AWGS_CASCADE_FWMARK_LEGACY: int = 0x2000  # v5.5.8 и старее — только для cleanup
+AWGS_CASCADE_FWMARK_LEGACY: int = 0x2000  # легаси-марка (без b4-exempt бита) — только для cleanup
 AWGS_CASCADE_FWMARK: int = 0x8200  # 33280 = 0x8000 (b4-exempt) | 0x0200 (тег каскада)
 
 # ── Источники ru.zone для каскада ───────────────────────────────────────────

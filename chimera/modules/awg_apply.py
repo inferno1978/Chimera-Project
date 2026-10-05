@@ -286,7 +286,7 @@ def awgs_apply(mode: str = AWGS_APPLY_MODE_SYNCCONF) -> bool:
         finally:
             _SELF_HEAL_IN_PROGRESS = False
 
-    # v5.5 (AWG 3.1): ошибка про 3.1-директиву (Line unrecognized:
+    # AWG 3.1: ошибка про 3.1-директиву (Line unrecognized:
     # HeaderProtectionKey= и т.п.) — это НЕ лечится self-heal по I2-I5:
     # инструменты физически не знают директивы 3.1. Даём точную подсказку
     # и НЕ пытаемся молча деградировать (state обещает 3.1) — fallback

@@ -203,7 +203,7 @@ def _diag_carrier_compare(carrier: str) -> dict:
 
 
 def _diag_protocol_version() -> dict:
-    """v5.5: диагностика версии протокола (2.0 / 3.1).
+    """диагностика версии протокола (2.0 / 3.1).
 
     Проверки:
       • version — версия из state ("2.0" | "3.1");
@@ -359,7 +359,7 @@ def do_awg_diagnose_menu() -> None:
         _box_row(f"  {RED}●{NC} Standalone AWG НЕ установлен")
     _box_sep()
 
-    # Protocol version (v5.5: 2.0 / 3.1)
+    # Protocol version (2.0 / 3.1)
     pv = report.get("protocol", {})
     for status, msg in pv.get("checks", []):
         icon = {"OK": "✅", "WARN": "⚠️", "FAIL": "❌"}.get(status, "•")

@@ -86,18 +86,18 @@ def _awg_build_i_lines(i1: str, i2: str, i3: str, i4: str, i5: str,
                        role: str = "server") -> str:
     """Строит строки I1-I5 для .conf — раздельно для сервера и клиента.
 
-    v5.4.5: ПУСТЫЕ I1-I5 комментируются ВЕЗДА (# I2 = ) — и на сервере,
+    ПУСТЫЕ I1-I5 комментируются ВЕЗДА (# I2 = ) — и на сервере,
     и на клиенте. Непустые пишутся как есть.
     Основание — E2E 2026-10-03 (de1→nl1, ubuntu 24.04, amneziawg-tools
     1.0.20210914-0~202608130144 из PPA): Linux-клиентский awg-quick
     падает на голой пустой 'I2 = ' — "Line unrecognized: I2=" (awg
     setconf требует значение). '# I2 = ' принимается и сервером, и
     клиентом; клиентские приложения (Keenetic, amneziawg-go, Amnezia
-    Client) комментарии игнорируют. Правило v5.4.4 "клиенту без #"
+    Client) комментарии игнорируют. Прежнее правило "клиенту без #"
     касалось только приложений и ломало awg-quick на Linux.
 
     Args:
-      role: сохранён для совместимости вызовов; с v5.4.5 поведение
+      role: сохранён для совместимости вызовов; поведение
             идентично для обеих ролей (пустые комментируются).
     """
     lines = ""
@@ -114,13 +114,13 @@ def _awg_build_i_lines(i1: str, i2: str, i3: str, i4: str, i5: str,
 
 
 def _awg_build_31_lines() -> str:
-    """v5.5 (AWG 3.1): 9 транспортных директив Mode B из core-глобалей.
+    """AWG 3.1: 9 транспортных директив Mode B из core-глобалей.
 
     Возвращает ПУСТУЮ строку при AWG_PROTOCOL_VERSION != "3.1" (все
     существующие 2.0-конфиги — байт-в-байт как раньше) и полный блок
     директив (HeaderProtectionKey, ContentPaddingAddition, Rekey*,
     RejectAfterTime, KeepaliveTimeout, MaxHandshakeAttempts,
-    RandomTrailers, DisableCookies) при 3.1. Единое правило v5.4.5 —
+    RandomTrailers, DisableCookies) при 3.1. Единое правило —
     непустые «Key = value», пустые «# Key = ».
     """
     from .awg_protocol import awg_is_31, awg_render_31_lines
@@ -613,11 +613,11 @@ def _awg_server_conf_text() -> str:
         + _build_nat6_down(_awg_subnet_v6, "awg0", "$WAN6", scope_source=False)
         + " || true"
     )
-    # v5.4.4: I1-I5 через _awg_build_i_lines(role="server")
+    # I1-I5 через _awg_build_i_lines(role="server")
     _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
                                   role="server")
-    # v5.5: блок директив AWG 3.1 (пустая строка при 2.0 — конфиг
-    # байт-в-байт как в v5.4.x)
+    # блок директив AWG 3.1 (пустая строка при 2.0 — конфиг
+    # байт-в-байт со старыми конфигами)
     _31_lines = _awg_build_31_lines()
     if _31_lines:
         _i_lines = _i_lines + _31_lines + "\n"
@@ -685,10 +685,10 @@ def _awg_client_conf_text() -> str:
     AWG_I4 = getattr(core, "AWG_I4", "")
     AWG_I5 = getattr(core, "AWG_I5", "")
     AWG_SERVER_PUBKEY = getattr(core, "AWG_SERVER_PUBKEY", "")
-    # v5.4.4: I1-I5 через _awg_build_i_lines(role="client")
+    # I1-I5 через _awg_build_i_lines(role="client")
     _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
                                   role="client")
-    # v5.5: блок директив AWG 3.1 (пустая строка при 2.0)
+    # блок директив AWG 3.1 (пустая строка при 2.0)
     _31_lines = _awg_build_31_lines()
     if _31_lines:
         _i_lines = _i_lines + _31_lines + "\n"
@@ -3139,10 +3139,10 @@ def _awg_client_conf_for_node(node: dict) -> str:
     psk      = node.get("preshared_key", AWG_PRESHARED_KEY)
     cli_priv = node.get("client_privkey", AWG_CLIENT_PRIVKEY)
     endpoint = f"{node['host']}:{node['port']}"
-    # v5.4.4: I1-I5 через _awg_build_i_lines(role="client") — клиент
+    # I1-I5 через _awg_build_i_lines(role="client") — клиент
     _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
                                   role="client")
-    # v5.5: блок директив AWG 3.1 (пустая строка при 2.0)
+    # блок директив AWG 3.1 (пустая строка при 2.0)
     _31_lines = _awg_build_31_lines()
     if _31_lines:
         _i_lines = _i_lines + _31_lines + "\n"
@@ -3213,10 +3213,10 @@ def _awg_server_conf_for_node(node: dict) -> str:
     cli_ip6  = node["client_ip_v6"]
     lport    = node["port"]
     dif = "$(ip route | awk '/default/ {print $5; exit}')"
-    # v5.4.4: I1-I5 через _awg_build_i_lines(role="server") — сервер
+    # I1-I5 через _awg_build_i_lines(role="server") — сервер
     _i_lines = _awg_build_i_lines(AWG_I1, AWG_I2, AWG_I3, AWG_I4, AWG_I5,
                                   role="server")
-    # v5.5: блок директив AWG 3.1 (пустая строка при 2.0)
+    # блок директив AWG 3.1 (пустая строка при 2.0)
     _31_lines = _awg_build_31_lines()
     if _31_lines:
         _i_lines = _i_lines + _31_lines + "\n"
