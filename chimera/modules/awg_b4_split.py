@@ -1152,6 +1152,8 @@ def apply_all(verbose: bool = True) -> bool:
     if st.get("aaaa_filter"):
         if domains and not aaaa_rules_write(domains):
             _warn("apply: AAAA-фильтр не записан")
+        if domains:
+            st["aaaa_domains"] = domains   # анти-двойная запись в тике
     else:
         aaaa_rules_remove()
     if not timer_install(st.get("refresh_sec", 60)):
@@ -1447,6 +1449,8 @@ def _menu_sets() -> None:
                 domains = collect_domains(st)
                 if st.get("aaaa_filter") and domains:
                     aaaa_rules_write(domains)
+                    st["aaaa_domains"] = domains
+                    state_save(st)
                 refresh_tick()
             return
         if v == "a":
