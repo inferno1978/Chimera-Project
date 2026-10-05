@@ -93,6 +93,8 @@ TG_TIMEOUT             = 10     # сек
 SSH_TIMEOUT            = 12     # сек на peer
 MIN_SAMPLES_FOR_CLASSIFY = 10   # меньше — «недостаточно данных»
 TG_CHUNK_LIMIT         = 3900   # запас до лимита TG 4096
+TG_RETRIES = 3         # попыток отправки (DPI-ресет 1-го соединения)
+TG_RETRY_PAUSE = 2     # сек между попытками
 
 # Пороги по умолчанию откалиброваны по живому флоту (2026-10):
 #   чистые ноды 0.0–0.1% (91, pl1, de) → НОРМА; fi1 avg 3.8/пик 7.7 → ВНИМАНИЕ
@@ -127,6 +129,7 @@ DEFAULT_CONFIG: dict = {
         "include_ticket_block": True,  # блок доказательств для тикета
     },
     "retention_days": 30,
+    "tg_retries": 3,      # попыток отправки TG (1-я часто reset по DPI)
 }
 
 
@@ -463,7 +466,13 @@ def _save_prev(st: dict) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _tg_send(msg: str, event: str = "") -> bool:
-    """Отправка в TG с events-фильтром; длинные сообщения режутся по чанкам."""
+    """Отправка в TG: events-фильтр, чанки, ретраи.
+
+    Ретраи нужны: на части сетей (RU-транзит) первое TLS-соединение к
+    api.telegram.org сбрасывается DPI, повтор проходит (замерено на 45:
+    попытка 1 — reset, попытка 2 — 200 за 0.3с). Число попыток —
+    cfg["tg_retries"] из steal-monitor.json (1..5, дефолт TG_RETRIES).
+    """
     try:
         if not TG_CONFIG.exists():
             return False
@@ -473,23 +482,37 @@ def _tg_send(msg: str, event: str = "") -> bool:
             return False
         if event and not cfg.get("events", {}).get(event, True):
             return False
+        try:
+            retries = max(1, min(5, int(load_config().get("tg_retries",
+                                                         TG_RETRIES))))
+        except Exception:
+            retries = TG_RETRIES
         chunks = [msg[i:i + TG_CHUNK_LIMIT]
                   for i in range(0, len(msg), TG_CHUNK_LIMIT)] or [msg]
         all_ok = True
         for c in chunks:
-            r = _run([
-                "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                "-m", str(TG_TIMEOUT),
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                "-d", f"chat_id={chat}",
-                "-d", f"text={c}",
-                "-d", "parse_mode=HTML",
-            ], timeout=TG_TIMEOUT + 5)
-            all_ok = all_ok and (r.stdout or "").strip() == "200"
+            ok_chunk = False
+            for attempt in range(1, retries + 1):
+                r = _run([
+                    "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                    "-m", str(TG_TIMEOUT),
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    "-d", f"chat_id={chat}",
+                    "-d", f"text={c}",
+                    "-d", "parse_mode=HTML",
+                ], timeout=TG_TIMEOUT + 5)
+                code = (r.stdout or "").strip()
+                if code == "200":
+                    ok_chunk = True
+                    break
+                _log(f"tg send: попытка {attempt}/{retries} — код "
+                     f"{code or 'нет ответа'}")
+                if attempt < retries:
+                    time.sleep(TG_RETRY_PAUSE)
+            all_ok = all_ok and ok_chunk
         return all_ok
     except Exception:
         return False
-
 
 def _load_tg_state() -> dict:
     try:
