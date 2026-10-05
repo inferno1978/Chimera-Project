@@ -395,10 +395,10 @@ def _ssh_proc_stat(peer: dict, timeout: int = SSH_TIMEOUT) -> Optional[dict]:
     stat_lines = [ln for ln in out.splitlines() if ln.startswith("cpu")]
     rest = [ln.strip() for ln in out.splitlines()
             if ln.strip() and not ln.strip().startswith("cpu")]
-    loadavg = read_loadavg(rest[0]) if rest else None
-    uptime = None
-    if len(rest) >= 2:
-        uptime = read_uptime(rest[1])
+    # хвост cat'а: /proc/stat после cpu-строк содержит intr/ctxt, а loadavg
+    # и uptime — в самом конце. Берём с конца, иначе load1 парсится из intr.
+    loadavg = read_loadavg(rest[-2]) if len(rest) >= 2 else None
+    uptime = read_uptime(rest[-1]) if rest else None
     st = read_proc_stat("\n".join(stat_lines))
     if st is None:
         return None
