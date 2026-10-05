@@ -7,7 +7,7 @@ fake-DNS сервером на 127.0.0.1:5300 (порт dnscrypt-proxy, upstream
 стартуют гонкой: redsocks занял :5300 → dnscrypt-proxy crash-loop
 (exit 255, bind: address already in use, 3.8k рестартов) → DNS ноды мёртв.
 
-Контракт фикса (v5.4.6):
+Контракт фикса:
   • _redsocks_comment_dnstc — оборачивает dnstc-блок в C-комментарий,
     остальной конфиг байт-в-байт; идемпотентен (маркер-гвардр);
   • _neutralize_system_redsocks — stop/disable/reset-failed ТОЛЬКО

@@ -133,7 +133,7 @@ class TestBuild31Lines(unittest.TestCase):
             self.assertEqual(len(block.splitlines()), 9)
 
     def test_empty_globals_commented(self):
-        # Пустые 3.1-глобали → «# Key = » (правило v5.4.5)
+        # Пустые 3.1-глобали → «# Key = » (правило комментирования)
         core = _core_31(AWG_REKEY_TIMEOUT="", AWG_RANDOM_TRAILERS="")
         with patch.object(awg_transport, "_core_module", return_value=core):
             block = awg_transport._awg_build_31_lines()

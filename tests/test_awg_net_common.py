@@ -718,7 +718,7 @@ class TestWriteSysctlConf(unittest.TestCase):
             content = p.read_text()
             self.assertNotIn("conf.all.rp_filter", content)
             self.assertNotIn("conf.default.rp_filter", content)
-            # v5.5.8: ipv6.forwarding стал managed-ключом — при ipv6_forward=False
+            # ipv6.forwarding стал managed-ключом — при ipv6_forward=False
             # он вычищается (управляется только нашим флагом), при True — пишется.
             # Старое поведение «чужая строка сохраняется» заменено сознательно:
             # двойные источники правды для одного ключа давали гонки значений.
@@ -728,7 +728,7 @@ class TestWriteSysctlConf(unittest.TestCase):
             self.assertIn("net.ipv4.conf.eth0.rp_filter = 2", content)
 
     def test_ipv6_forward_flag_writes_and_replaces(self):
-        """v5.5.8: ipv6_forward=True пишет net.ipv6.conf.all.forwarding = 1
+        """ipv6_forward=True пишет net.ipv6.conf.all.forwarding = 1
         и заменяет старое вхождение (managed-ключ, без дублирования)."""
         from chimera.modules.awg_net_common import write_sysctl_conf
         with tempfile.TemporaryDirectory() as td:

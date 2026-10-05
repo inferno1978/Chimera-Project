@@ -177,7 +177,7 @@ def awgs_detect_os() -> dict:
 
 
 def awgs_kmod_already_ready() -> bool:
-    """v5.4.5: бинарники awg/awg-quick + рабочий kmod уже в системе?
+    """бинарники awg/awg-quick + рабочий kmod уже в системе?
 
     Реальный кейс (E2E 2026-10-03, 138x): пакеты amneziawg-tools/-dkms
     установлены ранее, но PPA/keyserver недоступны (падение DNS) —
@@ -275,10 +275,10 @@ def awgs_install_dkms() -> bool:
     """
     core = _core_module()
 
-    # v5.4.5: быстрый путь — всё уже установлено (идемпотентность +
+    # быстрый путь — всё уже установлено (идемпотентность +
     # устойчивость к недоступному PPA/keyserver при готовых пакетах)
     if awgs_kmod_already_ready():
-        # v5.5.2 (E2E fi1): даже при готовых пакетах userspace-стабы
+        # (E2E fi1): даже при готовых пакетах userspace-стабы
         # от Mode B эпохи затемняют which awg → syncconf уходит в
         # amneziawg-go (не умеет show/syncconf) → пиры применяются в
         # conf, но НЕ к живому интерфейсу — handshake молча не сходится
@@ -465,7 +465,7 @@ def awgs_install_dkms() -> bool:
         # apt update (толерантный к кратковременному outage PPA)
         r = core._run(["apt-get", "update", "-y"], capture=True, check=False)
         if r.returncode != 0:
-            # v5.5.2 (E2E fi1): висячий apt.systemd.daily держит lock →
+            # (E2E fi1): висячий apt.systemd.daily держит lock →
             # update молча проваливается, PPA-индексы не обновляются.
             # Лечим (TERM→KILL зависших системных apt) и ретраим.
             stderr = r.stderr or ""
@@ -492,7 +492,7 @@ def awgs_install_dkms() -> bool:
             return rr.returncode == 0 and bool(rr.stdout.strip())
 
         if not _cache_has_dkms():
-            # v5.5.2 (E2E fi1): вторая попытка после лечения лока —
+            # (E2E fi1): вторая попытка после лечения лока —
             # индексы PPA могли не обновиться из-за apt-lock.
             if _awgs_apt_lock_heal():
                 core._run(["apt-get", "update", "-y"],
@@ -548,7 +548,7 @@ def awgs_install_dkms() -> bool:
                 core.warn("→ Пробуем Go-версию (userspace) как fallback")
                 return _awgs_install_dkms_fallback()
 
-        # v5.5.2 (E2E fi1): пакеты установлены — убрать userspace-стабы,
+        # (E2E fi1): пакеты установлены — убрать userspace-стабы,
         # затемняющие пакетные awg/awg-quick (наследие Mode B эпохи)
         _awgs_remove_shadowing_stubs()
     except Exception as e:
@@ -557,7 +557,7 @@ def awgs_install_dkms() -> bool:
         return _awgs_install_dkms_fallback()
 
     # ── Шаг 3: проверка модуля ─────────────────────────────────────────────
-    # v5.4.5: функциональная проба вместо мгновенного lsmod: dkms-раскатка
+    # функциональная проба вместо мгновенного lsmod: dkms-раскатка
     # для нескольких ядер асинхронна, modprobe+lsmod сразу после apt давали
     # ложный WARN «не загрузился» при реально работающем модуле (E2E de1:
     # WARN вылез, при этом awg0 поднялся и туннель работал). Проба
@@ -603,7 +603,7 @@ def _awgs_install_dkms_fallback() -> bool:
         from .awg_transport import _awg_install_go_version
         if _awg_install_go_version():
             core.success("amneziawg Go-версия установлена (userspace)")
-            # v5.5.2 (E2E fi1): без пакетного amneziawg-tools юнита
+            # (E2E fi1): без пакетного amneziawg-tools юнита
             # awg-quick@.service не существует → сервис not-found,
             # туннель не поднимается. Ставим userspace-юнит.
             if not _awgs_install_userspace_unit():
@@ -619,7 +619,7 @@ def _awgs_install_dkms_fallback() -> bool:
 
 
 def _awgs_install_userspace_unit() -> bool:
-    """v5.5.2: юнит awg-quick@.service для userspace (go) standalone.
+    """юнит awg-quick@.service для userspace (go) standalone.
 
     Пакет amneziawg-tools приносит /lib/systemd/system/awg-quick@.service;
     в userspace-режиме (go-fallback) пакет не ставится — создаём
@@ -660,7 +660,7 @@ def _awgs_install_userspace_unit() -> bool:
 
 
 def _awgs_remove_shadowing_stubs(paths: dict | None = None) -> None:
-    """v5.5.2 (E2E fi1): убрать userspace-стабы, затемняющие пакетный AWG.
+    """(E2E fi1): убрать userspace-стабы, затемняющие пакетный AWG.
 
     Наследие userspace-эпохи Mode B: /usr/local/bin/awg и awg-quick
     (обёртки над amneziawg-go) стоят ВЫШЕ /usr/bin в PATH. При
@@ -712,7 +712,7 @@ def _awgs_remove_shadowing_stubs(paths: dict | None = None) -> None:
 
 
 def _awgs_apt_lock_heal() -> bool:
-    """v5.5.2: лечение висячих apt-локов перед установкой пакетов.
+    """лечение висячих apt-локов перед установкой пакетов.
 
     Реальный кейс (E2E fi1 2026-10-03): apt.systemd.daily update завис
     (недоступный репозиторий, http-метод без таймаута) и держит
@@ -971,7 +971,7 @@ AWGS_PARAMS_SPEC = [
      "Доп. junk в transport-пакетах. 0 = выключено. Протокольный лимит — 32 байта."),
 ]
 
-# H1-H4 — отдельный блок ввода (v5.5.1): официальный формат AWG 2.0+ —
+# H1-H4 — отдельный блок ввода: официальный формат AWG 2.0+ —
 # «N» ИЛИ диапазон «N-M» в 0..INT32_MAX (wiki.amnezia.host: одиночные
 # числа — формат legacy 1.0; amneziawg-tools config.c →
 # u32_range_from_string). Диапазоны НЕ должны пересекаться — пакеты из
@@ -1005,7 +1005,7 @@ AWGS_PARAMS_SPEC_HEX = [
      "Опционально. Пусто = без пакета; 'fill' — нейтральная цепочка."),
 ]
 
-# v5.5.5: шорткаты профилей мимикрии для интерактивного ввода (полный
+# шорткаты профилей мимикрии для интерактивного ввода (полный
 # реестр — AWG_I1_MIMICRY_PROFILES в awg_presets, 13 профилей).
 AWGS_MIMICRY_SHORTCUTS: dict = {
     "auto":     "random",
@@ -1050,7 +1050,7 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
     Для каждого параметра показывает: описание, диапазон, рекомендуемое значение.
     Пользователь может Enter (значение по умолчанию) или ввести своё.
 
-    v5.5.1 — полная поддержка официального синтаксиса:
+    полная поддержка официального синтаксиса:
       • H1-H4 — «N» или диапазон «N-M» (0..INT32_MAX, без пересечений);
       • I1-I5 — CPS-цепочки кросс-движковых тегов + шорткаты ВСЕХ 13
         профилей мимикрии (auto/quic/quic0rtt/burst/dns/tls/altsvc/
@@ -1059,7 +1059,7 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
         ContentPaddingAddition «N»/«N-M», таймеры, RandomTrailers/
         DisableCookies «on»/«off»).
 
-    v5.5.5 — защита от несовместимых параметров (kernel-сервер +
+    защита от несовместимых параметров (kernel-сервер +
     go-клиенты): теги <c> (kernel-only) и <d>/<ds>/<dz N> (go-only,
     no-op) БЛОКИРУЮТСЯ на этапе ввода с переспросом; финальная
     валидация — strict_cross_engine=True. Ввести конфиг, который
@@ -1107,7 +1107,7 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
     params = {}
 
     # Числовые параметры (Jc/Jmin/Jmax/S1-S4)
-    # v5.5.5: для 3.1 рекомендации/диапазоны S1-S4 — из констрейнтов
+    # для 3.1 рекомендации/диапазоны S1-S4 — из констрейнтов
     # GenerateObfuscation31. Прежние «рекомендуется 0» (2.0-специфика)
     # проваливали финальную валидацию 3.1 при вводе «всё по Enter»
     # (S1=0 < 15) — кастомный 3.1-конфиг было невозможно собрать с
@@ -1141,7 +1141,7 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
         params[key] = val
         print()
 
-    # H1-H4 — официальный формат «N» / «N-M» (v5.5.1)
+    # H1-H4 — официальный формат «N» / «N-M»
     print(f"{BOLD}H1-H4 — magic headers (официальный формат AWG 2.0+: «N» или «N-M» до {AWGS_H_UPPER_LIMIT}){NC}")
     print(f"  {DIM}Диапазоны скрывают заголовок от DPI; не должны пересекаться между собой.{NC}")
     print(f"  {DIM}Значения 1-4 не используйте — это узнаваемые vanilla-WireGuard типы сообщений.{NC}")
@@ -1225,7 +1225,7 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
                 val = ""
                 break
             _low = val.lower()
-            # v5.5.5: 'fill' — нейтральная цепочка (та же форма, что
+            # 'fill' — нейтральная цепочка (та же форма, что
             # автозаполнение I2-I5 в генераторах 3.1)
             if _low == "fill":
                 val = _generate_neutral_i_chain()
@@ -1254,7 +1254,7 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
                 warn(f"  Не похоже на CPS-цепочку (<b 0x...>, <t>, <r N>, <rc N>, "
                      f"<rd N>) и не hex — попробуйте ещё раз")
                 continue
-            # v5.5.5: наш стандартный деплой — kernel-сервер + go-клиенты;
+            # наш стандартный деплой — kernel-сервер + go-клиенты;
             # теги одного движка БЛОКИРУЮТСЯ с переспросом (раньше <c>
             # только предупреждал — можно было собрать конфиг, который
             # не подключится ни на одном клиенте-приложении)
@@ -1280,7 +1280,7 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
             params[key] = val
         print()
 
-    # AWG 3.1: 9 транспортных директив (v5.5.1 — полный ручной контроль)
+    # AWG 3.1: 9 транспортных директив (полный ручной контроль)
     if is_31:
         _defaults_31 = awg31_generate_extra_params()
         _short = {
@@ -1364,7 +1364,7 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
                      f"{params.get(_k31, '')}")
     _box_bottom()
 
-    # Валидация (v5.5.5: strict_cross_engine — конфиг пойдёт и на
+    # Валидация (strict_cross_engine — конфиг пойдёт и на
     # kernel-сервер, и на go-клиентов; одно-движковые теги уже
     # заблокированы на вводе — здесь защита остальным правилам:
     # S1+56≠S2, пересечения H, таймерная иерархия 3.1 и т.д.)
@@ -1397,13 +1397,12 @@ def awgs_build_server_conf(
     """
     Генерирует содержимое awg0.conf (серверная сторона).
 
-    protocol_version (v5.5): "" | "2.0" — формат AWG 2.0 (обратная
+    protocol_version: "" | "2.0" — формат AWG 2.0 (обратная
     совместимость, байт-в-байт как раньше); "3.1" — после I1-I5
     добавляются 9 директив AWG 3.1 (HeaderProtectionKey/
     ContentPaddingAddition/Rekey*/RejectAfterTime/KeepaliveTimeout/
     MaxHandshakeAttempts/RandomTrailers/DisableCookies — см.
-    awg_protocol.awg_render_31_lines; пустые комментируются по правилу
-    v5.4.5). Все существующие вызовы без версии получают 2.0-конфиг
+    awg_protocol.awg_render_31_lines; пустые комментируются по тому же правилу). Все существующие вызовы без версии получают 2.0-конфиг
     без изменений.
     """
     peers = peers or []
@@ -1443,7 +1442,7 @@ def awgs_build_server_conf(
     lines.append(f"H2 = {params.get('h2', 2)}")
     lines.append(f"H3 = {params.get('h3', 3)}")
     lines.append(f"H4 = {params.get('h4', 4)}")
-    # v5.4.2: I1-I5 для СЕРВЕРНОГО конфига — комментируем пустые (как в эталоне Amnezia).
+    # I1-I5 для СЕРВЕРНОГО конфига — комментируем пустые (как в эталоне Amnezia).
     # Старые amneziawg-tools на сервере падают на 'I2 = ' (пустая), но игнорируют '# I2 = '.
     # Клиентский конфиг (awg_qr.py) пишет I1-I5 без комментария — это работает
     # (подтверждено zvshka: рабочая конфигурация Amnezia имеет # I на сервере
@@ -1455,9 +1454,9 @@ def awgs_build_server_conf(
         else:
             lines.append(f"# {key.upper()} = ")
 
-    # AWG 3.1 (v5.5): 9 транспортных директив сразу после I1-I5 —
+    # AWG 3.1: 9 транспортных директив сразу после I1-I5 —
     # HeaderProtectionKey, ContentPaddingAddition, таймеры, RandomTrailers,
-    # DisableCookies. Единое правило v5.4.5: непустые — «Key = value»,
+    # DisableCookies. Единое правило: непустые — «Key = value»,
     # пустые — «# Key = » (голое «Key = » валит awg setconf).
     if awg_is_31(protocol_version):
         lines.append(awg_render_31_lines(params))
@@ -1574,12 +1573,12 @@ def awgs_detect_wan_interface() -> str:
 def awgs_build_nat_helper_body(awg_subnet: str,
                                awg_iface: str = AWGS_INTERFACE,
                                subnet_v6: str = "") -> str:
-    """v5.4.5: тело helper-скрипта /usr/local/sbin/awg-nat-rules.sh.
+    """тело helper-скрипта /usr/local/sbin/awg-nat-rules.sh.
 
     Вынесено в отдельную функцию для юнит-тестирования (см.
     tests/test_awg_standalone.py::TestAwgsNatHelper).
 
-    v5.5.8: subnet_v6 (непустой) → helper применяет и v6-часть
+    subnet_v6 (непустой) → helper применяет и v6-часть
     (NAT66 MASQUERADE + FORWARD v6 через build_nat6_idempotent_shell)
     — для standalone-серверов с включённым IPv6-туннелем.
     """
@@ -1611,11 +1610,11 @@ def awgs_build_nat_helper_body(awg_subnet: str,
 
 
 def awgs_build_nat_unit_content() -> str:
-    """v5.4.5: содержимое awg-nat.service — ExecStart/ExecStop вызывают
+    """содержимое awg-nat.service — ExecStart/ExecStop вызывают
     helper-скрипт БЕЗ shell-кавычек (инлайн `bash -c '...awk '{...}'...'`
     разрывался systemd-токенизатором — NAT умирал после каждой перезагрузки).
 
-    v5.5.3 FIX-F: WantedBy+=awg-quick@awg0.service — старт туннеля тянет
+    FIX-F: WantedBy+=awg-quick@awg0.service — старт туннеля тянет
     за собой NAT-юнит (wants-симлинк). Раньше было только multi-user.target:
     `systemctl stop awg-quick@awg0 && start` (и даже restart!) гасил awg-nat
     через Requires (ExecStop удалял MASQUERADE), а повторный старт туннеля
@@ -1653,7 +1652,7 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "",
 
     Также включает:
     • net.ipv4.ip_forward=1 (если ещё не включён)
-    • v5.5.8: net.ipv6.conf.all.forwarding=1 — при непустом subnet_v6
+    • net.ipv6.conf.all.forwarding=1 — при непустом subnet_v6
     • rp_filter=2 (loose mode) ТОЛЬКО на awg0 и WAN — точечно, не глобально.
       Loose mode сохраняет anti-spoofing защиту (в отличие от 0=off) и
       достаточно для корректной работы NAT. Раньше сбрасывался global
@@ -1661,7 +1660,7 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "",
     • iptables MASQUERADE для подсети awg0 → WAN (idempotent через -C check)
     • iptables FORWARD: awg0 → anywhere (ACCEPT), idempotent
     • iptables FORWARD: anywhere → awg0 (ESTABLISHED,RELATED ACCEPT), idempotent
-    • v5.5.8: при непустом subnet_v6 — ip6tables NAT66 (MASQUERADE v6
+    • при непустом subnet_v6 — ip6tables NAT66 (MASQUERADE v6
       подсети → WAN, GUA-адрес интерфейса) + FORWARD v6 + v6-часть в
       helper-скрипте awg-nat-rules.sh. На сервере без глобального v6
       правила безвредны (v6-пакеты из туннеля не маршрутизируются —
@@ -1705,7 +1704,7 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "",
     # 1. sysctl: ip_forward=1 (idempotent)
     info("Настройка sysctl (ip_forward, per-interface rp_filter=2 loose mode)...")
     apply_ip_forward(core)
-    # v5.5.8: v6-forwarding — только при включённом v6-туннеле
+    # v6-forwarding — только при включённом v6-туннеле
     if subnet_v6:
         apply_ipv6_forward(core)
 
@@ -1742,7 +1741,7 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "",
         iptables_ensure(core, rule_args[1:])
     success(f"iptables: MASQUERADE {awg_subnet} → {wan_iface} + FORWARD правила")
 
-    # v5.5.8: NAT66 — MASQUERADE v6 + FORWARD v6 (idempotent через
+    # NAT66 — MASQUERADE v6 + FORWARD v6 (idempotent через
     # ip6tables_ensure). Работает при наличии GUA на WAN; без GUA пакеты
     # из fd66::/64 не маршрутизируются (правила безвредны, анти-утечка
     # сохраняется — клиент не ходит по v6 мимо туннеля).
@@ -1760,7 +1759,7 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "",
     # WAN определяется в runtime через `ip route show default` (не хардкодим
     # wan_iface, т.к. после ребута интерфейс может переименовать — udev).
     #
-    # v5.4.5: КРИТИЧЕСКИЙ фикс — раньше ExecStart был инлайном:
+    # КРИТИЧЕСКИЙ фикс — раньше ExecStart был инлайном:
     #   ExecStart=/bin/bash -c 'WAN=$(... awk '{print $5}') ...'
     # systemd-токенизатор разрывал аргумент на вложенной одинарной кавычке
     # awk, а $WAN разворачивал сам systemd (пусто). Юнит молча падал
@@ -1786,7 +1785,7 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "",
         core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
         core._run(["systemctl", "enable", "awg-nat.service"],
                   check=False, quiet=True)
-        # v5.4.5: restart обязателен — если юнит остался в failed от
+        # restart обязателен — если юнит остался в failed от
         # предыдущей установки/бута (E2E 138x: failed-статус висел от
         # старого юнита юзера при живых runtime-правилах), без restart
         # он не поднимется до следующего ребута
@@ -1858,13 +1857,13 @@ def awgs_install(
     Полный цикл установки standalone AWG (2.0 или 3.1).
     Возвращает True при успехе.
 
-    protocol_version="3.1" (v5.5): генерация параметров по констрейнтам
+    protocol_version="3.1": генерация параметров по констрейнтам
     GenerateObfuscation31 (S1-S4 ≥ 12, Jmax ≤ 339, I1 = <r 32-256> + 9
     транспортных параметров), awg0.conf с 3.1-директивами, state с
     protocol_version="3.1". Перед установкой предупреждает о поддержке
     клиентами (AmneziaVPN 5.0.1.5+; роутеры 3.1 НЕ поддерживают).
 
-    v5.5.8 (IPv6): allow_ipv6_tunnel теперь True ПО УМОЛЧАНИЮ — новый
+    (IPv6): allow_ipv6_tunnel теперь True ПО УМОЛЧАНИЮ — новый
     дефолт после инцидента «Ютуб работает только с B4» (2026-10-05):
     IPv4-only туннель при IPv6-сети клиента = AAAA-утечка мимо туннеля
     (браузер ходит на ютуб напрямую по v6 через провайдера → TSPU душит
@@ -2000,7 +1999,7 @@ def awgs_install(
                  "RandomTrailers, DisableCookies")
 
     # 9. Генерация awg0.conf
-    # v5.5.8: subnet_v6 — derived ULA per-node (fd66:66:<okt3>::/64),
+    # subnet_v6 — derived ULA per-node (fd66:66:<okt3>::/64),
     # если не передан явно. Пустой → дефолт от v4-подсети.
     if not subnet_v6:
         subnet_v6 = awg_v6_ula_from_subnet(subnet)
@@ -2027,7 +2026,7 @@ def awgs_install(
     # 11. Systemd
     info("Запуск awg-quick@awg0.service...")
     if not awgs_setup_systemd():
-        # v5.5.2 (E2E fi1 2026-10-03): честный контракт установки —
+        # (E2E fi1 2026-10-03): честный контракт установки —
         # успех = поднятый туннель. Раньше здесь был только warn:
         # userspace-go без юнита давал «Установка завершена» при
         # мёртвом awg0 (systemctl not-found), каскад получал бокс
@@ -2040,7 +2039,7 @@ def awgs_install(
     # 11.1 NAT / маршрутизация — КРИТИЧНО для standalone AWG
     # Без MASQUERADE + ip_forward + FORWARD правил клиенты подключаются,
     # но не получают интернет (ответный трафик не доходит).
-    # v5.5.8: при allow_ipv6_tunnel — NAT66 (MASQUERADE v6 + FORWARD v6
+    # при allow_ipv6_tunnel — NAT66 (MASQUERADE v6 + FORWARD v6
     # + sysctl ipv6.forwarding) и v6-часть в helper-скрипте awg-nat-rules.sh.
     info("Настройка NAT/MASQUERADE + ip_forward (для интернета у клиентов)...")
     awgs_setup_nat_and_routing(
@@ -2112,12 +2111,12 @@ def awgs_install(
 
 
 # ============================================================================
-#  ВКЛЮЧЕНИЕ IPv6 НА СУЩЕСТВУЮЩЕЙ УСТАНОВКЕ (v5.5.8)
+#  ВКЛЮЧЕНИЕ IPv6 НА СУЩЕСТВУЮЩЕЙ УСТАНОВКЕ
 # ============================================================================
 
 def awgs_enable_ipv6(regen_client_confs: bool = True) -> bool:
     """
-    v5.5.8: включает IPv6 на УЖЕ установленном standalone AWG — без
+    включает IPv6 на УЖЕ установленном standalone AWG — без
     переустановки и без сброса ключей/пиров (upgrade-путь для живых нод).
 
     Контекст: инцидент 2026-10-05 «Ютуб работает только с B4 на роутере» —
@@ -2166,7 +2165,7 @@ def awgs_enable_ipv6(regen_client_confs: bool = True) -> bool:
 
     # 1. subnet_v6 — derived ULA per-node
     subnet_v6 = state.get("subnet_v6") or ""
-    # v5.5.8: миграция старого дефолтного fd66:66:66::/64 на per-node
+    # миграция старого дефолтного fd66:66:66::/64 на per-node
     # (кроме случая, когда v4-подсеть сама 10.66.66.0/24 — тогда derived =
     # старый дефолт и миграция не нужна)
     derived = awg_v6_ula_from_subnet(subnet)
@@ -2350,7 +2349,7 @@ def do_manage_awg_standalone() -> None:
         import os
         os.system("clear")
         print()
-        # v5.5: заголовок показывает ФАКТИЧЕСКУЮ версию установленного
+        # заголовок показывает ФАКТИЧЕСКУЮ версию установленного
         # протокола (2.0/3.1) из state — «AmneziaWG (standalone VPN)» до
         # установки, когда версия ещё не определена.
         from .awg_protocol import awg_protocol_label
@@ -2406,7 +2405,7 @@ def do_manage_awg_standalone() -> None:
         elif ch == "7":
             do_awgs_rotate_menu()
         elif ch == "8":
-            # v5.5.8: включение IPv6 на живой установке (upgrade без сброса)
+            # включение IPv6 на живой установке (upgrade без сброса)
             awgs_enable_ipv6()
             input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch in ("q", ""):
@@ -2417,7 +2416,7 @@ def do_manage_awg_standalone() -> None:
 
 
 def _awgs_prompt_protocol_version() -> str:
-    """v5.5: выбор версии протокола AWG перед установкой (TUI).
+    """выбор версии протокола AWG перед установкой (TUI).
 
     Возвращает "2.0" или "3.1" (нормализовано через awg_protocol).
     """
@@ -2460,7 +2459,7 @@ def _awgs_menu_install() -> None:
     _box_desc = core._box_desc
     CYAN, NC, GREEN, DIM = core.CYAN, core.NC, core.GREEN, core.DIM
 
-    # v5.5: сначала — выбор версии протокола (2.0 / 3.1), она пробрасывается
+    # сначала — выбор версии протокола (2.0 / 3.1), она пробрасывается
     # во ВСЕ пути установки ниже (пресеты, advanced, custom params).
     protocol_version = _awgs_prompt_protocol_version()
 
@@ -2530,7 +2529,7 @@ def _awgs_menu_custom_params(protocol_version: str = "2.0") -> None:
 
     endpoint = input(f"{CYAN}Endpoint (если за NAT, иначе пусто) []: {NC}").strip()
 
-    # Теперь — параметры обфускации (v5.5.1: с версией протокола — для 3.1
+    # Теперь — параметры обфускации (с версией протокола — для 3.1
     # промпт охватывает и 9 транспортных директив)
     custom_params = awgs_prompt_custom_params(protocol_version=protocol_version)
     if custom_params is None:
@@ -2688,7 +2687,7 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
         return False, "Standalone AWG не установлен"
 
     state = awgs_state_load()
-    # v5.5: ротация соблюдает версию протокола из state (3.1 → полный
+    # ротация соблюдает версию протокола из state (3.1 → полный
     # 3.1-набор, включая новые HeaderProtectionKey и таймеры)
     protocol_version = state.get("protocol_version", "2.0")
 
@@ -2719,7 +2718,7 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
         # Apply успешен — теперь безопасно коммитить state
         awgs_state_update(params=new_params)
 
-        # v5.4.1: Перегенерируем клиентские .conf файлы для всех пиров —
+        # Перегенерируем клиентские .conf файлы для всех пиров —
         # после ротации параметры обфускации изменились, и клиенты должны
         # получить новые параметры, иначе handshake не завершится
         # (подтверждено жалобой zvshka: "handshake did not complete after
@@ -2752,7 +2751,7 @@ def awgs_rotate_obfuscation(preset_name: str = "") -> tuple[bool, str]:
             i1_display = _i1_val[:16] + "..."
         else:
             i1_display = _i1_val
-        # v5.5.5: сколько I-цепочек заполнено (3.1 — все 5 по умолчанию)
+        # сколько I-цепочек заполнено (3.1 — все 5 по умолчанию)
         _i_filled = sum(1 for _k in ("i1", "i2", "i3", "i4", "i5")
                         if new_params.get(_k))
         msg = (f"Параметры обновлены: Jc={new_params['jc']} "

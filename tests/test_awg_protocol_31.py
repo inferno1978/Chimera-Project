@@ -10,7 +10,7 @@ Unit-тесты для chimera/modules/awg_protocol.py — версионное 
   3. awg31_generate_extra_params — генерация 9 параметров (диапазоны
      GenerateObfuscation31, те же констрейнты что в wpp_awg)
   4. awg31_validate_extra_params — валидация (успех/все классы ошибок)
-  5. awg_render_31_lines — рендер директив (правило v5.4.5: пустые «# K = »)
+  5. awg_render_31_lines — рендер директив (правило пустые «# K = »)
   6. awg31_merge_into_params — слияние 2.0-базы с 3.1-дополнением
   7. awg_state_protocol_version — чтение версии из state-словаря
 """
@@ -78,7 +78,7 @@ class TestVersionHelpers(unittest.TestCase):
         self.assertEqual(awg_protocol_label(""), "AmneziaWG 2.0")
 
     def test_vpn_uri_protocol_version(self):
-        # v5.5: vpn:// URI — «2» для 2.0 (историческое), «3» для 3.1
+        # vpn:// URI — «2» для 2.0 (историческое), «3» для 3.1
         self.assertEqual(awg_vpn_uri_protocol_version("2.0"), "2")
         self.assertEqual(awg_vpn_uri_protocol_version("3.1"), "3")
         self.assertEqual(awg_vpn_uri_protocol_version(""), "2")
@@ -202,7 +202,7 @@ class TestValidate31ExtraParams(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("KeepaliveTimeout", err)
 
-    # ── v5.5.1: официальные формы «N» (одиночное число, amneziawg-tools
+    # ── официальные формы «N» (одиночное число, amneziawg-tools
     # type.c u16_range_from_string) + кросс-валидации таймеров ──────────
 
     def test_single_number_forms_accepted(self):
@@ -260,7 +260,7 @@ class TestValidate31ExtraParams(unittest.TestCase):
             self.assertTrue(ok, msg=err)
 
     def test_flag_official_bool_forms_accepted(self):
-        # v5.5.1: parse_bool amneziawg-tools — официально «on»/«off»/«0»/«1»
+        # parse_bool amneziawg-tools — официально «on»/«off»/«0»/«1»
         # (генерация пишет «on», но конфиги с off/0/1 — валидные)
         for v in ("on", "off", "0", "1", "ON", "Off"):
             p = self._valid()
@@ -307,7 +307,7 @@ class TestRender31Lines(unittest.TestCase):
             self.assertIn(f"{AWG31_DIRECTIVE_NAMES[k]} = {p[k]}", rendered)
 
     def test_empty_params_all_commented(self):
-        # Пустые параметры → «# Key = » (правило v5.4.5: голое «Key = »
+        # Пустые параметры → «# Key = » (правило голое «Key = »
         # валит awg setconf)
         rendered = awg_render_31_lines({})
         for d in AWG31_DIRECTIVE_NAMES.values():
@@ -351,7 +351,7 @@ class TestMergeIntoParams(unittest.TestCase):
 
 class TestStateProtocolVersion(unittest.TestCase):
     def test_missing_key_is_20(self):
-        # Старые state (до v5.5) без ключа = 2.0 — миграция не нужна
+        # Старые state без ключа = 2.0 — миграция не нужна
         self.assertEqual(awg_state_protocol_version({}), "2.0")
         self.assertEqual(awg_state_protocol_version(
             {"installed": True, "params": {}}), "2.0")

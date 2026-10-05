@@ -163,9 +163,9 @@ class TestPresetsGenerate(unittest.TestCase):
                 self.assertGreaterEqual(p["jmax"], p["jmin"])
 
     def test_s1_s2_non_zero_v542(self):
-        """v5.4.2: S1, S2 — случайные ненулевые (как в эталонном конфиге Amnezia).
+        """S1, S2 — случайные ненулевые (как в эталонном конфиге Amnezia).
 
-        Раньше (v5.0-v5.4.1) были 0 (как в bivlked). Но рабочий конфиг от
+        Раньше  были 0 (как в bivlked). Но рабочий конфиг от
         приложения Amnezia использует S1=125, S2=47 — ненулевые. Подтверждено
         zvshka: с S1=0, S2=0 handshake не завершается. С ненулевыми — работает.
         """

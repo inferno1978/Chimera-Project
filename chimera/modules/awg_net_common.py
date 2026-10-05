@@ -91,7 +91,7 @@ def iptables_ensure(core, args: list, binary: str = "iptables") -> None:
     так и доступен для других модулей, которым нужна идемпотентная
     установка iptables-правил (NAT, mangle, filter).
 
-    v5.5.8: параметр binary ("iptables" | "ip6tables") — та же логика
+    параметр binary ("iptables" | "ip6tables") — та же логика
     для IPv6-правил (ip6tables_ensure — обёртка ниже).
     """
     if "-A" not in args:
@@ -117,7 +117,7 @@ def iptables_ensure(core, args: list, binary: str = "iptables") -> None:
 
 def ip6tables_ensure(core, args: list) -> None:
     """
-    v5.5.8: идемпотентное добавление ip6tables-правила (IPv6).
+    идемпотентное добавление ip6tables-правила (IPv6).
 
     Обёртка над iptables_ensure с binary="ip6tables" — идентичная логика
     -C/-A, но для стека IPv6. Используется NAT66 (MASQUERADE v6) и
@@ -127,12 +127,12 @@ def ip6tables_ensure(core, args: list) -> None:
 
 
 # ============================================================================
-# IPv6 ULA DERIVATION (v5.5.8)
+# IPv6 ULA DERIVATION
 # ============================================================================
 
 def awg_v6_ula_from_subnet(subnet_v4: str, default: str = "fd66:66:66::/64") -> str:
     """
-    v5.5.8: выводит ULA-подсеть IPv6 из v4-подсети туннеля.
+    выводит ULA-подсеть IPv6 из v4-подсети туннеля.
 
     Правило: третий октет v4-базы становится третьим hextet'ом ULA
     (ДЕСЯТИЧНАЯ запись октета — 82 значит hextet '82', НЕ 0x52;
@@ -173,7 +173,7 @@ def awg_v6_ula_from_subnet(subnet_v4: str, default: str = "fd66:66:66::/64") -> 
 
 def awg_v6_host_from_v4(client_ip_v4: str, subnet_v6: str) -> str:
     """
-    v5.5.8: выводит v6-адрес хоста с host-id из последнего октета v4.
+    выводит v6-адрес хоста с host-id из последнего октета v4.
 
     Примеры (subnet_v6 = fd66:66:82::/64):
       172.16.82.2  → fd66:66:82::2
@@ -403,7 +403,7 @@ def build_sysctl_lines(awg_iface: str, wan_iface: str,
       • wan_iface       — имя WAN-интерфейса (eth0, ens3, …)
       • rp_filter_value — 0/1/2 (default 2 = loose mode). 0 только как явный
                           fallback если 2 не решает проблему на конкретном ядре.
-      • ipv6_forward    — v5.5.8: добавить net.ipv6.conf.all.forwarding = 1
+      • ipv6_forward    — добавить net.ipv6.conf.all.forwarding = 1
                           (нужно для NAT66/транзита v6 из туннеля).
 
     Дополнительно: net.ipv4.ip_forward=1 (без этого NAT-трафик не форвардится).
@@ -473,7 +473,7 @@ def apply_ip_forward(core) -> None:
 
 def apply_ipv6_forward(core) -> None:
     """
-    v5.5.8: включает net.ipv6.conf.all.forwarding=1 в runtime — без этого
+    включает net.ipv6.conf.all.forwarding=1 в runtime — без этого
     ядро не форвардит IPv6-пакеты из туннеля (NAT66/транзит в каскаде).
     Idempotent: проверяет текущее значение перед sysctl -w.
     """
@@ -504,7 +504,7 @@ def write_sysctl_conf(path: Path, awg_iface: str, wan_iface: str,
     но вычищает старые global all/default rp_filter записи (которые были
     ошибочно добавлены предыдущей версией кода).
 
-    v5.5.8: ipv6_forward=True добавляет net.ipv6.conf.all.forwarding = 1
+    ipv6_forward=True добавляет net.ipv6.conf.all.forwarding = 1
     в управляемые строки (managed_prefixes расширен соответствующе — старая
     строка ipv6.forwarding из файла вычищается и перезаписывается нашей).
 

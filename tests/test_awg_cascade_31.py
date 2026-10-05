@@ -8,7 +8,7 @@ Unit-тесты AWG 3.1 в awg_cascade.py — каскад из 2 серверо
   1. _awgs_cascade_build_awg1_conf(exit_protocol_version="3.1") — 9 директив
   2. awgs_cascade_setup_awg0 — версионная валидация (entry 2.0 vs exit 3.1)
   3. awgs_cascade_setup_awg1 — бокс данных содержит Protocol version
-  4. РЕГРЕССИЯ 2.0: без версии — конфиг и валидация байт-в-байт как v5.4.5
+  4. РЕГРЕССИЯ 2.0: без версии — конфиг и валидация байт-в-байт как раньше
 """
 from __future__ import annotations
 

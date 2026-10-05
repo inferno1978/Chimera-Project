@@ -89,7 +89,7 @@ class TestBuildTestClientConfigXhttpReality(unittest.TestCase):
     def test_reality_regression(self):
         """Классический reality (Mode A): SNI = domain (canonical sni_hygiene).
 
-        v5.5.1: прежний тест ассертил баг — SNI брался из reality_dest даже
+        прежний тест ассертил баг — SNI брался из reality_dest даже
         БЕЗ Mode B/AWG, тогда как сервер в Mode A ждёт serverNames=[domain].
         Канонический рул (как в E2E-проверенной xhttp_reality ветке):
         Mode B + awg_exit_enabled + reality_dest → reality_dest, иначе domain.

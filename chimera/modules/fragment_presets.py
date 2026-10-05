@@ -287,7 +287,7 @@ def _generate_one(preset: dict) -> Optional[Path]:
                 },
             }
         else:
-            # REALITY — v5.5.1: канонический SNI-рул (sni_hygiene)
+            # REALITY — канонический SNI-рул (sni_hygiene)
             from chimera.modules.sni_hygiene import client_sni_for_state
             sni = client_sni_for_state(state) or server_host
             outbound = {

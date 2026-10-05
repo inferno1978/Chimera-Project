@@ -66,7 +66,7 @@ class TestPresetsGenerate31(unittest.TestCase):
             self.assertLessEqual(p["jmax"], 339)
 
     def test_h_values_narrow_ranges_31(self):
-        # v5.5.1: 3.1 — ОФИЦИАЛЬНЫЙ диапазонный формат «N-M» (как 2.0),
+        # 3.1 — ОФИЦИАЛЬНЫЙ диапазонный формат «N-M» (как 2.0),
         # но УЗКИЕ диапазоны (~15-20k, H4 ~25-30k) — фикс бага amneziawg-go
         # (широкие диапазоны в 3.1 + HeaderProtectionKey = misclassify/CPU)
         for _ in range(10):
@@ -94,7 +94,7 @@ class TestPresetsGenerate31(unittest.TestCase):
                                     msg=f"H{i+1}/H{j+1} пересекаются: {hs}")
 
     def test_i1_mode_respected_31(self):
-        # v5.5.1: 3.1 поддерживает ВЕСЬ официальный CPS-язык — i1_mode
+        # 3.1 поддерживает ВЕСЬ официальный CPS-язык — i1_mode
         # пресета больше НЕ игнорируется (random/absent → <r 32-256>,
         # binary → <b 0x...>; «только <r N>» был констрейнтом 3x-ui)
         for preset in awgs_presets_list():
@@ -144,7 +144,7 @@ class TestPresetsValidate31(unittest.TestCase):
         self.assertIn("339", err)
 
     def test_i1_binary_valid_for_31(self):
-        # v5.5.1: <b 0x...> — официальный тег, валиден и в 3.1
+        # <b 0x...> — официальный тег, валиден и в 3.1
         # (прежде «только <r N>» — был констрейнтом GenerateObfuscation31/3x-ui)
         p = self._valid_31()
         p["i1"] = "<b 0xdeadbeef>"
@@ -244,7 +244,7 @@ class TestRegression20(unittest.TestCase):
             self.assertTrue(0 <= p["s4"] <= 32)
 
     def test_generate_20_h_ranges_nm(self):
-        # 2.0: H1-H4 — диапазоны 'N-M' (v5.4.2+)
+        # 2.0: H1-H4 — диапазоны 'N-M' (официальный формат)
         p = awgs_presets_generate("default")
         for i in range(1, 5):
             self.assertIn("-", p[f"h{i}"])

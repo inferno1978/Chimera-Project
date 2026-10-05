@@ -401,7 +401,7 @@ def _reset_old_tools_warn_flag() -> None:
     _OLD_AWG_TOOLS_WARN_SHOWN = False
 
 
-# ── Проверка поддержки директив AWG 3.1 (v5.5) ───────────────────────────────
+# ── Проверка поддержки директив AWG 3.1 ───────────────────────────────
 
 # Кэш на процесс (тот же паттерн, что _SUPPORTS_I2_I5_CACHE).
 _SUPPORTS_AWG31_CACHE: dict = {}

@@ -76,12 +76,12 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     port = state.get("port", AWGS_DEFAULT_PORT)
     is_cascade = bool(state.get("cascade_role"))
 
-    # v5.5.11: B4-сплит — снять ДО разборки каскада (правила/таймер/
+    # B4-сплит — снять ДО разборки каскада (правила/таймер/
     # AAAA в AGH/ipset/nft-сет), silent-режим (uninstall и так шумный)
     try:
         from . import awg_b4_split
         if awg_b4_split.is_active():
-            info("Снятие B4-сплита (v5.5.11)...")
+            info("Снятие B4-сплита...")
             awg_b4_split.deactivate(verbose=False)
         else:
             # даже выключенный мог оставить артефакты (крэш при выключении)
@@ -96,7 +96,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     info("Остановка сервисов...")
     awgs_stop_systemd()
     if is_cascade:
-        # Каскад: останавливаем awg1 + routing + failover-таймер (v5.5.3)
+        # Каскад: останавливаем awg1 + routing + failover-таймер
         core._run(["systemctl", "stop", "awg-quick@awg1"],
                   check=False, quiet=True)
         core._run(["systemctl", "disable", "awg-quick@awg1"],
@@ -105,7 +105,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
                   check=False, quiet=True)
         core._run(["systemctl", "disable", "awg-cascade-routing"],
                   check=False, quiet=True)
-        # v5.5.3: мульти-exit failover (таймер + сервис + wrapper)
+        # мульти-exit failover (таймер + сервис + wrapper)
         from .awg_cascade import awgs_cascade_failover_teardown
         awgs_cascade_failover_teardown()
     # NAT-юнит (если создавался при установке)
@@ -123,7 +123,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     awg_nat_unit.unlink(missing_ok=True)
     if AWGS_SYSTEMD_CASCADE.exists():
         AWGS_SYSTEMD_CASCADE.unlink(missing_ok=True)
-    # v5.5.3: failover-юниты (на случай запуска uninstall без cascade_role)
+    # failover-юниты (на случай запуска uninstall без cascade_role)
     for _u in ("/etc/systemd/system/awg-cascade-failover.timer",
                "/etc/systemd/system/awg-cascade-failover.service"):
         Path(_u).unlink(missing_ok=True)
@@ -184,7 +184,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     # 8.1 NAT iptables правила (если создавались при установке)
     info("Удаление iptables NAT правил...")
     subnet = state.get("subnet", "10.66.66.0/24")
-    # v5.4.5: MASQUERADE ставится С "-o <WAN>" (build_nat_idempotent_shell),
+    # MASQUERADE ставится С "-o <WAN>" (build_nat_idempotent_shell),
     # поэтому -D обязан включать тот же "-o <WAN>" — иначе iptables молча
     # НЕ матчит правило и MASQUERADE переживает uninstall (подтверждено
     # E2E 2026-10-03 на de1: правило -s 10.66.66.0/24 -o ens3 осталось).
@@ -220,10 +220,10 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
             check=False, quiet=True,
         )
 
-    # 8.2 v5.4.5: артефакты, которые раньше переживали uninstall
+    # 8.2 артефакты, которые раньше переживали uninstall
     # (подтверждено E2E 2026-10-03 на de1: wrapper, PPA sources+keyring, sysctl)
     info("Удаление wrapper-скриптов и PPA...")
-    # helper NAT-скрипт (создаётся awgs_setup_nat_and_routing с v5.4.5)
+    # helper NAT-скрипт (создаётся awgs_setup_nat_and_routing)
     Path("/usr/local/sbin/awg-nat-rules.sh").unlink(missing_ok=True)
     # wrapper cron-задачи expires (создаётся awgs_setup_expires_cron)
     Path("/usr/local/sbin/awg-expires-check.sh").unlink(missing_ok=True)
@@ -251,7 +251,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
                 chain_active = False
             if chain_active:
                 sysctl_file.write_text(
-                    "# v5.4.5: сохранён ip_forward для chain Mode B "
+                    "# сохранён ip_forward для chain Mode B "
                     "(awg_exit_enabled)\nnet.ipv4.ip_forward = 1\n")
                 info("sysctl ip_forward сохранён (используется chain Mode B)")
             else:
@@ -275,7 +275,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     # 11. Если /root/awg/ пустой — удаляем
     try:
         if AWGS_AWG_DIR.exists():
-            # v5.4.5: пустую keys/ тоже убираем (после удаления файлов
+            # пустую keys/ тоже убираем (после удаления файлов
             # директория-призрак оставалась — E2E de1)
             if AWGS_KEYS_DIR.exists() and not any(AWGS_KEYS_DIR.iterdir()):
                 AWGS_KEYS_DIR.rmdir()
@@ -301,7 +301,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     if is_cascade:
         _box_row(f"    • awg-quick@awg1.service")
         _box_row(f"    • awg-cascade-routing.service")
-        _box_row(f"    • awg-cascade-failover.timer/.service (v5.5.3)")
+        _box_row(f"    • awg-cascade-failover.timer/.service")
         _box_row(f"    • ipset {AWGS_IPSET_NAME}")
         _box_row(f"    • {AWGS_CASCADE_DIR}/")
     _box_row(f"    • {AWGS_SERVER_CONF}")
@@ -328,8 +328,7 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
 def _awgs_uninstall_cleanup_iptables() -> None:
     """Best-effort удаление iptables-правил каскада.
 
-    v5.4.5:
-      • MARK теперь в PREROUTING (главный фикс каскада) — удаляем его;
+    • MARK теперь в PREROUTING (главный фикс каскада) — удаляем его;
         старые FORWARD/OUTPUT-варианты тоже подчищаем (эволюция бага).
       • Добавлены TCPMSS-правила (двойное туннелирование).
       • Правила удаляются ЦИКЛИЧЕСКИ (дубли от старых прогонов —
@@ -339,9 +338,9 @@ def _awgs_uninstall_cleanup_iptables() -> None:
     from .awg_constants import AWGS_CASCADE_FWMARK
     # Список правил для удаления (best-effort, игнорируем ошибки).
     # Эволюция MARK-правила: OUTPUT (SSH-lockout, 33970c2) → FORWARD
-    # (после route decision — транзит не работал) → PREROUTING (v5.4.5).
+    # (после route decision — транзит не работал) → PREROUTING.
     rules = [
-        # Текущее: PREROUTING-MARK (v5.4.5)
+        # Текущее: PREROUTING-MARK
         ("iptables", "-t", "mangle", "-D", "PREROUTING", "-i", "awg0",
          "-m", "set", "!", "--match-set", AWGS_IPSET_NAME, "dst",
          "-j", "MARK", "--set-mark", str(AWGS_CASCADE_FWMARK)),
@@ -361,7 +360,7 @@ def _awgs_uninstall_cleanup_iptables() -> None:
          "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"),
         ("iptables", "-D", "FORWARD", "-i", "awg0", "-m", "set",
          "--match-set", AWGS_IPSET_NAME, "dst", "-j", "ACCEPT"),
-        # v5.4.5: TCPMSS clamp
+        # TCPMSS clamp
         ("iptables", "-t", "mangle", "-D", "FORWARD", "-i", "awg0", "-o", "awg1",
          "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS",
          "--set-mss", "1140"),

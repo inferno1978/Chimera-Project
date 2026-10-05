@@ -1031,7 +1031,7 @@ def _prompt_h1_h4_unique(
 def _prompt_known_sni_domain(core) -> str:
     """Меню выбора домена-донора из справочника известных ресурсов.
 
-    v5.5.1 (sni_hygiene): ТОЛЬКО для явной кастомизации — пользователь
+    (sni_hygiene): ТОЛЬКО для явной кастомизации — пользователь
     осознанно берёт чужой популярный домен, видя предупреждение о ToS
     РФ-хостингов / РКН. Возвращает домен или '' (отмена).
     """
@@ -1160,7 +1160,7 @@ def prompt_awg_exit_mode() -> None:
             success("Транспорт: VLESS (стандарт)")
             return
         if choice in ("2", "4"):
-            # v5.5: 2 = AmneziaWG 2.0, 4 = AmneziaWG 3.1 (transport protection)
+            # 2 = AmneziaWG 2.0, 4 = AmneziaWG 3.1 (transport protection)
             from chimera.modules.awg_protocol import (
                 awg_normalize_version, awg_protocol_label,
             )
@@ -1197,7 +1197,7 @@ def prompt_awg_exit_mode() -> None:
         warn("Введите 1, 2, 3 или 4")
 
     # --- Домен маскировки REALITY (dest/sni) ---
-    # v5.5.1 SNI-гигиена (sni_hygiene.py): ПРИОРИТЕТ — свой домен (Self-SNI).
+    # SNI-гигиена (sni_hygiene.py): ПРИОРИТЕТ — свой домен (Self-SNI).
     # Почему сменили политику (прежняя: «чужой популярный сайт, свой домен
     # нельзя — петля»):
     #   • РФ-хостинги вносят в ToS блокировку серверов, у которых SNI/dest
@@ -1207,7 +1207,7 @@ def prompt_awg_exit_mode() -> None:
     #     себя на 443). Self-SNI паттерн (wiki.amnezia.host) берёт dest =
     #     ЛОКАЛЬНЫЙ nginx-сокет с LE-сертификатом СВОЕГО домена (как Mode A)
     #     — петли нет, IP↔домен↔сертификат совпадают, снаружи выглядит
-    #     максимально естественно. Генераторы (xray_install v5.5.1) выбирают
+    #     максимально естественно. Генераторы (xray_install) выбирают
     #     сокет автоматически, когда reality_dest == PARAM_DOMAIN.
     from chimera.modules import sni_hygiene
     PARAM_DOMAIN_L = (getattr(core, "PARAM_DOMAIN", "") or "").strip().lower()
@@ -1289,7 +1289,7 @@ def prompt_awg_exit_mode() -> None:
         else:
             success(f"   REALITY dest/sni: {PARAM_REALITY_DEST}")
     setattr(core, "PARAM_REALITY_DEST", PARAM_REALITY_DEST)
-    # (v5.5.1: прежний блок с дефолтом www.cloudflare.com и запретом своего
+    # (прежний блок с дефолтом www.cloudflare.com и запретом своего
     # домена удалён — см. sni_hygiene.py. Техническое предупреждение о
     # microsoft.com (баг REALITY: Certificate 8273 > 8192) теперь входит в
     # sni_hygiene.warn_known_domain_text и показывается при явном выборе.)
@@ -1370,7 +1370,7 @@ def prompt_awg_exit_mode() -> None:
     elif _obf_ch == "2":
         # Авто-генерация полного набора через awgs_generate_full_manual_params()
         from chimera.modules.awg_presets import awgs_generate_full_manual_params
-        # v5.5: генерация учитывает версию протокола (3.1 → полный набор
+        # генерация учитывает версию протокола (3.1 → полный набор
         # с HeaderProtectionKey и таймерами, диапазоны GenerateObfuscation31)
         _awg_pv = getattr(core, "AWG_PROTOCOL_VERSION", "2.0")
         _p = awgs_generate_full_manual_params(None, protocol_version=_awg_pv)
@@ -1508,7 +1508,7 @@ def prompt_awg_exit_mode() -> None:
         if not (0 <= _pidx < len(_presets)):
             _pidx = 0
         _preset_name = _presets[_pidx]
-        # v5.5: пресет с версией протокола (3.1 → GenerateObfuscation31-набор)
+        # пресет с версией протокола (3.1 → GenerateObfuscation31-набор)
         _awg_pv = getattr(core, "AWG_PROTOCOL_VERSION", "2.0")
         _p = awgs_presets_generate(_preset_name, protocol_version=_awg_pv)
         if _awg_pv == "3.1":

@@ -113,7 +113,7 @@ def _build_shadowtls_inbound(state_ib: dict) -> dict:
     sb_users = [{"password": u["password"], "name": u.get("name", u.get("uuid", "")[:8])}
                 for u in users if u.get("password")]
 
-    # v5.5.1 (sni_hygiene): фолбэк handshake-домена — СВОЙ домен из
+    # (sni_hygiene): фолбэк handshake-домена — СВОЙ домен из
     # state.json (Self-SNI: handshake к себе → xray→nginx с LE-сертификатом),
     # не известный ресурс; константа — только последний резорт.
     try:

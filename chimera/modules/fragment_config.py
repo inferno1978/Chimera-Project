@@ -267,7 +267,7 @@ def generate_fragment_client_config(
             },
         }
     else:
-        # REALITY — v5.5.1: канонический SNI-рул (sni_hygiene.client_sni_for_state):
+        # REALITY — канонический SNI-рул (sni_hygiene.client_sni_for_state):
         # Mode B + AWG-exit + reality_dest → reality_dest (совпадает с
         # serverNames сервера), иначе — domain (свой домен). Прежний
         # безусловный reality_dest с фолбэком www.cloudflare.com ломал Mode A

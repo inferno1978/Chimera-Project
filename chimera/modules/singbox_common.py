@@ -58,7 +58,7 @@ DEFAULT_PORT_TUIC_ALTERNATIVE = 443  # UDP/443 — параллельно с TCP
 # ShadowTLS v3 делает честный TLS-handshake к этому домену, после чего
 # переключается на внутренний Trojan. Цензор видит «настоящий» TLS-ответ.
 #
-# v5.5.1 (sni_hygiene): ПРИОРИТЕТ — СВОЙ домен (см. shadowtls_handshake_default):
+# (sni_hygiene): ПРИОРИТЕТ — СВОЙ домен (см. shadowtls_handshake_default):
 # handshake к own domain:443 → xray REALITY (не-аутентичный клиент) → nginx
 # decoy-сокет с LE-сертификатом — честный TLS локально, БЕЗ внешних коннектов
 # к известным ресурсам (ToS РФ-хостингов / РКН). Константа ниже — последний

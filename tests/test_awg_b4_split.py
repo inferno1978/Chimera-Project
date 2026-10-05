@@ -2,7 +2,7 @@
 """
 tests/test_awg_b4_split.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для B4-сплита AWG-каскада (v5.5.11).
+Unit-тесты для B4-сплита AWG-каскада.
 
 Контекст: юзер хочет YouTube и др. ресурсы с RU-IP (Google отключила
 рекламу для RU-IP) — домены сетов b4 напрямую с entry через DPI-bypass,
@@ -19,7 +19,7 @@ Unit-тесты для B4-сплита AWG-каскада (v5.5.11).
                             строки, идемпотентность, remove)
   8. _mark_spec           — форма каскадного mark-правила (сплит вкл/выкл)
   9. state                — roundtrip + фильтр неизвестных ключей
- 10. routing script       — split-aware генерация (v5.5.11-блоки)
+ 10. routing script       — split-aware генерация (сплит-блоки)
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _setup_core_in_sysmodules():
-    """Заглушка chimera._core (тот же приём, что test_awg_ipv6_v558)."""
+    """Заглушка chimera._core (тот же приём, что test_awg_ipv6_dualstack)."""
     if "chimera._core" in sys.modules:
         return
     core_path = _PROJECT_ROOT / "chimera" / "_core.py"
@@ -359,7 +359,7 @@ class TestStateRoundtrip(unittest.TestCase):
 
 
 class TestRoutingScriptSplitAware(unittest.TestCase):
-    """Генератор awg-routing.sh: v5.5.11-блоки при сплите вкл/выкл."""
+    """Генератор awg-routing.sh: сплит-блоки при сплите вкл/выкл."""
 
     def setUp(self):
         _setup_core_in_sysmodules()

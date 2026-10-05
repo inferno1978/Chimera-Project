@@ -138,13 +138,13 @@ class TestBuildClientConf(unittest.TestCase):
         self.assertIn("I1 = deadbeef", conf)
 
     def test_client_i1_to_i5_empty_commented_v545(self):
-        """v5.4.5: ПУСТЫЕ I1-I5 в клиентском .conf КОММЕНТИРУЮТСЯ (# I2 = ).
+        """ПУСТЫЕ I1-I5 в клиентском .conf КОММЕНТИРУЮТСЯ (# I2 = ).
 
         E2E 2026-10-03 (de1→nl1): Linux-клиент awg-quick падает на голой
         пустой 'I2 = ' — "Line unrecognized: I2=" (awg setconf требует
         значение). '# I2 = ' принимается сервером и клиентом; приложения
         (Keenetic/amneziawg-go) комментарии игнорируют.
-        Правило v5.4.2 "клиенту без #" ломало awg-quick на Linux.
+        Прежнее правило "клиенту без #" ломало awg-quick на Linux.
         """
         from chimera.modules.awg_qr import awgs_qr_build_client_conf
         conf = awgs_qr_build_client_conf(_peer(), _server_state())
@@ -152,13 +152,13 @@ class TestBuildClientConf(unittest.TestCase):
         for key in ("I1", "I2", "I3", "I4", "I5"):
             self.assertIn(f"# {key} = ", conf,
                           f"# {key} = должен присутствовать (закомментирован) "
-                          f"в клиентском conf (v5.4.5)")
+                          f"в клиентском conf")
             self.assertNotIn(f"\n{key} = \n", conf,
                              f"голая пустая строка '{key} = ' НЕ должна быть "
-                             f"в клиентском conf (awg setconf падает, v5.4.5)")
+                             f"в клиентском conf (awg setconf падает)")
 
     def test_client_i_set_when_nonempty_v545(self):
-        """v5.4.5: НЕПУСТЫЕ I в клиентском .conf пишутся без комментария."""
+        """НЕПУСТЫЕ I в клиентском .conf пишутся без комментария."""
         from chimera.modules.awg_qr import awgs_qr_build_client_conf
         state = _server_state()
         state["params"].update({"i1": "aa", "i2": "bb", "i3": "cc",
@@ -167,7 +167,7 @@ class TestBuildClientConf(unittest.TestCase):
         for key, val in (("I1", "aa"), ("I2", "bb"), ("I3", "cc"),
                          ("I4", "dd"), ("I5", "ee")):
             self.assertIn(f"{key} = {val}", conf,
-                          f"непустой {key} должен быть без # (v5.4.5)")
+                          f"непустой {key} должен быть без #")
 
     def test_includes_ipv6_address_when_enabled(self):
         from chimera.modules.awg_qr import awgs_qr_build_client_conf

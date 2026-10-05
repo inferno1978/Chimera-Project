@@ -127,7 +127,7 @@ def awg_peer_rebuild_conf(apply: bool = True, params_override: dict = None) -> b
             "endpoint":       f"{state.get('cascade_peer_host', '')}:{state.get('cascade_peer_port', 0)}",
             "preshared_key":  "",
         } if state.get("cascade_role") == "entry" else None,
-        # v5.5: версия протокола из state — 3.1-установки получают
+        # версия протокола из state — 3.1-установки получают
         # awg0.conf с 9 транспортными директивами; отсутствие ключа
         # (старые state) = "2.0" = байт-в-байт прежнее поведение.
         protocol_version=state.get("protocol_version", "2.0"),
@@ -202,7 +202,7 @@ def awg_peer_add(
     if not client_ip:
         warn("Нет свободных IP в подсети (максимум 253 клиента)")
         return False
-    # IPv6 (если включён) — v5.5.8: v6-адрес зеркалит v4 host-id
+    # IPv6 (если включён) — v6-адрес зеркалит v4 host-id
     # (172.16.82.5 → fd66:66:82::5) — консистентно с awgs_enable_ipv6()
     state = awgs_state_load()
     client_ipv6 = ""

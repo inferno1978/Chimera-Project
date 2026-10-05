@@ -829,7 +829,7 @@ def generate_xray_config() -> None:
     log_to_file = core.log_to_file
 
     _assert_reality_dest_sane()
-    # v5.5.1 Self-SNI (Mode B): dest = свой домен → берём nginx-сокет
+    # Self-SNI (Mode B): dest = свой домен → берём nginx-сокет
     from chimera.modules.sni_hygiene import (
         reality_self_sni as _rsn_check, reality_server_settings,
     )
@@ -1022,7 +1022,7 @@ def generate_xray_config() -> None:
                 "security": "reality",
                 "realitySettings": {
                     "show":        False,
-                    # v5.5.1 Self-SNI (sni_hygiene): если REALITY dest
+                    # Self-SNI (sni_hygiene): если REALITY dest
                     # указывает на СВОЙ домен (PARAM_DOMAIN) — берём
                     # dest = ЛОКАЛЬНЫЙ nginx-сокет с LE-сертификатом этого
                     # домена (как в Mode A). Петли нет (сокет, не domain:443),
@@ -1593,7 +1593,7 @@ def generate_xray_config_xhttp_reality() -> None:
     log_to_file = core.log_to_file
 
     _assert_reality_dest_sane()
-    # v5.5.1 Self-SNI (Mode B): dest = свой домен → берём nginx-сокет
+    # Self-SNI (Mode B): dest = свой домен → берём nginx-сокет
     from chimera.modules.sni_hygiene import (
         reality_self_sni as _rsn_check, reality_server_settings,
     )
@@ -1760,7 +1760,7 @@ def generate_xray_config_xhttp_reality() -> None:
                 "xhttpSettings": _xhttp_s,
                 # TLS-маскировка REALITY — та же, что в tcp+reality:
                 # dest=unix-сокет nginx (сайт-заглушка), serverNames=домен;
-                # v5.5.1 Self-SNI — и в Mode B, если dest = свой домен
+                # Self-SNI — и в Mode B, если dest = свой домен
                 # (sni_hygiene.reality_self_sni).
                 "realitySettings": {
                     "show":        False,
