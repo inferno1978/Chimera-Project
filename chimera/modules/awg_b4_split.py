@@ -569,20 +569,50 @@ def _nft_ensure_base() -> bool:
     return r.returncode == 0
 
 
+def lb_extra_ifaces() -> list:
+    """Дополнительные туннельные интерфейсы при LB-балансировке каскада:
+    awg2..awgN (N = число exit'ов). Пусто — LB выключен/один exit.
+
+    Читается nft_apply_split/nft_apply_blanket (blanket b4-exempt бит
+    на inner-пакеты ВСЕХ туннелей) и awg_cascade_lb (хук).
+    """
+    try:
+        from .awg_state import awgs_state_load
+        st = awgs_state_load()
+        if not st.get("lb_mode"):
+            return []
+        n = len(st.get("cascade_exits") or [])
+        return [f"awg{i}" for i in range(2, n + 1)] if n > 1 else []
+    except Exception:
+        return []
+
+
+def _nft_ifaces(primary: str = "awg1") -> str:
+    """nft-мультиматч по интерфейсам: `iifname "awg1"` (LB off — форма
+    байт-в-байт прежняя) или `iifname { "awg1", "awg2", ... }` (LB on)."""
+    extras = lb_extra_ifaces()
+    if not extras:
+        return f"iifname \"{primary}\""
+    allif = [primary] + extras
+    inner = ", ".join(f'"{x}"' for x in allif)
+    return f"iifname {{ {inner} }}"
+
+
 def nft_apply_split() -> bool:
     """Сплит-форма awg_b4exempt (АТОМАРНЫЙ nft-батч).
 
-    prerouting: awg1 → exempt; awg0+@set → return (b4 обработает);
-    awg0 → exempt (каскад). output: AGH-ответы (sport 53 → awg0) exempt —
-    иначе b4 output (udp sport 53 → queue) перехватил бы их (неизвестное
-    поведение на чужих ответах; dnscrypt-цепочка чистая — фикс не нужен).
-    Порядок prerouting-правил критичен: @set-return ДО blanket-awg0.
+    prerouting: туннели (awg1 [+ awg2..awgN при LB]) → exempt;
+    awg0+@set → return (b4 обработает); awg0 → exempt (каскад).
+    output: AGH-ответы (sport 53 → awg0) exempt — иначе b4 output
+    (udp sport 53 → queue) перехватил бы их. Порядок prerouting-правил
+    критичен: @set-return ДО blanket-awg0.
     """
     if not _nft_ensure_base():
         return False
+    tun = _nft_ifaces("awg1")
     batch = (
         f"flush chain inet {_NFT_TABLE} prerouting\n"
-        f"add rule inet {_NFT_TABLE} prerouting iifname \"awg1\" "
+        f"add rule inet {_NFT_TABLE} prerouting {tun} "
         f"meta mark set meta mark or {AWGS_B4_EXEMPT_BIT:#x} "
         f"ct mark set ct mark or {AWGS_B4_EXEMPT_BIT:#x}\n"
         f"add rule inet {_NFT_TABLE} prerouting iifname \"awg0\" "
@@ -604,15 +634,17 @@ def nft_apply_split() -> bool:
 
 
 def nft_apply_blanket() -> bool:
-    """blanket-форма (сплит выключен): blanket awg0/awg1, без сета/output-цепи."""
+    """blanket-форма (сплит выключен): blanket awg0 + туннели awg1
+    [+ awg2..awgN при LB], без сета/output-цепи."""
     if not _nft_ensure_base():
         return False
+    tun = _nft_ifaces("awg1")
     batch = (
         f"flush chain inet {_NFT_TABLE} prerouting\n"
         f"add rule inet {_NFT_TABLE} prerouting iifname \"awg0\" "
         f"meta mark set meta mark or {AWGS_B4_EXEMPT_BIT:#x} "
         f"ct mark set ct mark or {AWGS_B4_EXEMPT_BIT:#x}\n"
-        f"add rule inet {_NFT_TABLE} prerouting iifname \"awg1\" "
+        f"add rule inet {_NFT_TABLE} prerouting {tun} "
         f"meta mark set meta mark or {AWGS_B4_EXEMPT_BIT:#x} "
         f"ct mark set ct mark or {AWGS_B4_EXEMPT_BIT:#x}\n"
         f"flush chain inet {_NFT_TABLE} output\n"
@@ -625,6 +657,48 @@ def nft_apply_blanket() -> bool:
         _err(f"nft_apply_blanket: {getattr(r, 'stderr', '')}")
         return False
     return True
+
+
+def routing_nft_block() -> str:
+    """nft-строки awg_b4exempt для awg-routing.sh (идемпотентные
+    grep||add; LB-форма awg-routing.sh — вызывается awg_cascade_lb).
+
+    Сплит-форма (правила awg_b4direct/awg1+awgN/awg0-blanket/output
+    AGH 53) при активном сплите, иначе — базовые blanket-строки
+    awg0/awg1(+awgN). При LB off существующий скрипт каскада этот
+    блок не использует (его генерит awg_cascade как раньше) — форма
+    только для lb_routing_script_text.
+    """
+    b = f"{AWGS_B4_EXEMPT_BIT:#x}"
+    tun_grep = _nft_ifaces("awg1")
+    lines = [f"nft add table inet {_NFT_TABLE} 2>/dev/null",
+             f"nft add chain inet {_NFT_TABLE} prerouting "
+             "'{ type filter hook prerouting priority mangle - 10; "
+             "policy accept; }' 2>/dev/null"]
+    if is_active():
+        lines += [
+            f"nft add set inet {_NFT_TABLE} {_NFT_SET} '{{ type ipv4_addr; }}' 2>/dev/null",
+            f"nft list table inet {_NFT_TABLE} 2>/dev/null | grep -q 'daddr @{_NFT_SET}' || {{",
+            f"    nft add rule inet {_NFT_TABLE} prerouting {tun_grep} meta mark set meta mark or {b} ct mark set ct mark or {b}",
+            f"    nft add rule inet {_NFT_TABLE} prerouting iifname 'awg0' ip daddr @{_NFT_SET} return",
+            f"    nft add rule inet {_NFT_TABLE} prerouting iifname 'awg0' meta mark set meta mark or {b} ct mark set ct mark or {b}",
+            "}}",
+            f"nft add chain inet {_NFT_TABLE} output "
+            "'{ type filter hook output priority mangle - 10; "
+            "policy accept; }' 2>/dev/null",
+            f"nft list chain inet {_NFT_TABLE} output 2>/dev/null | grep -q 'sport 53' || {{",
+            f"    nft add rule inet {_NFT_TABLE} output oifname 'awg0' udp sport 53 meta mark set meta mark or {b}",
+            f"    nft add rule inet {_NFT_TABLE} output oifname 'awg0' tcp sport 53 meta mark set meta mark or {b}",
+            "}}",
+        ]
+    else:
+        lines += [
+            f"nft list table inet {_NFT_TABLE} 2>/dev/null | grep -q 'iifname \"awg0\"' || "
+            f"nft add rule inet {_NFT_TABLE} prerouting iifname 'awg0' meta mark set meta mark or {b} ct mark set ct mark or {b}",
+            f"nft list table inet {_NFT_TABLE} 2>/dev/null | grep -q 'iifname \"awg1\"' || "
+            f"nft add rule inet {_NFT_TABLE} prerouting {tun_grep} meta mark set meta mark or {b} ct mark set ct mark or {b}",
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def nft_set_replace(ips: set) -> bool:
@@ -683,7 +757,19 @@ def cascade_mark_sync(excl: bool) -> bool:
     выигрывает → у direct-dest пакетов остаётся 0x8200 → каскад
     (fail-safe), утечки «напрямую без b4» нет. Удаление легаси-вариантов —
     как в _awgs_cascade_apply_iptables (while-loop).
+
+    LB-режим: каскадного mark-правила НЕТ (трафик идёт через диспетчер
+    awg_lb) — исключение сплита живёт в ХУКЕ диспетчера; синхронизируем
+    хук (lb_hook_sync, add-first-then-delete тех же двух форм).
     """
+    # LB: исключение переезжает в хук диспетчера
+    try:
+        from .awg_state import awgs_state_load
+        if awgs_state_load().get("lb_mode"):
+            from . import awg_cascade_lb
+            return awg_cascade_lb.lb_hook_sync(excl)
+    except Exception:
+        pass
     new = _mark_spec(excl)
     old = _mark_spec(not excl)
     # 1) убедиться что нужная форма есть

@@ -517,6 +517,14 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     На entry MASQUERADE v6 -o awg1 переписывает src на v6-адрес awg1
     (fd66:66:<okt3>::X) — зеркало v4-дизайна каскада.
     """
+    # LB-режим: каскадный MARK-путь не ставим — трафик идёт через
+    # диспетчер awg_lb (awg_cascade_lb.lb_dispatcher_install)
+    try:
+        from . import awg_cascade_lb as _lbm
+        if _lbm.lb_is_on():
+            return _lbm.lb_dispatcher_install()
+    except Exception:
+        pass
     core = _core_module()
 
     # B4-сплит — mark-правило получает исключение direct-плеча
@@ -732,6 +740,33 @@ def _awgs_cascade_create_routing_script(exit_subnet: str,
         _B4_SPLIT_RULE_NOTE = (
             "B4-сплит выключен — вся не-RU destination → каскад")
         _B4_SPLIT_NFT_BLOCK = ""
+
+    # LB-режим: вся маршрутизация — lb-блоком (диспетчер awg_lb +
+    # пер-слот); голова ipset общая, разделы 2-4 обычной формы не нужны
+    try:
+        from . import awg_cascade_lb as _lbm
+        if _lbm.lb_is_on():
+            from . import awg_b4_split as _b4s
+            head = f"""#!/bin/bash
+# AWG Cascade routing (LB-ФОРМА — балансировка) — пересоздаёт правила при старте
+# Автоматически сгенерировано chimera/modules/awg_cascade.py
+# Идемпотентно: безопасен при многократном запуске.
+
+# 1. ipset из ru.zone (один pipe — построчный add грузил минуты)
+ipset create {AWGS_IPSET_NAME} hash:net family inet hashsize 4096 maxelem 65536 -exist
+if [ -f "{AWGS_RU_ZONE_FILE}" ]; then
+    grep -vE '^#|^$|;' "{AWGS_RU_ZONE_FILE}" | sed "s/^/add {AWGS_IPSET_NAME} /" | ipset restore -exist 2>/dev/null || true
+fi
+{_B4_SPLIT_IPSET_BLOCK}
+"""
+            script = (head + _b4s.routing_nft_block()
+                      + _lbm.lb_routing_script_text()
+                      + '\necho "AWG Cascade routing (LB) started"\n')
+            AWGS_ROUTING_SCRIPT.write_text(script)
+            AWGS_ROUTING_SCRIPT.chmod(0o755)
+            return
+    except Exception:
+        pass
 
     script = f"""#!/bin/bash
 # AWG Cascade routing — пересоздаёт правила при старте системы
@@ -1105,7 +1140,17 @@ def awgs_cascade_register_exit(
          f"{awg_protocol_label(protocol_version)}) добавлена в каскад "
          f"(всего exit: {len(exits)})")
 
-    if activate or len(exits) == 1:
+    # LB: новый слот — пересборка туннелей/диспетчера (resync); активация
+    # отдельного exit'а в LB не имеет смысла
+    _lb_on = False
+    try:
+        from . import awg_cascade_lb as _lbm
+        _lb_on = _lbm.lb_is_on()
+        if _lb_on:
+            _lbm.lb_resync()
+    except Exception:
+        pass
+    if not _lb_on and (activate or len(exits) == 1):
         return awgs_cascade_activate_exit(name)
     return True
 
@@ -1124,6 +1169,17 @@ def awgs_cascade_activate_exit(name: str, probe_timeout: int = 0) -> bool:
     core = _core_module()
     info = core.info
     warn = core.warn
+
+    # LB: активация отдельного exit'а недоступна (диспетчер рулит;
+    # юзеру — мульти-exit → [6] Балансировка)
+    try:
+        from . import awg_cascade_lb as _lbm
+        if _lbm.lb_is_on():
+            warn("Каскад в режиме балансировки — переключение отдельного "
+                 "exit'а недоступно (мульти-exit → [6] Балансировка)")
+            return False
+    except Exception:
+        pass
 
     exits = _awgs_cascade_exits_load()
     box = next((e for e in exits if e.get("name") == name), None)
@@ -1215,6 +1271,17 @@ def awgs_cascade_remove_exit(name: str) -> bool:
     if state.get(AWGS_CASCADE_ACTIVE_KEY) == name:
         state[AWGS_CASCADE_ACTIVE_KEY] = exits[0].get("name", "") if exits else ""
     awgs_state_save(state)
+    _lb_on = False
+    try:
+        from . import awg_cascade_lb as _lbm
+        _lb_on = _lbm.lb_is_on()
+    except Exception:
+        pass
+    if _lb_on:
+        # LB: слоты сдвинулись — пересборка (resync при <2 exit сам
+        # выключит LB через deactivate)
+        from . import awg_cascade_lb as _lbm
+        return _lbm.lb_resync()
     if was_active and exits:
         return awgs_cascade_activate_exit(exits[0].get("name", ""))
     return True
@@ -1288,6 +1355,15 @@ def awgs_cascade_failover_check() -> str:
     if state.get("cascade_role") != "entry":
         return "not-entry"
     exits = _awgs_cascade_exits_load()
+
+    # LB-режим: вместо single-exit failover — health-тик диспетчера
+    try:
+        from . import awg_cascade_lb as _lbm
+        if _lbm.lb_is_on(state):
+            return _lbm.lb_health_tick()
+    except Exception:
+        pass
+
     if len(exits) < 2:
         return "single-exit"
 
@@ -1848,6 +1924,7 @@ def _awgs_cascade_menu_multiexit() -> None:
         _box_item("3", "Удалить exit")
         _box_item("4", "Авто-failover: включить (health-тик каждую минуту)")
         _box_item("5", "Авто-failover: выключить")
+        _box_item("6", "Балансировка: все exit'ы одновременно (LB)")
         _box_item("Q", "Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -1894,6 +1971,9 @@ def _awgs_cascade_menu_multiexit() -> None:
             awgs_cascade_failover_teardown()
             info("Авто-failover выключен, юниты удалены")
             input(f"{core.BLUE}Нажмите Enter...{NC}")
+        elif ch == "6":
+            from .awg_cascade_lb import lb_menu
+            lb_menu()
         elif ch in ("q", ""):
             break
 
@@ -2066,3 +2146,17 @@ def _awgs_cascade_status() -> None:
             _box_row(f"  Cascade entry peer: {RED}не найден{NC}")
 
     _box_bottom()
+
+
+def awgs_cascade_routing_regen_lb() -> bool:
+    """Перегенерировать awg-routing.sh с учётом LB-режима.
+
+    Обёртка для awg_cascade_lb (activate/resync): create_routing_script
+    сам ветвится — lb on → LB-форма (диспетчер + пер-слот), off →
+    обычная каскадная форма.
+    """
+    st = awgs_state_load()
+    subnet = st.get("cascade_subnet") or AWGS_DEFAULT_SUBNET
+    v6 = awg_v6_ula_from_subnet(subnet) if st.get("allow_ipv6_tunnel") else ""
+    _awgs_cascade_create_routing_script(subnet, subnet_v6=v6)
+    return True

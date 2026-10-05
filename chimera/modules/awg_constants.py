@@ -86,6 +86,35 @@ AWGS_FAILOVER_PROBE_SEC: int = 18
 # Разумный верхний предел списка exit-нод.
 AWGS_FAILOVER_MAX_EXITS: int = 16
 
+# ── Балансировка каскада (awg_cascade_lb): N туннелей одновременно ──────────
+# Слот = позиция exit в cascade_exits (1-based): awg1..awgN. Per-exit:
+# марка AWGS_CASCADE_FWMARK|slot (0x8201..0x8210), таблица 2000+slot,
+# ip rule fwmark 0x8200|slot lookup 2000+slot. Диспетчер awg_lb (mangle
+# PREROUTING): connmark save/restore (маска 0xFFFF — номер слота в
+# младших битах) + statistic-хвост по стратегии. v6-зеркало awg_lb6.
+AWGS_LB_STRATEGIES: tuple = ("prio", "rr", "random", "clienthash",
+                             "leastping", "leastload", "smart")
+AWGS_LB_METRIC_STRATEGIES: tuple = ("leastping", "leastload", "smart")
+AWGS_LB_DEFAULT_STRATEGY: str = "prio"
+AWGS_LB_MAX_SLOTS: int = 16          # = AWGS_FAILOVER_MAX_EXITS
+AWGS_LB_TABLE_BASE: int = 2000       # таблица слота = 2000 + slot
+AWGS_LB_CHAIN: str = "awg_lb"        # mangle-цепочка v4
+AWGS_LB_CHAIN6: str = "awg_lb6"      # mangle-цепочка v6
+# Веса составной оценки — зеркально smart_balancer (VLESS) и
+# mieru_cascade; TTFB-плечо заменено на потери (пробы без main-маршрута
+# через туннель невозможны, см. докстринг _probe_slot).
+AWGS_LB_W_LATENCY: float = 0.50
+AWGS_LB_W_TTFB: float = 0.30         # в smart-оценке = потери пинга, %
+AWGS_LB_W_LOAD: float = 0.20
+AWGS_LB_NORM_LAT_MS: int = 2000
+AWGS_LB_NORM_TTFB_MS: int = 5000
+AWGS_LB_NORM_LOAD: int = 5_000_000  # «худшая» скорость, B/s (tx_bytes)
+AWGS_LB_NORM_LOSS_PCT: float = 100.0  # «худшие» потери, %
+AWGS_LB_SHARE_FLOOR: float = 0.005   # <0.5% — слот вне ротации
+AWGS_LB_SCORE_FLOOR: float = 0.002   # кап соотношения весов 500:1
+AWGS_LB_EMA_ALPHA: float = 0.35      # вес свежей пробы
+AWGS_LB_WEIGHTS_HYSTERESIS: float = 0.05  # п.п.; доли в пределах — джиттер
+
 # ── Бинарники ────────────────────────────────────────────────────────────────
 AWGS_BIN:       str = "awg"
 AWGS_QUICK_BIN: str = "awg-quick"
