@@ -257,7 +257,13 @@ def install_health_monitor(interval: int = DEFAULT_INTERVAL) -> tuple[bool, str]
     try:
         # Находим путь установки
         import importlib.util
-        spec = importlib.util.find_spec("chimera")
+        # find_spec кидает ValueError, если пакет уже в sys.modules с
+        # __spec__=None (тест-хелперы регистрируют фейковый chimera-пакет;
+        # паттерн b4_monitor._find_installer_path) — фолбэк /opt/chimera
+        try:
+            spec = importlib.util.find_spec("chimera")
+        except (ValueError, ModuleNotFoundError):
+            spec = None
         if spec and spec.submodule_search_locations:
             installer_path = str(Path(list(spec.submodule_search_locations)[0]).parent)
         else:
