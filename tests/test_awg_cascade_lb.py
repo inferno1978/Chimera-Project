@@ -197,11 +197,36 @@ class TestHookSpecs(_LbTestBase):
                 "awg_ru_networks", "dst", "-j", "awg_lb"])
 
     def test_hook_argv_v6(self):
+        # v6 — БЕЗ set-матчей: inet-сеты (ru_subnets/awg_b4_direct)
+        # в ip6tables невозможны; форма зеркалит оригинальный v6-MARK
+        # каскада (урок пилота 138: v6-хук с set-матчем падал → откат)
         a = self.lb.lb_hook_argv(True)
         self.assertEqual(
             a, ["ip6tables", "-t", "mangle", "-A", "PREROUTING",
-                "-i", "awg0", "-m", "set", "!", "--match-set",
-                "awg_ru_networks", "dst", "-j", "awg_lb6"])
+                "-i", "awg0", "-j", "awg_lb6"])
+
+    def test_hook_no_split_v6_bare(self):
+        # единственная v6-форма: без сплит-исключения и без set-матчей
+        self.assertEqual(self.lb._hook_no_split(True),
+                         self.lb.lb_hook_argv(True))
+
+    def test_hook_v6_no_set_match(self):
+        # инвариант: ни в какой v6-форме хука нет set-матчей
+        for argv in (self.lb.lb_hook_argv(True),
+                     self.lb._hook_no_split(True)):
+            self.assertNotIn("--match-set", argv)
+            self.assertNotIn("awg_b4_direct", argv)
+
+    def test_hook_sync_v6_no_delete(self):
+        # sync при v6: want == other (голая форма) — удалять нельзя,
+        # иначе снесём только что добавленный хук
+        st = self._lb_state(n=2)
+        self._write_state(st)
+        self._use_rec_run()
+        self.assertTrue(self.lb.lb_hook_sync(True))
+        for b in self.rec.bash:
+            if "awg_lb6" in b:
+                self.assertNotIn(" -D ", b)
 
     def test_save_argv_masks(self):
         a = self.lb.lb_save_argv(False)

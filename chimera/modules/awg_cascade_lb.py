@@ -202,9 +202,16 @@ def lb_hook_argv(v6: bool = False) -> list:
 
     Наследует исключения прежнего каскадного mark-правила: RU-сети
     (awg_ru_networks) всегда; awg_b4_direct — при активном B4-сплите.
+    v6 — БЕЗ set-матчей: awg_ru_networks/awg_b4_direct — inet-сеты,
+    в ip6tables их матчить нельзя (ошибка применения). Форма зеркалит
+    оригинальный v6-MARK каскада (apply_iptables: -i awg0 -j MARK
+    без исключений — весь v6 от awg0 идёт через каскад).
     """
     ipt = "ip6tables" if v6 else "iptables"
     chain = AWGS_LB_CHAIN6 if v6 else AWGS_LB_CHAIN
+    if v6:
+        return [ipt, "-t", "mangle", "-A", "PREROUTING",
+                "-i", "awg0", "-j", chain]
     spec = ["-i", "awg0", "-m", "set", "!", "--match-set",
             AWGS_IPSET_NAME, "dst"] + _split_excl()
     return [ipt, "-t", "mangle", "-A", "PREROUTING"] + spec + ["-j", chain]
@@ -1496,19 +1503,33 @@ def lb_hook_sync(excl: bool) -> bool:
     """
     want_with = excl
     for v6 in (False, True):
-        # 1) убедиться что нужная форма есть
         want = lb_hook_argv(v6) if want_with else _hook_no_split(v6)
+        other = _hook_no_split(v6) if want_with else lb_hook_argv(v6)
+        if want == other:
+            # v6: единственная форма (set-матчи в ip6tables невозможны,
+            # сплит-исключения в v6 нет) — только убедиться, что стоит;
+            # удаление «другой» снесло бы только что добавленную
+            _check_or_add(want)
+            continue
+        # 1) убедиться что нужная форма есть
         _check_or_add(want)
         # 2) удалить другую форму
-        other = _hook_no_split(v6) if want_with else lb_hook_argv(v6)
         _while_del(other)
     return True
 
 
 def _hook_no_split(v6: bool = False) -> list:
-    """Хук БЕЗ сплит-исключения (вторая форма для синка)."""
+    """Хук БЕЗ сплит-исключения (вторая форма для синка).
+
+    v6 — единственная голая форма (-i awg0 -j awg_lb6): set-матчи
+    inet в ip6tables невозможны, сплит-исключения в v6 нет
+    (== lb_hook_argv(True)).
+    """
     ipt = "ip6tables" if v6 else "iptables"
     chain = AWGS_LB_CHAIN6 if v6 else AWGS_LB_CHAIN
+    if v6:
+        return [ipt, "-t", "mangle", "-A", "PREROUTING",
+                "-i", "awg0", "-j", chain]
     return [ipt, "-t", "mangle", "-A", "PREROUTING",
             "-i", "awg0", "-m", "set", "!", "--match-set",
             AWGS_IPSET_NAME, "dst", "-j", chain]
