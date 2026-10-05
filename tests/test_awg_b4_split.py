@@ -190,7 +190,11 @@ class TestIpOk(unittest.TestCase):
 
 
 class TestAaaaYamlSurgery(unittest.TestCase):
-    """yaml-хирургия user_rules AGH: маркеры, чужие строки, идемпотентность."""
+    """Бессмаркерная yaml-хирургия user_rules AGH.
+
+    ⚠ AGH при рестарте сам перезаписывает yaml: срезает комментарии и
+    сортирует список — маркеры не живут. Опознание своих правил — по
+    шаблону $dnstype=AAAA (кейс 05.10: дубли 174→348 на живой ноде)."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -223,8 +227,7 @@ class TestAaaaYamlSurgery(unittest.TestCase):
         self.assertIn("user_rules:", body)
         self.assertIn("- '||youtube.com^$dnstype=AAAA'", body)
         self.assertIn("- '||ytimg.com^$dnstype=AAAA'", body)
-        self.assertIn(self._m._AAAA_BEGIN, body)
-        self.assertIn(self._m._AAAA_END, body)
+        self.assertNotIn("[]", body.split("user_rules:")[1].split("\n")[0])
         # чужая секция не тронута
         self.assertIn("dhcp:", body)
 
@@ -239,9 +242,9 @@ class TestAaaaYamlSurgery(unittest.TestCase):
         body = self._yaml.read_text()
         self.assertIn("- '||ads.example^'", body)
         self.assertIn("- '||googlevideo.com^$dnstype=AAAA'", body)
-        # наш блок ПОСЛЕ строки user_rules (та же вложенность)
+        # чужие правила ВЫШЕ наших (top-down приоритет AdGuard)
         self.assertLess(body.index("||ads.example^"),
-                        body.index(self._m._AAAA_BEGIN))
+                        body.index("||googlevideo.com^$dnstype=AAAA"))
 
     def test_idempotent_no_rewrite(self):
         self._yaml.write_text("user_rules: []\n")
@@ -250,23 +253,54 @@ class TestAaaaYamlSurgery(unittest.TestCase):
         self.assertTrue(self._m.aaaa_rules_write(["a.example"]))
         self.assertEqual(self._yaml.read_text(), first)
 
-    def test_update_replaces_block(self):
+    def test_update_replaces_ours(self):
         self._yaml.write_text("user_rules: []\n")
         self._m.aaaa_rules_write(["a.example"])
         self._m.aaaa_rules_write(["b.example"])
         body = self._yaml.read_text()
         self.assertNotIn("||a.example^", body)
         self.assertIn("- '||b.example^$dnstype=AAAA'", body)
+        self.assertEqual(body.count("$dnstype=AAAA"), 1)
+
+    def test_agh_normalized_dedupe(self):
+        """Кейс с живой ноды: AGH срезал маркеры и отсортировал, дубль 174→348.
+
+        Пишем дважды один список в 'нормализованный AGH' yaml (без маркеров,
+        отсортировано, дубли) — вторая запись обязана отдедупить и НЕ
+        размножить список."""
+        # AGH-нормализованный вид после первой записи + сортировка
+        self._yaml.write_text(
+            "user_rules:\n"
+            "  - '||b.example^$dnstype=AAAA'\n"
+            "  - '||b.example^$dnstype=AAAA'\n"     # дубль от двойной записи
+            "  - '||a.example^$dnstype=AAAA'\n"
+            "  - '||a.example^$dnstype=AAAA'\n")
+        ok = self._m.aaaa_rules_write(["a.example", "b.example"])
+        self.assertTrue(ok)
+        body = self._yaml.read_text()
+        self.assertEqual(body.count("$dnstype=AAAA"), 2)   # дедуп!
+        self.assertIn("- '||a.example^$dnstype=AAAA'", body)
+        self.assertIn("- '||b.example^$dnstype=AAAA'", body)
 
     def test_remove(self):
         self._yaml.write_text(
             "user_rules: []\n")
         self._m.aaaa_rules_write(["x.example"])
-        self.assertIn(self._m._AAAA_BEGIN, self._yaml.read_text())
+        self.assertIn("||x.example^", self._yaml.read_text())
         self._m.aaaa_rules_remove()
         body = self._yaml.read_text()
-        self.assertNotIn(self._m._AAAA_BEGIN, body)
         self.assertNotIn("||x.example^", body)
+        self.assertNotIn("$dnstype=AAAA", body)
+
+    def test_remove_keeps_foreign(self):
+        self._yaml.write_text(
+            "user_rules:\n"
+            "  - '||ads.example^'\n"
+            "  - '||ours.example^$dnstype=AAAA'\n")
+        self._m.aaaa_rules_remove()
+        body = self._yaml.read_text()
+        self.assertIn("- '||ads.example^'", body)
+        self.assertNotIn("$dnstype=AAAA", body)
 
     def test_remove_noop_when_absent(self):
         self._yaml.write_text("user_rules: []\n")
