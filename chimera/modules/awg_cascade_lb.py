@@ -936,13 +936,32 @@ def _notify(detail: str) -> None:
         pass
 
 
+def _sync_norm(line: str) -> str:
+    """Нормализация строки iptables -S к форме applied-спеков.
+
+    iptables -S пере-рендерит targets/matches:
+      «-j MARK --set-mark X»        → «--set-xmark X/0xffffffff»
+      «--probability 0.3312»        → «--probability 0.33119999990»
+        (вероятность хранится как доля 2^31 и печатается в 11 знаках;
+         расхождение с 4-значным _prob_str < 1e-9 → округление обеих
+         сторон до 6 знаков всегда совпадает)
+    Применять к ОБЕИМ сторонам сравнения (want и live).
+    """
+    line = line.replace("--set-xmark ", "--set-mark ").replace(
+        "/0xffffffff", "")
+    return re.sub(
+        r"--probability [0-9.]+",
+        lambda m: "--probability %.6f" % float(m.group(0).split()[1]),
+        line)
+
+
 def _rules_in_sync(lb: dict, v6: bool) -> bool:
     """Живые правила хвоста == applied (сверка iptables -S, self-heal)?
 
-    iptables -S канонизирует «-j MARK --set-mark X» в
-    «--set-xmark X/0xffffffff» — нормализуем live-вывод к форме
-    applied-спеков, иначе сверка НИКОГДА не сходится и каждый тик
-    переписывает диспетчер (урок пилота 138: вечный self-heal).
+    Сверка после нормализации канонического вывода iptables -S
+    (_sync_norm) — иначе она не сходится никогда и каждый тик
+    переписывает диспетчер (урок пилота 138: вечный self-heal из-за
+    --set-xmark и 11-значного --probability).
     """
     ipt = "ip6tables" if v6 else "iptables"
     chain = AWGS_LB_CHAIN6 if v6 else AWGS_LB_CHAIN
@@ -951,12 +970,10 @@ def _rules_in_sync(lb: dict, v6: bool) -> bool:
     if not applied:
         return True                     # пусто — нечего сверять
     r = _run([ipt, "-t", "mangle", "-S", chain], capture=True)
-    live = (r.stdout or "")
-    live = live.replace("--set-xmark ", "--set-mark ").replace(
-        "/0xffffffff", "")
+    live = _sync_norm(r.stdout or "")
     for spec in applied:
         want = " ".join(spec[4:])       # после 'iptables -t mangle': '-A awg_lb ...'
-        want = want.replace("-A ", "-A ", 1)
+        want = _sync_norm(want)
         if want not in live:
             return False
     return True

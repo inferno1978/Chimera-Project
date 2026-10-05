@@ -773,14 +773,14 @@ class TestRulesInSyncCanonical(_LbTestBase):
         "-A awg_lb -m connmark --mark 0x8200/0xff00 -j CONNMARK "
         "--restore-mark --nfmask 0xffff --ctmask 0xffff\n"
         "-A awg_lb -m mark --mark 0x8200/0xff00 -j RETURN\n"
-        "-A awg_lb -m statistic --mode random --probability 0.3312 "
+        "-A awg_lb -m statistic --mode random --probability 0.33119999990 "
         "-j MARK --set-xmark 0x8204/0xffffffff\n"
         "-A awg_lb -m mark --mark 0x8204 -j RETURN\n"
     )
     LIVE_V6 = (
         "-A awg_lb6 -m connmark --mark 0x8200/0xff00 -j CONNMARK "
         "--restore-mark --nfmask 0xffff --ctmask 0xffff\n"
-        "-A awg_lb6 -m statistic --mode random --probability 0.3312 "
+        "-A awg_lb6 -m statistic --mode random --probability 0.33119999990 "
         "-j MARK --set-xmark 0x8204/0xffffffff\n"
     )
 
@@ -804,7 +804,7 @@ class TestRulesInSyncCanonical(_LbTestBase):
     def test_desync_when_tail_rule_missing(self):
         lb = {"applied": self.APPLIED_V4}
         live = self.LIVE_V4.replace(
-            "-A awg_lb -m statistic --mode random --probability 0.3312 "
+            "-A awg_lb -m statistic --mode random --probability 0.33119999990 "
             "-j MARK --set-xmark 0x8204/0xffffffff\n", "")
         with patch.object(self.lb, "_run",
                           return_value=self._res(live)):
@@ -815,6 +815,20 @@ class TestRulesInSyncCanonical(_LbTestBase):
         with patch.object(self.lb, "_run",
                           return_value=self._res(self.LIVE_V6)):
             self.assertTrue(self.lb._rules_in_sync(lb, True))
+
+    def test_sync_norm_rr_and_setmark(self):
+        # rr-хвост: nth --every/--packet — целые, не пере-рендерятся;
+        # вероятность тоже нормализуется в обеих формах записи
+        a = self.lb._sync_norm(
+            "-A awg_lb -m statistic --mode nth --every 4 --packet 0 "
+            "-j MARK --set-mark 0x8201")
+        b = self.lb._sync_norm(
+            "-A awg_lb -m statistic --mode nth --every 4 --packet 0 "
+            "-j MARK --set-xmark 0x8201/0xffffffff")
+        self.assertEqual(a, b)
+        p1 = self.lb._sync_norm("--probability 0.3312")
+        p2 = self.lb._sync_norm("--probability 0.33119999990")
+        self.assertEqual(p1, p2)
 
     def test_empty_applied_is_sync(self):
         self.assertTrue(self.lb._rules_in_sync({"applied": []}, False))
