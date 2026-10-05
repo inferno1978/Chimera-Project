@@ -1155,19 +1155,26 @@ def apply_all(verbose: bool = True) -> bool:
 
 
 def deactivate(verbose: bool = True) -> None:
-    """Выключить сплит и вернуть каскад в v5.5.9-форму (полный cleanup)."""
+    """Выключить сплит и вернуть каскад в v5.5.9-форму (полный cleanup).
+
+    Порядок важен (v5.5.11.3):
+      1. enabled=False ДО регена — иначе routing_script_regen()/генератор
+         каскада увидят «включён» и запишут split-форму в boot-скрипт;
+      2. mark-правило без исключения ДО ipset_destroy — иначе iptables
+         держит reference и сет не сносится.
+    """
     timer_remove()
     dns_rules_remove()
     aaaa_rules_remove()
-    ipset_destroy()
-    _SNAPSHOT.unlink(missing_ok=True)
-    nft_apply_blanket()
-    cascade_mark_sync(excl=False)
-    routing_script_regen()
     st = state_load()
     st["enabled"] = False
     st["last_stats"] = {}
     state_save(st)
+    nft_apply_blanket()
+    cascade_mark_sync(excl=False)
+    ipset_destroy()
+    _SNAPSHOT.unlink(missing_ok=True)
+    routing_script_regen()
     _info("deactivate: сплит выключен, каскад в v5.5.9-форме")
     if verbose:
         print("  [OK] сплит снят: blanket-exempt + mark без исключения")
