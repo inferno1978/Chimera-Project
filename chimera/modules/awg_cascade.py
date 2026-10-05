@@ -2155,6 +2155,10 @@ def awgs_cascade_routing_regen_lb() -> bool:
     сам ветвится — lb on → LB-форма (диспетчер + пер-слот), off →
     обычная каскадная форма.
     """
+    # локальный импорт (паттерн routing_script_regen в awg_b4_split):
+    # на уровне модуля имени нет — NameError проявлялся только на живой
+    # ноде с allow_ipv6_tunnel=True (короткое замыкание скрывало от теста)
+    from .awg_net_common import awg_v6_ula_from_subnet
     st = awgs_state_load()
     subnet = st.get("cascade_subnet") or AWGS_DEFAULT_SUBNET
     v6 = awg_v6_ula_from_subnet(subnet) if st.get("allow_ipv6_tunnel") else ""

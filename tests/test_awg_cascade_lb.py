@@ -742,7 +742,10 @@ class TestRoutingScript(_LbTestBase):
         self.assertNotIn("default via 172.16.91.1 dev awg1 table 2000", content)
 
     def test_regen_lb_wrapper(self):
-        st = self._lb_state(n=2)
+        # v6=True обязательно: иначе st.get("allow_ipv6_tunnel") falsy →
+        # короткое замыкание → awg_v6_ula_from_subnet не вычислялся и
+        # NameError (отсутствие импорта в awg_cascade) тест не ловил
+        st = self._lb_state(n=2, v6=True)
         self._write_state(st)
         self.assertTrue(self.cascade.awgs_cascade_routing_regen_lb())
         self.assertIn("LB-ФОРМА",
@@ -750,6 +753,73 @@ class TestRoutingScript(_LbTestBase):
 
 
 # ── 9. failover_check диспетчеризация ────────────────────────────────────────
+
+class TestRulesInSyncCanonical(_LbTestBase):
+    """Сверка applied ↔ iptables -S в КАНОНИЧЕСКОЙ форме.
+
+    Урок пилота 138: iptables -S рендерит «-j MARK --set-mark X» как
+    «--set-xmark X/0xffffffff» — без нормализации live-вывода сверка
+    не сходилась никогда → каждый тик «self-heal» + перепись хвоста.
+    """
+    APPLIED_V4 = [
+        ["iptables", "-t", "mangle", "-A", "awg_lb",
+         "-m", "statistic", "--mode", "random",
+         "--probability", "0.3312", "-j", "MARK",
+         "--set-mark", "0x8204"],
+        ["iptables", "-t", "mangle", "-A", "awg_lb",
+         "-m", "mark", "--mark", "0x8204", "-j", "RETURN"],
+    ]
+    LIVE_V4 = (
+        "-A awg_lb -m connmark --mark 0x8200/0xff00 -j CONNMARK "
+        "--restore-mark --nfmask 0xffff --ctmask 0xffff\n"
+        "-A awg_lb -m mark --mark 0x8200/0xff00 -j RETURN\n"
+        "-A awg_lb -m statistic --mode random --probability 0.3312 "
+        "-j MARK --set-xmark 0x8204/0xffffffff\n"
+        "-A awg_lb -m mark --mark 0x8204 -j RETURN\n"
+    )
+    LIVE_V6 = (
+        "-A awg_lb6 -m connmark --mark 0x8200/0xff00 -j CONNMARK "
+        "--restore-mark --nfmask 0xffff --ctmask 0xffff\n"
+        "-A awg_lb6 -m statistic --mode random --probability 0.3312 "
+        "-j MARK --set-xmark 0x8204/0xffffffff\n"
+    )
+
+    APPLIED_V6 = [
+        ["ip6tables", "-t", "mangle", "-A", "awg_lb6",
+         "-m", "statistic", "--mode", "random",
+         "--probability", "0.3312", "-j", "MARK",
+         "--set-mark", "0x8204"],
+    ]
+
+    @staticmethod
+    def _res(stdout: str):
+        return type("R", (), {"returncode": 0, "stdout": stdout})()
+
+    def test_sync_with_canonical_iptables_s(self):
+        lb = {"applied": self.APPLIED_V4}
+        with patch.object(self.lb, "_run",
+                          return_value=self._res(self.LIVE_V4)):
+            self.assertTrue(self.lb._rules_in_sync(lb, False))
+
+    def test_desync_when_tail_rule_missing(self):
+        lb = {"applied": self.APPLIED_V4}
+        live = self.LIVE_V4.replace(
+            "-A awg_lb -m statistic --mode random --probability 0.3312 "
+            "-j MARK --set-xmark 0x8204/0xffffffff\n", "")
+        with patch.object(self.lb, "_run",
+                          return_value=self._res(live)):
+            self.assertFalse(self.lb._rules_in_sync(lb, False))
+
+    def test_sync_v6_mirror(self):
+        lb = {"applied_v6": self.APPLIED_V6}
+        with patch.object(self.lb, "_run",
+                          return_value=self._res(self.LIVE_V6)):
+            self.assertTrue(self.lb._rules_in_sync(lb, True))
+
+    def test_empty_applied_is_sync(self):
+        self.assertTrue(self.lb._rules_in_sync({"applied": []}, False))
+        self.assertTrue(self.lb._rules_in_sync({}, True))
+
 
 class TestFailoverDispatch(_LbTestBase):
     def test_dispatches_to_lb_tick(self):
