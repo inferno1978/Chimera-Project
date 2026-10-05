@@ -393,6 +393,65 @@ class TestAwgsCascadeCreateRoutingScript(unittest.TestCase):
                          "MARK в FORWARD слишком поздний для транзита "
                          "(после route decision)")
 
+    def test_script_other_form_cleanup_split_aware(self):
+        """ФИКС 2026-10-05: цикл подчистки «другой формы» mark-правила
+        не должен удалять АКТУАЛЬНУЮ форму из 2.1.
+
+        Раньше цикл безусловно содержал b4-исключение: при сплите ВКЛ он
+        удалял ТО ЖЕ правило, что 2.1 только что добавил — после каждого
+        запуска скрипта (бут/рестарт awg-cascade-routing/смена exit)
+        MARK-правило исчезало, весь клиентский трафик уходил без марки
+        → main → WAN напрямую, каскад молча обходился (E2E 138/91/45
+        2026-10-05: live mangle PREROUTING без awg0-правила).
+        """
+        from chimera.modules.awg_cascade import (
+            _awgs_cascade_create_routing_script, AWGS_IPSET_NAME,
+            AWGS_CASCADE_FWMARK,
+        )
+        excl = " -m set ! --match-set awg_b4_direct dst"
+        fwm = AWGS_CASCADE_FWMARK  # 0x8200
+
+        # ── сплит ВКЛ: актуальна сплит-форма (с исключением) ──
+        with self._patch()[0], self._patch()[1], \
+                patch("chimera.modules.awg_cascade._awgs_cascade_b4_split_excl",
+                      return_value=excl):
+            _awgs_cascade_create_routing_script("172.16.61.0/24")
+        on = self._script.read_text()
+        # 2.1 добавляет сплит-форму
+        self.assertIn(
+            f"-A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst"
+            f"{excl} -j MARK --set-mark {fwm}", on)
+        # подчистка НЕ должна удалять актуальную (сплит) форму
+        self.assertNotIn(
+            f"-D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst"
+            f"{excl} -j MARK --set-mark {fwm}", on,
+            "подчистка удаляет актуальную сплит-форму (бага: правило "
+            "исчезало после каждого запуска скрипта → каскад обходился)")
+        # ...а ДРУГУЮ (blanket, без исключения) — должна
+        self.assertIn(
+            f"-D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst "
+            f"-j MARK --set-mark {fwm}", on,
+            "при сплите ВКЛ подчистка должна убирать blanket-форму")
+
+        # ── сплит ВЫКЛ: актуальна blanket-форма, подчистка бьёт по сплит-форме ──
+        with self._patch()[0], self._patch()[1], \
+                patch("chimera.modules.awg_cascade._awgs_cascade_b4_split_excl",
+                      return_value=""):
+            _awgs_cascade_create_routing_script("172.16.61.0/24")
+        off = self._script.read_text()
+        self.assertIn(
+            f"-A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst "
+            f"-j MARK --set-mark {fwm}", off)
+        self.assertIn(
+            f"-D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst"
+            f"{excl} -j MARK --set-mark {fwm}", off,
+            "при сплите ВЫКЛ подчистка должна убирать сплит-форму")
+        self.assertNotIn(
+            f"-D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst "
+            f"-j MARK --set-mark {fwm} 2>/dev/null; do :; done", off,
+            "при сплите ВЫКЛ не должно быть удаления blanket-формы "
+            "(она актуальная — её удаление ломает каскад)")
+
     def test_script_routes_onlink_before_default_v545(self):
         """перед default via base.1 идёт on-link подсеть
         base.0/24 — иначе 'Nexthop has invalid gateway' при
