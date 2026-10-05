@@ -96,8 +96,8 @@ _QLOG_WINDOW_S    = 24 * 3600            # окно свежести запис�
 _RESOLVE_MAX_WORKERS = 8
 _RESOLVE_OVERALL_S   = 25                # общий таймаут пула резолва
 
-_AAAA_BEGIN = "# chimera:awg-b4-split-begin"
-_AAAA_END   = "# chimera:awg-b4-split-end"
+# Правило AAAA (см. _AAAA_ITEM_RE — AGH перезаписывает yaml и срезает
+# комментарии, поэтому маркеры не используются)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -804,22 +804,49 @@ def dns_rules_present() -> bool:
 #  AAAA-ФИЛЬТР (user_rules AGH — yaml-хирургия с бэкапом и верификацией)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _aaaa_block(indent: str, domains: list) -> list:
-    """Строки нашего блока в user_rules (маркеры + правила)."""
-    lines = [f"{indent}{_AAAA_BEGIN}"]
-    for d in domains:
-        lines.append(f"{indent}- '||{d}^$dnstype=AAAA'")
-    lines.append(f"{indent}{_AAAA_END}")
-    return lines
+# Наше AAAA-правило в user_rules — опознаём по шаблону ($dnstype=AAAA
+# достаточно специфичен; AGH сам перезаписывает yaml и СРЕЗАЕТ комментарии,
+# так что маркеры-блоки не живут — см. кейс 05.10: дубли 174→348).
+_AAAA_ITEM_RE = re.compile(
+    r"^\s*-\s*['\"]\|\|[^'\"]+\^\$dnstype=AAAA['\"]\s*$")
+
+
+def _user_rules_section(text: str):
+    """Секция user_rules: (indent, start, end_excl, lines, had_inline_empty).
+
+    Учитывает оба_layout'а (топ-уровень и вложенный в filtering:) и стиль
+    AGH (элементы на уровне ключа или глубже). None — секции нет."""
+    lines = text.splitlines(keepends=True)
+    for i, ln in enumerate(lines):
+        m = re.match(r"^([ \t]*)user_rules:[ \t]*(\[\])?[ \t]*\r?\n?$", ln)
+        if not m:
+            continue
+        indent = m.group(1)
+        j = i + 1
+        while j < len(lines):
+            l2 = lines[j]
+            s2 = l2.strip()
+            if not s2 or s2.startswith("#"):
+                break                      # пустая/комментарий — конец секции
+            cur_ind = len(l2) - len(l2.lstrip())
+            if cur_ind > len(indent) or (cur_ind == len(indent)
+                                         and s2.startswith("-")):
+                j += 1
+                continue
+            break
+        return indent, i, j, lines, bool(m.group(2))
+    return None
 
 
 def aaaa_rules_write(domains: list) -> bool:
     """||domain^$dnstype=AAAA для split-доменов в user_rules AGH.
 
-    Текстовая хирургия (pyyaml-раундтрип потерял бы чужие комментарии),
-    наш блок — между маркерами, чужие строки не трогаем. Рестарт AGH —
-    только при изменении; после рестарта проверяем сервис, при падении —
-    откат бэкапа (DNS ноды важнее фичи).
+    Бессмаркерная пересборка секции: строки с $dnstype=AAAA считаем НАШИМИ
+    (заменяем целиком), остальные — чужими (сохраняем как есть, они выше —
+    приоритетнее, AdGuard оценивает top-down). Идемпотентно: без изменений
+    рестарта нет. ⚠ AGH при рестарте сам перезаписывает yaml (срезает
+    комментарии и сортирует список) — поэтому НЕ полагаемся на маркеры.
+    Бэкап + верификация сервиса + откат при падении (DNS ноды важнее).
     """
     if not _AGH_YAML.exists():
         _warn("aaaa_rules_write: AGH yaml не найден")
@@ -830,73 +857,35 @@ def aaaa_rules_write(domains: list) -> bool:
         _warn(f"aaaa_rules_write: {e}")
         return False
 
-    # найти строку user_rules (учёт вложенности filtering: и топ-уровня)
-    m = re.search(r"^([ \t]*)user_rules:[ \t]*(\[\])?[ \t]*$", text,
-                  re.MULTILINE)
-    if not m:
+    sec = _user_rules_section(text)
+    if sec is None:
         _warn("aaaa_rules_write: 'user_rules:' не найден в yaml")
         return False
-    indent = m.group(1)
+    indent, i, j, lines, _inline = sec
     item_indent = indent + "  "
 
-    # наш текущий блок в файле
-    new_block = _aaaa_block(item_indent, domains)
-    old_block = []
-    in_block = False
-    for line in text.splitlines():
-        if line.strip() == _AAAA_BEGIN:
-            in_block = True
-            old_block.append(line)
-            continue
-        if line.strip() == _AAAA_END:
-            in_block = False
-            old_block.append(line)
-            continue
-        if in_block:
-            old_block.append(line)
-    if old_block and new_block == old_block:
-        return True                       # без изменений — рестарт не нужен
+    items = [ln.rstrip("\n") for ln in lines[i + 1:j]]
+    foreign = [it for it in items if not _AAAA_ITEM_RE.match(it)]
+    ours_new = [f"{item_indent}- '||{d}^$dnstype=AAAA'" for d in domains]
+    ours_new_dedup = list(dict.fromkeys(ours_new))
+    existing_ours = [it for it in items if _AAAA_ITEM_RE.match(it)]
 
-    # бэкап (один раз; восстанавливается при сбоях)
+    # без изменений (множество совпадает, чужие на месте) — рестарт не нужен
+    if (set(existing_ours) == set(ours_new_dedup)
+            and len(existing_ours) == len(ours_new_dedup)
+            and [it for it in items if it in foreign] == foreign):
+        return True
+
     try:
         if not _AGH_BACKUP.exists():
             _AGH_BACKUP.write_text(text)
     except Exception:
         pass
 
-    if old_block:
-        new_text = text.replace("\n".join(old_block),
-                                "\n".join(new_block), 1)
-    else:
-        # вставить блок ПОСЛЕ существующих пунктов user_rules (чужие
-        # правила выше = приоритетнее — AdGuard оценивает top-down):
-        # сканируем строки за 'user_rules:', пока они глубже её индента
-        lines = text.splitlines(keepends=True)
-        upto = text[:m.start()]
-        start_line = upto.count("\n")          # 0-based индекс строки
-        # 'user_rules: []' → 'user_rules:' (инлайн-пустышка невалидна с item'ами)
-        if m.group(2):
-            lines[start_line] = f"{indent}user_rules:\n"
-        insert_at = start_line + 1
-        while insert_at < len(lines):
-            ln = lines[insert_at]
-            stripped = ln.strip()
-            if not stripped or stripped.startswith("#"):
-                insert_at += 1                 # пустая/комментарий — пропускаем
-                continue
-            cur_ind = len(ln) - len(ln.lstrip())
-            # пункт списка: глубже ключа ИЛИ на том же инденте с '- '
-            # (AGH пишет user_rules-элементы на уровне ключа)
-            if cur_ind > len(indent) or (cur_ind == len(indent)
-                                         and stripped.startswith("-")):
-                insert_at += 1
-                continue
-            break
-        head = "".join(lines[:insert_at])
-        tail = "".join(lines[insert_at:])
-        if head and not head.endswith("\n"):
-            head += "\n"
-        new_text = head + "\n".join(new_block) + "\n" + tail
+    new_section = [f"{indent}user_rules:"] + \
+        [it for it in foreign] + ours_new_dedup
+    new_lines = lines[:i] + [s + "\n" for s in new_section] + lines[j:]
+    new_text = "".join(new_lines)
 
     try:
         _AGH_YAML.write_text(new_text)
@@ -917,34 +906,29 @@ def aaaa_rules_write(domains: list) -> bool:
         except Exception:
             pass
         return False
-    _info(f"AAAA-фильтр: {len(domains)} доменов в user_rules AGH")
+    _info(f"AAAA-фильтр: {len(ours_new_dedup)} доменов в user_rules AGH "
+          f"(чужих правил сохранено: {len(foreign)})")
     return True
 
 
 def aaaa_rules_remove() -> None:
-    """Убрать наш блок из user_rules (маркеры + строки между ними)."""
+    """Убрать ВСЕ наши $dnstype=AAAA-правила (чужие — остаются)."""
     if not _AGH_YAML.exists():
         return
     try:
         text = _AGH_YAML.read_text()
     except Exception:
         return
-    if _AAAA_BEGIN not in text:
+    sec = _user_rules_section(text)
+    if sec is None:
         return
-    lines = text.splitlines(keepends=True)
-    out, in_block, removed = [], False, False
-    for line in lines:
-        if line.strip() == _AAAA_BEGIN:
-            in_block, removed = True, True
-            continue
-        if line.strip() == _AAAA_END:
-            in_block = False
-            continue
-        if not in_block:
-            out.append(line)
-    new_text = "".join(out)
-    # user_rules: остался пустым и был '[]' — вернуть компакт-форму не обязателен,
-    # пустой список допустим; но при 'user_rules:' без элементов yaml валиден.
+    indent, i, j, lines, _inline = sec
+    items = [ln.rstrip("\n") for ln in lines[i + 1:j]]
+    foreign = [it for it in items if not _AAAA_ITEM_RE.match(it)]
+    if len(foreign) == len(items):
+        return                           # наших строк и так нет
+    new_section = [f"{indent}user_rules:"] + foreign
+    new_text = "".join(lines[:i] + [s + "\n" for s in new_section] + lines[j:])
     try:
         _AGH_YAML.write_text(new_text)
         _run(["systemctl", "restart", _AGH_SERVICE], capture=True)
