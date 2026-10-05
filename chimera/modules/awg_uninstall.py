@@ -76,6 +76,22 @@ def awgs_uninstall_full(keep_backups: bool = True) -> bool:
     port = state.get("port", AWGS_DEFAULT_PORT)
     is_cascade = bool(state.get("cascade_role"))
 
+    # v5.5.11: B4-сплит — снять ДО разборки каскада (правила/таймер/
+    # AAAA в AGH/ipset/nft-сет), silent-режим (uninstall и так шумный)
+    try:
+        from . import awg_b4_split
+        if awg_b4_split.is_active():
+            info("Снятие B4-сплита (v5.5.11)...")
+            awg_b4_split.deactivate(verbose=False)
+        else:
+            # даже выключенный мог оставить артефакты (крэш при выключении)
+            awg_b4_split.timer_remove()
+            awg_b4_split.ipset_destroy()
+            awg_b4_split.dns_rules_remove()
+            awg_b4_split.aaaa_rules_remove()
+    except Exception:
+        pass
+
     # 1. Останавливаем сервисы
     info("Остановка сервисов...")
     awgs_stop_systemd()

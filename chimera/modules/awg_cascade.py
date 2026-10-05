@@ -484,6 +484,17 @@ def _awgs_cascade_build_awg1_conf(
     return "\n".join(lines) + "\n"
 
 
+def _awgs_cascade_b4_split_excl() -> str:
+    """v5.5.11: доп. матч '-m set ! --match-set awg_b4_direct dst' для
+    каскадного mark-правила, когда активен B4-сплит (awg_b4_split).
+    Пустая строка — сплит выключен/модуля нет (v5.5.9-форма правила)."""
+    try:
+        from . import awg_b4_split
+        return awg_b4_split.mark_rule_exclusion()
+    except Exception:
+        return ""
+
+
 def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     """Применяет iptables-правила для каскада.
 
@@ -510,11 +521,15 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     """
     core = _core_module()
 
+    # v5.5.11: B4-сплит — mark-правило получает исключение direct-плеча
+    # (dst ∈ awg_b4_direct НЕ маркируется → main → WAN → b4 → RU-IP)
+    _b4x = _awgs_cascade_b4_split_excl()
+
     rules = [
         # v5.4.5: PREROUTING — ДО route decision (иначе транзит не
         # попадает в table 2000; см. докстринг). -i awg0 — только
         # клиентский трафик, серверный (ens3 in) не трогаем.
-        f"iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
+        f"iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
 
         # NAT для выхода через awg1
         f"iptables -t nat -A POSTROUTING -o awg1 -j MASQUERADE",
@@ -541,9 +556,11 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     # v5.5.9: + cleanup легаси-марки 0x2000 (v5.5.8 и старее — без b4-exempt
     # бита; если её не убрать, обе MARK-правила конкурируют и последняя
     # затирает fwmark — каскадный трафик теряет b4-exempt)
+    # v5.5.11: + обе формы mark-правила (с b4-сплит-исключением и без)
     core._run(["bash", "-c",
                f"while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
                f"while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
+               f"while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -m set ! --match-set awg_b4_direct dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
                f"while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done; "
                f"while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done; "
                f"while iptables -t nat -D POSTROUTING -o awg1 -j MASQUERADE 2>/dev/null; do :; done; "
@@ -598,14 +615,25 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     # DPI-bypass b4 на entry-нодах проверяет ct mark (prerouting) и
     # meta mark (b4_chain) на бит 0x8000 — помеченные флоу пропускаются
     # мимо nfqueue-перехвата. Идемпотентно; на системах без nft/b4 — no-op.
-    core._run(["bash", "-c",
-               f"nft add table inet awg_b4exempt 2>/dev/null; "
-               f"nft add chain inet awg_b4exempt prerouting '{{ type filter hook prerouting priority mangle - 10; policy accept; }}' 2>/dev/null; "
-               f"nft list table inet awg_b4exempt 2>/dev/null | grep -q 'iifname \"awg0\"' || "
-               f"nft add rule inet awg_b4exempt prerouting iifname 'awg0' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT}; "
-               f"nft list table inet awg_b4exempt 2>/dev/null | grep -q 'iifname \"awg1\"' || "
-               f"nft add rule inet awg_b4exempt prerouting iifname 'awg1' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT}; true"],
-              check=False, quiet=True)
+    # v5.5.11: при активном B4-сплите форму таблицы управляет модуль
+    # awg_b4_split (условный exempt: awg0+@awg_b4direct → return, т.е.
+    # b4 ОБРАБАТЫВАЕТ direct-плечо; + output-защита AGH-ответов) —
+    # минутный тик таймера сплита её же и поддерживает (self-heal).
+    if _b4x:
+        try:
+            from . import awg_b4_split
+            awg_b4_split.nft_apply_split()
+        except Exception:
+            pass
+    else:
+        core._run(["bash", "-c",
+                   f"nft add table inet awg_b4exempt 2>/dev/null; "
+                   f"nft add chain inet awg_b4exempt prerouting '{{ type filter hook prerouting priority mangle - 10; policy accept; }}' 2>/dev/null; "
+                   f"nft list table inet awg_b4exempt 2>/dev/null | grep -q 'iifname \"awg0\"' || "
+                   f"nft add rule inet awg_b4exempt prerouting iifname 'awg0' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT}; "
+                   f"nft list table inet awg_b4exempt 2>/dev/null | grep -q 'iifname \"awg1\"' || "
+                   f"nft add rule inet awg_b4exempt prerouting iifname 'awg1' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT}; true"],
+                  check=False, quiet=True)
 
     # v5.5.8: IPv6-зеркало каскада — весь клиентский v6 через exit
     if subnet_v6:
@@ -669,6 +697,44 @@ def _awgs_cascade_create_routing_script(exit_subnet: str,
     exit_base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
     exit_gw = f"{exit_base}.1"
 
+    # v5.5.11: B4-сплит — форма mark-правила/nft-таблицы зависит от его
+    # состояния (скрипт перегенерируется при вкл/выкл сплита и смене exit)
+    _b4x = _awgs_cascade_b4_split_excl()
+    _split_on = bool(_b4x)
+
+    if _split_on:
+        _B4_SPLIT_IPSET_BLOCK = (
+            "# v5.5.11: B4-сплит — ipset direct-плеча (b4 дурит ТСПУ, RU-IP)\n"
+            "ipset create awg_b4_direct hash:ip hashsize 1024 maxelem 65536 -exist\n"
+            "ipset create awg_b4_direct_new hash:ip hashsize 1024 maxelem 65536 -exist\n"
+            "if [ -f \"/etc/awg-cascade/awg_b4_direct.snapshot\" ]; then\n"
+            "    grep -vE '^create|^swap|^flush' /etc/awg-cascade/awg_b4_direct.snapshot | ipset restore -exist 2>/dev/null || true\n"
+            "fi\n"
+        )
+        _B4_SPLIT_RULE_NOTE = (
+            "B4-сплит ВКЛЮЧЁН — dst ∈ awg_b4_direct НЕ маркируется "
+            "(main → WAN → b4 → RU-IP), остальное → каскад")
+        _B4_SPLIT_NFT_BLOCK = (
+            "# v5.5.11: сплит-форма awg_b4exempt — ПОРЯДОК КРИТИЧЕН:\n"
+            "# @awg_b4direct-return ДО blanket-awg0 (b4 обрабатывает direct-плечо)\n"
+            f"nft add set inet awg_b4exempt awg_b4direct '{{ type ipv4_addr; }}' 2>/dev/null\n"
+            f"nft add chain inet awg_b4exempt output '{{ type filter hook output priority mangle - 10; policy accept; }}' 2>/dev/null\n"
+            f"nft list table inet awg_b4exempt 2>/dev/null | grep -q 'daddr @awg_b4direct' || {{\n"
+            f"    nft add rule inet awg_b4exempt prerouting iifname 'awg1' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT:#x} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT:#x}\n"
+            f"    nft add rule inet awg_b4exempt prerouting iifname 'awg0' ip daddr @awg_b4direct return\n"
+            f"    nft add rule inet awg_b4exempt prerouting iifname 'awg0' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT:#x} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT:#x}\n"
+            f"}}\n"
+            f"nft list chain inet awg_b4exempt output 2>/dev/null | grep -q 'sport 53' || {{\n"
+            f"    nft add rule inet awg_b4exempt output oifname 'awg0' udp sport 53 meta mark set meta mark or {AWGS_B4_EXEMPT_BIT:#x}\n"
+            f"    nft add rule inet awg_b4exempt output oifname 'awg0' tcp sport 53 meta mark set meta mark or {AWGS_B4_EXEMPT_BIT:#x}\n"
+            f"}}\n"
+        )
+    else:
+        _B4_SPLIT_IPSET_BLOCK = ""
+        _B4_SPLIT_RULE_NOTE = (
+            "B4-сплит выключен — вся не-RU destination → каскад (v5.5.9)")
+        _B4_SPLIT_NFT_BLOCK = ""
+
     script = f"""#!/bin/bash
 # AWG Cascade routing — пересоздаёт правила при старте системы
 # Автоматически сгенерировано chimera/modules/awg_cascade.py (v5.4.5)
@@ -682,18 +748,21 @@ ipset create {AWGS_IPSET_NAME} hash:net family inet hashsize 4096 maxelem 65536 
 if [ -f "{AWGS_RU_ZONE_FILE}" ]; then
     grep -vE '^#|^$|;' "{AWGS_RU_ZONE_FILE}" | sed "s/^/add {AWGS_IPSET_NAME} /" | ipset restore -exist 2>/dev/null || true
 fi
-
+{_B4_SPLIT_IPSET_BLOCK}
 # 2. iptables правила (идентичны live-набору _awgs_cascade_apply_iptables)
 # 2.1 v5.4.5 ГЛАВНЫЙ ФИКС: маркируем КЛИЕНТСКИЙ трафик в PREROUTING
 #     (ДО route decision — метка в FORWARD ставилась ПОСЛЕ маршрутизации,
 #     транзит уходил в main → DROP; метка в OUTPUT маркировала серверный
 #     трафик — SSH-lockout). -i awg0 — только клиентский трафик.
-iptables -t mangle -C PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null || \
-    iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK}
+#     v5.5.11: {_B4_SPLIT_RULE_NOTE}
+iptables -t mangle -C PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null || \
+    iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK}
 # подчистка старых FORWARD-MARK правил от предыдущих версий chimera
 while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done
 # v5.5.9: легаси-марка 0x2000 (без b4-exempt бита) — убрать, чтобы не
 # конкурировала с актуальной (последняя MARK в цепочке затирает fwmark)
+# v5.5.11: + другая форма mark-правила (сплит вкл/выкл)
+while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -m set ! --match-set awg_b4_direct dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done
 while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done
 while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done
 # 2.2 NAT для выхода через awg1
@@ -719,7 +788,10 @@ iptables -t mangle -C FORWARD -i awg1 -o awg0 -p tcp --tcp-flags SYN,RST SYN -j 
 #     помеченные флоу — иначе его пере-инжектированные пакеты теряют fwmark
 #     и уходят raw с WAN (TSPU/Google убивают по SNI — E2E 2026-10-05).
 #     Каскад шифруется до exit — DPI-bypass ему не нужен. Без b4 — no-op.
-nft add table inet awg_b4exempt 2>/dev/null
+#     v5.5.11: при активном B4-сплите — условная форма (direct-плечо
+#     НЕ exempt → b4 обрабатывает его ClientHello/ответы) + output-цепь
+#     (AGH-ответы sport 53 мимо b4). Форму поддерживает таймер сплита.
+{_B4_SPLIT_NFT_BLOCK}nft add table inet awg_b4exempt 2>/dev/null
 nft add chain inet awg_b4exempt prerouting '{{ type filter hook prerouting priority mangle - 10; policy accept; }}' 2>/dev/null
 nft list table inet awg_b4exempt 2>/dev/null | grep -q 'iifname "awg0"' || \
     nft add rule inet awg_b4exempt prerouting iifname 'awg0' meta mark set meta mark or {AWGS_B4_EXEMPT_BIT} ct mark set ct mark or {AWGS_B4_EXEMPT_BIT}
@@ -1573,6 +1645,10 @@ def do_manage_awg_cascade() -> None:
         _box_desc("Несколько зарубежных exit в одном каскаде: активен один, "
                   "при смерти активного таймер переключает на следующий. "
                   "Порядок списка = приоритет.")
+        _box_item("6", f"B4-сплит: домены (YouTube и др.) напрямую с RU-ноды")
+        _box_desc("v5.5.11: выбранные сеты b4 → напрямую через DPI-bypass "
+                  "(цель видит RU-IP — YouTube без рекламы), остальное — "
+                  "каскадом на exit. Требует b4 (меню 3 → Y → B).")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -1597,6 +1673,10 @@ def do_manage_awg_cascade() -> None:
             input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch == "5":
             _awgs_cascade_menu_multiexit()
+        elif ch == "6":
+            # v5.5.11: B4-сплит — подменю awg_b4_split
+            from .awg_b4_split import do_manage_awg_b4_split
+            do_manage_awg_b4_split()
         elif ch in ("q", ""):
             break
 
@@ -1952,6 +2032,21 @@ def _awgs_cascade_status() -> None:
             _box_row(f"    failover-таймер: "
                      f"{GREEN}active{NC}" if timer_on
                      else f"{DIM}off{NC}")
+
+        # v5.5.11: B4-сплит (краткая строка статуса)
+        try:
+            from . import awg_b4_split
+            _sp = awg_b4_split.status_info()
+            _box_sep()
+            if _sp["enabled"]:
+                _box_row(f"  B4-сплит:    {GREEN}ВКЛЮЧЁН{NC} — "
+                         f"{_sp['sets_selected']} сетов / "
+                         f"{_sp['domains']} доменов → "
+                         f"{GREEN}{_sp['ipset']}{NC} IP (b4 напрямую)")
+            else:
+                _box_row(f"  B4-сплит:    {DIM}выключен{NC}")
+        except Exception:
+            pass
 
     elif role == "exit":
         from .awg_protocol import awg_protocol_label
