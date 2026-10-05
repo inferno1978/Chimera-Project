@@ -937,7 +937,13 @@ def _notify(detail: str) -> None:
 
 
 def _rules_in_sync(lb: dict, v6: bool) -> bool:
-    """Живые правила хвоста == applied (сверка iptables -S, self-heal)?"""
+    """Живые правила хвоста == applied (сверка iptables -S, self-heal)?
+
+    iptables -S канонизирует «-j MARK --set-mark X» в
+    «--set-xmark X/0xffffffff» — нормализуем live-вывод к форме
+    applied-спеков, иначе сверка НИКОГДА не сходится и каждый тик
+    переписывает диспетчер (урок пилота 138: вечный self-heal).
+    """
     ipt = "ip6tables" if v6 else "iptables"
     chain = AWGS_LB_CHAIN6 if v6 else AWGS_LB_CHAIN
     key = "applied_v6" if v6 else "applied"
@@ -946,6 +952,8 @@ def _rules_in_sync(lb: dict, v6: bool) -> bool:
         return True                     # пусто — нечего сверять
     r = _run([ipt, "-t", "mangle", "-S", chain], capture=True)
     live = (r.stdout or "")
+    live = live.replace("--set-xmark ", "--set-mark ").replace(
+        "/0xffffffff", "")
     for spec in applied:
         want = " ".join(spec[4:])       # после 'iptables -t mangle': '-A awg_lb ...'
         want = want.replace("-A ", "-A ", 1)
