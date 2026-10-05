@@ -708,6 +708,29 @@ def _awgs_cascade_create_routing_script(exit_subnet: str,
     _b4x = _awgs_cascade_b4_split_excl()
     _split_on = bool(_b4x)
 
+    # «ДРУГАЯ форма» mark-правила для подчистки в boot-скрипте (ФИКС
+    # 2026-10-05): актуальная форма ставится разделом 2.1 выше; цикл
+    # ниже должен удалять именно ДРУГУЮ, а не ту же самую. Раньше цикл
+    # безусловно содержал b4-исключение — при сплите ВКЛ он удалял ТО
+    # ЖЕ правило, что 2.1 только что добавил: после каждого запуска
+    # скрипта (бут/рестарт awg-cascade-routing/смена exit) MARK-правило
+    # исчезало, весь клиентский трафик уходил без марки → main → WAN
+    # напрямую, каскад молча обходился (E2E 2026-10-05: live mangle
+    # PREROUTING без awg0-правила на 138/91/45 при живом table-2000).
+    # Теперь: сплит ВКЛ → актуальна сплит-форма, убираем blanket-форму
+    # (без исключения); сплит ВЫКЛ → актуальна blanket, убираем сплит-форму.
+    if _split_on:
+        _other_form_del = (
+            f"while iptables -t mangle -D PREROUTING -i awg0 "
+            f"-m set ! --match-set {AWGS_IPSET_NAME} dst "
+            f"-j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done")
+    else:
+        _other_form_del = (
+            f"while iptables -t mangle -D PREROUTING -i awg0 "
+            f"-m set ! --match-set {AWGS_IPSET_NAME} dst "
+            f"-m set ! --match-set awg_b4_direct dst "
+            f"-j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done")
+
     if _split_on:
         _B4_SPLIT_IPSET_BLOCK = (
             "# B4-сплит — ipset direct-плеча (b4 дурит ТСПУ, RU-IP)\n"
@@ -794,8 +817,8 @@ iptables -t mangle -C PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} 
 while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done
 # легаси-марка 0x2000 (без b4-exempt бита) — убрать, чтобы не
 # конкурировала с актуальной (последняя MARK в цепочке затирает fwmark)
-# + другая форма mark-правила (сплит вкл/выкл)
-while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -m set ! --match-set awg_b4_direct dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done
+# + ДРУГАЯ форма mark-правила (сплит вкл/выкл) — актуальную из 2.1 не трогаем
+{_other_form_del}
 while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done
 while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done
 # 2.2 NAT для выхода через awg1
