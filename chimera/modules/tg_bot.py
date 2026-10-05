@@ -1904,6 +1904,9 @@ def do_manage_telegram() -> None:
             "b4_preset":      "B4: ротация пресета (ремедия)",
             "b4_exempt_empty": "B4: ipset exempt пуст",
             "b4_exempt_ok":   "B4: ipset exempt заполнен",
+            # CPU Steal монитор (steal_monitor.py; отсутствующий ключ = ВКЛ)
+            "steal_report":   "Steal: дневной отчёт (оверселл)",
+            "steal_alert":    "Steal: критический всплеск",
         }
 
         print()
@@ -1966,7 +1969,8 @@ def do_manage_telegram() -> None:
                        "mieru_exit_up","mieru_no_exits","mieru_stalled",
                        "b4_down","b4_up","b4_degraded","b4_recovered",
                        "b4_stalled","b4_restarted","b4_discovery",
-                       "b4_preset","b4_exempt_empty","b4_exempt_ok"]
+                       "b4_preset","b4_exempt_empty","b4_exempt_ok",
+                       "steal_report","steal_alert"]
             ev_labels = [
                 "Xray упал","Xray восстановился","Сертификат истекает",
                 "Лимит трафика","Daily health-отчёт","Exit-нода недоступна",
@@ -1979,6 +1983,7 @@ def do_manage_telegram() -> None:
                 "B4: health-tick не обновляется","B4: рестарт (self-heal)",
                 "B4: запущен Discovery (ремедия)","B4: ротация пресета (ремедия)",
                 "B4: ipset exempt пуст","B4: ipset exempt заполнен",
+                "Steal: дневной отчёт (оверселл)","Steal: критический всплеск",
             ]
             events = cfg.get("events", {k: True for k in ev_keys})
             print()
