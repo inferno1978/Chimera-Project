@@ -178,8 +178,8 @@ class TestNormAddrForDisplay(unittest.TestCase):
         """`[::ffff:1.2.3.4]:443` → `1.2.3.4:443` (main case)."""
         result = self._norm("[::ffff:203.0.113.101]:443")
         self.assertEqual(result, "203.0.113.101:443")
-        # 14 (IPv4) + 1 (:) + 3 (port) = 18 chars (было 28 с brackets)
-        self.assertEqual(len(result), 18)
+        # 13 (IPv4) + 1 (:) + 3 (port) = 17 chars (было 27 с brackets)
+        self.assertEqual(len(result), 17)
 
     def test_ipv4_mapped_ipv6_with_client_port(self):
         """`[::ffff:5.6.7.8]:49775` → `5.6.7.8:49775`."""

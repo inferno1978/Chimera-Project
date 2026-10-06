@@ -798,7 +798,8 @@ class TestWizardAccess(unittest.TestCase):
         self.mod = ags
 
     def test_is_public_ipv4(self):
-        self.assertTrue(self.mod._is_public_ipv4("203.0.113.103"))
+        # 142.250.185.78 — публичный пример (TEST-NET 203.0.113.x — зарезервирован)
+        self.assertTrue(self.mod._is_public_ipv4("142.250.185.78"))
         self.assertFalse(self.mod._is_public_ipv4("192.168.1.10"))
         self.assertFalse(self.mod._is_public_ipv4("10.0.0.1"))
         self.assertFalse(self.mod._is_public_ipv4("172.16.0.2"))
