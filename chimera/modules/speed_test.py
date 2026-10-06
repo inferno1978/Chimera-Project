@@ -222,9 +222,11 @@ def do_speed_test(auto_mode: bool = False) -> None:
         host = nd.get("host", "?")
         port = nd.get("port", 443)
         tag  = f"chain-exit-{i+1}"
+        via_tag = (nd.get("via") or "").strip()
 
         _box_bottom()
-        _box_top(f"Нода {i+1}: {host}:{port} ({tag})")
+        _box_top(f"Нода {i+1}: {host}:{port} ({tag})"
+                 + (f"  ·  relay: {via_tag}" if via_tag else ""))
 
         # GeoIP
         _box_info(f"  Определение GeoIP...")
@@ -250,16 +252,62 @@ def do_speed_test(auto_mode: bool = False) -> None:
 
         # Новый бокс для латентности и скорости
         _box_top()
-        _box_info(f"  Измерение TCP-латентности до {host}:{port}...")
-        lat = _speed_test_node_latency(host, port)
-        _box_row(f"    TCP latency: {lat}")
+        _chain_r = None      # результат full-path (для via-нод)
+        if via_tag:
+            # Chain Relay: прямой TCP к via-ноде может быть перерезан ТСПУ —
+            # «TCP latency: таймаут» здесь ЛОЖНЫЙ негатив. Меряем полный путь:
+            # временный xray-клиент (entry → хопы → нода) + HTTP-проба +
+            # реальный download ЧЕРЕЗ цепочку.
+            _box_info(f"  Нода с релейным хопом «{via_tag}» — измеряем полный путь")
+            _box_info(f"  (entry → {via_tag} → нода; прямой путь может быть резан ТСПУ)...")
+            try:
+                from chimera.modules.chain_relay import (
+                    check_via_node_full_path, load_relay_hops)
+                _chain_r = check_via_node_full_path(
+                    nd, load_relay_hops(), want_ip=True,
+                    want_speed_mb=min(dl_size_mb, 100))
+            except ImportError:
+                _chain_r = None
+            if _chain_r is not None and _chain_r.get("ok"):
+                _ms = _chain_r.get("ms", 0)
+                _lc = GREEN if _ms < 400 else YELLOW
+                _lat_line = (f"    Полный путь: {_lc}{_ms:.0f} мс{NC}")
+                if _chain_r.get("exit_ip"):
+                    _lat_line += f"  {DIM}(exit IP {_chain_r['exit_ip']}){NC}"
+                _box_row(_lat_line)
+            elif _chain_r is not None:
+                _box_row(f"    Цепочка: {RED}недоступна "
+                         f"({_chain_r.get('detail', '')[:60]}){NC}")
+            else:
+                # chain_relay недоступен — старый прямой замер (может таймаутить)
+                _box_info(f"  Измерение TCP-латентности до {host}:{port}...")
+                lat = _speed_test_node_latency(host, port)
+                _box_row(f"    TCP latency: {lat}")
+        else:
+            _box_info(f"  Измерение TCP-латентности до {host}:{port}...")
+            lat = _speed_test_node_latency(host, port)
+            _box_row(f"    TCP latency: {lat}")
 
         # Скорость загрузки
-        _box_info(f"  Тест загрузки {dl_size_mb} МБ (Cloudflare)...")
-        dl = _speed_test_download(host, ip, port, dl_size_mb)
-        _box_row(f"    Download: {dl}")
+        if _chain_r is not None and _chain_r.get("ok"):
+            # via-нода: скорость уже измерена ЧЕРЕЗ цепочку (реальный путь
+            # клиентского трафика), отдельный прямой замер не нужен.
+            _mbps = _chain_r.get("speed_mbps", 0.0)
+            if _mbps > 0:
+                _dc = GREEN if _mbps > 100 else YELLOW if _mbps > 20 else RED
+                _box_row(f"    Download (через цепочку {via_tag}): "
+                         f"{_dc}{_mbps:.1f} Мбит/с{NC}")
+            else:
+                _box_row(f"    Download (через цепочку): "
+                         f"{YELLOW}не измерен{NC}")
+        else:
+            _box_info(f"  Тест загрузки {dl_size_mb} МБ (Cloudflare)...")
+            dl = _speed_test_download(host, ip, port, dl_size_mb)
+            _box_row(f"    Download: {dl}")
 
-        log_to_file("INFO", f"SpeedTest нода {i+1} ({host}): IP={ip}, CC={cc}, latency, DL={dl}")
+        log_to_file("INFO", f"SpeedTest нода {i+1} ({host}"
+                             + (f" via {via_tag}" if via_tag else "")
+                             + f"): IP={ip}, CC={cc}, latency, DL")
         _box_bottom()
 
     success("Тест скорости завершён")

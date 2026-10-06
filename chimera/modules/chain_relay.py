@@ -547,7 +547,8 @@ def _free_local_port() -> int:
 
 def check_via_node_full_path(nd: dict, hops: list[dict],
                              want_ip: bool = False,
-                             curl_timeout: int = 20) -> dict:
+                             curl_timeout: int = 20,
+                             want_speed_mb: int = 0) -> dict:
     """Full-path проверка exit-ноды с via: временный xray-клиент + curl.
 
     Поднимается отдельный xray (socks 127.0.0.1:<free port>) с цепочкой
@@ -557,13 +558,19 @@ def check_via_node_full_path(nd: dict, hops: list[dict],
     а не только TCP-доступность — прямой TCP к via-ноде может быть
     перерезан ТСПУ и не является признаком отказа.
 
+    want_speed_mb > 0 — дополнительно качает want_speed_mb МБ с Cloudflare
+    SpeedTest ЧЕРЕЗ цепочку и возвращает поле speed_mbps (реальная скорость
+    полного пути, а не прямого канала entry-сервера).
+
     Возвращает dict:
-        ok       — цепочка жива (HTTP 204 получен)
-        ms       — латентность полного пути (time_total curl)
-        exit_ip  — внешний IP (только при want_ip=True и ok)
-        detail   — человекочитаемое описание (для HM-лога/меню)
+        ok          — цепочка жива (HTTP 204 получен)
+        ms          — латентность полного пути (time_total curl)
+        exit_ip     — внешний IP (только при want_ip=True и ok)
+        speed_mbps  — Мбит/с через цепочку (только при want_speed_mb>0 и ok)
+        detail      — человекочитаемое описание (для HM-лога/меню)
     """
-    res = {"ok": False, "ms": 0.0, "exit_ip": "", "detail": ""}
+    res = {"ok": False, "ms": 0.0, "exit_ip": "", "speed_mbps": 0.0,
+           "detail": ""}
     via = hop_via_tag_for(nd, hops)
     if not via:
         res["detail"] = (f"via «{(nd or {}).get('via', '')}» не найден/выключен"
@@ -631,6 +638,33 @@ def check_via_node_full_path(nd: dict, hops: list[dict],
             ip = (r2.stdout or "").strip()
             if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', ip):
                 res["exit_ip"] = ip
+
+        # 3) скорость через цепочку (опционально, для speed-test)
+        if want_speed_mb > 0:
+            _mb = max(1, int(want_speed_mb))
+            _dl_timeout = max(60, _mb * 8)
+            try:
+                from chimera.modules.chain_nodes import _resolve_host_fresh
+                _cf_ip = _resolve_host_fresh("speed.cloudflare.com")
+            except Exception:
+                _cf_ip = None
+            _dl = ["curl", "-s", "-o", "/dev/null", "-m", str(_dl_timeout),
+                   "-w", "%{size_download} %{time_total} %{speed_download}",
+                   "-x", f"socks5h://127.0.0.1:{socks_port}"]
+            if _cf_ip:
+                _dl += ["--resolve", f"speed.cloudflare.com:443:{_cf_ip}"]
+            _dl.append(f"https://speed.cloudflare.com/__down?bytes={_mb * 1048576}")
+            r3 = subprocess.run(_dl, capture_output=True, text=True,
+                                timeout=_dl_timeout + 15)
+            _p = (r3.stdout or "").split()
+            if r3.returncode == 0 and len(_p) >= 3:
+                try:
+                    _size_b = int(_p[0])
+                    if _size_b >= 1024 * 100:      # ≥100 КБ — считаем валидным
+                        res["speed_mbps"] = float(_p[2]) * 8 / 1_000_000
+                except ValueError:
+                    pass
+
         hops_lbl = " → ".join([h.get("tag", "?") for h in chain])
         res["detail"] = f"цепочка жива ({hops_lbl} → exit)"
         return res
