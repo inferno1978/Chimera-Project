@@ -571,7 +571,8 @@ def _nft_ensure_base() -> bool:
 
 def lb_extra_ifaces() -> list:
     """Дополнительные туннельные интерфейсы при LB-балансировке каскада:
-    awg2..awgN (N = число exit'ов). Пусто — LB выключен/один exit.
+    awg2..awgN (N = ЭФФЕКТИВНЫХ exit'ов с учётом lb_exits-выбора пары).
+    Пусто — LB выключен/один exit.
 
     Читается nft_apply_split/nft_apply_blanket (blanket b4-exempt бит
     на inner-пакеты ВСЕХ туннелей) и awg_cascade_lb (хук).
@@ -581,8 +582,12 @@ def lb_extra_ifaces() -> list:
         st = awgs_state_load()
         if not st.get("lb_mode"):
             return []
-        n = len(st.get("cascade_exits") or [])
-        return [f"awg{i}" for i in range(2, n + 1)] if n > 1 else []
+        # состав = lb_effective_exits (выбор пары/подмножества),
+        # слоты = lb_slot_map — иначе b4-форма ссылалась бы на
+        # несуществующие туннели невыбранных exit'ов
+        from .awg_cascade_lb import lb_slot_map
+        return [info["iface"] for info in lb_slot_map(st).values()
+                if info["slot"] > 1]
     except Exception:
         return []
 

@@ -918,5 +918,266 @@ class TestB4Integration(_LbTestBase):
         self.assertIn("awg_b4_direct", bash)
 
 
+# ── 11. Выбор состава exit'ов (пара/подмножество, lb_exits) ─────────────────
+
+class TestExitSelection(_LbTestBase):
+    """lb_effective_exits / lb_exits-фильтр в слотах / lb_activate(exits)
+    / lb_set_exits / статус / b4-форма."""
+
+    def test_effective_all_by_default(self):
+        st = self._lb_state(n=4)
+        self.assertEqual(len(self.lb.lb_effective_exits(st)), 4)
+        st["lb_exits"] = []
+        self.assertEqual(len(self.lb.lb_effective_exits(st)), 4)
+
+    def test_effective_subset_cascade_order(self):
+        st = self._lb_state(n=4)          # de, fi1, nl1, pl1
+        st["lb_exits"] = ["pl1", "de"]    # обратный порядок ввода
+        eff = self.lb.lb_effective_exits(st)
+        self.assertEqual([b["name"] for b in eff], ["de", "pl1"])
+
+    def test_effective_stale_names_fallback_all(self):
+        st = self._lb_state(n=4)
+        st["lb_exits"] = ["de", "xx-unknown"]
+        self.assertEqual(len(self.lb.lb_effective_exits(st)), 4)
+
+    def test_effective_single_fallback_all(self):
+        st = self._lb_state(n=4)
+        st["lb_exits"] = ["de"]
+        self.assertEqual(len(self.lb.lb_effective_exits(st)), 4)
+
+    def test_slot_map_dense_renumber(self):
+        st = self._lb_state(n=4)          # de(1) fi1(2) nl1(3) pl1(4)
+        st["lb_exits"] = ["de", "pl1"]
+        slots = self.lb.lb_slot_map(st)
+        self.assertEqual(sorted(slots), ["de", "pl1"])
+        self.assertEqual(slots["de"]["slot"], 1)
+        self.assertEqual(slots["de"]["mark"], 0x8201)
+        self.assertEqual(slots["de"]["table"], 2001)
+        self.assertEqual(slots["de"]["iface"], "awg1")
+        self.assertEqual(slots["pl1"]["slot"], 2)
+        self.assertEqual(slots["pl1"]["mark"], 0x8202)
+        self.assertEqual(slots["pl1"]["table"], 2002)
+        self.assertEqual(slots["pl1"]["iface"], "awg2")
+
+    def test_is_on_effective(self):
+        st = self._lb_state(n=4)
+        st["lb_exits"] = ["de", "pl1"]
+        self.assertTrue(self.lb.lb_is_on(st))
+        # один валидный → фолбэк на все → всё ещё on (не молча гасим)
+        st["lb_exits"] = ["de"]
+        self.assertTrue(self.lb.lb_is_on(st))
+        st["lb_mode"] = False
+        self.assertFalse(self.lb.lb_is_on(st))
+
+    def test_normalize_selection(self):
+        st = self._lb_state(n=4)
+        names = [b["name"] for b in st["cascade_exits"]]
+        # дубликаты + мусор + обратный порядок → уникальные в порядке
+        # cascade_exits
+        self.assertEqual(
+            self.lb._normalize_exit_selection(
+                ["pl1", "de", "pl1", "", "xx", None], st["cascade_exits"]),
+            ["de", "pl1"])
+        self.assertEqual(
+            self.lb._normalize_exit_selection(None, st["cascade_exits"]), [])
+        self.assertEqual(
+            self.lb._normalize_exit_selection([], names + st["cascade_exits"]),
+            [])
+
+
+class TestActivateWithSelection(_LbTestBase):
+    def setUp(self):
+        super().setUp()
+        self._use_rec_run()
+
+    def _activate_ok(self, **kw):
+        with patch.object(self.lb, "lb_tunnels_apply",
+                          return_value=True), \
+             patch.object(self.lb, "lb_dispatcher_install",
+                          return_value=True), \
+             patch.object(self.lb, "_hmark_available", return_value=True), \
+             patch("chimera.modules.awg_cascade."
+                   "awgs_cascade_routing_regen_lb", return_value=True):
+            return self.lb.lb_activate(kw.get("strategy", "smart"),
+                                       kw.get("pinned", ""),
+                                       kw.get("exits"))
+
+    def test_activate_saves_selection(self):
+        st = self._lb_state(n=4)
+        self._write_state(st)
+        self.assertTrue(self._activate_ok(exits=["pl1", "de"]))
+        saved = self._read_state()
+        self.assertEqual(saved["lb_exits"], ["de", "pl1"])  # порядок списка
+        self.assertEqual(saved["lb_strategy"], "smart")
+
+    def test_activate_bad_selection_falls_back_all(self):
+        st = self._lb_state(n=4)
+        self._write_state(st)
+        self.assertTrue(self._activate_ok(exits=["de"]))
+        self.assertEqual(self._read_state()["lb_exits"], [])
+
+    def test_activate_rejects_lt2_total(self):
+        st = self._lb_state(n=1)
+        self._write_state(st)
+        self.assertFalse(self._activate_ok())
+
+    def test_activate_pinned_outside_selection_cleared(self):
+        st = self._lb_state(n=4)          # de, fi1, nl1, pl1
+        self._write_state(st)
+        self.assertTrue(self._activate_ok(pinned="nl1",
+                                          exits=["de", "pl1"]))
+        saved = self._read_state()
+        self.assertEqual(saved["lb_pinned"], "")
+        self.assertEqual(saved["lb_exits"], ["de", "pl1"])
+
+    def test_activate_pinned_inside_selection_kept(self):
+        st = self._lb_state(n=4)
+        self._write_state(st)
+        self.assertTrue(self._activate_ok(pinned="pl1",
+                                          exits=["de", "pl1"]))
+        self.assertEqual(self._read_state()["lb_pinned"], "pl1")
+
+
+class TestSetExits(_LbTestBase):
+    def setUp(self):
+        super().setUp()
+        self._use_rec_run()
+        self.calls = []
+        self._patches.append(patch.object(
+            self.lb, "lb_tunnels_apply",
+            side_effect=lambda *a, **k: self.calls.append("tunnels")
+            or True))
+        self._patches.append(patch.object(
+            self.lb, "lb_dispatcher_install",
+            side_effect=lambda *a, **k: self.calls.append("dispatcher")
+            or True))
+        self._patches[-1].start()
+        self._patches[-2].start()
+
+    def test_set_rejects_lt2(self):
+        st = self._lb_state(n=4)
+        st["lb_exits"] = ["de", "pl1"]
+        self._write_state(st)
+        self.assertFalse(self.lb.lb_set_exits(["de"]))
+        self.assertEqual(self._read_state()["lb_exits"], ["de", "pl1"])
+        self.assertEqual(self.calls, [])
+
+    def test_set_updates_state_and_clears_ema(self):
+        st = self._lb_state(n=4)          # de, fi1, nl1, pl1
+        st["lb_mode"] = True
+        st["lb_exits"] = []
+        st["lb"] = {
+            "metrics_ema": {"de": {}, "fi1": {}, "nl1": {}, "pl1": {}},
+            "probes": {"de": {}, "fi1": {}, "nl1": {}, "pl1": {}},
+            "tx_prev": {"de": 1, "fi1": 2, "nl1": 3, "pl1": 4},
+            "balance": {"shares": {"de": 0.25, "fi1": 0.25, "nl1": 0.25,
+                                   "pl1": 0.25}},
+            "alive_prev": ["de", "fi1", "nl1", "pl1"],
+        }
+        self._write_state(st)
+        self.assertTrue(self.lb.lb_set_exits(["pl1", "de"]))
+        saved = self._read_state()
+        self.assertEqual(saved["lb_exits"], ["de", "pl1"])
+        lb = saved["lb"]
+        self.assertEqual(sorted(lb["metrics_ema"]), ["de", "pl1"])
+        self.assertEqual(sorted(lb["probes"]), ["de", "pl1"])
+        self.assertEqual(sorted(lb["tx_prev"]), ["de", "pl1"])
+        self.assertIsNone(lb["balance"])
+        self.assertIsNone(lb["alive_prev"])
+        self.assertEqual(self.calls, ["tunnels", "dispatcher"])
+
+    def test_set_all_exits_on_the_fly(self):
+        st = self._lb_state(n=4)
+        st["lb_mode"] = True
+        st["lb_exits"] = ["de", "pl1"]
+        self._write_state(st)
+        self.assertTrue(self.lb.lb_set_exits(None))
+        self.assertEqual(self._read_state()["lb_exits"], [])
+        self.assertEqual(self.calls, ["tunnels", "dispatcher"])
+
+    def test_set_off_mode_remember_no_rebuild(self):
+        st = self._lb_state(n=4)
+        st["lb_mode"] = False
+        self._write_state(st)
+        self.assertTrue(self.lb.lb_set_exits(["de", "pl1"]))
+        self.assertEqual(self._read_state()["lb_exits"], ["de", "pl1"])
+        self.assertEqual(self.calls, [])
+
+
+class TestSelectionIntegration(_LbTestBase):
+    """Слоты/диспетчер/routing-скрипт/b4/health — только выбранные."""
+
+    def test_status_info_reports_selection(self):
+        st = self._lb_state(n=4)
+        st["lb_exits"] = ["de", "pl1"]
+        self._write_state(st)
+        info = self.lb.lb_status_info()
+        self.assertEqual(info["exits_selected"], ["de", "pl1"])
+        self.assertEqual(info["exits_total"], 4)
+        self.assertEqual(info["exits_effective"], 2)
+        self.assertEqual([s["name"] for s in info["slots"]],
+                         ["de", "pl1"])
+
+    def test_routing_script_only_selected(self):
+        st = self._lb_state(n=4)
+        st["lb_exits"] = ["de", "pl1"]
+        self._write_state(st)
+        txt = self.lb.lb_routing_script_text()
+        self.assertIn("слот 1: de", txt)
+        self.assertIn("слот 2: pl1", txt)
+        self.assertNotIn("слот 3:", txt)
+        self.assertNotIn("слот 4:", txt)
+        # зачистка покрывает невыбранные слоты (3..16)
+        self.assertIn("flush table 2003", txt)
+
+    def test_dispatcher_tail_only_selected(self):
+        st = self._lb_state(n=4)
+        st["lb_exits"] = ["de", "pl1"]
+        st["lb"] = {"alive": ["de", "pl1"]}
+        self._write_state(st)
+        slots = self.lb.lb_slot_map(st)
+        tail = self.lb.lb_tail_specs("prio", slots, ["de", "pl1"])
+        txt = " ".join(" ".join(map(str, s)) for s in tail)
+        self.assertIn("0x8201", txt)
+        self.assertNotIn("0x8203", txt)
+        self.assertNotIn("0x8204", txt)
+
+    def test_b4_extra_ifaces_follow_selection(self):
+        st = self._lb_state(n=4)
+        st["lb_exits"] = ["de", "pl1"]
+        self._write_state(st)
+        self.assertEqual(self.b4.lb_extra_ifaces(), ["awg2"])
+        # без выбора — все туннели
+        st["lb_exits"] = []
+        self._write_state(st)
+        self.assertEqual(self.b4.lb_extra_ifaces(),
+                         ["awg2", "awg3", "awg4"])
+
+    def test_health_tick_probes_only_selected(self):
+        st = self._lb_state(n=4)
+        st["lb_exits"] = ["de", "pl1"]
+        st["lb_strategy"] = "leastping"
+        st["lb"] = {"applied": [], "alive_prev": ["de", "pl1"]}
+        self._write_state(st)
+        probed = []
+
+        def fake_probe(info, lb):
+            probed.append(info["name"])
+            return {"alive": True, "rtt_ms": 30.0, "loss_pct": 0.0,
+                    "tx_rate_bps": 0, "age": 5}
+
+        with patch.object(self.lb, "_probe_slot",
+                          side_effect=fake_probe), \
+             patch.object(self.lb, "lb_dispatcher_install",
+                          return_value=True), \
+             patch.object(self.lb, "_notify", lambda d: None):
+            status = self.lb.lb_health_tick()
+        self.assertIn(status, ("ok", "rebalance"))
+        self.assertEqual(sorted(probed), ["de", "pl1"])
+        saved = self._read_state()
+        self.assertEqual(sorted(saved["lb"]["alive"]), ["de", "pl1"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
