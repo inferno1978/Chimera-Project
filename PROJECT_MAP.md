@@ -231,7 +231,7 @@
 | Файл | За что отвечает |
 |---|---|
 | `cluster_ops.py` | Операции кластера (управление несколькими exit-нодами через SSH) |
-| `smart_balancer.py` | Умный балансировщик (roundRobin/LeastPing/LeastLoad/Random) + auto-fallback cron |
+| `smart_balancer.py` | Умный балансировщик (roundRobin/LeastPing/LeastLoad/Random) + auto-fallback cron; + LB-состав (chain_lb_nodes, 2026-10-06): `_sb_lb_selection`/`_sb_probe_plan` — cron зондирует и выбирает лучшую ноду только из состава (индексы полного chain_nodes сохраняются — active_node_idx стабилен), `_sb_patch_xray_active_node` патчит первый outbound ИЗ selector chain-balancer (иначе патч вне ротации); пусто = все (обратная совместимость). Тесты: tests/test_chain_lb_nodes.py |
 
 ---
 
@@ -298,7 +298,7 @@
 
 | Файл | За что отвечает |
 |---|---|
-| `chain_nodes.py` | Chain/Nodes management (Mode B): 22 функции — chain config builders, node CRUD, health/speed tests |
+| `chain_nodes.py` | Chain/Nodes management (Mode B): 22 функции — chain config builders, node CRUD, health/speed tests; + LB-состав нод балансировки (chain_lb_nodes, 2026-10-06 — зеркало lb_exits AWG/Mieru): чистые хелперы `_normalize_lb_nodes`/`_lb_effective_nodes` (пусто=все, <2 валидных=фолбэк на все)/`_lb_selector_tags`/`_lb_nodes_summary`; selector+observatory только по выбранным в `generate_xray_config_chain_entry_multi` (outbounds — superset); `set_lb_nodes(hosts)` headless (state + хирургический патч живого config.json + graceful-рестарт xray/nginx + TG); меню [E] мультивыбором в do_manage_nodes + строка состава в шапке/сводке/health-матрице (роль «вне состава»); гигиена при удалении ноды; пиннинг ортогонален составу. Тесты: tests/test_chain_lb_nodes.py (35) |
 
 ---
 
