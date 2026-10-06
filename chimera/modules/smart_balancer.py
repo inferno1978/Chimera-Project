@@ -521,6 +521,59 @@ def _sb_probe_plan(nodes: list, selection: Optional[set]) -> list:
             if (nd.get("host") or "").strip().lower() in selection]
 
 
+def _sb_get_relay_hops() -> list:
+    """Активные релейные хопы из state.json (relay_hops, enabled=True).
+    Тот же state.json, что у _sb_get_nodes_from_state()."""
+    try:
+        if _STATE_FILE.exists():
+            st = json.loads(_STATE_FILE.read_text())
+            hops = st.get("relay_hops") or []
+            if isinstance(hops, list):
+                return [h for h in hops
+                        if isinstance(h, dict) and h.get("enabled", True)]
+    except Exception:
+        pass
+    return []
+
+
+def _sb_relay_probe_target(node: dict, hops: list) -> tuple:
+    """(host, port, via_tag) — цель зонда для exit-ноды.
+
+    Релейная нода (via=<tag>) зондируется через СВОЙ хоп: прямой путь
+    до неё перерезан транзитом по определению (ради этого хоп и
+    ставили), поэтому единственный осмысленный прямой зонд с
+    entry-ноды — первый сегмент пути, т.е. сам хоп (зеркало via-aware
+    шага 11 диагностики: там та же ловушка ложного негатива). Нода
+    без via → сама нода; via задан, но хоп не найден/выключен →
+    честно зондируем саму ноду (обратная совместимость).
+    Чистая функция (тестируется без сервера)."""
+    via = str((node or {}).get("via") or "").strip()
+    if via:
+        for h in hops or []:
+            if (str(h.get("tag") or "").strip() == via
+                    and h.get("host") and h.get("enabled", True)):
+                return h["host"], int(h.get("port", 443)), via
+    return (str((node or {}).get("host") or ""),
+            int((node or {}).get("port") or 443), "")
+
+
+def _sb_native_balancer_selector_tags() -> list:
+    """Теги selector нативного chain-balancer из живого конфига Xray
+    (пусто = балансировщика нет / selector отсутствует). Только чтение."""
+    cfg_path = _sb_get_xray_config_path()
+    if not cfg_path:
+        return []
+    try:
+        cfg = json.loads(cfg_path.read_text())
+        for b in (cfg.get("routing") or {}).get("balancers") or []:
+            if b.get("tag") == "chain-balancer":
+                sel = b.get("selector")
+                return list(sel) if isinstance(sel, list) else []
+    except Exception:
+        pass
+    return []
+
+
 def _smart_balancer_run_once() -> None:
     """
     Главная функция. Запускается из cron каждые N минут.
@@ -571,6 +624,9 @@ def _smart_balancer_run_once() -> None:
     # ------------------------------------------------------------------
     probe_results: list[dict] = []
 
+    # Релейные хопы — для via-aware зондирования (цель зонда = хоп)
+    hops = _sb_get_relay_hops()
+
     for i, node in plan:
         host = node.get("host", "")
         port = int(node.get("port", 443))
@@ -599,17 +655,24 @@ def _smart_balancer_run_once() -> None:
             _sb_log(f"INFO: карантин {key} снят — возврат в пул")
             _release_from_quarantine(meta)
 
-        # Собственно зонд
-        result = _probe_node(host, port)
+        # Собственно зонд. Via-aware: релейная нода (via=<tag>) зондируется
+        # через свой хоп — прямой путь до неё может быть транзитно дропнут
+        # (см. _sb_relay_probe_target); метрика пути = первый сегмент.
+        p_host, p_port, p_via = _sb_relay_probe_target(node, hops)
+        if p_via:
+            _sb_log(f"INFO: нода {key} зондируется через релей {p_via} "
+                    f"({p_host}:{p_port}) — прямой путь может быть дропнут")
+        result = _probe_node(p_host, p_port)
 
         if not result["alive"]:
             meta["fails"] = meta.get("fails", 0) + 1
-            _sb_log(f"WARN: нода {key} недоступна (провалов подряд: {meta['fails']})")
+            _via_note = f" [зонд через релей {p_via}]" if p_via else ""
+            _sb_log(f"WARN: нода {key} недоступна (провалов подряд: {meta['fails']}){_via_note}")
             if meta["fails"] >= dead_threshold:
                 _quarantine_node(meta, q_minutes)
                 _sb_log(
                     f"ALERT: нода {key} переведена в карантин на {q_minutes} мин "
-                    f"(провалов: {meta['fails']})"
+                    f"(провалов: {meta['fails']}){_via_note}"
                 )
                 # TG уведомление
                 try:
@@ -617,6 +680,7 @@ def _smart_balancer_run_once() -> None:
                         "xray_down",
                         f"⚠️ SmartBalancer: нода <b>{host}:{port}</b> "
                         f"недоступна {meta['fails']}×, карантин {q_minutes} мин"
+                        + (f" (зонд через релей {p_via})" if p_via else "")
                     )
                 except Exception:
                     pass
@@ -661,18 +725,22 @@ def _smart_balancer_run_once() -> None:
     state["nodes_meta"] = nodes_meta
 
     # ------------------------------------------------------------------
-    # 1.5 LB-состав активен — нативный chain-balancer владеет ротацией:
-    # патч адреса НЕ выполняем (иначе «лучшая» нода перезаписывает
-    # слот другой выбранной ноды и ротация состава схлопывается в одну
-    # ноду). Пробы/карантин/TG-алерты продолжают работать (наблюдаемость).
-    # Состав пуст — прежнее поведение (патч первого outbound).
+    # 1.5 Ротацией владеет нативный chain-balancer — патч адреса НЕ
+    # выполняем (иначе «лучшая» нода перезаписывает слот другой ноды
+    # и ротация схлопывается в одну ноду). Это случай как LB-состава
+    # (chain_lb_nodes непуст), так и состава «все ноды» (пусто, но в
+    # живом конфиге selector из ≥2 тегов). Пробы/скоринг/карантин/
+    # TG-алерты продолжают работать (наблюдаемость).
+    # Патч — только когда балансировщика нет (одна нода / pinned).
     # ------------------------------------------------------------------
-    if _lb_sel is not None:
+    _native_sel = _sb_native_balancer_selector_tags()
+    if _lb_sel is not None or len(_native_sel) >= 2:
         state["nodes_meta"] = nodes_meta
         _sb_save(state)
-        _sb_log("OK: LB-состав активен (" + ", ".join(sorted(_lb_sel)) +
-                ") — ротацией владеет нативный chain-balancer, "
-                "патч адреса пропущен")
+        _who = (", ".join(sorted(_lb_sel)) if _lb_sel is not None
+                else f"selector из {len(_native_sel)} тегов")
+        _sb_log("OK: ротацией владеет нативный chain-balancer (" + _who +
+                ") — патч адреса пропущен")
         return
 
     # ------------------------------------------------------------------
@@ -952,13 +1020,14 @@ def do_manage_smart_balancer() -> None:
                 bw_str  = f"bw={bw_ms}ms"  if bw_ms  else ""
                 extra   = "  ".join(filter(None, [lat_str, bw_str]))
                 marker  = f"{CYAN}▶{NC}" if i == cur_idx else f"{DIM} {NC}"
+                via_s   = f"  {DIM}via:{nd.get('via')}{NC}" if nd.get("via") else ""
                 # Строим одну строку и проверяем влезает ли она в рамку
-                line1 = f"  {marker} [{i}] {BOLD}{h}:{p}{NC}  {status_col}  {DIM}{extra}{NC}"
+                line1 = f"  {marker} [{i}] {BOLD}{h}:{p}{NC}{via_s}  {status_col}  {DIM}{extra}{NC}"
                 if _wcslen(line1) <= _BOX_W:  # type: ignore[name-defined]
                     _box_row(line1)  # type: ignore[name-defined]
                 else:
                     # Не влезает — хост на первой строке, метрики на второй
-                    _box_row(f"  {marker} [{i}] {BOLD}{h}:{p}{NC}  {status_col}")  # type: ignore[name-defined]
+                    _box_row(f"  {marker} [{i}] {BOLD}{h}:{p}{NC}{via_s}  {status_col}")  # type: ignore[name-defined]
                     if extra:
                         _box_row(f"       {DIM}{extra}{NC}")  # type: ignore[name-defined]
         else:
@@ -1134,13 +1203,17 @@ def do_manage_smart_balancer() -> None:
             _box_sep()  # type: ignore[name-defined]
 
             probe_data = []
+            hops = _sb_get_relay_hops()
             for i, nd in enumerate(nodes):
                 h   = nd.get("host", "?")
                 p   = int(nd.get("port", 443))
                 key = f"{h}:{p}"
-                _box_row(f"  Зондирую {CYAN}{h}:{p}{NC}...")  # type: ignore[name-defined]
+                # Via-aware: релейная нода зондируется через свой хоп
+                _ph, _pp, _pv = _sb_relay_probe_target(nd, hops)
+                _via_note = f"  {DIM}через релей {_pv}{NC}" if _pv else ""
+                _box_row(f"  Зондирую {CYAN}{h}:{p}{NC}{_via_note}...")  # type: ignore[name-defined]
 
-                result = _probe_node(h, p)
+                result = _probe_node(_ph, _pp)
                 if result["alive"]:
                     lat  = result["lat_ms"]
                     bw   = result["bw_ms"] or lat * 1.5

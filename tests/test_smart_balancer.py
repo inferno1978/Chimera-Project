@@ -12,6 +12,11 @@ Unit-тесты для chimera/modules/smart_balancer.py.
   5. _sb_load / _sb_save — JSON I/O
   6. _awg_guard_cron — проверка AWG-режима
   7. _probe_tcp_latency — TCP проверка (mocked socket)
+  8. _sb_get_relay_hops — активные relay_hops из state.json
+  9. _sb_relay_probe_target — цель зонда (via-aware, pure)
+ 10. _sb_native_balancer_selector_tags — selector живого chain-balancer
+ 11. run_once — сценарии: наблюдение при нативной ротации, классический
+     патч без балансировщика, зонд релейной ноды в хоп
 """
 from __future__ import annotations
 
@@ -333,6 +338,288 @@ class TestProbeTcpLatency(unittest.TestCase):
         # Первый созданный сокет — IPv4 (AF_INET).
         first_family = mock_sock_cls.call_args_list[0].args[0]
         self.assertEqual(first_family, _socket.AF_INET)
+
+
+class TestSbGetRelayHops(unittest.TestCase):
+    """_sb_get_relay_hops — активные relay_hops из state.json."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "state.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch(self):
+        return patch("chimera.modules.smart_balancer._STATE_FILE",
+                     self._state)
+
+    def test_empty_when_no_state(self):
+        from chimera.modules.smart_balancer import _sb_get_relay_hops
+        with self._patch():
+            self.assertEqual(_sb_get_relay_hops(), [])
+
+    def test_returns_enabled_hops_only(self):
+        from chimera.modules.smart_balancer import _sb_get_relay_hops
+        self._state.write_text(json.dumps({"relay_hops": [
+            {"tag": "hop-a", "host": "hop-a.example", "port": 443,
+             "enabled": True},
+            {"tag": "hop-b", "host": "hop-b.example", "port": 443,
+             "enabled": False},
+        ]}))
+        with self._patch():
+            hops = _sb_get_relay_hops()
+        self.assertEqual(len(hops), 1)
+        self.assertEqual(hops[0]["tag"], "hop-a")
+
+    def test_enabled_defaults_true(self):
+        from chimera.modules.smart_balancer import _sb_get_relay_hops
+        self._state.write_text(json.dumps({"relay_hops": [
+            {"tag": "hop-c", "host": "hop-c.example", "port": 8443},
+        ]}))
+        with self._patch():
+            self.assertEqual(len(_sb_get_relay_hops()), 1)
+
+    def test_garbage_state_returns_empty(self):
+        from chimera.modules.smart_balancer import _sb_get_relay_hops
+        self._state.write_text("{invalid")
+        with self._patch():
+            self.assertEqual(_sb_get_relay_hops(), [])
+
+
+class TestSbRelayProbeTarget(unittest.TestCase):
+    """_sb_relay_probe_target — цель зонда для ноды (pure)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._hops = [
+            {"tag": "hop-a", "host": "hop-a.example", "port": 8443,
+             "enabled": True},
+            {"tag": "hop-b", "host": "hop-b.example", "port": 443,
+             "enabled": False},
+        ]
+
+    def test_direct_node_without_via(self):
+        from chimera.modules.smart_balancer import _sb_relay_probe_target
+        self.assertEqual(
+            _sb_relay_probe_target({"host": "n.example", "port": 443},
+                                   self._hops),
+            ("n.example", 443, ""))
+
+    def test_relayed_node_probes_hop(self):
+        from chimera.modules.smart_balancer import _sb_relay_probe_target
+        self.assertEqual(
+            _sb_relay_probe_target(
+                {"host": "n.example", "port": 443, "via": "hop-a"},
+                self._hops),
+            ("hop-a.example", 8443, "hop-a"))
+
+    def test_disabled_hop_falls_back_to_node(self):
+        from chimera.modules.smart_balancer import _sb_relay_probe_target
+        self.assertEqual(
+            _sb_relay_probe_target(
+                {"host": "n.example", "port": 443, "via": "hop-b"},
+                self._hops),
+            ("n.example", 443, ""))
+
+    def test_unknown_via_falls_back_to_node(self):
+        from chimera.modules.smart_balancer import _sb_relay_probe_target
+        self.assertEqual(
+            _sb_relay_probe_target(
+                {"host": "n.example", "port": 443, "via": "nope"},
+                self._hops),
+            ("n.example", 443, ""))
+
+    def test_missing_port_defaults_443(self):
+        from chimera.modules.smart_balancer import _sb_relay_probe_target
+        self.assertEqual(
+            _sb_relay_probe_target({"host": "n2.example"}, []),
+            ("n2.example", 443, ""))
+
+    def test_none_node_is_safe(self):
+        from chimera.modules.smart_balancer import _sb_relay_probe_target
+        self.assertEqual(_sb_relay_probe_target(None, self._hops),
+                         ("", 443, ""))
+
+
+class TestSbNativeBalancerSelectorTags(unittest.TestCase):
+    """_sb_native_balancer_selector_tags — selector живого конфига."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg = self._tmpdir / "config.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch(self):
+        return patch(
+            "chimera.modules.smart_balancer._sb_get_xray_config_path",
+            lambda: self._cfg if self._cfg.exists() else None)
+
+    def test_empty_when_no_config(self):
+        from chimera.modules.smart_balancer import _sb_native_balancer_selector_tags
+        with patch(
+                "chimera.modules.smart_balancer._sb_get_xray_config_path",
+                lambda: None):
+            self.assertEqual(_sb_native_balancer_selector_tags(), [])
+
+    def test_returns_selector_tags(self):
+        from chimera.modules.smart_balancer import _sb_native_balancer_selector_tags
+        self._cfg.write_text(json.dumps({"routing": {"balancers": [
+            {"tag": "chain-balancer",
+             "selector": ["chain-exit-1", "chain-exit-2"],
+             "strategy": {"type": "roundRobin"}},
+        ]}}))
+        with self._patch():
+            self.assertEqual(_sb_native_balancer_selector_tags(),
+                             ["chain-exit-1", "chain-exit-2"])
+
+    def test_empty_when_no_balancers_section(self):
+        from chimera.modules.smart_balancer import _sb_native_balancer_selector_tags
+        self._cfg.write_text(json.dumps({"routing": {}}))
+        with self._patch():
+            self.assertEqual(_sb_native_balancer_selector_tags(), [])
+
+    def test_garbage_config_returns_empty(self):
+        from chimera.modules.smart_balancer import _sb_native_balancer_selector_tags
+        self._cfg.write_text("{invalid")
+        with self._patch():
+            self.assertEqual(_sb_native_balancer_selector_tags(), [])
+
+
+class TestRunOnceObservationAndVia(unittest.TestCase):
+    """run_once: сценарии via-aware зондирования и владения ротацией.
+
+    1. Нативный chain-balancer (selector из 2 тегов) владеет ротацией
+       при ПУСТОМ chain_lb_nodes («все ноды») — патч адреса НЕ вызывается
+       (иначе один слот ротации перезаписывается «лучшей» нодой).
+    2. Балансировщика нет — классический режим: патч вызывается
+       (обратная совместимость для одной ноды / pinned).
+    3. Релейная нода (via=<tag>) зондируется в свой хоп, не напрямую.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "state.json"   # installer state
+        self._sb    = self._tmpdir / "sb.json"      # SB state
+        self._cfg   = self._tmpdir / "config.json"  # xray config
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _alive(self):
+        return {"alive": True, "lat_ms": 10.0, "bw_ms": 20.0, "load": 0}
+
+    def _run(self, nodes, cfg_text=None):
+        """Запускает run_once с моками; возвращает (mock_patch, mock_reload,
+        probe_calls, saved_sb_state)."""
+        import chimera.modules.smart_balancer as sbm
+        self._state.write_text(json.dumps({
+            "chain_nodes": nodes,
+            "chain_lb_nodes": [],
+        }))
+        self._sb.write_text(json.dumps({
+            "enabled": True, "strategy": "smart", "active_node_idx": -1,
+        }))
+        if cfg_text is not None:
+            self._cfg.write_text(cfg_text)
+        probe_calls = []
+
+        def _fake_probe(host, port):
+            probe_calls.append((host, port))
+            return self._alive()
+
+        with patch("chimera.modules.smart_balancer._STATE_FILE", self._state), \
+             patch("chimera.modules.smart_balancer._SB_STATE_FILE", self._sb), \
+             patch("chimera.modules.smart_balancer._sb_get_nodes_from_state",
+                   return_value=nodes), \
+             patch("chimera.modules.smart_balancer._sb_get_xray_config_path",
+                   lambda: self._cfg if self._cfg.exists() else None), \
+             patch("chimera.modules.smart_balancer._probe_node",
+                   side_effect=_fake_probe), \
+             patch("chimera.modules.smart_balancer._sb_patch_xray_active_node") as m_patch, \
+             patch("chimera.modules.smart_balancer._sb_reload_xray") as m_reload, \
+             patch("chimera.modules.smart_balancer._tg_notify_event"), \
+             patch("chimera.modules.smart_balancer._sb_log"):
+            sbm._smart_balancer_run_once()
+        saved = json.loads(self._sb.read_text())
+        return m_patch, m_reload, probe_calls, saved
+
+    _CFG_BALANCER = json.dumps({"routing": {"balancers": [
+        {"tag": "chain-balancer",
+         "selector": ["chain-exit-1", "chain-exit-2"],
+         "strategy": {"type": "roundRobin"}},
+    ]}})
+
+    def test_no_patch_when_native_balancer_owns_rotation(self):
+        nodes = [{"host": "a.example", "port": 443},
+                 {"host": "b.example", "port": 443}]
+        m_patch, m_reload, calls, saved = self._run(
+            nodes, cfg_text=self._CFG_BALANCER)
+        m_patch.assert_not_called()
+        m_reload.assert_not_called()
+        # обе ноды пробились и заскорились (наблюдаемость жива)
+        self.assertEqual(calls, [("a.example", 443), ("b.example", 443)])
+        self.assertIn("a.example:443", saved["nodes_meta"])
+        self.assertIn("b.example:443", saved["nodes_meta"])
+        self.assertIsNotNone(saved["nodes_meta"]["a.example:443"]["last_score"])
+
+    def test_patch_when_no_native_balancer(self):
+        nodes = [{"host": "a.example", "port": 443},
+                 {"host": "b.example", "port": 443}]
+        m_patch, m_reload, calls, saved = self._run(
+            nodes, cfg_text=None)   # конфига нет → балансировщика нет
+        m_patch.assert_called_once()
+        self.assertEqual(saved["active_node_idx"], 0)
+
+    def test_relayed_node_probes_hop_not_directly(self):
+        nodes = [{"host": "a.example", "port": 443},
+                 {"host": "ee.example", "port": 443, "via": "hop-a"}]
+        # hop-a включён и живёт на 8443; relay_hops пишем в state.json,
+        # откуда их читает _sb_get_relay_hops() (через _STATE_FILE)
+        import chimera.modules.smart_balancer as sbm
+        self._state.write_text(json.dumps({
+            "chain_nodes": nodes,
+            "chain_lb_nodes": [],
+            "relay_hops": [
+                {"tag": "hop-a", "host": "hop-a.example", "port": 8443,
+                 "enabled": True},
+            ],
+        }))
+        self._sb.write_text(json.dumps({
+            "enabled": True, "strategy": "smart", "active_node_idx": -1,
+        }))
+        probe_calls = []
+
+        def _fake_probe(host, port):
+            probe_calls.append((host, port))
+            return self._alive()
+
+        with patch("chimera.modules.smart_balancer._STATE_FILE", self._state), \
+             patch("chimera.modules.smart_balancer._SB_STATE_FILE", self._sb), \
+             patch("chimera.modules.smart_balancer._sb_get_nodes_from_state",
+                   return_value=nodes), \
+             patch("chimera.modules.smart_balancer._sb_get_xray_config_path",
+                   lambda: None), \
+             patch("chimera.modules.smart_balancer._probe_node",
+                   side_effect=_fake_probe), \
+             patch("chimera.modules.smart_balancer._sb_patch_xray_active_node"), \
+             patch("chimera.modules.smart_balancer._sb_reload_xray"), \
+             patch("chimera.modules.smart_balancer._tg_notify_event"), \
+             patch("chimera.modules.smart_balancer._sb_log"):
+            sbm._smart_balancer_run_once()
+
+        # прямая нода — сама в себя, релейная — в свой хоп (не напрямую!)
+        self.assertIn(("a.example", 443), probe_calls)
+        self.assertIn(("hop-a.example", 8443), probe_calls)
+        self.assertNotIn(("ee.example", 443), probe_calls)
 
 
 if __name__ == "__main__":
