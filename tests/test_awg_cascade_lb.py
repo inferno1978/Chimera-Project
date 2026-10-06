@@ -985,6 +985,18 @@ class TestExitSelection(_LbTestBase):
             self.lb._normalize_exit_selection([], names + st["cascade_exits"]),
             [])
 
+    def test_effective_three_of_four(self):
+        # N-способность: не только пара — тройка (и далее до MAX_SLOTS)
+        st = self._lb_state(n=4)          # de, fi1, nl1, pl1
+        st["lb_exits"] = ["pl1", "de", "fi1"]
+        eff = self.lb.lb_effective_exits(st)
+        self.assertEqual([b["name"] for b in eff],
+                         ["de", "fi1", "pl1"])
+        slots = self.lb.lb_slot_map(st)
+        self.assertEqual([s["slot"] for s in slots.values()], [1, 2, 3])
+        self.assertEqual([s["mark"] for s in slots.values()],
+                         [0x8201, 0x8202, 0x8203])
+
 
 class TestActivateWithSelection(_LbTestBase):
     def setUp(self):
@@ -1103,6 +1115,26 @@ class TestSetExits(_LbTestBase):
         self.assertTrue(self.lb.lb_set_exits(["de", "pl1"]))
         self.assertEqual(self._read_state()["lb_exits"], ["de", "pl1"])
         self.assertEqual(self.calls, [])
+
+    def test_set_unpins_outside_composition(self):
+        st = self._lb_state(n=4)          # de, fi1, nl1, pl1
+        st["lb_mode"] = True
+        st["lb_pinned"] = "nl1"
+        st["lb"] = {"pinned_fallback": True}
+        self._write_state(st)
+        self.assertTrue(self.lb.lb_set_exits(["de", "pl1"]))
+        saved = self._read_state()
+        self.assertEqual(saved["lb_pinned"], "")          # снят
+        self.assertFalse(saved["lb"]["pinned_fallback"])
+
+    def test_set_keeps_pin_inside_composition(self):
+        st = self._lb_state(n=4)
+        st["lb_mode"] = True
+        st["lb_pinned"] = "de"
+        st["lb"] = {}
+        self._write_state(st)
+        self.assertTrue(self.lb.lb_set_exits(["de", "pl1"]))
+        self.assertEqual(self._read_state()["lb_pinned"], "de")
 
 
 class TestSelectionIntegration(_LbTestBase):
