@@ -2543,11 +2543,19 @@ def generate_xray_config_chain_entry_multi() -> None:
         # приводило к EOF и «dns: exchange failed» у VPN-клиентов.
         routing_rules = _build_chain_routing_rules(effective_tag)
     else:
-        # Несколько нод — балансировщик с выбранной стратегией
+        # Несколько нод — балансировщик с выбранной стратегией.
+        # LB-состав (chain_lb_nodes): selector только по выбранным нодам
+        # (зеркало lb_exits AWG/Mieru); outbounds остаются superset'ом —
+        # невыбранные не участвуют в ротации, но не рвут конфиг.
         strategy = CHAIN_BALANCER_STRATEGY  # "roundRobin" | "leastPing" | "random"
+        _lb_sel = _lb_selection_from_state(core)
+        _sel_tags = _lb_selector_tags(outbound_tags, nodes, _lb_sel)
+        if len(_sel_tags) < len(outbound_tags):
+            info(f"LB-состав: {_lb_nodes_summary(nodes, _lb_sel)} "
+                 f"— selector: {', '.join(_sel_tags)}")
         balancers = [{
             "tag":      "chain-balancer",
-            "selector": outbound_tags,
+            "selector": _sel_tags,
             "strategy": {"type": strategy},
         }]
         # FIX: тот же helper, но с balancer=True (использует balancerTag).
@@ -2555,7 +2563,7 @@ def generate_xray_config_chain_entry_multi() -> None:
         # leastPing / leastLoad требуют observatory — без него деградирует до random
         if strategy in ("leastPing", "leastLoad"):
             observatory = {
-                "subjectSelector":       ["chain-exit-"],
+                "subjectSelector":       list(_sel_tags),
                 "probeUrl":              "https://1.1.1.1/cdn-cgi/trace",
                 "probeInterval":         "30s",
                 "enableConcurrency":     True,
@@ -2790,6 +2798,8 @@ def do_manage_nodes() -> None:
         setattr(core, "XHTTP_PERF_PRESET", XHTTP_PERF_PRESET)
         CHAIN_NODES = _nodes_from_state(state)
         setattr(core, "CHAIN_NODES", CHAIN_NODES)
+        CHAIN_LB_NODES = state.get("chain_lb_nodes") or []
+        setattr(core, "CHAIN_LB_NODES", CHAIN_LB_NODES)
         CHAIN_BALANCER_STRATEGY = state.get("chain_balancer_strategy", CHAIN_BALANCER_STRATEGY)
         setattr(core, "CHAIN_BALANCER_STRATEGY", CHAIN_BALANCER_STRATEGY)
         CHAIN_PINNED_NODE_INDEX = state.get("chain_pinned_node_index", -1)
@@ -2868,10 +2878,16 @@ def do_manage_nodes() -> None:
 
         _ds_label = _ds_labels.get(_live_ds, _live_ds or "—")
         _bal_label = _strat_labels.get(CHAIN_BALANCER_STRATEGY, CHAIN_BALANCER_STRATEGY)
+        # Состав балансировки (lb-выбор, как в AWG/Mieru каскадах)
+        _lb_sel_local = getattr(core, "CHAIN_LB_NODES", None)
+        if _lb_sel_local is None:
+            _lb_sel_local = state.get("chain_lb_nodes") or []
+        _lb_label = _lb_nodes_summary(CHAIN_NODES, _lb_sel_local)
 
         print(f"  {DIM}Стратегия исходящих (domainStrategy):{NC} {CYAN}{_ds_label}{NC}")
         if len(CHAIN_NODES) >= 2:
             print(f"  {DIM}Стратегия балансировки:{NC}                {CYAN}{_bal_label}{NC}")
+            print(f"  {DIM}Состав балансировки:{NC}                   {CYAN}{_lb_label}{NC}")
         print()
         # ────────────────────────────────────────────────────────────────────────
 
@@ -2898,6 +2914,7 @@ def do_manage_nodes() -> None:
             _box_item("P", f"Закрепить exit-ноду  [{pinned_label}]")
             if len(CHAIN_NODES) >= 2:
                 _box_item("B", f"Изменить стратегию балансировки  [{_bal_label}]")
+                _box_item("E", f"Состав нод балансировки  [{_lb_label}]")
         _box_item("O", f"Изменить стратегию исходящих соединений  [{_ds_label}]")
         _box_item("N", f"Доп. клиент для резервной Entry-ноды  {DIM}(на уже развёрнутый exit){NC}")
         _box_item_exit("0", f"Назад в главное меню")
@@ -2949,6 +2966,22 @@ def do_manage_nodes() -> None:
                 time.sleep(1)
                 continue
             removed = CHAIN_NODES.pop(idx)
+            # Гигиена LB-состава: удалённый хост выбывает из выбора;
+            # если валидных осталось <2 — состав сбрасывается на «все»
+            _lb_after = [
+                h for h in (state.get("chain_lb_nodes") or [])
+                if h.strip().lower() != (removed.get("host") or "").strip().lower()
+            ]
+            if len(_lb_after) < 2:
+                _lb_after = []
+            state["chain_lb_nodes"] = _lb_after
+            setattr(core, "CHAIN_LB_NODES", _lb_after)
+            try:
+                _st_hd = json.loads(STATE_FILE.read_text())
+                _st_hd["chain_lb_nodes"] = _lb_after
+                STATE_FILE.write_text(json.dumps(_st_hd, indent=2, ensure_ascii=False))
+            except Exception:
+                pass
             _save_chain_nodes_to_state()
             success(f"Нода {removed['host']}:{removed['port']} удалена.")
             if CHAIN_NODES:
@@ -3062,6 +3095,57 @@ def do_manage_nodes() -> None:
                     _rebuild_and_restart_xray("Xray активен — новая стратегия балансировки применена")
             else:
                 info("Изменение отменено.")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "e" and len(CHAIN_NODES) >= 2:
+            # ── Состав нод балансировки (lb-выбор, как AWG/Mieru) ───────────
+            print()
+            print()
+            _box_top(f"Состав нод балансировки")
+            _box_row(f"  {DIM}Выберите ноды, между которыми балансируется трафик.{NC}")
+            _box_row(f"  {DIM}Ноды вне состава не выбрасываются из каскада — просто{NC}")
+            _box_row(f"  {DIM}выпадают из ротации (проблемный хостер/steal/гео).{NC}")
+            _box_sep()
+            _cur_sel = set(_lb_sel_local)
+            for i, nd in enumerate(CHAIN_NODES):
+                marker = f"  {GREEN}◀ в составе{NC}" \
+                    if (nd.get("host") or "").lower() in _cur_sel else ""
+                _box_item(f"{i+1}", f"{nd['host']}:{nd['port']}  SNI={nd['sni']}{marker}")
+            _box_sep()
+            _box_row(f"  {DIM}Текущий состав: {CYAN}{_lb_label}{NC}")
+            _box_row(f"  {DIM}Закрепление [P] имеет приоритет и работает вне состава.{NC}")
+            _box_bottom()
+            v = input(f"  {CYAN}Номера через запятую/пробел [Enter = все]:{NC} ").strip()
+            if not v:
+                _new_sel: list = []
+            else:
+                _idxs = []
+                for tok in re.split(r"[,\s]+", v):
+                    if tok.isdigit() and 1 <= int(tok) <= len(CHAIN_NODES):
+                        _idxs.append(int(tok) - 1)
+                _new_sel = [CHAIN_NODES[i]["host"] for i in sorted(set(_idxs))]
+            _norm = _normalize_lb_nodes(_new_sel, CHAIN_NODES)
+            if _new_sel and len(_norm) < 2:
+                warn("В выборе меньше 2 известных нод — отклонено "
+                     "(молчаливая одиночная нода запрещена).")
+                time.sleep(2)
+                continue
+            # Пишем state (и dual-form глобаль)
+            try:
+                _st_lb = json.loads(STATE_FILE.read_text())
+                _st_lb["chain_lb_nodes"] = _norm
+                STATE_FILE.write_text(json.dumps(_st_lb, indent=2, ensure_ascii=False))
+                setattr(core, "CHAIN_LB_NODES", _norm)
+                _lb_sel_local = _norm
+            except Exception as _lb_ex:
+                warn(f"Не удалось сохранить состав: {_lb_ex}")
+                time.sleep(2)
+                continue
+            success(f"Состав балансировки: {_lb_nodes_summary(CHAIN_NODES, _norm)}")
+            if len(CHAIN_NODES) >= 2:
+                ans = input(f"{YELLOW}Пересобрать конфиг Xray и перезапустить сейчас? [y/N]:{NC} ").strip().lower()
+                if ans == 'y':
+                    _rebuild_and_restart_xray("Xray активен — состав балансировки применён")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "o":
@@ -3322,6 +3406,12 @@ def generate_chain_summary() -> None:
         "random":     "Random",
     }
     strategy_label = strategy_labels.get(CHAIN_BALANCER_STRATEGY, CHAIN_BALANCER_STRATEGY)
+
+    # Состав балансировки (lb-выбор): подпись в сводке при мульти-ноде
+    _lb_sel_sum = _lb_selection_from_state(core)
+    if len(nodes) > 1:
+        _lb_sum_txt = _lb_nodes_summary(nodes, _lb_sel_sum)
+        strategy_label = f"{strategy_label} · состав: {_lb_sum_txt}"
 
     n_label = f"{len(nodes)} нод" if len(nodes) > 1 else "1 нода"
 
@@ -3887,12 +3977,14 @@ def do_node_health_matrix() -> None:
     nodes: list[dict] = []
     pinned_idx  = -1
     install_mode = "A"
+    lb_selection: list = []
     try:
         if STATE_FILE.exists():
             st = json.loads(STATE_FILE.read_text())
             nodes        = st.get("chain_nodes", [])
             pinned_idx   = st.get("chain_pinned_node_index", -1)
             install_mode = st.get("install_mode", "A")
+            lb_selection = st.get("chain_lb_nodes") or []
     except Exception:
         pass
 
@@ -3929,6 +4021,9 @@ def do_node_health_matrix() -> None:
 
     _box_row(f"  Нод в каскаде: {CYAN}{len(nodes)}{NC}  |  "
              f"Pinned: {CYAN}{'нода #'+str(pinned_idx+1) if pinned_idx >= 0 else 'нет (балансировщик)'}{NC}")
+    if len(nodes) >= 2:
+        _box_row(f"  Состав балансировки: {CYAN}"
+                 f"{_lb_nodes_summary(nodes, lb_selection)}{NC}")
     _box_row()
     _box_info(f"Проверяем {len(nodes)} нод(у)...")
 
@@ -4047,11 +4142,18 @@ def do_node_health_matrix() -> None:
         # Роль ноды
         is_dead   = tcp_ms_v < 0
         is_pinned = (i == pinned_idx)
+        # LB-состав: нода вне состава (и не pinned) — вне ротации
+        _lb_sel_m = set(lb_selection or [])
+        _in_lb = (not _lb_sel_m or
+                  (nd.get("host") or "").strip().lower() in _lb_sel_m or
+                  is_pinned)
         if is_dead:
             dead_count += 1
             role_str = f"{RED}dead{NC}"
         elif is_pinned:
             role_str = f"{CYAN}pinned{NC}"
+        elif not _in_lb:
+            role_str = f"{YELLOW}вне состава{NC}"
         else:
             role_str = f"{DIM}balancer{NC}"
 
@@ -4091,3 +4193,214 @@ def do_node_health_matrix() -> None:
     _box_row()
     _box_bottom()
     input(f"{BLUE}Нажмите Enter...{NC}")
+
+
+# =============================================================================
+#  LB-СОСТАВ (выбор нод для балансировки — зеркало lb_exits AWG/Mieru)
+# =============================================================================
+# Режим B, мульти-нода: нативный balancer Xray-coreSelector по умолчанию
+# включает ВСЕ exit-ноды. Как и в AWG/Mieru-каскадах, это вредит, когда
+# проблемная нода (steal/деградация) остаётся в ротации «просто потому,
+# что добавлена». state['chain_lb_nodes'] — список хостов выбранных нод;
+# пусто/None = все (обратная совместимость), <2 валидных = фолбэк на все
+# (молчаливая одиночная нода запрещена). Пиннинг (P) ортогонален составу:
+# закреплённая нода работает даже вне состава (явный override юзера).
+
+_CHAIN_STATE_FILE = Path("/var/lib/xray-installer/state.json")
+_CHAIN_CONFIG_FILE = Path("/etc/xray/config.json")
+
+
+def _lb_node_host(nd: dict) -> str:
+    """Ключ ноды для выбора состава: host (нормализованный, lower)."""
+    return (nd.get("host") or "").strip().lower()
+
+
+def _normalize_lb_nodes(selection: Optional[list],
+                        chain_nodes_list: list) -> list:
+    """Хосты выбранных нод: уникальные, известные, в порядке
+    chain_nodes_list (индексы не «прыгают» при другом порядке ввода).
+    None/пусто → [] (= все). Чистая функция (тестируется без сервера)."""
+    if not selection:
+        return []
+    known = {_lb_node_host(nd) for nd in chain_nodes_list
+             if (nd.get("host") or "").strip()}
+    wanted: list = []
+    for x in selection:
+        h = (x or "").strip().lower()
+        if h and h in known and h not in wanted:
+            wanted.append(h)
+    return [_lb_node_host(nd) for nd in chain_nodes_list
+            if _lb_node_host(nd) in set(wanted)]
+
+
+def _lb_effective_nodes(chain_nodes_list: list,
+                        selection: Optional[list]) -> list:
+    """Ноды, участвующие в балансировке (выбор пары/подмножества).
+
+    Пустой выбор = все; неизвестные хосты отбрасываются; валидных <2 —
+    фолбэк на ВСЕ ноды. Чистая функция."""
+    if not selection:
+        return list(chain_nodes_list)
+    sel = set(_normalize_lb_nodes(selection, chain_nodes_list))
+    if not sel:
+        return list(chain_nodes_list)
+    eff = [nd for nd in chain_nodes_list if _lb_node_host(nd) in sel]
+    if len(eff) < 2:
+        return list(chain_nodes_list)
+    return eff
+
+
+def _lb_selector_tags(outbound_tags: list, chain_nodes_list: list,
+                      selection: Optional[list]) -> list:
+    """Теги outbound'ов для balancer.selector / observatory.subjectSelector —
+    только выбранные ноды (порядок outbound_tags сохраняется).
+    Чистая функция."""
+    eff = _lb_effective_nodes(chain_nodes_list, selection)
+    if len(eff) == len(chain_nodes_list):
+        return list(outbound_tags)
+    eff_hosts = {_lb_node_host(nd) for nd in eff}
+    return [tag for tag, nd in zip(outbound_tags, chain_nodes_list)
+            if _lb_node_host(nd) in eff_hosts]
+
+
+def _lb_nodes_summary(chain_nodes_list: list,
+                      selection: Optional[list]) -> str:
+    """Человекочитаемый состав: 'host1, host2 (2 из 4)' / 'все (4)'.
+    Чистая функция."""
+    total = len(chain_nodes_list)
+    if not selection:
+        return f"все ({total})" if total else "—"
+    eff = _lb_effective_nodes(chain_nodes_list, selection)
+    if len(eff) == total:
+        return f"все ({total})"
+    return ", ".join((nd.get("host") or "?") for nd in eff) + \
+           f" ({len(eff)} из {total})"
+
+
+def _lb_selection_from_state(core=None) -> list:
+    """Читает выбор состава: core-глобаль CHAIN_LB_NODES (dual form),
+    затем state.json ['chain_lb_nodes']. Пусто = все."""
+    sel = []
+    if core is not None:
+        sel = getattr(core, "CHAIN_LB_NODES", None) or []
+    if not sel:
+        try:
+            stf = getattr(core, "STATE_FILE", None) if core is not None \
+                else None
+            if stf is None:
+                stf = _CHAIN_STATE_FILE
+            stf = Path(stf)
+            if stf.exists():
+                sel = json.loads(stf.read_text()).get(
+                    "chain_lb_nodes") or []
+        except Exception:
+            sel = []
+    return sel if isinstance(sel, list) else []
+
+
+def set_lb_nodes(hosts: Optional[list], restart: bool = True) -> bool:
+    """API: задать состав нод балансировки VLESS-каскада (Режим B).
+
+    hosts — список хостов (или метки-хосты в любом регистре);
+    None/[] = все ноды. Пишет state.json ['chain_lb_nodes'], хирургически
+    патчит selector цепочного balancer'а (+ observatory.subjectSelector)
+    в живом /etc/xray/config.json и перезапускает xray (graceful-путь
+    smart_balancer'а: reset-failed → restart → nginx restart).
+    Работает headless (SSH/скрипты) — ядро chimera._core не требуется.
+    False — отклонено (в выборе <2 известных хостов) или сбой патча.
+    """
+    try:
+        state = json.loads(_CHAIN_STATE_FILE.read_text())
+    except Exception:
+        state = {}
+    nodes = state.get("chain_nodes") or []
+    if len(nodes) < 2:
+        print("set_lb_nodes: нод в каскаде <2 — состав не нужен")
+        return False
+    sel = _normalize_lb_nodes(hosts, nodes)
+    if hosts and len(sel) < 2:
+        print("set_lb_nodes: в выборе <2 известных хостов — отклонено")
+        return False
+    state["chain_lb_nodes"] = sel
+    try:
+        _CHAIN_STATE_FILE.write_text(
+            json.dumps(state, indent=2, ensure_ascii=False))
+    except Exception as ex:
+        print(f"set_lb_nodes: не удалось записать state.json: {ex}")
+        return False
+    print("состав LB: " + _lb_nodes_summary(nodes, sel))
+
+    # ── Хирургический патч живого конфига (без полной пересборки) ─────────
+    try:
+        cfg = json.loads(_CHAIN_CONFIG_FILE.read_text())
+        balancers = (cfg.get("routing") or {}).get("balancers") or []
+        patched = False
+        # тег → host по vnext выходных outbound'ов
+        tag_host: dict = {}
+        for ob in cfg.get("outbounds", []):
+            t = str(ob.get("tag", ""))
+            if t.startswith("chain-exit"):
+                vn = ((ob.get("settings") or {}).get("vnext") or [{}])
+                tag_host[t] = ((vn[0] or {}).get("address") or
+                               "").strip().lower()
+        sel_set = set(sel)
+        _new_selector: list = []
+        for b in balancers:
+            if b.get("tag") != "chain-balancer":
+                continue
+            keep = [t for t in (b.get("selector") or [])
+                    if not sel_set or tag_host.get(t, "") in sel_set]
+            if keep:
+                b["selector"] = keep
+                _new_selector = keep
+            patched = True
+        # observatory пробирует только выбранные (subjectSelector = selector)
+        obs = cfg.get("observatory")
+        if obs and obs.get("subjectSelector") and _new_selector:
+            obs["subjectSelector"] = list(_new_selector)
+        if patched:
+            _CHAIN_CONFIG_FILE.write_text(
+                json.dumps(cfg, indent=2, ensure_ascii=False))
+            _CHAIN_CONFIG_FILE.chmod(0o640)
+            print("selector балансировщика: " + ", ".join(_new_selector))
+        else:
+            print("set_lb_nodes: chain-balancer в конфиге не найден "
+                  "(одна нода / pinned) — сохранён только state")
+    except Exception as ex:
+        print(f"set_lb_nodes: патч конфига не удался: {ex}")
+        return False
+
+    if not restart:
+        return True
+    # graceful-рестарт как у smart_balancer (reset-failed → xray → nginx)
+    import subprocess as _sp
+    _sp.run(["systemctl", "reset-failed", "xray"],
+            capture_output=True, check=False)
+    _sp.run(["systemctl", "restart", "xray"],
+            capture_output=True, timeout=30)
+    _ok = False
+    for _ in range(5):
+        time.sleep(3)
+        r = _sp.run(["systemctl", "is-active", "xray"],
+                    capture_output=True, text=True, timeout=5)
+        if r.stdout.strip() == "active":
+            _ok = True
+            break
+    if not _ok:
+        print("set_lb_nodes: xray не поднялся после рестарта!")
+        return False
+    rn = _sp.run(["systemctl", "is-active", "nginx"],
+                 capture_output=True, text=True, timeout=5)
+    if rn.stdout.strip() == "active":
+        _sp.run(["systemctl", "restart", "nginx"],
+                capture_output=True, timeout=15)
+    # TG-уведомление (best effort, как set_lb_exits Mieru)
+    try:
+        from chimera.modules.smart_balancer import _tg_notify_event
+        _tg_notify_event(
+            "cascade_lb_change",
+            "⚖️ VLESS-каскад: состав балансировки → <b>" +
+            (_lb_nodes_summary(nodes, sel) or "все") + "</b>")
+    except Exception:
+        pass
+    return True

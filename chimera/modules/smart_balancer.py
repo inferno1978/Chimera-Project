@@ -349,7 +349,25 @@ def _sb_patch_xray_active_node(node: dict) -> bool:
         outbounds = cfg.get("outbounds", [])
         patched = False
 
-        for ob in outbounds:
+        # LB-состав: при наличии selector у chain-balancer — патчим
+        # первый outbound ИЗ СОСТАВА (иначе патч уходит в тег вне
+        # ротации и не влияет на трафик). Без balancer/состава —
+        # первый подходящий outbound (прежнее поведение).
+        _sel_order: dict = {}
+        for _b in (cfg.get("routing") or {}).get("balancers") or []:
+            if _b.get("tag") == "chain-balancer" and _b.get("selector"):
+                _sel_order = {t: k for k, t in enumerate(_b["selector"])}
+                break
+
+        def _ob_prio(ob: dict) -> tuple:
+            t = str(ob.get("tag", ""))
+            if t in _sel_order:
+                return (0, _sel_order[t])
+            return (1, 0)
+
+        _ordered = sorted(outbounds, key=_ob_prio)   # stable: без selector — исходный порядок
+
+        for ob in _ordered:
             tag = ob.get("tag", "")
             # Ищем exit outbound (chain или прямой proxy)
             if not (tag.startswith("chain-exit") or tag == "proxy" or
@@ -482,10 +500,31 @@ def _awg_guard_cron(label: str) -> bool:
 # Core: одна итерация балансировки
 # ---------------------------------------------------------------------------
 
+def _sb_lb_selection(st: dict) -> Optional[set]:
+    """set нижних хостов выбранных нод (state['chain_lb_nodes'])
+    или None (= состав не задан, все ноды). Чистая функция."""
+    sel = (st or {}).get("chain_lb_nodes") or []
+    if not isinstance(sel, list):
+        return None
+    hosts = {(h or "").strip().lower() for h in sel if (h or "").strip()}
+    return hosts or None
+
+
+def _sb_probe_plan(nodes: list, selection: Optional[set]) -> list:
+    """[(idx, node)] — план зондирования: только ноды LB-состава
+    (None = все). Индексы ПОЛНОГО списка сохраняются — active_node_idx
+    и roundrobin-порядок ссылаются на полный chain_nodes. Чистая
+    функция (тестируется без сервера)."""
+    if selection is None:
+        return list(enumerate(nodes))
+    return [(i, nd) for i, nd in enumerate(nodes)
+            if (nd.get("host") or "").strip().lower() in selection]
+
+
 def _smart_balancer_run_once() -> None:
     """
     Главная функция. Запускается из cron каждые N минут.
-    1. Зондирует все ноды.
+    1. Зондирует ноды LB-состава (chain_lb_nodes; пусто = все).
     2. Обновляет метаданные (fails, quarantine).
     3. Выбирает лучшую ноду по composite score.
     4. Если текущая нода изменилась → патчит конфиг и перезагружает xray.
@@ -509,12 +548,30 @@ def _smart_balancer_run_once() -> None:
     dead_threshold = state.get("dead_threshold",     DEAD_THRESHOLD)
     nodes_meta     = state.get("nodes_meta", {})
 
+    # ── LB-состав (зеркало lb_exits AWG/Mieru): пробируем и выбираем
+    # только ноды, выбранные в state['chain_lb_nodes']. Ноды вне состава
+    # не зондируются и не могут стать активными. Состав пуст/не задан —
+    # все ноды (обратная совместимость).
+    try:
+        _chain_st = json.loads(Path("/var/lib/xray-installer/state.json").read_text()) \
+            if Path("/var/lib/xray-installer/state.json").exists() else {}
+    except Exception:
+        _chain_st = {}
+    _lb_sel = _sb_lb_selection(_chain_st)
+    plan    = _sb_probe_plan(nodes, _lb_sel)
+    if _lb_sel is not None and not plan:
+        _sb_log("WARN: LB-состав не содержит известных нод — пробируем все")
+        plan = list(enumerate(nodes))
+    elif _lb_sel is not None:
+        _sb_log("INFO: LB-состав: " + ", ".join(
+            nd.get("host", "?") for _, nd in plan))
+
     # ------------------------------------------------------------------
     # 1. Зондирование
     # ------------------------------------------------------------------
     probe_results: list[dict] = []
 
-    for i, node in enumerate(nodes):
+    for i, node in plan:
         host = node.get("host", "")
         port = int(node.get("port", 443))
         key  = f"{host}:{port}"
