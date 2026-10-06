@@ -31,6 +31,14 @@ cascade_exits — и распределяет НОВЫЕ соединения м
     падении — временно первый живой (фаза fallback + TG-уведомление),
     при восстановлении — автоматический возврат.
 
+Состав балансировки (lb_exits, 06.10): можно выбрать ПОДМНОЖЕСТВО
+exit'ов (например пару de+pl1) — state['lb_exits'] = [имена]; пусто =
+все. Слоты нумеруются по эффективному списку (плотно, 1..N); фолбэк
+на все exit'ы, если в выборе <2 известных имён (балансировка одним
+слотом бессмысленна, а молчаливое выключение LB — риск для трафика).
+Смена состава на лету — lb_set_exits() (пересборка туннелей/диспетчера/
+routing-скрипта + чистка EMA ушедших имён).
+
 Пер-exit инфраструктура:
   марка  0x8200|slot  (0x8201..0x8210; бит 0x8000 b4-exempt в каждой —
                        критично для сосуществования с b4 на entry)
@@ -125,26 +133,65 @@ def _err(msg):   _log("ERROR", msg)
 #  STATE / СЛОТЫ
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _normalize_exit_selection(exits: Optional[list],
+                              all_exits: list) -> list:
+    """Имена выбранных exit'ов: уникальные, известные, в порядке
+    cascade_exits (слоты не «прыгают» при другом порядке ввода).
+    None/пусто → [] (= все). Чистая функция."""
+    if not exits:
+        return []
+    names = {(b.get("name") or "").strip() for b in all_exits}
+    wanted = []
+    for x in exits:
+        nm = (x or "").strip()
+        if nm and nm in names and nm not in wanted:
+            wanted.append(nm)
+    return [b.get("name") for b in all_exits
+            if (b.get("name") or "") in set(wanted)]
+
+
+def lb_effective_exits(state: Optional[dict] = None) -> list:
+    """Боксы exit'ов, участвующих в балансировке (выбор пары/подмножества).
+
+    state['lb_exits'] — имена выбранных exit'ов; пусто/None — все
+    (обратная совместимость). Неизвестные имена отбрасываются;
+    если валидных <2 — фолбэк на ВСЕ exit'ы. Чистая функция
+    (тестируется без сервера).
+    """
+    if state is None:
+        state = awgs_state_load()
+    boxes = state.get("cascade_exits") or []
+    sel = state.get("lb_exits") or []
+    if not sel:
+        return list(boxes)
+    wanted = {(b.get("name") or "") for b in boxes}
+    eff = [b for b in boxes if (b.get("name") or "") in set(sel)]
+    if len({b.get("name") for b in eff} & wanted) < 2 or len(eff) < 2:
+        return list(boxes)
+    return eff
+
+
 def lb_is_on(state: Optional[dict] = None) -> bool:
-    """LB-режим активен и есть чем балансировать (≥2 exit'ов)."""
+    """LB-режим активен и есть чем балансировать (≥2 эффективных exit'ов)."""
     if state is None:
         state = awgs_state_load()
     if not state.get("lb_mode"):
         return False
-    return len(state.get("cascade_exits") or []) >= 2
+    return len(lb_effective_exits(state)) >= 2
 
 
 def lb_slot_map(state: Optional[dict] = None) -> dict:
-    """Слот = позиция exit в cascade_exits (1-based).
+    """Слот = позиция exit в ЭФФЕКТИВНОМ списке (lb_exits-фильтр;
+    1-based, плотная перенумерация — как при удалении exit'ов).
 
     → {name: {slot, mark, table, iface, subnet, box}}. Чистая функция
     (тестируется без сервера). Слоты > AWGS_LB_MAX_SLOTS не выдаётся.
     """
     if state is None:
         state = awgs_state_load()
-    exits = state.get("cascade_exits") or []
+    exits = lb_effective_exits(state)[:AWGS_LB_MAX_SLOTS]
     out: dict = {}
-    for i, box in enumerate(exits[:AWGS_LB_MAX_SLOTS], 1):
+    for i, box in enumerate(exits, 1):
         name = box.get("name") or f"exit-{i}"
         out[name] = {
             "slot": i,
@@ -1080,31 +1127,46 @@ def _hmark_available() -> bool:
     return r.returncode == 0 or "hmark" in txt
 
 
-def lb_activate(strategy: str, pinned: str = "") -> bool:
+def lb_activate(strategy: str, pinned: str = "",
+                exits: Optional[list] = None) -> bool:
     """Вход в LB-режим. Порядок: туннели → state lb_mode → диспетчер
     → routing script. При сбое посередине — полный откат через
-    lb_deactivate() + возврат прежнего активного exit'а."""
+    lb_deactivate() + возврат прежнего активного exit'а.
+
+    exits — имена exit'ов для балансировки (пара/подмножество;
+    None/пусто = все). Явный выбор с <2 известными именами — warn
+    и фолбэк на все (lb_exits сохраняется пустым)."""
     strategy = (strategy or "").lower()
     if strategy not in AWGS_LB_STRATEGIES:
         strategy = AWGS_LB_DEFAULT_STRATEGY
     state = awgs_state_load()
-    exits = state.get("cascade_exits") or []
-    if len(exits) < 2:
+    exits_all = state.get("cascade_exits") or []
+    sel = _normalize_exit_selection(exits, exits_all)
+    if exits and len(sel) < 2:
+        _warn("LB: в выборе <2 известных exit'ов — балансирую всеми")
+        sel = []
+    eff_boxes = ([b for b in exits_all
+                  if (b.get("name") or "") in set(sel)]
+                 if sel else exits_all)
+    if len(eff_boxes) < 2:
         _warn("LB: нужно ≥2 exit-нод (сейчас "
-              f"{len(exits)}) — включать нечего")
+              f"{len(eff_boxes)}) — включать нечего")
         return False
     if strategy == "clienthash" and not _hmark_available():
         _warn("LB: ядро без xt_HMARK — clienthash недоступен, "
               "включаю random")
         strategy = "random"
-    if pinned and pinned not in {e.get("name") for e in exits}:
-        _warn(f"LB: закрепление '{pinned}' не найдено в списке exit'ов")
+    if pinned and pinned not in {(b.get("name") or "")
+                                 for b in eff_boxes}:
+        _warn(f"LB: закрепление '{pinned}' вне состава балансировки — "
+              "снято")
         pinned = ""
 
     # 1. туннели (state ещё lb off — но tunnels_apply читает lb_mode!)
     state["lb_mode"] = True
     state["lb_strategy"] = strategy
     state["lb_pinned"] = pinned
+    state["lb_exits"] = sel
     awgs_state_save(state)          # tunnels_apply увидит lb_mode
     if not lb_tunnels_apply(state):
         _warn("LB: не все туннели поднялись — откат")
@@ -1136,18 +1198,81 @@ def lb_activate(strategy: str, pinned: str = "") -> bool:
     except Exception:
         pass
 
-    _info(f"LB включён: стратегия {strategy}, туннелей {len(exits)}"
-          f"{f', закреплён {pinned}' if pinned else ''}")
+    _info(f"LB включён: стратегия {strategy}, туннелей {len(eff_boxes)}"
+          f"{f', закреплён {pinned}' if pinned else ''}"
+          + (f", состав: {', '.join(sel)}" if sel else ""))
     _notify(f"AWG-балансировка включена: <b>{strategy}</b>, "
-            f"туннелей {len(exits)}")
+            f"туннелей {len(eff_boxes)}"
+            + (f", состав: {', '.join(sel)}" if sel else ""))
     return True
+
+
+def lb_set_exits(exits: Optional[list]) -> bool:
+    """Сменить состав exit'ов балансировки (на лету при lb on).
+
+    Пересборка как lb_resync: туннели → диспетчер → routing-скрипт →
+    b4-форма; EMA/доли/пробы ушедших имён чистятся (форс-ребаланс).
+    При lb off — только запоминает выбор (применится при lb_activate).
+    False — отклонено (итоговый состав <2 известных exit'ов).
+    """
+    state = awgs_state_load()
+    all_exits = state.get("cascade_exits") or []
+    sel = _normalize_exit_selection(exits, all_exits)
+    if exits and len(sel) < 2:
+        _warn("состав: в выборе <2 известных exit'ов — отклонено")
+        return False
+    prev = state.get("lb_exits") or []
+    state["lb_exits"] = sel
+    if not state.get("lb_mode"):
+        awgs_state_save(state)
+        _info("состав LB запомнен: "
+              f"{', '.join(sel) if sel else 'все'} "
+              "(LB выключен — применится при включении)")
+        return True
+    eff = lb_effective_exits(state)
+    if len(eff) < 2:
+        state["lb_exits"] = prev          # откат выбора
+        awgs_state_save(state)
+        _warn("состав: после смены <2 exit'ов — отклонено")
+        return False
+    lb = _lb_tree(state)
+    eff_names = {(b.get("name") or "") for b in eff}
+    for key in ("metrics_ema", "probes", "tx_prev"):
+        tree = lb.get(key)
+        if isinstance(tree, dict):
+            for nm in list(tree.keys()):
+                if nm not in eff_names:
+                    tree.pop(nm, None)
+    lb["balance"] = None                # форс-ребаланс долей
+    lb["alive_prev"] = None
+    awgs_state_save(state)
+    ok = lb_tunnels_apply(state)
+    if not lb_dispatcher_install(state):
+        ok = False
+    try:
+        from .awg_cascade import awgs_cascade_routing_regen_lb
+        awgs_cascade_routing_regen_lb()
+    except Exception as e:
+        _warn(f"состав: routing script: {e}")
+    try:
+        from . import awg_b4_split as b4
+        if b4.is_active():
+            b4.nft_apply_split()
+    except Exception as e:
+        _warn(f"состав: b4 reapply: {e}")
+    names = ", ".join(sel) if sel else "все"
+    _info(f"состав LB: {names}")
+    _notify(f"AWG-балансировка: состав exit'ов — {names}")
+    return ok
 
 
 def lb_deactivate() -> bool:
     """Выход из LB. Порядок (урок deactivate): state lb_mode=False
     ПЕРВЫМ → снять диспетчер → погасить лишние туннели → вернуть
     awg1 прежнему активному exit'у (activate_exit) → каскадный
-    MARK-путь (apply_iptables) → b4-форма."""
+    MARK-путь (apply_iptables) → b4-форма.
+    lb_exits НЕ чистится — состав запоминается для следующего
+    включения (как стратегия)."""
     state = awgs_state_load()
     active = state.get("cascade_active_exit") or ""
     exits = state.get("cascade_exits") or []
@@ -1233,6 +1358,10 @@ def lb_status_info(state: Optional[dict] = None) -> dict:
         "pinned": state.get("lb_pinned") or "",
         "pinned_fallback": bool(lb.get("pinned_fallback")),
         "balance_ts": bal.get("ts"),
+        "exits_selected": [n for n in (state.get("lb_exits") or [])
+                           if n],
+        "exits_total": len(state.get("cascade_exits") or []),
+        "exits_effective": len(lb_effective_exits(state)),
         "slots": [],
     }
     for name, info in lb_slot_map(state).items():
@@ -1384,6 +1513,13 @@ def lb_menu() -> None:
         box_row(f"  Режим: {'ВКЛ' if on else 'выкл'}"
                 f"{f', стратегия {CYAN}{info['strategy']}{NC}' if on else ''}"
                 f"{f', закреплён {GREEN}{info['pinned']}{NC}' if on and info['pinned'] else ''}")
+        sel = info.get("exits_selected") or []
+        if sel:
+            box_row(f"  Состав: {CYAN}{', '.join(sel)}{NC} "
+                    f"({info.get('exits_effective', len(sel))} из "
+                    f"{info.get('exits_total', '?')})")
+        else:
+            box_row(f"  Состав: все exit'ы ({info.get('exits_total', 0)})")
         if on and info["pinned_fallback"]:
             box_row(f"  {RED}закреплённый мёртв — временно первый живой{NC}")
         if info["balance_ts"]:
@@ -1397,11 +1533,12 @@ def lb_menu() -> None:
                 box_row(f"  {alive} awg{s['slot']} {s['name']:<14} {s['endpoint']:<22}"
                         f" {share:>6}  {rtt_s}")
         box_row()
-        box_item("1", "Включить (выбор стратегии)")
+        box_item("1", "Включить (стратегия + состав нод)")
         box_item("2", "Сменить стратегию на лету")
-        box_item("3", "Закрепить exit (весь трафик → выбранный)")
-        box_item("4", "Снять закрепление")
-        box_item("5", "Выключить (вернуть failover-режим)")
+        box_item("3", "Сменить состав нод на лету (пара/подмножество)")
+        box_item("4", "Закрепить exit (весь трафик → выбранный)")
+        box_item("5", "Снять закрепление")
+        box_item("6", "Выключить (вернуть failover-режим)")
         box_item("0", "Назад")
         box_bottom()
         try:
@@ -1433,9 +1570,27 @@ def lb_menu() -> None:
                         p = input(f"{CYAN}Номер (Enter = без закрепления):{NC} ").strip()
                         if p.isdigit() and 1 <= int(p) <= len(exits):
                             pin = exits[int(p) - 1].get("name", "")
-                    if lb_activate(strat, pin):
+                    sel_exits = None
+                    all_ex = state.get("cascade_exits") or []
+                    if len(all_ex) > 2:
+                        print()
+                        for i, e in enumerate(all_ex, 1):
+                            print(f"    [{i}] {e.get('name')} — "
+                                  f"{e.get('endpoint')}")
+                        v2 = input(f"{CYAN}Балансировать между (номера "
+                                   f"через запятую, Enter = все):{NC} ").strip()
+                        if v2:
+                            nums = [int(t) for t in
+                                    re.split(r"[,\s]+", v2) if t.isdigit()]
+                            sel_exits = [all_ex[i - 1].get("name", "")
+                                         for i in nums
+                                         if 1 <= i <= len(all_ex)]
+                    if lb_activate(strat, pin, sel_exits):
                         core.success(f"Балансировка включена: {strat}"
                                      + (f", закреплён {pin}" if pin else ""))
+                        sm = sel_exits or []
+                        if sm:
+                            core.success(f"Состав: {', '.join(sm)}")
                     else:
                         core.warn("Не удалось (см. лог) — режим откачен")
             except ValueError:
@@ -1466,6 +1621,38 @@ def lb_menu() -> None:
             input(f"\n{core.BLUE}Enter…{NC}")
         elif ch == "3":
             if not on:
+                core.warn("LB выключен — состав задаётся при включении")
+                input(f"\n{core.BLUE}Enter…{NC}")
+                continue
+            all_ex = state.get("cascade_exits") or []
+            if not all_ex:
+                continue
+            cur = info.get("exits_selected") or []
+            print()
+            for i, e in enumerate(all_ex, 1):
+                mark = (" ←" if (e.get("name") or "") in cur else "")
+                print(f"  [{i}] {e.get('name')} — "
+                      f"{e.get('endpoint')}:{e.get('port')}{mark}")
+            try:
+                v = input(f"{CYAN}Номера через запятую "
+                          f"(Enter = все):{NC} ").strip()
+                if v:
+                    nums = [int(t) for t in re.split(r"[,\s]+", v)
+                            if t.isdigit()]
+                    want = [all_ex[i - 1].get("name", "") for i in nums
+                            if 1 <= i <= len(all_ex)]
+                    if lb_set_exits(want):
+                        core.success(f"Состав: {', '.join(want)}")
+                    else:
+                        core.warn("Отклонено (см. лог)")
+                else:
+                    if lb_set_exits(None):
+                        core.success("Состав: все exit'ы")
+            except ValueError:
+                pass
+            input(f"\n{core.BLUE}Enter…{NC}")
+        elif ch == "4":
+            if not on:
                 core.warn("LB выключен")
                 input(f"\n{core.BLUE}Enter…{NC}")
                 continue
@@ -1488,7 +1675,7 @@ def lb_menu() -> None:
             except ValueError:
                 pass
             input(f"\n{core.BLUE}Enter…{NC}")
-        elif ch == "4":
+        elif ch == "5":
             st = awgs_state_load()
             st["lb_pinned"] = ""
             lb = _lb_tree(st)
@@ -1498,7 +1685,7 @@ def lb_menu() -> None:
                 lb_dispatcher_install(st)
             core.info("Закрепление снято")
             input(f"\n{core.BLUE}Enter…{NC}")
-        elif ch == "5":
+        elif ch == "6":
             if not on:
                 core.warn("LB и так выключен")
                 input(f"\n{core.BLUE}Enter…{NC}")
