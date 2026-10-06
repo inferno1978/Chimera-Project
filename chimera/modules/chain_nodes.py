@@ -4358,6 +4358,33 @@ def set_lb_nodes(hosts: Optional[list], restart: bool = True) -> bool:
         obs = cfg.get("observatory")
         if obs and obs.get("subjectSelector") and _new_selector:
             obs["subjectSelector"] = list(_new_selector)
+        # Ре-синх адресов выбранных outbound'ов: chain-exit-N →
+        # nodes[N-1] из state. Снимает устаревший патч smart_balancer'а
+        # (иначе «лучшая» нода остаётся в чужом слоте и ротация состава
+        # схлопывается в одну ноду).
+        _resynced: list = []
+        for ob in cfg.get("outbounds", []):
+            t = str(ob.get("tag", ""))
+            if t not in _new_selector:
+                continue
+            m = re.fullmatch(r"chain-exit-(\d+)", t)
+            if not m:
+                continue
+            idx = int(m.group(1)) - 1
+            if not (0 <= idx < len(nodes)):
+                continue
+            vn = (ob.get("settings") or {}).get("vnext") or []
+            if not vn:
+                continue
+            want_h = nodes[idx].get("host")
+            want_p = int(nodes[idx].get("port", 443))
+            if vn[0].get("address") != want_h or vn[0].get("port") != want_p:
+                vn[0]["address"] = want_h
+                vn[0]["port"] = want_p
+                _resynced.append(t)
+        if _resynced:
+            print("ре-синх адресов (снят патч smart_balancer): "
+                  + ", ".join(_resynced))
         if patched:
             _CHAIN_CONFIG_FILE.write_text(
                 json.dumps(cfg, indent=2, ensure_ascii=False))

@@ -283,6 +283,31 @@ class TestSetLbNodes(unittest.TestCase):
                     if ob["tag"].startswith("chain-exit")]
             self.assertEqual(tags, TAGS)
 
+    def test_apply_resyncs_stale_smartbalancer_patch(self):
+        # устаревший патч smart_balancer'а в чужом слоте снимается:
+        # chain-exit-1 указывает на ru, хотя его хост по state — fi
+        with tempfile.TemporaryDirectory() as td:
+            stf, cfgf = self._setup(td)
+            cfg = json.loads(cfgf.read_text())
+            cfg["outbounds"][0]["settings"]["vnext"][0]["address"] = \
+                "fleet-c.example"
+            cfgf.write_text(json.dumps(cfg))
+            with patch.object(cn, "_CHAIN_STATE_FILE", stf), \
+                 patch.object(cn, "_CHAIN_CONFIG_FILE", cfgf):
+                self.assertTrue(cn.set_lb_nodes(
+                    ["fi.fleet-b.example", "fleet-c.example"],
+                    restart=False))
+            patched = json.loads(cfgf.read_text())
+            by_tag = {ob["tag"]: ob for ob in patched["outbounds"]}
+            # chain-exit-1 (fi) восстановлен на свой хост
+            self.assertEqual(
+                by_tag["chain-exit-1"]["settings"]["vnext"][0]["address"],
+                "fi.fleet-b.example")
+            # невыбранный chain-exit-2 НЕ тронут (остаётся как был)
+            self.assertEqual(
+                by_tag["chain-exit-2"]["settings"]["vnext"][0]["address"],
+                "fleet-b.example")
+
     def test_apply_all_clears_selection(self):
         with tempfile.TemporaryDirectory() as td:
             stf, cfgf = self._setup(td)
