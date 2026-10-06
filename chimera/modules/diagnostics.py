@@ -1211,6 +1211,28 @@ def _diag_check_error_log(counters: list) -> None:
         _diag_ok(f"Нештатных ошибок нет (проверено {len(lines)} строк)")
 
 
+# Ширина колонки хоста в топах маршрутизации (шаг 8), верхний предел.
+# Реальная ширина адаптируется под текущую ширину рамки (см. _print_top):
+# короткие хосты паддятся пробелами, длинные усекаются — счётчик, проценты
+# и прогресс-бар всегда начинаются на одной и той же колонке.
+_DIAG_HOST_COL_W = 36
+
+
+def _diag_fit_host(host: str, width: int = _DIAG_HOST_COL_W) -> str:
+    """Хост в фиксированную колонку ровно `width` видимыми символами.
+
+    Длинные усекаются посередине («префикс…суффикс»), чтобы сохранить и
+    имя поддомена, и доменную зону (googlevideo.com, nperf.net и т.п.).
+    Раньше {host:<32} паддило только короткие хосты: длинные сдвигали
+    колонки счётчика/бара, а хосты >38 симв. вылезали за рамку и
+    переносили прогресс-бар на следующую строку.
+    """
+    if len(host) <= width:
+        return f"{host:<{width}}"
+    head, tail = width - 13, 12  # head + «…»(1) + tail == width
+    return f"{host[:head]}…{host[-tail:]}"
+
+
 def _diag_top_hosts(n: int = 15) -> None:
     """
     Топ хостов из access.log по направлениям: direct и chain-exit (proxy).
@@ -1288,7 +1310,10 @@ def _diag_top_hosts(n: int = 15) -> None:
             return
         total = sum(counter.values())
         _box_row(f"  {color}{BOLD}{label}{NC}  ({total} соединений)")
-        _box_row(f"  {'─'*44}")
+        # Ширина колонки хоста под текущую рамку (min 64): строка данных
+        # «  host  count  pct%  [bar-20]» = 38 + host_w, не должна переноситься.
+        host_w = max(22, min(_DIAG_HOST_COL_W, core._BOX_W - 42))
+        _box_row(f"  {'─' * (host_w + 36)}")
         _max = counter.most_common(1)[0][1]
         for host, cnt in counter.most_common(n):
             bar_w   = 20
@@ -1299,7 +1324,7 @@ def _diag_top_hosts(n: int = 15) -> None:
             else:                    bcol = DIM + GREEN
             filled  = int(cnt / _max * bar_w)
             bar     = f"{bcol}{'▓' * filled}{NC}{DIM}{'░' * (bar_w - filled)}{NC}"
-            _box_row(f"  {host:<32} {cnt:>5}  {pct:5.1f}%  {bar}")
+            _box_row(f"  {_diag_fit_host(host, host_w)} {cnt:>5}  {pct:5.1f}%  {bar}")
         if len(counter) > n:
             _box_dim(f"  ... и ещё {len(counter) - n} хостов")
         _box_row()
