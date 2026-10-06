@@ -2230,6 +2230,26 @@ def do_full_diagnostic() -> None:
         else:
             _node_fails: list[str] = []
             _max_lat = 0
+            # LB-состав (chain_lb_nodes): подсказка, какие ноды реально
+            # участвуют в ротации balancer'а. Кейс-ловушка: нода есть в
+            # chain_nodes и HM показывает UP (full-path жив), но её НЕТ в
+            # составе — трафик к ней не пойдёт никогда, speedtest на клиенте
+            # её IP не покажет. Диагностика должна это подсвечивать явно.
+            try:
+                _lb_sel = [h.strip().lower()
+                           for h in (_state.get("chain_lb_nodes") or [])]
+                if _lb_sel and len(_lb_sel) < len(_nodes):
+                    _in_rot  = [(_nd.get("host") or "?").strip().lower()
+                                for _nd in _nodes]
+                    _out_rot = [h for h in _in_rot if h not in _lb_sel]
+                    if _out_rot:
+                        _box_info(f"  Ротация балансировщика: "
+                                  f"{', '.join(_lb_sel)}")
+                        _wiz_hint(f"ВНЕ ротации: {', '.join(_out_rot)} — на эти "
+                                  f"ноды трафик НЕ идёт (меню нод → [E] "
+                                  f"Состав балансировки)")
+            except Exception:
+                pass
             for _ni, _nd in enumerate(_nodes, 1):
                 _nh = _nd.get("host", "")
                 _np = int(_nd.get("port", 443))
@@ -2242,6 +2262,39 @@ def do_full_diagnostic() -> None:
                 _HP_W = 32
                 _hp   = f"{_nh}:{_np}"[:_HP_W]   # host:port, обрезанный
                 _idx  = f"[{_ni}/{len(_nodes)}] → "
+
+                # Chain Relay: нода с via ходит через хоп (sockopt.dialerProxy),
+                # прямой TCP к ней может быть перерезан ТСПУ — это НЕ отказ.
+                # Как и в шаге 5, проверяем full-path (врем. xray-клиент через
+                # цепочку + HTTP-проба). Прямая TCP-проба — только fallback.
+                _via_tag = (_nd.get("via") or "").strip()
+                if _via_tag:
+                    try:
+                        from chimera.modules.chain_relay import (
+                            check_via_node_full_path as _cr_fullpath,
+                            load_relay_hops as _cr_hops)
+                        _vr = _cr_fullpath(_nd, _cr_hops())
+                        if _vr.get("ok"):
+                            _vms = _vr.get("ms", 0)
+                            _max_lat = max(_max_lat, int(_vms))
+                            _vc = GREEN if _vms < 300 else YELLOW
+                            _box_info(f"  {_idx}{_hp:<{_HP_W}}  "
+                                      f"{_vc}цепь OK{NC}  "
+                                      f"{DIM}(via {_via_tag}: {_vms:.0f} мс,"
+                                      f" прямой путь может быть перерезан"
+                                      f" ТСПУ){NC}")
+                            continue
+                        _box_info(f"  {_idx}{_hp:<{_HP_W}}  "
+                                  f"{RED}цепь FAIL{NC}  "
+                                  f"{DIM}(via {_via_tag}: "
+                                  f"{str(_vr.get('detail', ''))[:60]}){NC}")
+                        _node_fails.append(f"{_nh}:{_np} (цепь via {_via_tag})")
+                        continue
+                    except ImportError:
+                        pass    # chain_relay недоступен — TCP-проба ниже
+                    except Exception:
+                        pass    # ошибка full-path — TCP-проба ниже как fallback
+
                 # Используем _diag_tcp_probe — перебор всех address family (IPv4 + IPv6),
                 # как в шаге 5. Раньше тут был socket.create_connection(timeout=8),
                 # который для dual-stack доменов на IPv4-only сервере мог отдавать
@@ -2271,7 +2324,10 @@ def do_full_diagnostic() -> None:
                 _box_warn(f"Все ноды доступны, max latency = {_max_lat} ms")
                 _res("11. Exit-ноды", _WARN, f"Высокая latency ({_max_lat} ms)")
             else:
-                _box_ok(f"Все {len(_nodes)} exit-нод(ы) доступны")
+                _via_cnt = sum(1 for _nd in _nodes if (_nd.get("via") or "").strip())
+                _chain_lbl = (f" (в т.ч. {len(_nodes) - _via_cnt} напрямую, "
+                              f"{_via_cnt} через релейные хопы)") if _via_cnt else ""
+                _box_ok(f"Все {len(_nodes)} exit-нод(ы) доступны{_chain_lbl}")
                 _res("11. Exit-ноды", _PASS)
         _box_bottom()
         _pause("Шаг 11 завершён. Enter — продолжить...")

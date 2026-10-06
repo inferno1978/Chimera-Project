@@ -481,5 +481,113 @@ class TestHealthMonitorVia(unittest.TestCase):
         self.assertEqual(calls, ["ee.example.com", "tcp:de.example.com"])
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  check_via_node_full_path: want_speed_mb (скорость через цепочку)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestFullPathSpeed(unittest.TestCase):
+    """want_speed_mb>0 → качает файл ЧЕРЕЗ socks-цепочку и возвращает
+    speed_mbps; want_speed_mb=0 (дефолт) → скорость не меряется (обратная
+    совместимость HM/шага 5)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self.hops = [_mk_hop("hop-a")]
+        self.nd = _mk_node(via="hop-a")
+
+    def _run_check(self, calls, **kw):
+        """Запуск check_via_node_full_path с полностью замоканным окружением."""
+        import chimera.modules.chain_relay as cr
+
+        class _FakeProc:
+            def poll(self):
+                return None
+            def terminate(self):
+                pass
+            def wait(self, timeout=None):
+                pass
+            def kill(self):
+                pass
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if "generate_204" in " ".join(map(str, cmd)):
+                # liveness-проба: HTTP 204, 0.25 c
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="204 0.25",
+                                             stderr="")
+            if "api.ipify.org" in " ".join(map(str, cmd)):
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="203.0.113.77\n",
+                                             stderr="")
+            if "speed.cloudflare.com" in " ".join(map(str, cmd)):
+                # download 10 МБ за 2 c = 5242880 Б/с = 41.9 Мбит/с
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="10485760 2.0 5242880.0", stderr="")
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        with patch.object(cr, "_find_xray_bin", return_value="/usr/local/bin/xray"), \
+             patch.object(cr.subprocess, "Popen", return_value=_FakeProc()), \
+             patch.object(cr.subprocess, "run", side_effect=fake_run), \
+             patch.object(cr.tempfile, "mkstemp",
+                          return_value=(99, "/tmp/relaycheck_test.json")), \
+             patch("os.write", lambda *a, **kw: None), \
+             patch("os.close", lambda *a, **kw: None), \
+             patch.object(Path, "unlink", lambda self, **kw: None):
+            return cr.check_via_node_full_path(self.nd, self.hops, **kw)
+
+    def test_speed_measured_when_requested(self):
+        calls = []
+        res = self._run_check(calls, want_ip=True, want_speed_mb=10)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["exit_ip"], "203.0.113.77")
+        self.assertAlmostEqual(res["speed_mbps"], 41.9, delta=0.2)
+        # среди curl-вызовов есть download через socks-цепочку
+        self.assertTrue(any("speed.cloudflare.com" in " ".join(map(str, c))
+                            for c in calls))
+
+    def test_no_speed_probe_by_default(self):
+        calls = []
+        res = self._run_check(calls)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["speed_mbps"], 0.0)
+        # download-проба не выполнялась
+        self.assertFalse(any("speed.cloudflare.com" in " ".join(map(str, c))
+                             for c in calls))
+
+    def test_chain_dead_no_speed(self):
+        import chimera.modules.chain_relay as cr
+
+        class _FakeProc:
+            def poll(self):
+                return None
+            def terminate(self):
+                pass
+            def wait(self, timeout=None):
+                pass
+            def kill(self):
+                pass
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            return types.SimpleNamespace(returncode=0, stdout="000 20.0",
+                                         stderr="")
+
+        with patch.object(cr, "_find_xray_bin", return_value="/usr/local/bin/xray"), \
+             patch.object(cr.subprocess, "Popen", return_value=_FakeProc()), \
+             patch.object(cr.subprocess, "run", side_effect=fake_run), \
+             patch.object(cr.tempfile, "mkstemp",
+                          return_value=(99, "/tmp/relaycheck_test.json")), \
+             patch("os.write", lambda *a, **kw: None), \
+             patch("os.close", lambda *a, **kw: None), \
+             patch.object(Path, "unlink", lambda self, **kw: None):
+            res = cr.check_via_node_full_path(self.nd, self.hops,
+                                              want_ip=True, want_speed_mb=10)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["speed_mbps"], 0.0)
+        self.assertEqual(res["exit_ip"], "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
