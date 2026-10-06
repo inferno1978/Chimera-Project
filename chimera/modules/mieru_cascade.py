@@ -35,6 +35,11 @@ MULTI-EXIT:
   • Несколько Exit-нод: по паре (redsocks + mieru-hop) на каждую.
   • Балансировка — iptables statistic (round-robin по соединениям),
     стратегия 'prio' — active-backup (только первый живой Exit).
+  • СОСТАВ БАЛАНСИРОВКИ (lb_exits, порт awg_cascade_lb 06.10):
+    балансировать между ВЫБРАННЫМИ Exit-ами (пара/тройка/подмно-
+    жество — из всего списка); st['lb_exits'] = [ids], пусто = все;
+    <2 валидных → фолбэк на все. Меню [E] / set_lb_exits(ids|метки).
+    Пиннинг ортогонален: закреплённый вне состава — работает.
   • Health-timer (*/1 мин): TCP-проба + E2E `mieru test` на каждый Exit;
     падение (2 подряд) исключает Exit из правил, восстановление возвращает.
   • Сериализация применений: flock (TUI-хендлеры ↔ health-тик) — гонка
@@ -262,6 +267,7 @@ def state_load() -> dict:
         "strict_udp_block": False, # (entry)
         "exits": [],               # (entry)
         "exit": {},                # (exit-нода)
+        "lb_exits": [],            # ids Exit-ов для балансировки; [] = все (entry)
     })
 
 
@@ -952,6 +958,74 @@ def _effective_pinned(st: dict, act: list) -> tuple:
     return None, pid         # живых нет — правила трогать нечем
 
 
+# ── СОСТАВ БАЛАНСИРОВКИ (lb_exits, порт awg_cascade_lb 06.10) ────────────────
+#  Балансировка между ВЫБРАННЫМИ Exit-ами (пара/подмножество/все):
+#  st['lb_exits'] = [id Exit-ов]; пусто = все (обратная совместимость).
+#  Валидных (известных и включённых) <2 → фолбэк на все: одиночный
+#  Exit молча — риск для трафика (зеркало AWG: «молчаливое выключение
+#  LB запрещено»). Пиннинг (pinned_exit) ОРТОГОНАЛЕН составу: закреплён
+#  вне состава — работает (явный override юзера, стратегии всё равно
+#  не действуют); резолв пина — по полному активному списку.
+
+def _normalize_lb_selection(exits: Optional[list],
+                            all_exits: list) -> list:
+    """IDs выбранных Exit-ов: уникальные, известные, в порядке st['exits']
+    (правила не «прыгают» при другом порядке ввода). Токен = id Exit-а
+    ИЛИ метка (метка неоднозначна — токен игнорируется). None/пусто → []
+    (= все). Чистая функция (тестируется без сервера)."""
+    if not exits:
+        return []
+    by_id = {e.get("id") for e in all_exits}
+    label_ids: dict = {}
+    for e in all_exits:
+        lbl = e.get("label")
+        if lbl:
+            if lbl in label_ids:            # дубль метки — неоднозначно
+                label_ids[lbl] = None
+            else:
+                label_ids[lbl] = e.get("id")
+    wanted: list = []
+    for x in exits:
+        tok = (x or "").strip() if isinstance(x, str) else x
+        if not tok:
+            continue
+        eid = tok if tok in by_id else label_ids.get(tok)
+        if eid and eid not in wanted:
+            wanted.append(eid)
+    return [e["id"] for e in all_exits if e.get("id") in set(wanted)]
+
+
+def _lb_effective_exits(st: dict, act: Optional[list] = None) -> list:
+    """Активные Exit-ы, между которыми балансируем (lb_exits-фильтр).
+
+    act — активные Exit-ы (по умолчанию _active_exits: enabled+healthy);
+    выбор хранится в st['lb_exits'] (ids). Пусто = все; валидных
+    (известных И включённых) <2 → фолбэк на все. Выбранный, но
+    недоступный (healthy=False) просто выпадает из ротации — это
+    естественная деградация, как и до выбора состава. Чистая функция."""
+    if act is None:
+        act = _active_exits(st)
+    sel = _normalize_lb_selection(st.get("lb_exits"), st.get("exits", []))
+    if not sel:
+        return list(act)
+    enabled_ids = {e["id"] for e in st.get("exits", [])
+                   if e.get("enabled", True)}
+    if sum(1 for x in sel if x in enabled_ids) < 2:
+        return list(act)       # молчаливая одиночная нода запрещена
+    return [e for e in act if e.get("id") in set(sel)]
+
+
+def _lb_exits_summary(st: dict) -> str:
+    """Строка состава для меню/статуса: 'de, pl1 (2 из 4)' / 'все (4)'."""
+    exits = st.get("exits", [])
+    sel = _normalize_lb_selection(st.get("lb_exits"), exits)
+    if not sel:
+        return f"все ({len(exits)})"
+    labels = {e["id"]: (e.get("label") or e["id"]) for e in exits}
+    eff = len(_lb_effective_exits(st))
+    return f"{', '.join(labels[i] for i in sel if i in labels)} ({eff} из {len(exits)})"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  МЕТРИКИ ВЕСОВЫХ СТРАТЕГИЙ (порт smart_balancer VLESS, 01.10)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1185,8 +1259,12 @@ def _rule_specs(st: dict, bal: Optional[dict] = None) -> list:
                          "-j", "RETURN"],
         })
 
-    act = _active_exits(st)
-    pin_eff, _fb = _effective_pinned(st, act)
+    act_all = _active_exits(st)
+    # пин ортогонален составу: резолв закреплённого — по полному
+    # активному списку (закреплён вне состава — работает, явный override)
+    pin_eff, _fb = _effective_pinned(st, act_all)
+    # стратегии балансировки — только ВЫБРАННЫЕ Exit-ы (lb_exits)
+    act = _lb_effective_exits(st, act_all)
     strategy = (st.get("strategy") or "rr").lower()
     if strategy not in BALANCE_STRATEGIES:
         strategy = "rr"
@@ -1381,7 +1459,7 @@ def _rules_apply(st: dict) -> bool:
        4) запомнить применённое в st['applied_rules'] и персистить
           (survive ребута: rules.v4 вернёт ровно этот набор, а
           routing.sh и health-тик будут знать точный набор для -D)."""
-    act = _active_exits(st)
+    act = _lb_effective_exits(st)   # доли/пробы — только выбранные
     pinned_now = bool(st.get("pinned_exit"))
     bal = (_balance_shares(st, act)
            if (st.get("strategy") or "").lower() in METRIC_STRATEGIES
@@ -2273,6 +2351,12 @@ def _manage_exits(st: dict) -> None:
             raw = proto_ask("  № для удаления: ", c=True).strip()
             if raw.isdigit() and 1 <= int(raw) <= len(exits):
                 victim = exits.pop(int(raw) - 1)
+                # гигиена состава: id удалённого не должен оставаться
+                # в lb_exits (иначе нормализатор молча отфильтрует,
+                # а state — мусорить)
+                if victim["id"] in (st.get("lb_exits") or []):
+                    st["lb_exits"] = [x for x in st["lb_exits"]
+                                       if x != victim["id"]]
                 _release_ports_of_exit(victim)
                 _run(["systemctl", "disable", "--now",
                       f"mieru-hop@{victim['id']}"], capture=True)
@@ -2672,7 +2756,7 @@ def _health_tick_locked(verbose: bool = False) -> dict:
     if ((st.get("strategy") or "").lower() in METRIC_STRATEGIES
             and not st.get("pinned_exit")):
         try:
-            bal = _balance_shares(st, _active_exits(st))
+            bal = _balance_shares(st, _lb_effective_exits(st))
             result["balance"] = bal
             fresh = _rule_specs(st, bal)
             # Гистерезис + cooldown: доли в пределах
@@ -2880,6 +2964,7 @@ def _show_status(st: dict) -> None:
     if st.get("role") == "entry":
         m._box_kv("Матчинг:", str(st.get("matcher")))
         m._box_kv("Стратегия:", str(st.get("strategy")))
+        m._box_kv("Состав LB:", _lb_exits_summary(st))
         if st.get("pinned_exit"):
             labels = {e["id"]: (e.get("label") or e["id"])
                       for e in st.get("exits", [])}
@@ -2984,6 +3069,107 @@ def get_backup_paths() -> list:
 #  ГЛАВНОЕ МЕНЮ
 # ══════════════════════════════════════════════════════════════════════════════
 
+def set_lb_exits(exits: Optional[list]) -> bool:
+    """Сменить состав Exit-ов для балансировки (меню [E] / API).
+
+    Порт awg_cascade_lb.lb_set_exits (06.10): exits — ids ИЛИ метки
+    Exit-ов (пара/подмножество/сколько угодно — из всего флота);
+    None/пусто = все. На лету (role=entry, Exit-ы есть): пересборка
+    правил + routing.sh; EMA-история и доли ушедших чистятся (форс-
+    ребаланс). Явный выбор с <2 известных включённых — отклонено
+    (False), прежний состав сохраняется. Пиннинг не трогаем: закреплённый
+    Exit вне состава продолжает работать (override юзера)."""
+    m = _mieru()
+    with _cascade_lock(wait_hint=True):
+        fresh = state_load()              # ребаза (фикс гонки 01.10)
+        if fresh.get("role") != "entry":
+            print("  Состав балансировки имеет смысл только для Entry ([1]).")
+            return False
+        all_exits = fresh.get("exits", [])
+        sel = _normalize_lb_selection(exits, all_exits)
+        enabled_ids = {e["id"] for e in all_exits
+                       if e.get("enabled", True)}
+        if exits and sum(1 for x in sel if x in enabled_ids) < 2:
+            print("  В выборе <2 известных включённых Exit-ов — отклонено.")
+            return False
+        fresh["lb_exits"] = sel
+        # EMA ушедших — в мусор; доли — сброс (форс-ребаланс тиком)
+        eff = _lb_effective_exits(fresh)
+        eff_labels = {e.get("label") or e["id"] for e in eff}
+        ema = fresh.get("metrics_ema")
+        if isinstance(ema, dict):
+            for k in list(ema):
+                if k not in eff_labels:
+                    ema.pop(k, None)
+        fresh["balance"] = None
+        if all_exits:
+            ok = _rules_apply(fresh)
+            _ROUTING_SH.write_text(_routing_sh_text(fresh))
+        else:
+            state_save(fresh)
+            ok = True
+    labels = {e["id"]: (e.get("label") or e["id"]) for e in all_exits}
+    names = ", ".join(labels[i] for i in sel) if sel else "все"
+    print(f"  {m.GREEN}✓{m.NC} состав балансировки: {names}")
+    try:      # TG-уведомление — best effort (монитор шлёт сам)
+        from chimera.modules.mieru_cascade_monitor import _tg_send
+        _tg_send(f"Mieru-каскад: состав балансировки Exit-ов — {names}",
+                 "cascade_lb_change")
+    except Exception:
+        pass
+    return ok
+
+
+def _change_lb_exits(st: dict) -> None:
+    """[E] Состав балансировки Exit-ов (пара/подмножество из флота)."""
+    m = _mieru()
+    if st.get("role") != "entry":
+        print("  Состав балансировки имеет смысл только для Entry ([1]).")
+        m._pause()
+        return
+    enabled = [e for e in st.get("exits", []) if e.get("enabled", True)]
+    if len(enabled) < 2:
+        print("  Меньше двух включённых Exit-ов — состав выбирать нечего.")
+        m._pause()
+        return
+    cur = set(_normalize_lb_selection(st.get("lb_exits"),
+                                      st.get("exits", [])))
+    m._box_top("🧮  Состав балансировки Exit-ов")
+    m._box_row()
+    m._box_info("Балансировка ТОЛЬКО между выбранными Exit-ами (пара,")
+    m._box_info("тройка, сколько угодно — из всего списка). Enter = все.")
+    if st.get("pinned_exit"):
+        m._box_row()
+        m._box_warn("закреплён Exit — состав не действует до снятия [P]")
+    m._box_row()
+    for i, e in enumerate(enabled, 1):
+        mark = (f" {m.GREEN}◀ в составе{m.NC}"
+                if e["id"] in cur else "")
+        m._box_item(str(i),
+                    f"{e.get('label')} → {e.get('host')}:{e.get('port')}{mark}")
+    m._box_row()
+    m._box_bot(); print()
+    raw = proto_ask(f"  {m.CYAN}Номера через запятую [Enter=все]: {m.NC}",
+                    default="", c=True).strip()
+    if not raw:
+        if not st.get("lb_exits"):
+            print("  Состав и так: все Exit-ы.")
+            m._pause()
+            return
+        set_lb_exits(None)
+        m._pause()
+        return
+    nums = [int(t) for t in re.split(r"[,\s]+", raw) if t.isdigit()]
+    if not nums:
+        print("  Ничего не выбрано — состав не изменён.")
+        m._pause()
+        return
+    want = [enabled[i - 1]["id"] for i in nums
+            if 1 <= i <= len(enabled)]
+    set_lb_exits(want)
+    m._pause()
+
+
 def _change_strategy(st: dict) -> None:
     """Переключение стратегии балансировки (меню каскада → [S]).
     Меняет только правила: конфиги инстансов и сервисы от стратегии
@@ -3006,6 +3192,8 @@ def _change_strategy(st: dict) -> None:
             f"{k} {v:.0%}" for k, v in
             sorted(bal["shares"].items(), key=lambda kv: -kv[1]))
         m._box_info(f"доли последнего расчёта: {m.CYAN}{shares}{m.NC}")
+    m._box_info(f"состав балансировки: {m.CYAN}{_lb_exits_summary(st)}{m.NC}"
+                f" {m.DIM}— смена: [E]{m.NC}")
     m._box_row()
     m._box_bot(); print()
     raw = proto_ask(f"  {m.CYAN}Выбор [Enter=текущая]: {m.NC}",
@@ -3169,6 +3357,8 @@ def do_mieru_cascade_menu() -> None:
                        st["pinned_exit"])
             pin_lbl = f" {m.DIM}[{_pl}]{m.NC}"
         m._box_item("P", f"📌  Закрепить Exit-ноду{pin_lbl}")
+        m._box_item("E", f"🧮  Состав балансировки "
+                         f"{m.DIM}[{_lb_exits_summary(st)}]{m.NC}")
         m._box_item("5", "🏥  Health check + ребаланс")
         m._box_item("6", "📊  Статус")
         m._box_item("L", "🔗  Ссылки для клиентов (Karing/Nekobox/JSON/QR)")
@@ -3208,6 +3398,8 @@ def do_mieru_cascade_menu() -> None:
             _change_strategy(st)
         elif ch == "p":
             _change_pin(st)
+        elif ch == "e":
+            _change_lb_exits(st)
         elif ch == "5":
             r = health_tick(verbose=True)
             if not r.get("checked"):

@@ -1211,7 +1211,8 @@ def lb_set_exits(exits: Optional[list]) -> bool:
     """Сменить состав exit'ов балансировки (на лету при lb on).
 
     Пересборка как lb_resync: туннели → диспетчер → routing-скрипт →
-    b4-форма; EMA/доли/пробы ушедших имён чистятся (форс-ребаланс).
+    b4-форма; EMA/доли/пробы ушедших имён чистятся (форс-ребаланс);
+    закрепление вне нового состава снимается (как в lb_activate).
     При lb off — только запоминает выбор (применится при lb_activate).
     False — отклонено (итоговый состав <2 известных exit'ов).
     """
@@ -1237,6 +1238,13 @@ def lb_set_exits(exits: Optional[list]) -> bool:
         return False
     lb = _lb_tree(state)
     eff_names = {(b.get("name") or "") for b in eff}
+    # закрепление вне нового состава — снять (зеркало lb_activate:
+    # пин на exit без туннеля в новом составе бессмыслен)
+    if state.get("lb_pinned") and state["lb_pinned"] not in eff_names:
+        _warn(f"состав: закреплённый '{state['lb_pinned']}' вне состава — "
+              "закрепление снято")
+        state["lb_pinned"] = ""
+        lb["pinned_fallback"] = False
     for key in ("metrics_ema", "probes", "tx_prev"):
         tree = lb.get(key)
         if isinstance(tree, dict):
