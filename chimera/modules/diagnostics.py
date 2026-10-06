@@ -869,6 +869,56 @@ def _diag_check_routing_live(cfg: dict, counters: list) -> None:
             port = vn.get("port", 443)
             if not host:
                 continue
+
+            # Chain Relay: outbound с sockopt.dialerProxy ходит через хоп —
+            # прямой TCP к такой ноде может быть перерезан ТСПУ и это НЕ
+            # признак отказа. Проверяем full-path (врем. xray-клиент через
+            # цепочку + HTTP-проба), TCP-проба — только как fallback.
+            _dp = ((ob.get("streamSettings", {}) or {})
+                   .get("sockopt", {}) or {}).get("dialerProxy", "")
+            if _dp:
+                try:
+                    from chimera.modules.chain_relay import (
+                        check_via_node_full_path, load_relay_hops)
+                    _vn_user = (vn.get("users") or [{}])[0]
+                    _rs = (ob.get("streamSettings", {}) or {}).get(
+                        "realitySettings", {}) or {}
+                    _ss = ob.get("streamSettings", {}) or {}
+                    _proto = ("xhttp_reality"
+                              if (_ss.get("network") == "xhttp"
+                                  and _ss.get("security") == "reality")
+                              else "reality" if _ss.get("security") == "reality"
+                              else "xhttp")
+                    _nd = {
+                        "host": host, "port": port,
+                        "uuid": _vn_user.get("id", ""),
+                        "pubkey": _rs.get("publicKey", ""),
+                        "shortid": (_rs.get("shortIds") or [""])[0]
+                        if isinstance(_rs.get("shortIds"), list)
+                        else _rs.get("shortId", ""),
+                        "sni": (_rs.get("serverNames") or [host])[0]
+                        if isinstance(_rs.get("serverNames"), list)
+                        else (host or ""),
+                        "fp": _rs.get("fingerprint", "chrome"),
+                        "flow": _vn_user.get("flow", ""),
+                        "proto": _proto,
+                        "via": _dp,
+                    }
+                    _r = check_via_node_full_path(_nd, load_relay_hops())
+                    if _r.get("ok"):
+                        _diag_chk(counters, True,
+                                  f"Exit-нода [{tag}] {host}:{port} — full-path OK "
+                                  f"через хоп «{_dp}» ({_r.get('ms', 0):.0f} мс)",
+                                  "")
+                    else:
+                        _diag_chk(counters, False,
+                                  "",
+                                  f"Exit-нода [{tag}] {host}:{port} — цепочка через "
+                                  f"хоп «{_dp}» НЕ РАБОТАЕТ ({_r.get('detail', '')[:80]})")
+                    continue
+                except Exception:
+                    pass    # fallback на обычную TCP-пробу ниже
+
             alive, detail, _lat = _diag_tcp_probe(host, port, timeout=10)
             if alive:
                 _diag_chk(counters, True,

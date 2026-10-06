@@ -2255,9 +2255,24 @@ def generate_xray_config_chain_entry_multi() -> None:
 
     query_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
 
+    # ── Chain Relay (релейные хопы): exit-нода с via = «chain_nodes[i].via»
+    #    соединяется к хопу через другой outbound (sockopt.dialerProxy).
+    #    Без хопов / без via — конфиг байт-в-байт как раньше (совместимость).
+    relay_hops: list[dict] = []
+    try:
+        from chimera.modules.chain_relay import (
+            load_relay_hops as _cr_load_hops,
+            hop_via_tag_for as _cr_via_tag,
+            collect_hop_outbounds as _cr_collect,
+        )
+        relay_hops = _cr_load_hops()
+    except Exception:
+        relay_hops = []
+
     # Строим список outbound-ов для exit-нод
     outbounds_exit = []
     outbound_tags  = []
+    via_count = 0
     for i, nd in enumerate(nodes):
         tag = f"chain-exit-{i+1}"
         outbound_tags.append(tag)
@@ -2374,7 +2389,28 @@ def generate_xray_config_chain_entry_multi() -> None:
                     },
                 },
             }
+        # Chain Relay: exit-нода с via ходит через хоп (sockopt.dialerProxy)
+        _via_tag = None
+        if relay_hops:
+            try:
+                _via_tag = _cr_via_tag(nd, relay_hops)
+            except Exception:
+                _via_tag = None
+        if _via_tag:
+            out["streamSettings"].setdefault("sockopt", {})["dialerProxy"] = _via_tag
+            via_count += 1
         outbounds_exit.append(out)
+
+    # Hop-outbound-и (только если хотя бы один exit использует via)
+    hop_outbounds: list[dict] = []
+    if relay_hops and via_count:
+        try:
+            hop_outbounds = _cr_collect(nodes, relay_hops)
+        except Exception:
+            hop_outbounds = []
+        if hop_outbounds:
+            info(f"Chain Relay: {via_count} exit-нод(ы) через хопи "
+                 f"({', '.join(ob['tag'] for ob in hop_outbounds)}) — dialerProxy")
 
     # Inbound от клиента — зависит от PROTOCOL_MODE
     # ── BUGFIX: clients — из ЕДИНОГО источника юзеров ──────────
@@ -2586,7 +2622,7 @@ def generate_xray_config_chain_entry_multi() -> None:
             "disableFallbackIfMatch": True,
         },
         "inbounds": [client_inbound],
-        "outbounds": outbounds_exit + [
+        "outbounds": hop_outbounds + outbounds_exit + [
             {"protocol": "blackhole", "tag": "BLOCK"},
             # ИСПРАВЛЕНИЕ: direct outbound нужен ВСЕГДА — не только при AWG.
             # Правило 127.0.0.1/8 → direct (выше в routing) требует этого outbound,
@@ -2896,8 +2932,10 @@ def do_manage_nodes() -> None:
         else:
             print(f"  Текущие exit-ноды ({len(CHAIN_NODES)}/{MAX_CHAIN_NODES}):")
             for i, nd in enumerate(CHAIN_NODES):
+                _via = nd.get("via", "") or ""
+                _via_s = f"  {DIM}via:{_via}{NC}" if _via else ""
                 print(f"    {CYAN}[{i+1}]{NC} {nd['host']}:{nd['port']}  "
-                      f"SNI={nd['sni']}  FP={nd['fp']}")
+                      f"SNI={nd['sni']}  FP={nd['fp']}{_via_s}")
         print()
         _box_top("Действия")
         _box_item("A", f"Добавить ноду")
@@ -2917,6 +2955,13 @@ def do_manage_nodes() -> None:
                 _box_item("E", f"Состав нод балансировки  [{_lb_label}]")
         _box_item("O", f"Изменить стратегию исходящих соединений  [{_ds_label}]")
         _box_item("N", f"Доп. клиент для резервной Entry-ноды  {DIM}(на уже развёрнутый exit){NC}")
+        try:
+            from chimera.modules.chain_relay import load_relay_hops as _cr_lh
+            _cr_n = len(_cr_lh())
+        except Exception:
+            _cr_n = 0
+        _cr_lbl = f"  [{_cr_n} хоп(ов)]" if _cr_n else ""
+        _box_item("H", f"⛓ Релейные хопы (многохоповый каскад){_cr_lbl}")
         _box_item_exit("0", f"Назад в главное меню")
         _box_bottom()
 
@@ -2928,6 +2973,23 @@ def do_manage_nodes() -> None:
 
         if ch == "0" or ch == "":
             break
+
+        elif ch == "h":
+            # Chain Relay: релейные хопы (многохоповый каскад, dialerProxy)
+            try:
+                from chimera.modules.chain_relay import do_chain_relay_menu
+                do_chain_relay_menu()
+            except Exception as _cr_ex:
+                warn(f"Chain Relay: {_cr_ex}")
+            # relay-меню могло изменить chain_nodes/via в state.json —
+            # перечитываем, чтобы список нод выше был актуальным
+            try:
+                _st = json.loads(STATE_FILE.read_text())
+                CHAIN_NODES = _nodes_from_state(_st)
+                setattr(core, "CHAIN_NODES", CHAIN_NODES)
+            except Exception:
+                pass
+            continue
 
         elif ch == "a":
             if len(CHAIN_NODES) >= MAX_CHAIN_NODES:
