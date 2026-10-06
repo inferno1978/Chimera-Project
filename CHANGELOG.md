@@ -1,3 +1,53 @@
+# Changelog new entry — Chain Relay: релейные хопы, многохоповый каскад и full-path мониторинг (06 Oct 2026)
+
+## FEAT(chain_relay): релейные хопы — многохоповый каскад через Xray sockopt.dialerProxy + FAQ — 6 октября 2026
+
+**Контекст:** живой кейс прод-каскада (обезличен): exit-нода недостижима
+с одной entry напрямую — ТСПУ дропает TCP к её IP целиком на транзите
+(tcpdump: 0 SYN ни на один порт при живом ICMP), с других entry нода
+работает. Смена порта бесполезна, IPv6 нет. Нода при этом ценная
+(локация, чистый IP). Решение — объезд через посредника нативным
+механизмом Xray `sockopt.dialerProxy` (живой PoC: оба хопа PASS,
+exit-IP подтверждён, тёплые запросы 0.4–0.6 с).
+
+**Новый модуль `chimera/modules/chain_relay.py`:**
+- state.json: `relay_hops[]` — полностью кастомизируемый хоп (host/
+  port/uuid/pbk/sid/sni/fp/flow/proto/path/xhttp_mode/via/comment/
+  enabled; proto: reality|xhttp|xhttp_reality) + `chain_nodes[i].via`;
+- валидация: дубли тегов, reserved-теги, формат UUID, self-via, циклы,
+  битые ссылки, обязательные REALITY-поля;
+- N-hop рекурсия: хоп может иметь свой via (цепочки произвольной
+  глубины), hop-билдеры зеркалят формы exit-outbound-ов каскада;
+- full-path чекер `check_via_node_full_path`: временный xray-клиент
+  (socks) через цепочку hop→exit + HTTP-проба + exit-IP;
+- меню (Режим B → E → H): добавить хоп (vless-ссылка / из exit-ноды /
+  вручную), изменить поля, вкл-выкл, удалить, назначить via,
+  проверить цепочки;
+- zero-touch: на хопе-посреднике не устанавливается ничего — entry
+  для него обычный клиент, используется существующий инбаунд.
+
+**Интеграция:**
+- `chain_nodes.generate_xray_config_chain_entry_multi`: dialerProxy на
+  exit-outbound с via + hop-outbound-и перед exit-ами; **без хопов
+  конфиг байт-в-байт как раньше** (регресс-тест);
+- `chain_nodes.do_manage_nodes`: пункт [H] со счётчиком хопов, via в
+  списке нод, перечитка state;
+- `node_health_monitor`: via-ноды проверяются full-path (прямой TCP к
+  ним перерезан — не признак отказа), fallback на TCP;
+- `diagnostics._diag_check_routing_live`: via-aware full-path.
+
+**Документация:** `docs/faq/CHAIN_RELAY_FAQ.md` — подробный FAQ для
+неопытных пользователей: происхождение фичи (обезличенный кейс),
+объяснение на пальцах, роли нод и где что настраивается, пошаговая
+настройка, безопасность, N-hop, откат, разбор ошибок и Q&A (25 вопросов).
+
+**Тесты:** `tests/test_chain_relay.py` — 32 теста (валидация,
+разрешение via, билдеры 3 протоколов, collect/dedup/рекурсия, конфиг
+чекера, интеграция генерации с via и без, HM full-path). Полный сьют
+на момент коммита: 6993 passed, 3 pre-existing failures (не из этой
+ветки). Служебные примеры/фикстуры санифицированы (documentation-
+значения), прод-идентификаторы в репо не попадают.
+
 # Changelog new entry — Состав балансировки (chain_lb_nodes) для VLESS-каскада + сводка: три балансировщика и CPU Steal-монитор — 6 октября 2026
 
 ## FEAT(chain-nodes): балансировка между ВЫБРАННЫМИ exit-нодами VLESS-каскада (Режим B) — меню [E], set_lb_nodes(), smart_balancer уважает состав
