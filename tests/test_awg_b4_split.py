@@ -181,7 +181,8 @@ class TestQhSuffixMatch(unittest.TestCase):
 class TestIpOk(unittest.TestCase):
     def test_filters(self):
         from chimera.modules.awg_b4_split import _ip_ok
-        self.assertTrue(_ip_ok("203.0.113.101"))
+        # 142.250.185.78 — публичный пример (TEST-NET 203.0.113.x — зарезервирован)
+        self.assertTrue(_ip_ok("142.250.185.78"))
         self.assertFalse(_ip_ok("0.0.0.0"))
         self.assertFalse(_ip_ok("127.0.0.1"))
         self.assertFalse(_ip_ok("192.168.1.1"))
