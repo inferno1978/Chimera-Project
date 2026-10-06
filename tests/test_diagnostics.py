@@ -397,5 +397,110 @@ class TestDiagTcpProbe(unittest.TestCase):
         self.assertEqual(connected_to[0], "5.6.7.8")
 
 
+class TestDiagTopHostsAlignment(unittest.TestCase):
+    """Шаг 8 «Топ хостов по маршрутизации» — выравнивание прогресс-баров.
+
+    Сценарий бага: {host:<32} паддил только короткие хосты, но не усекал
+    длинные — колонки count/%/бара «плясали» (googlevideo.com, 35 симв. —
+    сдвиг вправо), а hosts длиннее ~38 симв. (nperf.net, 42) вылезали за
+    ширину рамки и переносили бар на новую строку.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    @staticmethod
+    def _log(host: str, port: str, tag: str) -> str:
+        return (f"2026/10/07 10:00:00 [Info] proxy/vless/inbound: "
+                f"connection accepted tcp:{host}:{port} "
+                f"[inbound-vless -> {tag}]")
+
+    def test_fit_host_pads_and_truncates(self):
+        from chimera.modules.diagnostics import _diag_fit_host, _DIAG_HOST_COL_W
+        # короткий — паддинг до ширины колонки
+        padded = _diag_fit_host("i.ytimg.com")
+        self.assertEqual(len(padded), _DIAG_HOST_COL_W)
+        self.assertTrue(padded.startswith("i.ytimg.com"))
+        # граничный (35 симв., googlevideo) — влезает целиком
+        gv = "rr1---sn-pivhx-n8v6.googlevideo.com"
+        self.assertEqual(_diag_fit_host(gv), f"{gv:<{_DIAG_HOST_COL_W}}")
+        # длинный — ровно ширина колонки, усечение посередине,
+        # доменная зона сохранена
+        long_host = "fi-oneprovider-helsinki-01-1g-1.nperf.net"
+        fitted = _diag_fit_host(long_host)
+        self.assertEqual(len(fitted), _DIAG_HOST_COL_W)
+        self.assertIn("…", fitted)
+        self.assertTrue(fitted.endswith(long_host[-12:]))
+
+    def test_fit_host_narrow_box(self):
+        """Узкая рамка (min 64) — колонка сужается, строка не переносится."""
+        from chimera.modules.diagnostics import _diag_fit_host
+        long_host = "fi-oneprovider-helsinki-01-1g-1.nperf.net"
+        fitted = _diag_fit_host(long_host, 22)
+        self.assertEqual(len(fitted), 22)
+        self.assertTrue(fitted.endswith(long_host[-12:]))
+
+    def test_rows_bars_aligned_no_wrap(self):
+        """Полный рендер топа: у всех строк бара одна стартовая колонка,
+        бар ровно 20 символов (нет переносов за рамку), длинный хост
+        усечён с сохранением доменной зоны."""
+        import contextlib
+        import io
+        import os
+        import re as _re
+        from chimera.modules import diagnostics
+
+        fake_core = sys.modules["chimera._core"]
+        box_w = fake_core._BOX_W
+
+        hosts = [
+            ("149.154.175.50", "443", "chain-exit-3", 8),          # короткий IP
+            ("fi-oneprovider-helsinki-01-1g-1.nperf.net", "443", "chain-exit-5", 5),  # 42 симв.
+            ("speedtest.fi.senko.network", "8080", "chain-exit-4", 4),  # host:port
+            ("rr1---sn-pivhx-n8v6.googlevideo.com", "443", "direct", 6),  # 35 симв.
+            ("i.ytimg.com", "443", "direct", 3),                   # 11 симв.
+        ]
+        lines = []
+        for host, port, tag, cnt in hosts:
+            lines.extend([self._log(host, port, tag)] * cnt)
+
+        with tempfile.NamedTemporaryFile("w", suffix=".log",
+                                         delete=False) as f:
+            f.write("\n".join(lines) + "\n")
+            log_path = f.name
+        self.addCleanup(os.unlink, log_path)
+
+        old = fake_core.DIAG_ACCESS_LOG
+        fake_core.DIAG_ACCESS_LOG = Path(log_path)
+        self.addCleanup(setattr, fake_core, "DIAG_ACCESS_LOG", old)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            diagnostics._diag_top_hosts(n=10)
+        out = _re.sub(r"\033\[[0-9;]*m", "", buf.getvalue())
+
+        bar_lines = [l for l in out.splitlines() if ("▓" in l or "░" in l)]
+        # все 5 хостов в топе (в обеих секциях)
+        self.assertGreaterEqual(len(bar_lines), 5, out)
+        # 1) бар ровно 20 символов в каждой строке → переносов нет
+        for l in bar_lines:
+            n_bar = len(l) - len(l.replace("▓", "").replace("░", ""))
+            self.assertEqual(n_bar, 20, f"бар не 20 симв.: {l!r}")
+        # 2) стартовая колонка бара одинакова у всех строк
+        starts = {l.find("▓") if "▓" in l else l.find("░")
+                  for l in bar_lines}
+        self.assertEqual(len(starts), 1,
+                         f"колонки бара разъехались: {starts}\n{out}")
+        # 3) строки не вылезают за рамку (+2 на ║…║)
+        for l in bar_lines:
+            self.assertLessEqual(len(l), box_w + 2, l)
+        # 4) длинный хост усечён «…», доменная зона видна
+        self.assertTrue(any("…" in l and "nperf.net" in l
+                            for l in bar_lines), out)
+        # 5) короткий хост и граничный googlevideo отображаются целиком
+        self.assertTrue(any("i.ytimg.com" in l for l in bar_lines), out)
+        self.assertTrue(any("googlevideo.com" in l for l in bar_lines), out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
