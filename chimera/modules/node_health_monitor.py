@@ -181,7 +181,25 @@ def check_nodes_once() -> list[dict]:
         if not host:
             continue
 
-        up, ms = _tcp_ping(host, port)
+        # Chain Relay (via): прямой TCP к такой ноде может быть перерезан
+        # ТСПУ на транзитном пути — это НЕ признак отказа. Проверяем
+        # full-path: временный xray-клиент через цепочку hop→exit
+        # (dialerProxy) + HTTP-проба. Fallback на TCP при любой ошибке.
+        via = nd.get("via", "") or ""
+        if via:
+            try:
+                from chimera.modules.chain_relay import (
+                    check_via_node_full_path, load_relay_hops)
+                _hops = load_relay_hops()
+                _r = check_via_node_full_path(nd, _hops)
+                up, ms = bool(_r.get("ok")), float(_r.get("ms", 0.0) or 0.0)
+                _log(f"[{host}:{port}] via:{via} full-path "
+                     f"{'up' if up else 'DOWN'}"
+                     f"{' ' + _r.get('detail', '')[:120] if _r.get('detail') else ''}")
+            except Exception:
+                up, ms = _tcp_ping(host, port)
+        else:
+            up, ms = _tcp_ping(host, port)
         key    = f"{host}:{port}"
 
         prev_up      = prev_state.get(key, {}).get("up", None)
