@@ -4335,38 +4335,35 @@ def set_lb_nodes(hosts: Optional[list], restart: bool = True) -> bool:
         cfg = json.loads(_CHAIN_CONFIG_FILE.read_text())
         balancers = (cfg.get("routing") or {}).get("balancers") or []
         patched = False
-        # тег → host по vnext выходных outbound'ов
-        tag_host: dict = {}
-        for ob in cfg.get("outbounds", []):
-            t = str(ob.get("tag", ""))
-            if t.startswith("chain-exit"):
-                vn = ((ob.get("settings") or {}).get("vnext") or [{}])
-                tag_host[t] = ((vn[0] or {}).get("address") or
-                               "").strip().lower()
         sel_set = set(sel)
-        _new_selector: list = []
+        # Селектор строим ЗАНОВО из state (источник истины): теги по
+        # ПОЗИЦИЯМ выбранных хостов в chain_nodes. Фильтровать ТЕКУЩИЙ
+        # selector по живым адресам нельзя: он уже сужен прошлым
+        # составом, а адреса могли быть пропатчены smart_balancer'ом
+        # (кейс прод-деплоя: selector схлопнулся в один тег).
+        _new_selector = [f"chain-exit-{i+1}"
+                         for i, nd in enumerate(nodes)
+                         if not sel or _lb_node_host(nd) in sel_set]
+        if sel and len(_new_selector) < 2:
+            print("set_lb_nodes: пересобранный selector <2 тегов — "
+                  "отклонено")
+            return False
         for b in balancers:
-            if b.get("tag") != "chain-balancer":
-                continue
-            keep = [t for t in (b.get("selector") or [])
-                    if not sel_set or tag_host.get(t, "") in sel_set]
-            if keep:
-                b["selector"] = keep
-                _new_selector = keep
-            patched = True
+            if b.get("tag") == "chain-balancer":
+                b["selector"] = list(_new_selector)
+                patched = True
         # observatory пробирует только выбранные (subjectSelector = selector)
         obs = cfg.get("observatory")
         if obs and obs.get("subjectSelector") and _new_selector:
             obs["subjectSelector"] = list(_new_selector)
-        # Ре-синх адресов выбранных outbound'ов: chain-exit-N →
-        # nodes[N-1] из state. Снимает устаревший патч smart_balancer'а
-        # (иначе «лучшая» нода остаётся в чужом слоте и ротация состава
-        # схлопывается в одну ноду).
+        # Ре-синх адресов ВСЕХ chain-exit outbound'ов: chain-exit-N →
+        # nodes[N-1] из state (суперсет, не только выбранные — инвариант
+        # «адреса конфига == state»). Снимает устаревший патч
+        # smart_balancer'а (иначе «лучшая» нода остаётся в чужом слоте
+        # и ротация состава схлопывается в одну ноду).
         _resynced: list = []
         for ob in cfg.get("outbounds", []):
             t = str(ob.get("tag", ""))
-            if t not in _new_selector:
-                continue
             m = re.fullmatch(r"chain-exit-(\d+)", t)
             if not m:
                 continue

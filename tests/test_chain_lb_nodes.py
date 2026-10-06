@@ -308,6 +308,43 @@ class TestSetLbNodes(unittest.TestCase):
                 by_tag["chain-exit-2"]["settings"]["vnext"][0]["address"],
                 "fleet-b.example")
 
+    def test_rebuild_selector_from_state_not_live(self):
+        # КЕЙС ПРОД-ДЕПЛОЯ: прошлый состав сузил selector до
+        # [chain-exit-1, chain-exit-3], и smart_balancer пропатчил адрес
+        # chain-exit-1 (state-хост fi) на ru. Новый состав
+        # [fleet-a.example, fi.fleet-b.example] обязан
+        # перестроить selector ПО STATE: [chain-exit-2, chain-exit-3] —
+        # фильтрация текущего selector по живым адресам давала
+        # [chain-exit-1(патчено fi), chain-exit-3] или хуже — один тег.
+        with tempfile.TemporaryDirectory() as td:
+            stf, cfgf = self._setup(td)
+            cfg = json.loads(cfgf.read_text())
+            cfg["routing"]["balancers"][0]["selector"] = \
+                ["chain-exit-1", "chain-exit-3"]
+            cfg["outbounds"][0]["settings"]["vnext"][0]["address"] = \
+                "fleet-c.example"      # патч smart_balancer поверх fi
+            cfgf.write_text(json.dumps(cfg))
+            with patch.object(cn, "_CHAIN_STATE_FILE", stf), \
+                 patch.object(cn, "_CHAIN_CONFIG_FILE", cfgf):
+                self.assertTrue(cn.set_lb_nodes(
+                    ["fleet-a.example", "fi.fleet-b.example"],
+                    restart=False))
+            patched = json.loads(cfgf.read_text())
+            # порядок флота фикстуры: fi=1, fleet-b.example=2,
+            # ru=3, fleet=4 → выбранным соответствуют теги 1 и 4
+            self.assertEqual(
+                patched["routing"]["balancers"][0]["selector"],
+                ["chain-exit-1", "chain-exit-4"])
+            # ре-синх вернул chain-exit-1 его state-хост (fi) — хотя он
+            # теперь вне состава, адрес не должен врать
+            by_tag = {ob["tag"]: ob for ob in patched["outbounds"]}
+            self.assertEqual(
+                by_tag["chain-exit-1"]["settings"]["vnext"][0]["address"],
+                "fi.fleet-b.example")
+            self.assertEqual(
+                by_tag["chain-exit-2"]["settings"]["vnext"][0]["address"],
+                "fleet-b.example")
+
     def test_apply_all_clears_selection(self):
         with tempfile.TemporaryDirectory() as td:
             stf, cfgf = self._setup(td)
