@@ -559,6 +559,7 @@ class TestFullPathSpeed(unittest.TestCase):
         with patch.object(cr, "_find_xray_bin", return_value="/usr/local/bin/xray"), \
              patch.object(cr.subprocess, "Popen", return_value=_FakeProc()), \
              patch.object(cr.subprocess, "run", side_effect=fake_run), \
+             patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
              patch.object(cr.tempfile, "mkstemp",
                           return_value=(99, "/tmp/relaycheck_test.json")), \
              patch("os.write", lambda *a, **kw: None), \
@@ -606,6 +607,7 @@ class TestFullPathSpeed(unittest.TestCase):
         with patch.object(cr, "_find_xray_bin", return_value="/usr/local/bin/xray"), \
              patch.object(cr.subprocess, "Popen", return_value=_FakeProc()), \
              patch.object(cr.subprocess, "run", side_effect=fake_run), \
+             patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
              patch.object(cr.tempfile, "mkstemp",
                           return_value=(99, "/tmp/relaycheck_test.json")), \
              patch("os.write", lambda *a, **kw: None), \
@@ -628,15 +630,21 @@ class TestProbeLadder(unittest.TestCase):
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def _ladder(self, responses):
-        """responses — (rc, code, ms) по порядку вызовов _curl_socks."""
+    def _ladder(self, responses, probe_ip=None):
+        """responses — (rc, code, ms) по порядку вызовов _curl_socks.
+        probe_ip — что отвечает _resolve_probe_host_ipv4 (None → P2b
+        пропускается: тесты не ходят в реальный DNS)."""
         import chimera.modules.chain_relay as cr
         seq = list(responses)
+        self.curl_calls = []
 
-        def fake_curl(port, url, timeout, insecure=False):
+        def fake_curl(port, url, timeout, insecure=False, resolve=None):
+            self.curl_calls.append((url, timeout, insecure, resolve))
             return seq.pop(0) if seq else (28, "000", None)
 
-        with patch.object(cr, "_curl_socks", side_effect=fake_curl):
+        with patch.object(cr, "_curl_socks", side_effect=fake_curl), \
+             patch.object(cr, "_resolve_probe_host_ipv4",
+                          return_value=probe_ip):
             return cr._probe_ladder(12345, 20)
 
     def test_http_204_first(self):
@@ -658,11 +666,18 @@ class TestProbeLadder(unittest.TestCase):
         self.assertEqual(r["code"], "204")
 
     def test_ip_only_dns_broken(self):
-        # доменные пробы молчат, IP-проба отвечает → DNS на exit сломан
-        r = self._ladder([(0, "000", None), (0, "000", None), (0, "301", 400.0)])
+        # доменные пробы молчат (P1 + P2 обе попытки), IP-проба отвечает
+        # → DNS на exit сломан (P2b пропущен: entry-резолв недоступен)
+        r = self._ladder([(0, "000", None), (0, "000", None),
+                          (0, "000", None), (0, "301", 400.0)])
         self.assertTrue(r["delivered"])
         self.assertFalse(r["domain_ok"])
         self.assertTrue(r["ip_only"])
+        # P3 — четвёртый вызов, без --resolve
+        url, timeout, insecure, resolve = self.curl_calls[3]
+        self.assertEqual(url, "https://1.1.1.1/")
+        self.assertTrue(insecure)
+        self.assertIsNone(resolve)
 
     def test_all_dead(self):
         r = self._ladder([(28, "000", None)] * 5)
@@ -682,7 +697,7 @@ class TestProbeLadder(unittest.TestCase):
         import chimera.modules.chain_relay as cr
         calls = []
 
-        def fake_curl(port, url, timeout, insecure=False):
+        def fake_curl(port, url, timeout, insecure=False, resolve=None):
             calls.append(url)
             if len(calls) == 1:
                 return (7, "000", None)
@@ -693,6 +708,44 @@ class TestProbeLadder(unittest.TestCase):
             r = cr._probe_ladder(12345, 20)
         self.assertTrue(r["domain_ok"])
         self.assertEqual(len(calls), 2)
+
+    def test_https_retry_rescues_slow_chain(self):
+        # живой кейс окт. 2026 (вечер): P1 (порт 80) молчит, P2#1 не
+        # уложилась в таймаут на медленной цепи (~400 мс RTT), P2#2 —
+        # прошла → цепь жива, никакого «нода не отвечает»
+        r = self._ladder([(28, "000", None), (28, "000", None),
+                          (0, "204", 1500.0)])
+        self.assertTrue(r["delivered"])
+        self.assertTrue(r["domain_ok"])
+        self.assertTrue(r["port80_blocked"])
+        self.assertEqual(r["code"], "204")
+        # вторая попытка щедрее по таймауту (8 → 10 с)
+        self.assertEqual(self.curl_calls[1][1], 8)
+        self.assertEqual(self.curl_calls[2][1], 10)
+
+    def test_p2b_resolve_fallback_cf_edge(self):
+        # доменные пробы молчат (в т.ч. DNS на exit), P2b с --resolve на
+        # entry-резолвленный IP доставляет → ip_only (цепь жива, DNS нет)
+        r = self._ladder([(28, "000", None), (28, "000", None),
+                          (28, "000", None), (0, "204", 700.0)],
+                         probe_ip="104.16.123.96")
+        self.assertTrue(r["delivered"])
+        self.assertFalse(r["domain_ok"])
+        self.assertTrue(r["ip_only"])
+        url, timeout, insecure, resolve = self.curl_calls[3]
+        self.assertEqual(url, "https://cp.cloudflare.com/generate_204")
+        self.assertFalse(insecure)
+        self.assertEqual(resolve, "cp.cloudflare.com:443:104.16.123.96")
+
+    def test_p2b_skipped_when_entry_dns_dead(self):
+        # entry-резолв не дал IP → P2b пропускается, работают P3/P4
+        r = self._ladder([(28, "000", None), (28, "000", None),
+                          (28, "000", None), (0, "301", 400.0)],
+                         probe_ip=None)
+        self.assertTrue(r["delivered"])
+        self.assertTrue(r["ip_only"])
+        # ни один вызов не ушёл с --resolve
+        self.assertTrue(all(c[3] is None for c in self.curl_calls))
 
 
 class TestDiagnoseDeadChain(unittest.TestCase):
@@ -752,9 +805,18 @@ class TestDiagnoseDeadChain(unittest.TestCase):
         self.assertIn("с хопа", d["detail"])
 
     def test_hop_ok_direct_fail(self):
+        # живой кейс окт. 2026 (вечер): «нода не отвечает» противоречил
+        # ICMP exit↔хоп и полному тесту (шаг 5/12 ОК); теперь вердикт —
+        # про ногу хоп→нода, а не «смерть ноды», с оговоркой про ТСПУ
+        # (прямой fail для via-ноды — норма) и подсказкой перепроверки
         d = self._diag(True, False)
         self.assertEqual(d["legs"], {"hop": "ok", "direct": "fail"})
-        self.assertEqual(d["reason"], "нода не отвечает")
+        self.assertEqual(d["reason"], "хоп→нода не доставляет")
+        self.assertNotEqual(d["reason"], "нода не отвечает")
+        self.assertIn("ТСПУ", d["detail"])
+        self.assertIn("норма", d["detail"])
+        self.assertIn("nc -zv", d["detail"])
+        self.assertIn("полный тест", d["detail"])
 
     def test_both_dead(self):
         d = self._diag(False, False)
@@ -790,6 +852,7 @@ class TestFullPathV2(unittest.TestCase):
                           return_value="/usr/local/bin/xray"), \
              patch.object(cr.subprocess, "Popen", side_effect=_popen), \
              patch.object(cr.subprocess, "run", side_effect=fake_run), \
+             patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
              patch.object(cr.tempfile, "mkstemp",
                           return_value=(99, "/tmp/relaycheck_test.json")), \
              patch("os.write", lambda *a, **kw: None), \
@@ -814,6 +877,33 @@ class TestFullPathV2(unittest.TestCase):
         self.assertAlmostEqual(res["ms"], 300.0, delta=1)
         self.assertIn("порт 80", res["detail"])
         self.assertEqual(res["reason"], "цепь жива")
+
+    def test_slow_chain_https_retry_ok(self):
+        # живой кейс окт. 2026 (вечер, ~400 мс RTT): P1 (80-й)
+        # молчит, P2#1 таймаутит, P2#2 — 204 → цепь жива. Раньше одиночная
+        # проба + зафильтрованные DoH-IP давали FAIL «нода не отвечает»
+        # при живой цепи (полный тест/ICMP при этом ОК).
+        attempts = {"n": 0}
+
+        def fake_run(cmd, **kw):
+            url = cmd[-1]
+            if url.startswith("http://"):
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="000 20.0", stderr="")
+            if url == "https://cp.cloudflare.com/generate_204":
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    return types.SimpleNamespace(returncode=0,
+                                                 stdout="000 8.0", stderr="")
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="204 1.50", stderr="")
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        res = self._run(fake_run)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["reason"], "цепь жива")
+        self.assertIn("порт 80", res["detail"])
+        self.assertEqual(attempts["n"], 2)
 
     def test_ip_only_dns_broken_not_ok(self):
         # IP-проба проходит, доменные — нет: цепь доходит, но реальный

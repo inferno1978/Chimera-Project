@@ -556,9 +556,18 @@ def _free_local_port() -> int:
 #  (сеть с ограниченным egress) резала исходящий порт 80. Лестница проб различает
 #  «цепь мертва» и «цепь жива, но endpoint/порт/DNS недоступны», а при полном
 #  отказе диагностирует, КАКАЯ нога сломана (entry→хоп / хоп→нода / нода).
+#
+#  Второй живой кейс (окт. 2026, тот же юзер, вечер): [T] FAIL «нода не
+#  отвечает» при живой цепи (шаг 5: full-path 425 мс; шаг 12: 2.1 Мбит/с;
+#  ICMP exit↔хоп ок). Медленная цепь RU→хоп→exit (~400 мс RTT) не укладывалась
+#  в одиночную 6-с https-пробу, а IP-фолбэки 1.1.1.1/8.8.8.8 — DoH-эндпоинты,
+#  фильтруемые сетью exit. Итог: P2 с ретраем, P2b через
+#  --resolve (DNS на exit не участвует) и честный вердикт ног (см.
+#  _diagnose_dead_chain: «напрямую недоступна» для via-ноды — норма, ТСПУ).
 # ─────────────────────────────────────────────────────────────────────────────
-_PROBE_HTTP_204  = "http://cp.cloudflare.com/generate_204"   # домен + порт 80
-_PROBE_HTTPS_204 = "https://cp.cloudflare.com/generate_204"  # домен + порт 443
+_PROBE_HOST      = "cp.cloudflare.com"                       # probe-домен (P1/P2/P2b)
+_PROBE_HTTP_204  = f"http://{_PROBE_HOST}/generate_204"      # домен + порт 80
+_PROBE_HTTPS_204 = f"https://{_PROBE_HOST}/generate_204"     # домен + порт 443
 _PROBE_IP_CF     = "https://1.1.1.1/"                        # IP, без DNS (Cloudflare)
 _PROBE_IP_GG     = "https://8.8.8.8/"                        # IP, без DNS (Google)
 
@@ -575,10 +584,13 @@ def _socks_check_inbound(socks_port: int) -> dict:
 
 
 def _curl_socks(socks_port: int, url: str, timeout: int,
-                insecure: bool = False) -> tuple[int, str, Optional[float]]:
+                insecure: bool = False,
+                resolve: Optional[str] = None) -> tuple[int, str, Optional[float]]:
     """curl через socks5h → (rc, http_code, ms). '000'/'' — HTTP-ответа нет.
 
     rc=7 — не поднялся сам socks (xray ещё стартует); 28 — таймаут на цепи.
+    resolve — «host:port:ip» для curl --resolve: endpoint тот же (SNI/Host
+    честные), но DNS на exit не участвует — IP резолвится на entry (P2b).
     """
     cmd = ["curl", "-s", "-o", "/dev/null",
            "-w", "%{http_code} %{time_total}",
@@ -586,6 +598,8 @@ def _curl_socks(socks_port: int, url: str, timeout: int,
            "-x", f"socks5h://127.0.0.1:{socks_port}"]
     if insecure:
         cmd.append("-k")
+    if resolve:
+        cmd += ["--resolve", resolve]
     cmd.append(url)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
@@ -674,14 +688,38 @@ class _TempXrayClient:
         return False
 
 
-def _probe_ladder(socks_port: int, t_domain: int, t_fast: int = 6,
-                  t_ip: int = 5, retry_startup: float = 8.0) -> dict:
+def _resolve_probe_host_ipv4(host: str = _PROBE_HOST) -> Optional[str]:
+    """IPv4 probe-хоста, резолв НА СТОРОНЕ ENTRY (не через цепочку).
+
+    Для P2b: endpoint тот же, что у P2, но DNS на exit не участвует
+    (--resolve). Покрывает медленный/сломанный DNS на exit и сети, где
+    DoH-IP (1.1.1.1/8.8.8.8) фильтруются (живой кейс окт. 2026:
+    сеть с ограниченным egress). Вызывается ТОЛЬКО после неудачи P1+P2,
+    на живом пути не тратит ни одного запроса. Любая ошибка → None
+    (шаг P2b просто пропускается).
+    """
+    try:
+        infos = socket.getaddrinfo(host, 443, socket.AF_INET,
+                                   socket.SOCK_STREAM)
+        return infos[0][4][0] if infos else None
+    except Exception:
+        return None
+
+
+def _probe_ladder(socks_port: int, t_domain: int, t_fast: int = 8,
+                  t_ip: int = 6, retry_startup: float = 8.0) -> dict:
     """Лестница HTTP-проб через socks-цепочку (различает отказы).
 
-    P1 http  generate_204  — порт 80 + DNS на exit (с ретраями rc=7,
-         пока xray не поднялся — вместо слепого sleep);
-    P2 https generate_204  — порт 443 + DNS (exit может резать 80-й);
-    P3/P4 https IP-literal — 443 без DNS и без привязки к Cloudflare-домену.
+    P1  http  generate_204 — порт 80 + DNS на exit (с ретраями rc=7,
+          пока xray не поднялся — вместо слепого sleep);
+    P2  https generate_204 — порт 443 + DNS (exit может резать 80-й);
+          ДВЕ попытки (вторая щедрее по таймауту): медленная цепь
+          (живой кейс окт. 2026: ~400 мс RTT) не должна
+          валиться одиночной пробой;
+    P2b https generate_204 c --resolve на IP, резолвленный на ENTRY:
+          DNS на exit не участвует, SNI честный — покрывает медленный/
+          сломанный DNS на exit и фильтрацию DoH-IP на сети exit;
+    P3/P4 https IP-literal — 443 без DNS (1.1.1.1 / 8.8.8.8).
 
     Любой HTTP-код ≠ 000 = цепь ДОСТАВЛЯЕТ трафик. Возвращает:
       delivered      — есть хоть какой-то HTTP-ответ
@@ -705,12 +743,25 @@ def _probe_ladder(socks_port: int, t_domain: int, t_fast: int = 6,
             continue
         break
 
-    # P2: https 204 (порт 443 + DNS)
-    rc, code, ms = _curl_socks(socks_port, _PROBE_HTTPS_204, t_fast)
-    if code and code != "000":
-        res.update(delivered=True, domain_ok=True, code=code, ms=ms,
-                   port80_blocked=True)
-        return res
+    # P2: https 204 (порт 443 + DNS), 2 попытки — джиттер/медленная цепь
+    # не должны валить основную доменную пробу (вторая попытка щедрее)
+    for _t in (t_fast, max(t_fast, 10)):
+        rc, code, ms = _curl_socks(socks_port, _PROBE_HTTPS_204, _t)
+        if code and code != "000":
+            res.update(delivered=True, domain_ok=True, code=code, ms=ms,
+                       port80_blocked=True)
+            return res
+
+    # P2b: тот же endpoint, но IP резолвим на ENTRY (--resolve): DNS на
+    # exit не участвует. Живой кейс окт. 2026: exit-сеть с ограниченным egress
+    # фильтрует DoH-IP (1.1.1.1/8.8.8.8) — P3/P4 молчат при живой цепи.
+    _cf_ip = _resolve_probe_host_ipv4()
+    if _cf_ip:
+        rc, code, ms = _curl_socks(socks_port, _PROBE_HTTPS_204, t_ip,
+                                    resolve=f"{_PROBE_HOST}:443:{_cf_ip}")
+        if code and code != "000":
+            res.update(delivered=True, code=code, ms=ms, ip_only=True)
+            return res
 
     # P3/P4: https на IP-literal (-k): без DNS, не только Cloudflare
     for url in (_PROBE_IP_CF, _PROBE_IP_GG):
@@ -788,10 +839,20 @@ def _diagnose_dead_chain(nd: dict, chain: list[dict], xbin: str,
                   f"ноды не достучаться — проверьте на ноде файервол/порт и "
                   f"доступность {xp} с хопа")
     elif legs["hop"] == "ok" and legs["direct"] == "fail":
-        reason = "нода не отвечает"
-        detail = (f"нода {xp} не отвечает ни через хоп, ни напрямую (прямой "
-                  f"путь может быть перерезан ТСПУ, но через хоп тоже не идёт "
-                  f"— проверьте uuid/pbk/sid/sni ноды и xray на ней)")
+        # Живой кейс (окт. 2026, вечер): вердикт «нода не отвечает»
+        # противоречил ICMP exit↔хоп и полному тесту (шаг 5/12 ОК).
+        # Прямая недоступность для via-ноды — НОРМА (ТСПУ, ради этого
+        # хоп и поставлен), а «через хоп не идёт» мерялось одиночными
+        # короткими пробами на медленной цепи. Говорим честно: не
+        # отвечает именно нога хоп→нода (или цепь была перегружена).
+        reason = "хоп→нода не доставляет"
+        detail = (f"нога хоп→нода: ни одна проба не прошла (хоп жив; напрямую "
+                  f"нода недоступна — норма для via-ноды, путь режет ТСПУ, это "
+                  f"не признак смерти ноды). Если полный тест (шаг 5/12) "
+                  f"проходит — цепочка была медленной/перегруженной в момент "
+                  f"пробы, повторите [T]; иначе проверьте с хопа nc -zv "
+                  f"{nd.get('host', '?')} {nd.get('port', '?')}, ключи ноды "
+                  f"(uuid/pbk/sid/sni) и xray на ней")
     else:
         reason = "хоп и нода не отвечают"
         detail = (f"не отвечают ни хоп «{hop_tag}» ({hp}), ни нода {xp} по "
@@ -813,12 +874,15 @@ def check_via_node_full_path(nd: dict, hops: list[dict],
     обеих ног + маршрутизацию), а не только TCP-доступность — прямой TCP
     к via-ноде может быть перерезан ТСПУ и не является признаком отказа.
 
-    Лестница различает отказы (живой кейс окт. 2026: exit резал порт 80 →
-    старая одиночная http-проба вечно FAIL при живой цепи):
+    Лестница различает отказы (живой кейс окт. 2026 №1: exit резал порт 80 →
+    старая одиночная http-проба вечно FAIL при живой цепи; кейс №2: медленная
+    цепь с ~400 мс RTT — одиночная 6-с https-проба таймаутила, а DoH-IP
+    1.1.1.1/8.8.8.8 фильтровались сетью exit → ложный «нода не отвечает»
+    при живой цепи; теперь P2 с ретраем + P2b через --resolve):
       • http 204 → цепь жива;
-      • https 204 (http молчит) → цепь жива, exit режет порт 80 — ок;
-      • только IP-проба проходит → цепь доходит, но DNS/domains на exit
-        сломаны → ok=False с диагнозом;
+      • https 204 (http молчит; 2 попытки) → цепь жива, exit режет порт 80;
+      • только IP-проба (P2b/P3/P4) проходит → цепь доходит, но DNS/domains
+        на exit сломаны → ok=False с диагнозом;
       • всё молчит → ok=False; при deep_diag=True дополнительно
         поднимаются два мини-клиента (только хоп / только нода напрямую)
         и определяется, КАКАЯ нога сломана (см. _diagnose_dead_chain).
