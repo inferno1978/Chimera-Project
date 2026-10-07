@@ -24,6 +24,7 @@ Unit-тесты для B4-сплита AWG-каскада.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -412,6 +413,54 @@ class TestRoutingScriptSplitAware(unittest.TestCase):
         self.assertNotIn("ipset create awg_b4_direct", body)
         self.assertNotIn("awg_b4direct", body)      # nft-сет
         self.assertNotIn("snapshot", body)
+
+
+class TestRoutingNftBlockBashValid(unittest.TestCase):
+    """Регрессия v5.x (07.10.2026): закрывающие скобки nft-блока
+    писались как literal '}}' (двойные — автор скопировал f-string
+    экранирование в plain-строку) → bash-группа grep||{ … не
+    закрывалась → awg-routing.sh: «syntax error: unexpected end of
+    file» на всех RU-entry с LB-формой. Сервис awg-cascade-routing
+    падал при первом рестарте после регена.
+
+    Проверяем: (а) закрывающие строки — ровно '}' по одной; (б) весь
+    блок — валидный bash (bash -n); (в) обе формы (сплит вкл/выкл)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import awg_b4_split
+        self._b4s = awg_b4_split
+
+    def _block(self, active: bool) -> str:
+        with patch.object(self._b4s, "is_active", return_value=active), \
+             patch.object(self._b4s, "_nft_ifaces",
+                          return_value='iifname { "awg1", "awg2" }'):
+            return self._b4s.routing_nft_block()
+
+    def test_split_on_closers_single_brace(self):
+        body = self._block(True)
+        closers = [l for l in body.splitlines() if l.strip() == "}"]
+        self.assertEqual(len(closers), 2,
+                         f"ожидались ровно 2 закрывающие '}}'; получено: "
+                         f"{closers!r}")
+        doubles = [l for l in body.splitlines() if l.strip() == "}}"]
+        self.assertEqual(doubles, [],
+                         "literal '}}' не закрывает bash-группу "
+                         "(word '}}' ≠ reserved word '}') — регрессия v5.x")
+
+    def test_split_on_bash_syntax(self):
+        script = "#!/bin/bash\n" + self._block(True)
+        r = subprocess.run(["bash", "-n"], input=script,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0,
+                         f"bash -n упал на сплит-форме: {r.stderr}")
+
+    def test_split_off_bash_syntax(self):
+        script = "#!/bin/bash\n" + self._block(False)
+        r = subprocess.run(["bash", "-n"], input=script,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0,
+                         f"bash -n упал на blanket-форме: {r.stderr}")
 
 
 if __name__ == "__main__":
