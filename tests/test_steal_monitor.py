@@ -403,15 +403,19 @@ class TestAlerts(StealMonitorTestBase):
 class TestBuildReport(StealMonitorTestBase):
 
     def _seed_day(self):
+        # конфиг с идентичностью локальной ноды (как на реальном деплое)
+        self._write_cfg({"node_label": "RU-2", "node_ip": "203.0.113.20"})
         rows = []
         for i in range(30):   # чистая локальная
             rows.append(_mk_sample(0.2, hour=10 + i % 5, node="local",
                                    host="srv45"))
-        for i in range(30):   # больная nl1
+        for i in range(30):   # больная nl1 — новые сэмплы с идентичностью
             rows.append(_mk_sample(12.0 + (i % 5), hour=18 + i % 4,
                                    node="nl1", host="vm134610",
                                    steal_t=1500, busy_t=5000,
-                                   core_max=40.0, core_min=2.0))
+                                   core_max=40.0, core_min=2.0,
+                                   label="NL", ip="203.0.113.30",
+                                   hostname="vm134610"))
         rows.append({"ts": 1, "node": "nl1", "host": "vm134610",
                      "ok": False, "err": "ssh failed"})
         p = sm._samples_path()
@@ -423,15 +427,41 @@ class TestBuildReport(StealMonitorTestBase):
         self._seed_day()
         text = sm.build_report()
         self.assertIn("CPU Steal Report", text)
-        self.assertIn("local", text)
-        self.assertIn("nl1", text)
-        self.assertIn("КРИТИЧНО", text)            # nl1 avg ~14 → crit
-        self.assertIn("НОРМА", text)               # local 0.2 → ok
-        self.assertIn("Тикет-блок", text)
+        self.assertIn("Монитор:", text)               # шапка идентифицирует ноду
+        self.assertIn("RU-2", text)                   # label локальной из конфига
+        self.assertIn("203.0.113.20", text)         # IP локальной из конфига
+        self.assertIn("NL", text)
+        self.assertIn("203.0.113.30", text)        # IP peer из сэмпла
+        self.assertIn("КРИТИЧНО — есть проблемы", text)   # nl1 avg ~14 → crit
+        self.assertIn("НОРМА — проблем нет", text)     # local 0.2 → ok
+        self.assertIn("Флот: 🔴 1 (NL)", text)         # сводка с ярлыками
+        self.assertIn("Черновик тикета", text)
         self.assertIn("vm134610", text)
         self.assertIn("Рекомендации", text)
-        self.assertIn("НЕ ребут", text)            # рекомендация crit
-        self.assertIn("ошибок 1", text)            # err-сэмпл nl1 виден в отчёте
+        self.assertIn("НЕ ребут", text)                # рекомендация crit
+        self.assertIn("ошибок 1", text)                # err-сэмпл nl1 виден в отчёте
+
+    def test_report_russian_ticket_crit(self):
+        self._seed_day()
+        text = sm.build_report()
+        self.assertIn("Тема: Хронический CPU steal", text)
+        self.assertIn("Здравствуйте!", text)
+        self.assertIn("мигрировать", text)             # требование миграции
+        self.assertIn("не решает", text)               # ребут — не решение
+        self.assertIn("шумного соседа на SMT-сиблинге", text)
+        self.assertIn("Спасибо!", text)
+
+    def test_report_russian_ticket_warn(self):
+        for i in range(20):   # avg ~4% → warn (>=3), не crit
+            sm._append_sample(_mk_sample(3.8 + (i % 3) * 0.2, hour=12,
+                                         label="FI", ip="203.0.113.50",
+                                         hostname="srv-fi"))
+        self._write_cfg({"node_label": "FI", "node_ip": "203.0.113.50"})
+        text = sm.build_report()
+        self.assertIn("ВНИМАНИЕ — пограничное состояние", text)
+        self.assertIn("Черновик тикета", text)
+        self.assertIn("просьба проверить", text)       # вежливый warn-тикет
+        self.assertIn("вернёмся с просьбой о миграции", text)
 
     def test_report_single_ok_node_gets_recommendations(self):
         for i in range(15):
@@ -577,6 +607,18 @@ class TestSshSample(StealMonitorTestBase):
         self.assertEqual(got["load1"], 0.42)
         self.assertEqual(got["uptime_s"], 1480000.0)
         self.assertEqual(len(got["stat"]["percpu"]), 2)
+        self.assertIsNone(got["hostname"])   # без маркера — обратная совместимость
+
+    def test_ssh_parses_hostname_marker(self):
+        out = (_mk_proc_stat() + "0.42 0.35 0.30 1/500 9\n" + "1480000.5 5\n"
+               + "___HOSTNAME___vm999\n")
+        r = MagicMock(returncode=0, stdout=out)
+        with patch("subprocess.run", return_value=r):
+            got = sm._ssh_proc_stat({"host": "de", "user": "root", "port": 22})
+        self.assertIsNotNone(got)
+        self.assertEqual(got["hostname"], "vm999")
+        self.assertEqual(got["load1"], 0.42)      # хвост не сместился
+        self.assertEqual(got["uptime_s"], 1480000.0)
 
     def test_ssh_failure_returns_none(self):
         r = MagicMock(returncode=255, stdout="")
@@ -587,6 +629,122 @@ class TestSshSample(StealMonitorTestBase):
         import subprocess as _sp
         with patch("subprocess.run", side_effect=_sp.TimeoutExpired("ssh", 20)):
             self.assertIsNone(sm._ssh_proc_stat({"host": "de"}))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  16a. Идентификация нод (label · IP · hostname)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestIdentity(StealMonitorTestBase):
+
+    def test_local_identity_from_config(self):
+        cfg = {"node_label": "RU-1", "node_ip": "203.0.113.10"}
+        with patch.object(sm, "_hostname", return_value="srv-ru1"):
+            ident = sm._local_identity(cfg)
+        self.assertEqual(ident["label"], "RU-1")
+        self.assertEqual(ident["ip"], "203.0.113.10")
+        self.assertEqual(ident["hostname"], "srv-ru1")
+
+    def test_local_identity_fallbacks(self):
+        # без конфига label = hostname, ip = автодетект
+        with patch.object(sm, "_hostname", return_value="vm134610"), \
+             patch.object(sm, "_detect_local_ip", return_value="203.0.113.30"):
+            ident = sm._local_identity({})
+        self.assertEqual(ident["label"], "vm134610")
+        self.assertEqual(ident["ip"], "203.0.113.30")
+
+    def test_detect_local_ip_via_route(self):
+        r = MagicMock(stdout="1.1.1.1 via 10.0.0.1 dev eth0 src 203.0.113.7 uid 0\n")
+        with patch.object(sm, "_run", return_value=r):
+            self.assertEqual(sm._detect_local_ip(), "203.0.113.7")
+
+    def test_detect_local_ip_route_private_falls_to_hostname(self):
+        # src внутренний (NAT) → берём первый публичный из hostname -I
+        responses = {
+            ("ip", "-4", "route", "get", "1.1.1.1"): MagicMock(
+                stdout="1.1.1.1 dev eth0 src 10.0.0.5\n"),
+            ("hostname", "-I"): MagicMock(
+                stdout="10.0.0.5 172.16.0.1 203.0.113.9 fe80::1\n"),
+        }
+
+        def fake_run(cmd, timeout=20):
+            return responses[tuple(cmd)]
+
+        with patch.object(sm, "_run", side_effect=fake_run):
+            self.assertEqual(sm._detect_local_ip(), "203.0.113.9")
+
+    def test_is_private_ip(self):
+        for priv in ("10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1",
+                     "127.0.0.1", "169.254.1.1", "", "fd00::1", "не-ip"):
+            self.assertTrue(sm._is_private_ip(priv), priv)
+        for pub in ("203.0.113.10", "203.0.113.7", "8.8.8.8", "203.0.113.20"):
+            self.assertFalse(sm._is_private_ip(pub), pub)
+
+    def test_display_title_full(self):
+        ident = {"label": "NL", "ip": "203.0.113.30", "hostname": "vm134610"}
+        self.assertEqual(
+            sm._display_title(ident, "nl1", "x"),
+            "<b>NL</b> · <code>203.0.113.30</code> · vm134610")
+
+    def test_display_title_dedup(self):
+        # hostname совпадает с label / ip — не дублируем
+        self.assertEqual(
+            sm._display_title({"label": "vm1", "ip": "203.0.113.60", "hostname": "vm1"},
+                              "local", "vm1"),
+            "<b>vm1</b> · <code>203.0.113.60</code>")
+
+    def test_display_title_legacy_samples(self):
+        # старые сэмплы без ident → «local (srv45)» как раньше
+        self.assertEqual(sm._display_title({}, "local", "srv45"),
+                         "<b>local</b> (srv45)")
+
+    def test_sample_writes_identity(self):
+        prev_store, tgst, alerts = {}, {"nodes": {}}, []
+        cur1 = sm.read_proc_stat(_mk_proc_stat(steal_total=1000))
+        cur2 = sm.read_proc_stat(_mk_proc_stat(steal_total=3000))
+        ident = {"label": "RU-1", "ip": "203.0.113.10", "hostname": "srv-ru1"}
+        sm._record_node_sample("local", "srv-ru1", cur1, 0.5, 1000.0,
+                               prev_store, dict(sm.DEFAULT_CONFIG), tgst, alerts)
+        rec = sm._record_node_sample("local", "srv-ru1", cur2, 0.5, 1000.0,
+                                     prev_store, dict(sm.DEFAULT_CONFIG), tgst,
+                                     alerts, ident=ident)
+        self.assertEqual(rec["label"], "RU-1")
+        self.assertEqual(rec["ip"], "203.0.113.10")
+        self.assertEqual(rec["hostname"], "srv-ru1")
+
+    def test_fleet_summary_labels(self):
+        node_data = [
+            ("local", "h", {"n_ok": 1}, "ok", [],
+             {"label": "RU-1", "ip": "1.1.1.1", "hostname": "a"}),
+            ("nl1", "h", {"n_ok": 1}, "crit", [],
+             {"label": "NL", "ip": "203.0.113.70", "hostname": "b"}),
+        ]
+        line = sm._fleet_summary_line(node_data)
+        self.assertIn("🔴 1 (NL)", line)
+        self.assertIn("🟢 1 (RU-1)", line)
+        # crit идёт первым — проблемы видны сразу
+        self.assertLess(line.index("🔴"), line.index("🟢"))
+
+
+class TestTgChunks(StealMonitorTestBase):
+
+    def test_split_respects_line_boundaries(self):
+        lines = ["строка номер %02d с данными тикета" % i for i in range(300)]
+        msg = "\n".join(lines)
+        chunks = sm._split_tg_chunks(msg, limit=500)
+        self.assertTrue(all(len(c) <= 500 for c in chunks))
+        # ни одна строка не разрезана: конкатенация строк чанков = исходные строки
+        restored = []
+        for c in chunks:
+            restored.extend(c.split("\n"))
+        self.assertEqual(restored, lines)
+
+    def test_split_hard_cuts_giant_line(self):
+        self.assertEqual(sm._split_tg_chunks("x" * 8000),
+                         ["x" * 3900, "x" * 3900, "x" * 200])
+
+    def test_split_short_message_single_chunk(self):
+        self.assertEqual(sm._split_tg_chunks("коротко"), ["коротко"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
