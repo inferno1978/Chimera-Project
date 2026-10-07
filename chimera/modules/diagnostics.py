@@ -934,10 +934,29 @@ def _diag_check_routing_live(cfg: dict, counters: list) -> None:
             if _dp:
                 try:
                     from chimera.modules.chain_relay import (
-                        check_via_node_full_path, load_relay_hops)
+                        check_via_node_full_path, load_relay_hops,
+                        hop_via_tag_for)
                     _nd = _fullpath_nd_from_outbound(ob, vn)
                     if _nd:
-                        _r = check_via_node_full_path(_nd, load_relay_hops())
+                        _hops = load_relay_hops()
+                        if not hop_via_tag_for(_nd, _hops):
+                            # dialerProxy в конфиге есть, но хоп уже
+                            # выключен/удалён в state — конфиг не пересобран
+                            # после выключения хопа. ERR «цепочка НЕ РАБОТАЕТ»
+                            # был бы ложным и противоречил бы шагу 11, который
+                            # в этом же кейсе пишет «нода работает напрямую»:
+                            # генератор после пересборки подключит ноду
+                            # напрямую. Зеркалит семантику шага 11 / [T] / HM
+                            # (hop_via_tag_for перед full-path).
+                            _diag_chk(counters, False,
+                                      "",
+                                      f"Exit-нода [{tag}] {host}:{port} — хоп «{_dp}» "
+                                      f"выключен/удалён, но конфиг ещё маршрутизирует "
+                                      f"ноду через него — пересоберите конфиг "
+                                      f"(после пересборки нода подключится напрямую)",
+                                      is_warn=True)
+                            continue
+                        _r = check_via_node_full_path(_nd, _hops)
                         if _r.get("ok"):
                             _diag_chk(counters, True,
                                       f"Exit-нода [{tag}] {host}:{port} — full-path OK "
