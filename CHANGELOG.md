@@ -1,3 +1,59 @@
+# Changelog new entry — HM/диагностика для релеев: ложный DOWN при выключенном хопе + потерянные SNI/path в реконструкции шага 5 (07 Oct 2026)
+
+## FIX(node_health_monitor/diagnostics/chain_relay): via-нода с неактивным хопом помечалась DOWN, шаг 5 терял SNI/path/mode при реконструкции из outbound
+
+**Контекст (аудит по запросу владельца):** «HM и диагностика одной
+кнопкой для релеев работает нормально?» — ревизия всех путей
+full-path проверки после чекера v2 вскрыла три расхождения
+поведенческого контракта «генератор прод-конфига ↔ проверяющие».
+
+**Баг 1 — HM, ложный DOWN + TG-тревога:** нода с via, чей хоп
+ВЫКЛЮЧЕН или удалён. Генератор прод-конфига (chain_nodes L2396:
+_cr_via_tag → hop_via_tag_for → None → dialerProxy НЕ ставится)
+подключает такую ноду НАПРЯМУЮ — она работает. Но HM звал
+check_via_node_full_path, тот возвращал ok=False «via … не найден/
+выключен» → HM: DOWN + Telegram-тревога при живой ноде. Фикс: HM
+проверяет активность хопа (hop_via_tag_for) и при неактивном via
+проверяет ноду TCP-пингом как прямую (зеркалит fallback генератора,
+test_disabled_hop_falls_back_direct), с пометкой в лог. Аналогично
+починены шаг 11 мастера (прямая TCP-проба + пометка «via неактивен —
+нода работает напрямую» вместо FAIL) и меню [T] (строка
+«(via … выкл → напрямую) → OK/DOWN» вместо FAIL).
+
+**Баг 2 — шаг 5, потерянный SNI:** реконструкция nd из outbound
+прод-конфига читала ТОЛЬКО serverNames (список — inbound-форма
+exit-ноды), а outbound хранит serverName (СТРОКА, см. генератор
+reality-ветки: serverName: nd.sni). В итоге SNI всегда падал в
+host: для IP-хостов SNI=IP → REALITY-хендшейк чекера не сходился →
+ложный FAIL шага 5 для via-нод с SNI ≠ host.
+
+**Баг 3 — шаг 5, потерянные path/xhttp_mode:** для xhttp/xhttp_
+reality via-нод реконструкция не брала path/mode из xhttpSettings
+outbound → чекер уходил на дефолты "/"/"stream-up" (генератор
+пишет реальные значения, path авто-генерится "/" + hex) → ложный
+FAIL при кастомном path.
+
+**Фикс шага 5:** инлайн-реконструкция вынесена в чистую функцию
+`diagnostics._fullpath_nd_from_outbound(ob, vn)` — SNI: serverName
+(outbound) → serverNames[0] (inbound-форма) → tlsSettings.serverName
+→ host; fp: realitySettings → tlsSettings; path/mode: xhttpSettings;
+shortid: shortIds[0] | shortId. Шаг 5 вызывает её; None (нет
+dialerProxy) → обычная TCP-проба.
+
+**Тесты:** test_chain_relay.py +1 (TestHealthMonitorViaFullPath.
+test_disabled_hop_falls_back_tcp_ping — выключенный хоп → TCP,
+нода up, full-path не зовётся); test_diagnostics.py +класс
+TestFullpathNdFromOutbound ×5 (нет dialerProxy → None; xhttp_
+reality с path=/ab12cd34 mode=packet-up; reality serverNames;
+reality serverName-строка — regression бага 2; xhttp tls SNI/fp).
+Итог по затронутым наборам: 299 passed (chain_relay, diagnostics ×2,
+node_health_monitor, smart_balancer, chain_nodes, chain_lb_nodes,
+health ×2, speed_test ×2), регрессий нет.
+
+---
+
+
+
 # Changelog new entry — ложный FAIL full-path чекера цепочек + маскирующий Download в спидтесте (07 Oct 2026)
 
 ## FIX(chain_relay/speed_test): «цепочка отвечает некорректно (HTTP 000)» — ложный FAIL при живой цепи, и прямой Download маскировал отказ

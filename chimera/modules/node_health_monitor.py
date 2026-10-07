@@ -189,15 +189,27 @@ def check_nodes_once() -> list[dict]:
         if via:
             try:
                 from chimera.modules.chain_relay import (
-                    check_via_node_full_path, load_relay_hops)
+                    check_via_node_full_path, load_relay_hops,
+                    hop_via_tag_for)
                 _hops = load_relay_hops()
-                # deep_diag=False: HM работает по cron, его интересует
-                # ok/не-ok; развёрнутую диагностику ног дают меню [T]/шаг 11
-                _r = check_via_node_full_path(nd, _hops, deep_diag=False)
-                up, ms = bool(_r.get("ok")), float(_r.get("ms", 0.0) or 0.0)
-                _log(f"[{host}:{port}] via:{via} full-path "
-                     f"{'up' if up else 'DOWN'}"
-                     f"{' ' + _r.get('detail', '')[:120] if _r.get('detail') else ''}")
+                if not hop_via_tag_for(nd, _hops):
+                    # Хоп выключен/удалён: генератор прод-конфига в этом
+                    # случае НЕ ставит dialerProxy — нода ходит НАПРЯМУЮ.
+                    # Проверяем как прямую (TCP), иначе ложный DOWN +
+                    # TG-тревога при живой ноде (зеркалит fallback
+                    # генератора chain_nodes: test_disabled_hop_falls_
+                    # back_direct).
+                    up, ms = _tcp_ping(host, port)
+                    _log(f"[{host}:{port}] via:{via} неактивен "
+                         f"(хоп выключен/удалён) — проверена как прямая")
+                else:
+                    # deep_diag=False: HM работает по cron, его интересует
+                    # ok/не-ok; развёрнутую диагностику ног дают меню [T]/шаг 11
+                    _r = check_via_node_full_path(nd, _hops, deep_diag=False)
+                    up, ms = bool(_r.get("ok")), float(_r.get("ms", 0.0) or 0.0)
+                    _log(f"[{host}:{port}] via:{via} full-path "
+                         f"{'up' if up else 'DOWN'}"
+                         f"{' ' + _r.get('detail', '')[:120] if _r.get('detail') else ''}")
             except Exception:
                 up, ms = _tcp_ping(host, port)
         else:

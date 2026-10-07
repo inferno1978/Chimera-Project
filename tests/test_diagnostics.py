@@ -502,5 +502,116 @@ class TestDiagTopHostsAlignment(unittest.TestCase):
         self.assertTrue(any("googlevideo.com" in l for l in bar_lines), out)
 
 
+class TestFullpathNdFromOutbound(unittest.TestCase):
+    """Реконструкция nd-dict для full-path проверки (шаг 5 мастера)
+    из outbound прод-конфига с sockopt.dialerProxy.
+
+    Регрессия: path/xhttp_mode раньше не реконструировались — чекер
+    уходил на дефолты "/"+"stream-up" и для xhttp/xhttp_reality нод с
+    кастомным path full-path проверка валилась ложно."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _ob(self, stream: dict) -> dict:
+        return {
+            "tag": "chain-exit-2",
+            "protocol": "vless",
+            "settings": {"vnext": [{
+                "address": "203.0.113.10", "port": 8443,
+                "users": [{"id": "d34df00d-1111-2222-3333-444455556666",
+                           "encryption": "none"}],
+            }]},
+            "streamSettings": stream,
+        }
+
+    def test_no_dialer_proxy_returns_none(self):
+        from chimera.modules.diagnostics import _fullpath_nd_from_outbound
+        ob = self._ob({"network": "tcp", "security": "reality",
+                       "sockopt": {}, "realitySettings": {}})
+        vn = ob["settings"]["vnext"][0]
+        self.assertIsNone(_fullpath_nd_from_outbound(ob, vn))
+
+    def test_xhttp_reality_custom_path_mode(self):
+        from chimera.modules.diagnostics import _fullpath_nd_from_outbound
+        ob = self._ob({
+            "network": "xhttp", "security": "reality",
+            "sockopt": {"dialerProxy": "hop-eu", "tcpCongestion": "bbr"},
+            "xhttpSettings": {"mode": "packet-up", "path": "/ab12cd34",
+                              "extra": {}},
+            "realitySettings": {
+                "show": False, "fingerprint": "firefox",
+                "serverName": "exit.example.com",
+                "publicKey": "PBK-123", "shortId": "SID-456",
+                "spiderX": "/"},
+        })
+        vn = ob["settings"]["vnext"][0]
+        nd = _fullpath_nd_from_outbound(ob, vn)
+        self.assertIsNotNone(nd)
+        self.assertEqual(nd["proto"], "xhttp_reality")
+        self.assertEqual(nd["path"], "/ab12cd34")       # НЕ дефолт "/"
+        self.assertEqual(nd["xhttp_mode"], "packet-up")  # НЕ дефолт
+        self.assertEqual(nd["via"], "hop-eu")
+        self.assertEqual(nd["uuid"], "d34df00d-1111-2222-3333-444455556666")
+        self.assertEqual(nd["pubkey"], "PBK-123")
+        self.assertEqual(nd["shortid"], "SID-456")
+        self.assertEqual(nd["sni"], "exit.example.com")
+        self.assertEqual(nd["fp"], "firefox")
+        self.assertEqual(nd["host"], "203.0.113.10")
+        self.assertEqual(nd["port"], 8443)
+
+    def test_reality_sni_from_server_names(self):
+        from chimera.modules.diagnostics import _fullpath_nd_from_outbound
+        ob = self._ob({
+            "network": "tcp", "security": "reality",
+            "sockopt": {"dialerProxy": "hop-eu"},
+            "realitySettings": {
+                "serverNames": ["sni.example.com"],
+                "publicKey": "PBK", "shortIds": ["SID1", "SID2"],
+                "fingerprint": "chrome"},
+        })
+        vn = ob["settings"]["vnext"][0]
+        nd = _fullpath_nd_from_outbound(ob, vn)
+        self.assertEqual(nd["proto"], "reality")
+        self.assertEqual(nd["sni"], "sni.example.com")
+        self.assertEqual(nd["shortid"], "SID1")          # первый из shortIds
+        self.assertEqual(nd["flow"], "")                  # users без flow
+
+    def test_reality_sni_from_server_name_string(self):
+        """ГЛАВНЫЙ кейс шага 5: прод-outbound REALITY хранит serverName
+        (строку), а не serverNames. Раньше SNI брался = host (IP) →
+        REALITY-проба через цепочку валилась ложно для IP-хостов."""
+        from chimera.modules.diagnostics import _fullpath_nd_from_outbound
+        ob = self._ob({
+            "network": "tcp", "security": "reality",
+            "sockopt": {"dialerProxy": "hop-eu"},
+            "realitySettings": {
+                "serverName": "real-sni.example.com",
+                "publicKey": "PBK", "shortId": "SID9",
+                "fingerprint": "chrome"},
+        })
+        vn = ob["settings"]["vnext"][0]
+        nd = _fullpath_nd_from_outbound(ob, vn)
+        self.assertEqual(nd["sni"], "real-sni.example.com")  # НЕ 203.0.113.10
+        self.assertEqual(nd["shortid"], "SID9")              # shortId-строка
+
+    def test_xhttp_tls_sni_fp_from_tls_settings(self):
+        from chimera.modules.diagnostics import _fullpath_nd_from_outbound
+        ob = self._ob({
+            "network": "xhttp", "security": "tls",
+            "sockopt": {"dialerProxy": "hop-eu"},
+            "xhttpSettings": {"mode": "stream-up", "path": "/xy9876"},
+            "tlsSettings": {"serverName": "tls.example.com",
+                            "fingerprint": "safari",
+                            "alpn": ["h2", "http/1.1"]},
+        })
+        vn = ob["settings"]["vnext"][0]
+        nd = _fullpath_nd_from_outbound(ob, vn)
+        self.assertEqual(nd["proto"], "xhttp")
+        self.assertEqual(nd["sni"], "tls.example.com")   # из tlsSettings
+        self.assertEqual(nd["fp"], "safari")             # из tlsSettings
+        self.assertEqual(nd["path"], "/xy9876")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

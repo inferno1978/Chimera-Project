@@ -842,6 +842,61 @@ def _diag_tcp_probe(host: str, port: int, timeout: int = 10
     return False, failed_summary, -1
 
 
+def _fullpath_nd_from_outbound(ob: dict, vn: dict) -> Optional[dict]:
+    """Реконструкция nd-dict для full-path проверки из outbound прод-конфига.
+
+    Чистая функция (шаг 5 мастера и тесты). outbound с sockopt.dialerProxy
+    уже содержит всё нужное: ключи REALITY, SNI, а для xhttp/xhttp_reality —
+    РЕАЛЬНЫЕ path/mode в xhttpSettings. Раньше path/xhttp_mode не
+    реконструировались и чекер уходил на дефолты "/"/"stream-up" — для нод
+    с кастомным path full-path проверка падала ложно (REALITY/xHTTP не
+    сходился по пути). Возвращает None, если outbound не via (нет
+    dialerProxy) — вызывать проверку не нужно.
+    """
+    _ss = ob.get("streamSettings", {}) or {}
+    _dp = (_ss.get("sockopt", {}) or {}).get("dialerProxy", "")
+    if not _dp:
+        return None
+    _vn_user = (vn.get("users") or [{}])[0]
+    _rs = (_ss.get("realitySettings", {}) or {})
+    _xs = (_ss.get("xhttpSettings", {}) or {})
+    _tls = (_ss.get("tlsSettings", {}) or {})
+    _proto = ("xhttp_reality"
+              if (_ss.get("network") == "xhttp"
+                  and _ss.get("security") == "reality")
+              else "reality" if _ss.get("security") == "reality"
+              else "xhttp")
+    _host = vn.get("address", "")
+    # SNI: outbound-форма REALITY — serverName (строка); inbound-форма —
+    # serverNames (список, для полноты); xhttp — tlsSettings.serverName.
+    # Раньше читался только serverNames → для via-outbound (где serverName)
+    # SNI всегда падал в host: для IP-хостов SNI=IP валил REALITY-пробу.
+    _sni = (_rs.get("serverName")
+            or ((_rs.get("serverNames") or [""])[0]
+                if isinstance(_rs.get("serverNames"), list) else "")
+            or _tls.get("serverName")
+            or _host or "")
+    return {
+        "host": _host,
+        "port": vn.get("port", 443),
+        "uuid": _vn_user.get("id", ""),
+        "pubkey": _rs.get("publicKey", ""),
+        "shortid": (_rs.get("shortIds") or [""])[0]
+        if isinstance(_rs.get("shortIds"), list)
+        else _rs.get("shortId", ""),
+        "sni": _sni,
+        "fp": (_rs.get("fingerprint")
+               or _tls.get("fingerprint") or "chrome"),
+        "flow": _vn_user.get("flow", ""),
+        "proto": _proto,
+        # path/mode — из xhttpSettings outbound (генератор пишет реальные
+        # значения; дефолты ломали проверку при кастомном path)
+        "path": _xs.get("path", "/"),
+        "xhttp_mode": _xs.get("mode", "stream-up"),
+        "via": _dp,
+    }
+
+
 def _diag_check_routing_live(cfg: dict, counters: list) -> None:
     core = _core_module()
     _box_warn = core._box_warn
@@ -880,42 +935,20 @@ def _diag_check_routing_live(cfg: dict, counters: list) -> None:
                 try:
                     from chimera.modules.chain_relay import (
                         check_via_node_full_path, load_relay_hops)
-                    _vn_user = (vn.get("users") or [{}])[0]
-                    _rs = (ob.get("streamSettings", {}) or {}).get(
-                        "realitySettings", {}) or {}
-                    _ss = ob.get("streamSettings", {}) or {}
-                    _proto = ("xhttp_reality"
-                              if (_ss.get("network") == "xhttp"
-                                  and _ss.get("security") == "reality")
-                              else "reality" if _ss.get("security") == "reality"
-                              else "xhttp")
-                    _nd = {
-                        "host": host, "port": port,
-                        "uuid": _vn_user.get("id", ""),
-                        "pubkey": _rs.get("publicKey", ""),
-                        "shortid": (_rs.get("shortIds") or [""])[0]
-                        if isinstance(_rs.get("shortIds"), list)
-                        else _rs.get("shortId", ""),
-                        "sni": (_rs.get("serverNames") or [host])[0]
-                        if isinstance(_rs.get("serverNames"), list)
-                        else (host or ""),
-                        "fp": _rs.get("fingerprint", "chrome"),
-                        "flow": _vn_user.get("flow", ""),
-                        "proto": _proto,
-                        "via": _dp,
-                    }
-                    _r = check_via_node_full_path(_nd, load_relay_hops())
-                    if _r.get("ok"):
-                        _diag_chk(counters, True,
-                                  f"Exit-нода [{tag}] {host}:{port} — full-path OK "
-                                  f"через хоп «{_dp}» ({_r.get('ms', 0):.0f} мс)",
-                                  "")
-                    else:
-                        _diag_chk(counters, False,
-                                  "",
-                                  f"Exit-нода [{tag}] {host}:{port} — цепочка через "
-                                  f"хоп «{_dp}» НЕ РАБОТАЕТ ({_r.get('detail', '')[:80]})")
-                    continue
+                    _nd = _fullpath_nd_from_outbound(ob, vn)
+                    if _nd:
+                        _r = check_via_node_full_path(_nd, load_relay_hops())
+                        if _r.get("ok"):
+                            _diag_chk(counters, True,
+                                      f"Exit-нода [{tag}] {host}:{port} — full-path OK "
+                                      f"через хоп «{_dp}» ({_r.get('ms', 0):.0f} мс)",
+                                      "")
+                        else:
+                            _diag_chk(counters, False,
+                                      "",
+                                      f"Exit-нода [{tag}] {host}:{port} — цепочка через "
+                                      f"хоп «{_dp}» НЕ РАБОТАЕТ ({_r.get('detail', '')[:80]})")
+                        continue
                 except Exception:
                     pass    # fallback на обычную TCP-пробу ниже
 
@@ -2293,28 +2326,39 @@ def do_full_diagnostic() -> None:
                 # Как и в шаге 5, проверяем full-path (врем. xray-клиент через
                 # цепочку + HTTP-проба). Прямая TCP-проба — только fallback.
                 _via_tag = (_nd.get("via") or "").strip()
+                _via_note = ""
                 if _via_tag:
                     try:
                         from chimera.modules.chain_relay import (
                             check_via_node_full_path as _cr_fullpath,
-                            load_relay_hops as _cr_hops)
-                        _vr = _cr_fullpath(_nd, _cr_hops())
-                        if _vr.get("ok"):
-                            _vms = _vr.get("ms", 0)
-                            _max_lat = max(_max_lat, int(_vms))
-                            _vc = GREEN if _vms < 300 else YELLOW
+                            load_relay_hops as _cr_hops,
+                            hop_via_tag_for as _cr_via_ok)
+                        _hops = _cr_hops()
+                        if not _cr_via_ok(_nd, _hops):
+                            # Хоп выключен/удалён: генератор прод-конфига в
+                            # этом случае НЕ ставит dialerProxy — нода ходит
+                            # НАПРЯМУЮ. FAIL «via не найден» был бы ложным:
+                            # проверяем прямой TCP-пробой (как генератор).
+                            _via_note = (f", via «{_via_tag}» неактивен — "
+                                         f"нода работает напрямую")
+                        else:
+                            _vr = _cr_fullpath(_nd, _hops)
+                            if _vr.get("ok"):
+                                _vms = _vr.get("ms", 0)
+                                _max_lat = max(_max_lat, int(_vms))
+                                _vc = GREEN if _vms < 300 else YELLOW
+                                _box_info(f"  {_idx}{_hp:<{_HP_W}}  "
+                                          f"{_vc}цепь OK{NC}  "
+                                          f"{DIM}(via {_via_tag}: {_vms:.0f} мс,"
+                                          f" прямой путь может быть перерезан"
+                                          f" ТСПУ){NC}")
+                                continue
                             _box_info(f"  {_idx}{_hp:<{_HP_W}}  "
-                                      f"{_vc}цепь OK{NC}  "
-                                      f"{DIM}(via {_via_tag}: {_vms:.0f} мс,"
-                                      f" прямой путь может быть перерезан"
-                                      f" ТСПУ){NC}")
+                                      f"{RED}цепь FAIL{NC}  "
+                                      f"{DIM}(via {_via_tag}: "
+                                      f"{str(_vr.get('detail', ''))[:90]}){NC}")
+                            _node_fails.append(f"{_nh}:{_np} (цепь via {_via_tag})")
                             continue
-                        _box_info(f"  {_idx}{_hp:<{_HP_W}}  "
-                                  f"{RED}цепь FAIL{NC}  "
-                                  f"{DIM}(via {_via_tag}: "
-                                  f"{str(_vr.get('detail', ''))[:90]}){NC}")
-                        _node_fails.append(f"{_nh}:{_np} (цепь via {_via_tag})")
-                        continue
                     except ImportError:
                         pass    # chain_relay недоступен — TCP-проба ниже
                     except Exception:
@@ -2329,7 +2373,8 @@ def do_full_diagnostic() -> None:
                     _max_lat = max(_max_lat, _lat_ms)
                     _lc = GREEN if _lat_ms < 150 else YELLOW if _lat_ms < 300 else RED
                     _lat_str = f"{_lc}{_lat_ms:>4}ms{NC}"
-                    _box_info(f"  {_idx}{_hp:<{_HP_W}}  {_lat_str}  {DIM}({_detail}){NC}")
+                    _box_info(f"  {_idx}{_hp:<{_HP_W}}  {_lat_str}  "
+                              f"{DIM}({_detail}{_via_note}){NC}")
                     if _lat_ms >= 300:
                         _wiz_hint(f"Высокая latency к {_nh} — попробуй: mtr {_nh}")
                 else:
