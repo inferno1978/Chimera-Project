@@ -1338,6 +1338,16 @@ def do_chain_relay_menu() -> None:
                     ok, ms = check_hop_tcp(nd)
                     st = (f"{GREEN}OK {ms:.0f} мс{NC}" if ok else f"{RED}DOWN{NC}")
                     _box_row(f"  exit {nd.get('host')}:  (напрямую)  →  {st}")
+                elif not hop_via_tag_for(nd, hops):
+                    # Хоп выключен/удалён: генератор прод-конфига в этом
+                    # случае подключает ноду НАПРЯМУЮ (без dialerProxy) —
+                    # FAIL «via не найден» был бы ложным. Проверяем TCP,
+                    # как генератор (зеркалит test_disabled_hop_falls_
+                    # back_direct).
+                    ok, ms = check_hop_tcp(nd)
+                    st = (f"{GREEN}OK {ms:.0f} мс{NC}" if ok else f"{RED}DOWN{NC}")
+                    _box_row(f"  exit {nd.get('host')}:  "
+                             f"(via {via} {RED}выкл{NC} → напрямую)  →  {st}")
                 else:
                     r = check_via_node_full_path(nd, hops, want_ip=True)
                     if r["ok"]:

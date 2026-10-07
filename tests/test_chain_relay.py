@@ -480,6 +480,35 @@ class TestHealthMonitorVia(unittest.TestCase):
         # full-path вызван только для via-ноды, TCP — только для прямой
         self.assertEqual(calls, ["ee.example.com", "tcp:de.example.com"])
 
+    def test_disabled_hop_falls_back_tcp_ping(self):
+        """via указывает на ВЫКЛЮЧЕННЫЙ хоп: генератор прод-конфига в этом
+        случае не ставит dialerProxy (нода ходит напрямую) — HM обязан
+        проверять её TCP-пингом, а не врать DOWN «via не найден» (ложный
+        DOWN + TG-тревога при живой ноде)."""
+        from chimera.modules import node_health_monitor as nhm
+
+        # Тот же state, но хоп выключен
+        self.core.STATE_FILE.write_text(json.dumps({
+            "chain_nodes": [_mk_node(via="hop-a"), _mk_node("de.example.com")],
+            "relay_hops": [_mk_hop("hop-a", enabled=False)],
+        }))
+        calls = []
+
+        orig_tcp = nhm._tcp_ping
+        nhm._tcp_ping = lambda h, p: (calls.append("tcp:" + h) or (True, 12.0))
+        try:
+            results = nhm.check_nodes_once()
+        finally:
+            nhm._tcp_ping = orig_tcp
+
+        by_host = {r["host"]: r for r in results}
+        # via-нода с выключенным хопом ЖИВА (проверена TCP, как прямая)
+        self.assertTrue(by_host["ee.example.com"]["up"])
+        self.assertEqual(by_host["ee.example.com"]["ms"], 12.0)
+        # обе ноды проверены TCP-пингом
+        self.assertEqual(sorted(calls),
+                         ["tcp:de.example.com", "tcp:ee.example.com"])
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  check_via_node_full_path: want_speed_mb (скорость через цепочку)
