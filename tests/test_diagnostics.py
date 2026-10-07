@@ -13,11 +13,13 @@ Unit-тесты для chimera/modules/diagnostics.py.
 """
 from __future__ import annotations
 
+import io
 import json
 import socket
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -611,6 +613,119 @@ class TestFullpathNdFromOutbound(unittest.TestCase):
         self.assertEqual(nd["sni"], "tls.example.com")   # из tlsSettings
         self.assertEqual(nd["fp"], "safari")             # из tlsSettings
         self.assertEqual(nd["path"], "/xy9876")
+
+
+class TestDiagRoutingLiveViaHop(unittest.TestCase):
+    """Шаг 5 мастера («Тест маршрутизации») для via-нод (dialerProxy).
+
+    Регрессия stale-config кейса: хоп выключен/удалён в state ПОСЛЕ
+    последней сборки конфига → outbound всё ещё содержит dialerProxy.
+    Раньше шаг 5 выдавал ERR «цепочка НЕ РАБОТАЕТ (via не найден/
+    выключен)» и противоречил шагу 11 того же запуска («нода работает
+    напрямую»). Теперь — WARN «пересоберите конфиг», full-path
+    не вызывается (зеркалит шаг 11 / меню [T] / HM).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    @staticmethod
+    def _via_ob() -> dict:
+        return {
+            "tag": "chain-exit-2",
+            "protocol": "vless",
+            "settings": {"vnext": [{
+                "address": "203.0.113.10", "port": 8443,
+                "users": [{"id": "d34df00d-1111-2222-3333-444455556666",
+                           "encryption": "none"}],
+            }]},
+            "streamSettings": {
+                "network": "tcp", "security": "reality",
+                "sockopt": {"dialerProxy": "hop-eu"},
+                "realitySettings": {
+                    "serverName": "exit.example.com",
+                    "publicKey": "PBK-123", "shortId": "SID-456",
+                    "fingerprint": "chrome"},
+            },
+        }
+
+    @staticmethod
+    def _hop(enabled: bool) -> dict:
+        return {
+            "tag": "hop-eu", "host": "203.0.113.20", "port": 443,
+            "uuid": "d34df00d-1111-2222-3333-444455556666",
+            "pubkey": "RkFLRS1wYi1rZXk", "shortid": "0f1e2d3c4b5a6978",
+            "sni": "fi.example.com", "fp": "chrome", "proto": "reality",
+            "via": "", "enabled": enabled,
+        }
+
+    def _run(self, hops, chain_result=None):
+        """_diag_check_routing_live с одним via-outbound.
+
+        Возвращает (stdout, counters, fullpath_calls).
+        """
+        import chimera.modules.diagnostics as dg
+        import chimera.modules.chain_relay as cr
+
+        counters = dg._diag_make_counters()
+        calls: list = []
+
+        def _fake_fullpath(nd, hs, **kw):
+            calls.append((nd, hs))
+            return dict(chain_result) if chain_result else {
+                "ok": False, "ms": 0.0, "detail": "не должен вызываться",
+                "reason": "x", "legs": {}, "xray_tail": ""}
+
+        out = io.StringIO()
+        with redirect_stdout(out), \
+             patch.object(cr, "load_relay_hops", lambda: hops), \
+             patch.object(cr, "check_via_node_full_path", _fake_fullpath):
+            dg._diag_check_routing_live(
+                {"outbounds": [self._via_ob()]}, counters)
+        return out.getvalue(), counters, calls
+
+    def test_disabled_hop_warns_no_false_fail(self):
+        """Хоп выключен, конфиг stale → WARN «пересоберите конфиг»,
+        ERR-счётчик не растёт, full-path не вызывается."""
+        out, counters, calls = self._run([self._hop(enabled=False)])
+        self.assertEqual(calls, [],
+                         "full-path не должен вызываться для выключенного хопа")
+        self.assertIn("пересоберите конфиг", out)
+        self.assertIn("hop-eu", out)
+        # [total, passed, warnings, errors]: 1 проверка, 0 ошибок, 1 WARN
+        self.assertEqual(counters, [1, 0, 1, 0])
+        self.assertNotIn("НЕ РАБОТАЕТ", out)
+
+    def test_enabled_hop_fullpath_ok(self):
+        """Хоп активен → full-path вызывается с реконструированным nd
+        и списком хопов; ok → «full-path OK», ошибок нет."""
+        _h = self._hop(enabled=True)
+        out, counters, calls = self._run(
+            [_h],
+            {"ok": True, "ms": 412.0, "exit_ip": "203.0.113.10",
+             "speed_mbps": 0.0, "detail": "цепочка жива", "reason": "цепь жива",
+             "legs": {}, "xray_tail": ""})
+        self.assertEqual(len(calls), 1)
+        nd, hs = calls[0]
+        self.assertEqual(nd["via"], "hop-eu")          # реконструкция
+        self.assertEqual(nd["sni"], "exit.example.com")
+        self.assertEqual(nd["pubkey"], "PBK-123")
+        self.assertIs(hs[0], _h)                       # хопы переданы как есть
+        self.assertIn("full-path OK", out)
+        self.assertIn("412", out)
+        self.assertEqual(counters, [1, 1, 0, 0])
+
+    def test_enabled_hop_fullpath_fail_is_err(self):
+        """Хоп активен, цепь упала → честный ERR с деталью чекера."""
+        out, counters, calls = self._run(
+            [self._hop(enabled=True)],
+            {"ok": False, "ms": 0.0, "exit_ip": "", "speed_mbps": 0.0,
+             "detail": "хоп→нода недостижима (mini-client: нода не отвечает)",
+             "reason": "хоп→нода недостижима", "legs": {}, "xray_tail": ""})
+        self.assertEqual(len(calls), 1)
+        self.assertIn("НЕ РАБОТАЕТ", out)
+        self.assertIn("хоп→нода недостижима", out)
+        self.assertEqual(counters, [1, 0, 0, 1])
 
 
 if __name__ == "__main__":
