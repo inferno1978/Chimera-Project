@@ -1,3 +1,76 @@
+# Changelog new entry — ложный FAIL full-path чекера цепочек + маскирующий Download в спидтесте (07 Oct 2026)
+
+## FIX(chain_relay/speed_test): «цепочка отвечает некорректно (HTTP 000)» — ложный FAIL при живой цепи, и прямой Download маскировал отказ
+
+**Контекст (юзер, скрины error1/error2):** CHAIN RELAY → [T] и шаги
+11/12 мастера: exit-нода <ip>:8443 via hop-<tag>
+стабильно FAIL «цепочка отвечает некорректно (HTTP 000)» — при том что
+хоп TCP-OK 161 мс, exit напрямую OK, а следом «Download: 25.4 Мбит/с».
+Чекер валил единственную HTTP-пробу http://cp.cloudflare.com/
+generate_204 (порт 80): сети exit-нод (кейс — сеть с ограниченным
+egress) режут исходящий 80-й, и живая цепь навсегда оставалась FAIL.
+Хуже: шаг 12 при FAIL цепочки показывал прямой Download (замер идёт
+напрямую в Cloudflare с entry, минуя ноду — это канал самого entry,
+число совпадало у обеих нод: 22.3/25.4), юзер решал «всё работает».
+
+**Причина (1):** единственность пробы — 000 по порту 80 трактовался
+как «цепь мертва», без различения порт/DNS/endpoint. Дополнительно:
+слепой `time.sleep(1.5)` после старта xray (на медленном VPS socks
+успевал не подняться → мгновенный rc=7 → 000) и `stderr=PIPE` без
+дренажа (пайп 64 КБ мог заблокировать xray посреди проверки).
+
+**Причина (2):** `speed_test.py` для via-ноды с упавшей цепочкой
+проваливался в общий else-замер `_speed_test_download` — который
+никогда не ходил через ноду (проверено git log -L: замер всегда
+прямой с entry, аргументы resolve_host/port веститиальные).
+
+**`chimera/modules/chain_relay.py` — чекер v2:**
+- `_probe_ladder()`: лестница проб P1 http://generate_204 (порт 80+
+  DNS) → P2 https://generate_204 (443+DNS) → P3/P4 https 1.1.1.1 /
+  8.8.8.8 (-k, IP-literal, без DNS). Любой код ≠ 000 = цепь
+  ДОСТАВЛЯЕТ; ok=True при живой доменной пробе (204 или иной код —
+  перехват 302 больше не FAIL), «порт 80 с exit режется, 443 ок» —
+  заметка; только IP-проба → ok=False, «DNS на exit» (домены не
+  резолвятся — реальный трафик не пойдёт, это честно);
+- старт xray: ретраи curl по rc=7 до 8 с вместо sleep(1.5); stderr
+  в файл (`_TempXrayClient`, хвост в `xray_tail`) — без риска
+  переполнения пайпа;
+- `_diagnose_dead_chain()` (deep_diag=True по умолчанию, у HM/
+  балансера False): при полном молчании поднимает два мини-клиента —
+  только хоп и только нода напрямую — и формулирует, КАКАЯ нога
+  сломана: «хоп не отвечает» (TCP есть, VLESS нет → uuid/pbk/sid/
+  sni/flow хопа) / «хоп→нода недостижима» (обе ноги живы) /
+  «нода не отвечает» / «хоп и нода не отвечают»;
+- контракт ответа расширен, не сломан: + reason (короткая причина),
+  legs (диагностика ног), xray_tail; ok/ms/exit_ip/speed_mbps/detail
+  прежние. Меню [T] и шаг 11 печатают развёрнутый диагноз (было
+  detail[:60] «цепочка отвечает некорректно (HTTP 000)» — теперь
+  причина и что проверять).
+
+**`chimera/modules/speed_test.py` — шаг 12:** FAIL цепочки → прямой
+Download НЕ вызывается и НЕ показывается; вместо него диагноз чекера
+(reason/detail) + «Download: не измерен — цепочка недоступна» +
+подсказка «это канал entry, а не нода; проверьте цепочку (меню
+[E] → [H] → [T])». Живая цепочка — как раньше, скорость через
+speed_mbps ЧЕРЕЗ цепочку.
+
+**`node_health_monitor.py` / `smart_balancer.py`:** deep_diag=False
+(cron/зонды — только ok/не-ok, развёрнутый диагноз дают интерактивные
+проверки).
+
+**Тесты:** `tests/test_chain_relay.py` +15: TestProbeLadder (6:
+http-204 / https-fallback порт-80 / ip-only DNS / all-dead / 302-
+delivered / rc=7-ретраи), TestDiagnoseDeadChain (4 сочетания ног),
+TestFullPathV2 (5: порт-80-жива / DNS-not-ok / deep_diag 3 xray /
+deep_diag=False 1 xray / старый контракт 204). Новых регрессий нет:
+test_chain_relay 50 passed, соседние наборы (speed_test_cf_doh,
+diagnostics ×2, node_health_monitor, smart_balancer, chain_nodes,
+chain_lb_nodes) — 276 passed суммарно. Новый
+`tests/test_speed_test_chain_fail.py` (2): FAIL → прямой замер не
+вызван и «не измерен» в выводе; OK → скорость через цепочку.
+
+---
+
 # Changelog new entry — фикс bash-синтаксиса awg-routing.sh LB-формы (07 Oct 2026)
 
 ## FIX(awg_b4_split): routing_nft_block генерил '}}' вместо '}' — awg-cascade-routing падал на всех RU-entry с LB
@@ -238,7 +311,7 @@ bafa212. Вторая проблема: при составе балансиро
 
 **`speed_test.py` — Режим B, тест по exit-нодам:**
 - заголовок ноды помечает релей: «Нода 5: …:443 (chain-exit-5) ·
-  relay: hop-a»;
+  relay: hop-eu»;
 - via-нода: вместо прямого TCP-latency — полный путь через цепочку
   (латентность + exit IP) и Download ЧЕРЕЗ цепочку (реальная скорость
   клиентского пути, а не прямого канала entry-сервера);

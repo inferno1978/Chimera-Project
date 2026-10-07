@@ -588,7 +588,10 @@ def _sb_fullpath_check(node: dict, hops: list) -> dict:
     мокали _sb_fullpath_check, не трогая chain_relay."""
     try:
         from chimera.modules import chain_relay
-        return chain_relay.check_via_node_full_path(node, hops)
+        # deep_diag=False: зонд балансера ходит часто, ok/не-ok достаточно;
+        # развёрнутую диагностику ног дают меню [T]/диагностика/спидтест
+        return chain_relay.check_via_node_full_path(node, hops,
+                                                    deep_diag=False)
     except Exception as e:
         return {"ok": False, "ms": 0.0, "exit_ip": "",
                 "detail": f"full-path check упал: {e}"}
