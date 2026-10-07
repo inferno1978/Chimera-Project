@@ -1,3 +1,46 @@
+# Changelog new entry — фикс bash-синтаксиса awg-routing.sh LB-формы (07 Oct 2026)
+
+## FIX(awg_b4_split): routing_nft_block генерил '}}' вместо '}' — awg-cascade-routing падал на всех RU-entry с LB
+
+**Контекст (владелец):** при добавлении exit-ноды в LB-ротацию
+(awgs_cascade_lb.lb_set_exits) перегенерируется
+/etc/awg-cascade/awg-routing.sh; после регена сервис
+awg-cascade-routing.service падал: «syntax error: unexpected end
+of file». На момент находки битый скрипт лежал на всех трёх
+RU-entry (n91/n45/n138) — латентно со включения LB; рестарт
+сервиса на n45 при смене состава ротации вскрыл баг (до этого
+service висел «active» со старых запусков, ребут обнажил бы его
+на всех нодах разом).
+
+**Причина:** в `routing_nft_block()` закрывающие скобки bash-групп
+`grep … || { … }` писались plain-строкой `"}}",` — вне f-string
+`}}` остаётся двумя literal скобками. Word `}}` не является
+reserved word `}`, группа не закрывается, bash читает до EOF.
+Автор скопировал f-string-экранирование из соседних строк
+(`f"'{{ type … }}'"` → одиночные скобки nft) без префикса `f`.
+Не-LB-форма не задета (там корректный inline-блок
+`_B4_SPLIT_NFT_BLOCK` в awg_cascade.py) — поэтому юнит-тесты
+генератора (только не-LB форма, только assertIn) баг не ловили.
+
+**`chimera/modules/awg_b4_split.py`:** строки 690/697
+`"}}",` → `"}",` — ровно одна закрывающая скобка на каждую
+bash-группу (set-блок prerouting + AGH 53 output-блок).
+
+**`tests/test_awg_b4_split.py`:** +3 теста (класс
+TestRoutingNftBlockBashValid) — (а) в сплит-форме ровно 2
+закрывающие `}` и ни одной строки `}}`; (б) bash -n всей
+сплит-формы; (в) bash -n blanket-формы. bash -n — тот уровень
+проверки, который ловил бы этот класс багов с самого начала.
+
+**Деплой:** hotfix-патч уже применён на n91/n45/n138 (sed, md5
+d4bde493…), awg-routing.sh перегенерирован
+(awgs_cascade_routing_regen_lb), сервисы перезапущены — «AWG
+Cascade routing (LB) started» на всех трёх; фикс в Git закрепляет
+hotfix (иначе следующий fetch+reset вернул бы баг).
+
+
+---
+
 # Changelog new entry — failover резервных релеев в SmartBalancer (07 Oct 2026)
 
 ## FEAT(smart_balancer): автоматический failover релея — via-нода переключается на резервный хоп при смерти текущего

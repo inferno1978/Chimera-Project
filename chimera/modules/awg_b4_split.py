@@ -687,14 +687,14 @@ def routing_nft_block() -> str:
             f"    nft add rule inet {_NFT_TABLE} prerouting {tun_grep} meta mark set meta mark or {b} ct mark set ct mark or {b}",
             f"    nft add rule inet {_NFT_TABLE} prerouting iifname 'awg0' ip daddr @{_NFT_SET} return",
             f"    nft add rule inet {_NFT_TABLE} prerouting iifname 'awg0' meta mark set meta mark or {b} ct mark set ct mark or {b}",
-            "}}",
+            "}",
             f"nft add chain inet {_NFT_TABLE} output "
             "'{ type filter hook output priority mangle - 10; "
             "policy accept; }' 2>/dev/null",
             f"nft list chain inet {_NFT_TABLE} output 2>/dev/null | grep -q 'sport 53' || {{",
             f"    nft add rule inet {_NFT_TABLE} output oifname 'awg0' udp sport 53 meta mark set meta mark or {b}",
             f"    nft add rule inet {_NFT_TABLE} output oifname 'awg0' tcp sport 53 meta mark set meta mark or {b}",
-            "}}",
+            "}",
         ]
     else:
         lines += [
