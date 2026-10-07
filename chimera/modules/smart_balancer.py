@@ -7,6 +7,11 @@ Smart Balancer — автоматический выбор лучшей exit-н�
   • Взвешенный score: latency 50%, bandwidth 30%, load 20%
   • Карантин "мёртвых" нод на QUARANTINE_MINUTES минут
   • Прямой патч config.json Xray без перезаписи всего конфига
+  • Failover релея: via-нода, чей хоп дрогнул FAILOVER_AFTER_FAILS
+    раза подряд, переключается на другой активный хоп с живым
+    full-path (state.json via + канонический rebuild + TG-уведомление);
+    если полный путь текущего хопа на самом деле жив (ложный негатив
+    зонда) — переключения не происходит
 
 Точка входа из _core.py:
     from chimera.modules.smart_balancer import (
@@ -106,6 +111,11 @@ PROBE_INTERVAL_MIN = 15
 QUARANTINE_MINUTES = 30
 DEAD_THRESHOLD     = 3
 PROBE_TIMEOUT_SEC  = 5
+
+# Failover релея: после стольких ПОДРЯД провалов зонда via-ноды
+# пробуем резервные хопи (2 = вторая подряд неудача, до карантина).
+# 1 = без гистерезиса (не надо: рестарт Xray на каждом чихе зонда).
+FAILOVER_AFTER_FAILS = 2
 
 W_LATENCY   = 0.50
 W_BANDWIDTH = 0.30
@@ -557,6 +567,151 @@ def _sb_relay_probe_target(node: dict, hops: list) -> tuple:
             int((node or {}).get("port") or 443), "")
 
 
+def _sb_failover_candidates(node: dict, hops: list) -> list:
+    """Активные хопи-кандидаты для failover via-ноды (кроме текущего via).
+
+    Текущий via исключается даже если он выключен/не найден (это и есть
+    источник проблемы). Порядок — как в relay_hops. Чистая функция
+    (тестируется без сервера)."""
+    via = str((node or {}).get("via") or "").strip()
+    return [h for h in (hops or [])
+            if h.get("enabled", True)
+            and str(h.get("tag") or "").strip() != via]
+
+
+def _sb_fullpath_check(node: dict, hops: list) -> dict:
+    """Обёртка над chain_relay.check_via_node_full_path.
+
+    Поднимает временный xray-клиент с цепочкой hop→exit и курит 204:
+    это единственная честная проверка РАБОТОСПОСОБНОСТИ релейного пути
+    (TCP до хопа живость хопа не доказывает). Обёртка — чтобы тесты
+    мокали _sb_fullpath_check, не трогая chain_relay."""
+    try:
+        from chimera.modules import chain_relay
+        return chain_relay.check_via_node_full_path(node, hops)
+    except Exception as e:
+        return {"ok": False, "ms": 0.0, "exit_ip": "",
+                "detail": f"full-path check упал: {e}"}
+
+
+def _sb_hop_probe_metrics(tag: str, hops: list,
+                          fallback_ms: float = 0.0) -> dict:
+    """Метрики первого сегмента пути через хоп (зеркало обычного зонда
+    via-ноды: score считается по хопу, не по exit-ноде). full-path уже
+    подтверждён вызывающим кодом, поэтому при сбое TCP-зонда здесь —
+    честный fallback на латентность полного пути."""
+    h = next((x for x in (hops or [])
+              if str(x.get("tag") or "") == tag), None)
+    if h:
+        p = _probe_node(h.get("host", ""), int(h.get("port", 443) or 443))
+        if p.get("alive"):
+            return p
+    return {"alive": True, "lat_ms": fallback_ms,
+            "bw_ms": fallback_ms, "load": 0}
+
+
+def _sb_switch_node_via(host: str, new_tag: str) -> bool:
+    """Переписать via exit-ноды в state.json + канонический rebuild Xray.
+
+    Канонический путь (как TUI «Узлы → H → V»): chain_relay._save_
+    chain_nodes_via + core._load_state_into_globals + _rebuild_and_
+    restart_xray — генератор сам переставит sockopt.dialerProxy и хоп-
+    outbound-ы. Вызывается failover-логикой SmartBalancer. Возвращает
+    True при успехе."""
+    try:
+        from chimera.modules import chain_relay
+        nodes = chain_relay._chain_nodes_from_state()
+        nd = next((n for n in nodes
+                   if (n.get("host") or "").strip().lower()
+                   == (host or "").strip().lower()), None)
+        if nd is None:
+            return False
+        nd["via"] = new_tag
+        if not chain_relay._save_chain_nodes_via(nodes):
+            return False
+        import importlib
+        core = importlib.import_module("chimera._core")
+        core._load_state_into_globals()
+        core._rebuild_and_restart_xray(
+            "Xray активен — failover релея применён")
+        return True
+    except Exception:
+        return False
+
+
+def _sb_try_relay_failover(node: dict, hops: list,
+                           key: str) -> Optional[dict]:
+    """Попытка спасти via-ноду после повторных провалов зонда.
+
+    Вызывается из run_once, когда via-нода FAILOVER_AFTER_FAILS раза
+    подряд не зондируется (хоп мёртв/выключен → зонд бил напрямую и
+    упал). Возвращает probe-result (alive) при успехе или None.
+
+    Шаги:
+      1. full-path через ТЕКУЩИЙ via: жив? — это был ложный негатив
+         зонда, ничего не трогаем, нода жива;
+      2. кандидаты (прочие активные хопи): быстрый TCP-зонд →
+         сортировка по латентности → full-path через кандидата;
+         первый живой → _sb_switch_node_via (state + rebuild + TG);
+      3. ничего не помогло → None (вызывающий код продолжит обычный
+         сценарий провала вплоть до карантина).
+    """
+    via = str((node or {}).get("via") or "").strip()
+    if not via:
+        return None
+
+    # 1) текущий путь ещё жив? (зонд дрогнул — путь не обязательно)
+    fp = _sb_fullpath_check(node, hops)
+    if fp.get("ok"):
+        _sb_log(f"INFO: нода {key}: зонд релея {via} дрогнул, но полный "
+                f"путь жив ({fp.get('detail') or ''}) — без переключения")
+        return _sb_hop_probe_metrics(
+            via, hops, float(fp.get("ms") or 0.0))
+
+    # 2) резервные хопи: TCP-живые, по возрастанию латентности
+    scored: list[tuple[float, dict]] = []
+    for h in _sb_failover_candidates(node, hops):
+        p = _probe_node(h.get("host", ""),
+                        int(h.get("port", 443) or 443))
+        if p.get("alive"):
+            scored.append((float(p.get("lat_ms") or 1e9), h))
+    scored.sort(key=lambda x: x[0])
+    if not scored:
+        _sb_log(f"INFO: нода {key}: релей {via} недоступен, резервных "
+                f"активных хопов нет")
+        return None
+
+    for _, h in scored:
+        cand = str(h.get("tag") or "")
+        fp2 = _sb_fullpath_check({**node, "via": cand}, hops)
+        if not fp2.get("ok"):
+            _sb_log(f"INFO: нода {key}: резерв {cand} — full-path не прошёл "
+                    f"({fp2.get('detail') or '?'})")
+            continue
+        if not _sb_switch_node_via(node.get("host", ""), cand):
+            _sb_log(f"WARN: нода {key}: резерв {cand} жив, но переключить "
+                    f"via не удалось — пробуем следующий")
+            continue
+        node["via"] = cand          # in-memory синхронизация для логов
+        _ms = float(fp2.get("ms") or 0.0)
+        _sb_log(f"FAILOVER: нода {key}: релей {via} → {cand} "
+                f"(full-path {_ms:.0f} мс, exit_ip={fp2.get('exit_ip') or '?'})")
+        try:
+            _tg_notify_event(  # type: ignore[name-defined]
+                "relay_failover",
+                f"🔄 SmartBalancer: релей <b>{via}</b> недоступен — нода "
+                f"<b>{key}</b> переключена на резервный релей <b>{cand}</b> "
+                f"(full-path {_ms:.0f} мс)"
+            )
+        except Exception:
+            pass
+        return _sb_hop_probe_metrics(cand, hops, _ms)
+
+    _sb_log(f"INFO: нода {key}: релей {via} недоступен, живых full-path "
+            f"резервов нет (проверено TCP-живых: {len(scored)})")
+    return None
+
+
 def _sb_native_balancer_selector_tags() -> list:
     """Теги selector нативного chain-balancer из живого конфига Xray
     (пусто = балансировщика нет / selector отсутствует). Только чтение."""
@@ -668,59 +823,72 @@ def _smart_balancer_run_once() -> None:
             meta["fails"] = meta.get("fails", 0) + 1
             _via_note = f" [зонд через релей {p_via}]" if p_via else ""
             _sb_log(f"WARN: нода {key} недоступна (провалов подряд: {meta['fails']}){_via_note}")
-            if meta["fails"] >= dead_threshold:
-                _quarantine_node(meta, q_minutes)
-                _sb_log(
-                    f"ALERT: нода {key} переведена в карантин на {q_minutes} мин "
-                    f"(провалов: {meta['fails']}){_via_note}"
-                )
-                # TG уведомление
-                try:
-                    _tg_notify_event(  # type: ignore[name-defined]
-                        "xray_down",
-                        f"⚠️ SmartBalancer: нода <b>{host}:{port}</b> "
-                        f"недоступна {meta['fails']}×, карантин {q_minutes} мин"
-                        + (f" (зонд через релей {p_via})" if p_via else "")
+
+            # ── Failover релея: via-нода, FAILOVER_AFTER_FAILS+ провалов ──
+            # До карантина: возможно, дрогнул только зонд (проверяем
+            # full-path текущего хопа), либо хоп реально умер — тогда
+            # ищем живой резервный релей и переключаем via (+rebuild+TG).
+            if (str(node.get("via") or "").strip()
+                    and meta["fails"] >= FAILOVER_AFTER_FAILS):
+                _fo = _sb_try_relay_failover(node, hops, key)
+                if _fo is not None:
+                    result = _fo        # нода спасена — падаем в живой путь
+
+            if not result["alive"]:
+                if meta["fails"] >= dead_threshold:
+                    _quarantine_node(meta, q_minutes)
+                    _sb_log(
+                        f"ALERT: нода {key} переведена в карантин на {q_minutes} мин "
+                        f"(провалов: {meta['fails']}){_via_note}"
                     )
-                except Exception:
-                    pass
-            probe_results.append({
-                "idx": i, "key": key, "node": node,
-                "alive": False, "quarantined": False,
-                "score": 1.0, "meta": meta,
-            })
-        else:
-            # Нода жива — сбрасываем счётчик провалов
-            meta["fails"] = 0
-            lat_ms = result["lat_ms"]
-            bw_ms  = result["bw_ms"]
-            load   = result.get("load", 0)
+                    # TG уведомление
+                    try:
+                        _tg_notify_event(  # type: ignore[name-defined]
+                            "xray_down",
+                            f"⚠️ SmartBalancer: нода <b>{host}:{port}</b> "
+                            f"недоступна {meta['fails']}×, карантин {q_minutes} мин"
+                            + (f" (зонд через релей {p_via})" if p_via else "")
+                        )
+                    except Exception:
+                        pass
+                probe_results.append({
+                    "idx": i, "key": key, "node": node,
+                    "alive": False, "quarantined": False,
+                    "score": 1.0, "meta": meta,
+                })
+                continue
 
-            if strategy == "smart":
-                score = _compute_score(lat_ms, bw_ms, load, weights)
-            elif strategy == "leastping":
-                score = _compute_score(lat_ms, None, 0,
-                                       {"latency": 1.0, "bandwidth": 0.0, "load": 0.0})
-            elif strategy == "leastload":
-                score = _compute_score(None, None, load,
-                                       {"latency": 0.0, "bandwidth": 0.0, "load": 1.0})
-            elif strategy == "random":
-                import random as _rnd
-                score = _rnd.random()
-            else:   # roundrobin — score = порядковый номер (обработаем ниже)
-                score = float(i)
+        # Нода жива (или спасена failover-ом) — сбрасываем счётчик провалов
+        meta["fails"] = 0
+        lat_ms = result["lat_ms"]
+        bw_ms  = result["bw_ms"]
+        load   = result.get("load", 0)
 
-            meta["last_score"]  = score
-            meta["last_lat_ms"] = lat_ms
-            meta["last_bw_ms"]  = bw_ms
-            meta["last_load"]   = load
+        if strategy == "smart":
+            score = _compute_score(lat_ms, bw_ms, load, weights)
+        elif strategy == "leastping":
+            score = _compute_score(lat_ms, None, 0,
+                                   {"latency": 1.0, "bandwidth": 0.0, "load": 0.0})
+        elif strategy == "leastload":
+            score = _compute_score(None, None, load,
+                                   {"latency": 0.0, "bandwidth": 0.0, "load": 1.0})
+        elif strategy == "random":
+            import random as _rnd
+            score = _rnd.random()
+        else:   # roundrobin — score = порядковый номер (обработаем ниже)
+            score = float(i)
 
-            probe_results.append({
-                "idx": i, "key": key, "node": node,
-                "alive": True, "quarantined": False,
-                "score": score, "meta": meta,
-                "lat_ms": lat_ms, "bw_ms": bw_ms, "load": load,
-            })
+        meta["last_score"]  = score
+        meta["last_lat_ms"] = lat_ms
+        meta["last_bw_ms"]  = bw_ms
+        meta["last_load"]   = load
+
+        probe_results.append({
+            "idx": i, "key": key, "node": node,
+            "alive": True, "quarantined": False,
+            "score": score, "meta": meta,
+            "lat_ms": lat_ms, "bw_ms": bw_ms, "load": load,
+        })
 
     state["nodes_meta"] = nodes_meta
 

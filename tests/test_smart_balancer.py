@@ -622,5 +622,336 @@ class TestRunOnceObservationAndVia(unittest.TestCase):
         self.assertNotIn(("ee.example", 443), probe_calls)
 
 
+class TestSbFailoverCandidates(unittest.TestCase):
+    """_sb_failover_candidates — чистая выборка резервных хопов."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _hops(self):
+        return [
+            {"tag": "hop-a", "host": "hop-a.example", "port": 443,
+             "enabled": True},
+            {"tag": "hop-b", "host": "hop-b.example", "port": 443,
+             "enabled": True},
+            {"tag": "hop-c", "host": "hop-c.example", "port": 443,
+             "enabled": False},
+        ]
+
+    def test_excludes_current_via(self):
+        from chimera.modules.smart_balancer import _sb_failover_candidates
+        node = {"host": "ee.example", "via": "hop-a"}
+        tags = [h["tag"] for h in _sb_failover_candidates(node, self._hops())]
+        self.assertEqual(tags, ["hop-b"])
+
+    def test_no_via_returns_all_enabled(self):
+        from chimera.modules.smart_balancer import _sb_failover_candidates
+        node = {"host": "ee.example"}
+        tags = [h["tag"] for h in _sb_failover_candidates(node, self._hops())]
+        self.assertEqual(tags, ["hop-a", "hop-b"])
+
+    def test_unknown_via_still_excluded(self):
+        """via указывает на выключенный/несуществующий хоп — он не кандидат."""
+        from chimera.modules.smart_balancer import _sb_failover_candidates
+        node = {"host": "ee.example", "via": "hop-c"}
+        tags = [h["tag"] for h in _sb_failover_candidates(node, self._hops())]
+        self.assertEqual(tags, ["hop-a", "hop-b"])
+
+    def test_none_safe(self):
+        from chimera.modules.smart_balancer import _sb_failover_candidates
+        self.assertEqual(_sb_failover_candidates(None, None), [])
+        self.assertEqual(_sb_failover_candidates(None, self._hops()),
+                         self._hops()[:2])
+
+
+class TestRelayFailover(unittest.TestCase):
+    """run_once + _sb_try_relay_failover: сценарии отказов релея.
+
+    Основа: via-нода ee (via=hop-a) + два резервных хопа (hop-pl,
+    hop-b). Зонд hop-a мёртв, nodes_meta предзаполнен fails —
+    failover должен переключить via до карантина.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "state.json"
+        self._sb    = self._tmpdir / "sb.json"
+        self._cfg   = self._tmpdir / "config.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    _NODES = [
+        {"host": "a.example", "port": 443},
+        {"host": "ee.example", "port": 443, "via": "hop-a",
+         "uuid": "00000000-0000-0000-0000-000000000001",
+         "pubkey": "PUBKEY-EE", "shortid": "deadbeef", "sni": "ee.example"},
+    ]
+    _HOPS = [
+        {"tag": "hop-a", "host": "hop-a.example", "port": 443,
+         "enabled": True},
+        {"tag": "hop-pl", "host": "hop-pl.example", "port": 443,
+         "enabled": True},
+        {"tag": "hop-b", "host": "hop-b.example", "port": 443,
+         "enabled": True},
+    ]
+    _CFG_BALANCER = json.dumps({"routing": {"balancers": [
+        {"tag": "chain-balancer",
+         "selector": ["chain-exit-1", "chain-exit-2"],
+         "strategy": {"type": "roundRobin"}},
+    ]}})
+
+    def _probe(self, host, port):
+        """hop-a мёртв; все остальные цели живы."""
+        if host == "hop-a.example":
+            return {"alive": False, "lat_ms": None, "bw_ms": None,
+                    "load": None}
+        return {"alive": True, "lat_ms": 40.0, "bw_ms": 60.0, "load": 0}
+
+    def _run(self, fails, fullpath, switch_ret=True, nodes=None):
+        """run_once с моками failover-инфраструктуры.
+
+        fullpath(node, hops) -> dict — мок _sb_fullpath_check.
+        Возвращает (m_switch, m_tg, saved_sb_state, probe_calls)."""
+        import copy
+        import chimera.modules.smart_balancer as sbm
+        # deepcopy: _sb_try_relay_failover мутирует node["via"] при
+        # переключении — общий class-атрибут _NODES загрязнял бы
+        # последующие тесты (ловушка порядка выполнения).
+        nodes = (copy.deepcopy(nodes) if nodes is not None
+                 else copy.deepcopy(self._NODES))
+        hops = copy.deepcopy(self._HOPS)
+        self._state.write_text(json.dumps({
+            "chain_nodes": nodes,
+            "chain_lb_nodes": [],
+            "relay_hops": hops,
+        }))
+        self._sb.write_text(json.dumps({
+            "enabled": True, "strategy": "smart", "active_node_idx": -1,
+            "nodes_meta": {"ee.example:443": {
+                "fails": fails, "quarantine_until": 0,
+            }},
+        }))
+        self._cfg.write_text(self._CFG_BALANCER)
+        probe_calls = []
+
+        def _fake_probe(host, port):
+            probe_calls.append((host, port))
+            return self._probe(host, port)
+
+        with patch("chimera.modules.smart_balancer._STATE_FILE", self._state), \
+             patch("chimera.modules.smart_balancer._SB_STATE_FILE", self._sb), \
+             patch("chimera.modules.smart_balancer._sb_get_nodes_from_state",
+                   return_value=nodes), \
+             patch("chimera.modules.smart_balancer._sb_get_xray_config_path",
+                   lambda: self._cfg), \
+             patch("chimera.modules.smart_balancer._probe_node",
+                   side_effect=_fake_probe), \
+             patch("chimera.modules.smart_balancer._sb_fullpath_check",
+                   side_effect=fullpath) as m_fp, \
+             patch("chimera.modules.smart_balancer._sb_switch_node_via",
+                   return_value=switch_ret) as m_switch, \
+             patch("chimera.modules.smart_balancer._sb_patch_xray_active_node"), \
+             patch("chimera.modules.smart_balancer._sb_reload_xray"), \
+             patch("chimera.modules.smart_balancer._tg_notify_event") as m_tg, \
+             patch("chimera.modules.smart_balancer._sb_log"):
+            sbm._smart_balancer_run_once()
+        saved = json.loads(self._sb.read_text())
+        return m_switch, m_tg, m_fp, saved, probe_calls
+
+    def test_failover_switches_to_healthy_hop(self):
+        """hop-a мёртв (fails 1→2): full-path текущего мёртв, hop-pl жив
+        → via переключен на hop-pl, fails сброшен, TG отправлен."""
+        def _fp(nd, hops):
+            if nd.get("via") == "hop-a":
+                return {"ok": False, "ms": 0, "detail": "цепочка мертва"}
+            return {"ok": True, "ms": 150.0, "exit_ip": "198.51.100.10",
+                    "detail": "цепочка жива"}
+        m_switch, m_tg, m_fp, saved, calls = self._run(fails=1, fullpath=_fp)
+        m_switch.assert_called_once_with("ee.example", "hop-pl")
+        self.assertEqual(m_tg.call_args[0][0], "relay_failover")
+        ee = saved["nodes_meta"]["ee.example:443"]
+        self.assertEqual(ee["fails"], 0)
+        self.assertIsNotNone(ee["last_score"])
+
+    def test_failover_prefers_fastest_candidate(self):
+        """Кандидаты сортируются по TCP-латентности: hop-b быстрее —
+        переключаемся на него."""
+        def _probe_fast_de(host, port):
+            if host == "hop-a.example":
+                return {"alive": False, "lat_ms": None, "bw_ms": None,
+                        "load": None}
+            if host == "hop-b.example":
+                return {"alive": True, "lat_ms": 20.0, "bw_ms": 30.0,
+                        "load": 0}
+            return {"alive": True, "lat_ms": 90.0, "bw_ms": 120.0, "load": 0}
+
+        import chimera.modules.smart_balancer as sbm
+        import copy
+        _nodes = copy.deepcopy(self._NODES)
+        self._state.write_text(json.dumps({
+            "chain_nodes": _nodes, "chain_lb_nodes": [],
+            "relay_hops": self._HOPS,
+        }))
+        self._sb.write_text(json.dumps({
+            "enabled": True, "strategy": "smart", "active_node_idx": -1,
+            "nodes_meta": {"ee.example:443": {"fails": 1,
+                                              "quarantine_until": 0}},
+        }))
+        self._cfg.write_text(self._CFG_BALANCER)
+
+        def _fp(nd, hops):
+            return ({"ok": True, "ms": 140.0, "exit_ip": "198.51.100.10",
+                     "detail": "ok"} if nd.get("via") != "hop-a"
+                    else {"ok": False, "ms": 0, "detail": "dead"})
+
+        with patch("chimera.modules.smart_balancer._STATE_FILE", self._state), \
+             patch("chimera.modules.smart_balancer._SB_STATE_FILE", self._sb), \
+             patch("chimera.modules.smart_balancer._sb_get_nodes_from_state",
+                   return_value=_nodes), \
+             patch("chimera.modules.smart_balancer._sb_get_xray_config_path",
+                   lambda: self._cfg), \
+             patch("chimera.modules.smart_balancer._probe_node",
+                   side_effect=_probe_fast_de), \
+             patch("chimera.modules.smart_balancer._sb_fullpath_check",
+                   side_effect=_fp), \
+             patch("chimera.modules.smart_balancer._sb_switch_node_via",
+                   return_value=True) as m_switch, \
+             patch("chimera.modules.smart_balancer._sb_patch_xray_active_node"), \
+             patch("chimera.modules.smart_balancer._sb_reload_xray"), \
+             patch("chimera.modules.smart_balancer._tg_notify_event"), \
+             patch("chimera.modules.smart_balancer._sb_log"):
+            sbm._smart_balancer_run_once()
+        m_switch.assert_called_once_with("ee.example", "hop-b")
+
+    def test_failover_current_path_alive_no_switch(self):
+        """Зонд дрогнул, но full-path текущего хопа жив (ложный негатив):
+        без переключения, нода жива, fails сброшен."""
+        def _fp(nd, hops):
+            return {"ok": True, "ms": 151.0, "exit_ip": "198.51.100.10",
+                    "detail": "цепочка жива"}
+        m_switch, m_tg, m_fp, saved, calls = self._run(fails=1, fullpath=_fp)
+        m_switch.assert_not_called()
+        ee = saved["nodes_meta"]["ee.example:443"]
+        self.assertEqual(ee["fails"], 0)
+        self.assertIsNotNone(ee["last_score"])
+
+    def test_failover_exhausted_goes_to_quarantine(self):
+        """Все релеи мертвы: переключения нет, fails 2→3 → карантин."""
+        def _fp(nd, hops):
+            return {"ok": False, "ms": 0, "detail": "всё мертво"}
+        m_switch, m_tg, m_fp, saved, calls = self._run(fails=2, fullpath=_fp)
+        m_switch.assert_not_called()
+        ee = saved["nodes_meta"]["ee.example:443"]
+        self.assertGreater(ee.get("quarantine_until", 0), 0)
+        self.assertEqual(ee["fails"], 3)
+
+    def test_failover_not_triggered_on_first_fail(self):
+        """Первый провал (fails 0→1) — гистерезис: full-path не дёргаем."""
+        def _fp(nd, hops):
+            raise AssertionError("full-path не должен вызываться при fails<2")
+        m_switch, m_tg, m_fp, saved, calls = self._run(fails=0, fullpath=_fp)
+        m_switch.assert_not_called()
+        ee = saved["nodes_meta"]["ee.example:443"]
+        self.assertEqual(ee["fails"], 1)
+
+    def test_failover_skipped_for_direct_nodes(self):
+        """Нода без via: failover не применяется даже после 2+ провалов."""
+        def _fp(nd, hops):
+            raise AssertionError("full-path не должен вызываться без via")
+        nodes = [{"host": "plain.example", "port": 443}]
+        import chimera.modules.smart_balancer as sbm
+        self._state.write_text(json.dumps({
+            "chain_nodes": nodes, "chain_lb_nodes": [],
+            "relay_hops": self._HOPS,
+        }))
+        self._sb.write_text(json.dumps({
+            "enabled": True, "strategy": "smart", "active_node_idx": -1,
+            "nodes_meta": {"plain.example:443": {"fails": 2,
+                                                 "quarantine_until": 0}},
+        }))
+        self._cfg.write_text(self._CFG_BALANCER)
+
+        def _dead_probe(host, port):
+            return {"alive": False, "lat_ms": None, "bw_ms": None,
+                    "load": None}
+
+        with patch("chimera.modules.smart_balancer._STATE_FILE", self._state), \
+             patch("chimera.modules.smart_balancer._SB_STATE_FILE", self._sb), \
+             patch("chimera.modules.smart_balancer._sb_get_nodes_from_state",
+                   return_value=nodes), \
+             patch("chimera.modules.smart_balancer._sb_get_xray_config_path",
+                   lambda: self._cfg), \
+             patch("chimera.modules.smart_balancer._probe_node",
+                   side_effect=_dead_probe), \
+             patch("chimera.modules.smart_balancer._sb_fullpath_check",
+                   side_effect=_fp), \
+             patch("chimera.modules.smart_balancer._sb_switch_node_via") as m_switch, \
+             patch("chimera.modules.smart_balancer._sb_patch_xray_active_node"), \
+             patch("chimera.modules.smart_balancer._sb_reload_xray"), \
+             patch("chimera.modules.smart_balancer._tg_notify_event"), \
+             patch("chimera.modules.smart_balancer._sb_log"):
+            sbm._smart_balancer_run_once()
+        m_switch.assert_not_called()
+        ee = json.loads(self._sb.read_text())["nodes_meta"]["plain.example:443"]
+        self.assertGreater(ee.get("quarantine_until", 0), 0)
+
+
+class TestSbSwitchNodeVia(unittest.TestCase):
+    """_sb_switch_node_via: state.json via + канонический rebuild."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "state.json"
+        self._state.write_text(json.dumps({
+            "chain_nodes": [
+                {"host": "a.example", "port": 443},
+                {"host": "ee.example", "port": 443, "via": "hop-a"},
+            ],
+        }))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_switch_updates_state_and_rebuilds(self):
+        import chimera.modules.smart_balancer as sbm
+        import chimera.modules.chain_relay as cr
+        calls = {}
+        with patch.object(cr, "_chain_nodes_from_state",
+                          return_value=json.loads(
+                              self._state.read_text())["chain_nodes"]), \
+             patch.object(cr, "_save_chain_nodes_via",
+                          side_effect=lambda nodes: calls.update(
+                              saved=nodes) or True), \
+             patch("chimera._core._load_state_into_globals",
+                   lambda: calls.update(loaded=True)), \
+             patch("chimera._core._rebuild_and_restart_xray",
+                   lambda msg="": calls.update(rebuilt=msg) or None):
+            ok = sbm._sb_switch_node_via("EE.example", "hop-pl")
+        self.assertTrue(ok)
+        self.assertTrue(calls.get("loaded"))
+        self.assertIn("failover", calls.get("rebuilt", ""))
+        ee = next(n for n in calls["saved"]
+                  if n["host"] == "ee.example")
+        self.assertEqual(ee["via"], "hop-pl")
+
+    def test_unknown_host_returns_false(self):
+        import chimera.modules.smart_balancer as sbm
+        import chimera.modules.chain_relay as cr
+        with patch.object(cr, "_chain_nodes_from_state",
+                          return_value=json.loads(
+                              self._state.read_text())["chain_nodes"]), \
+             patch.object(cr, "_save_chain_nodes_via") as m_save, \
+             patch("chimera._core._rebuild_and_restart_xray") as m_rebuild:
+            ok = sbm._sb_switch_node_via("no-such.example", "hop-pl")
+        self.assertFalse(ok)
+        m_save.assert_not_called()
+        m_rebuild.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
