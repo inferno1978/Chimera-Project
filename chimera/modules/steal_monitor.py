@@ -15,15 +15,24 @@ TCP-relay (Mieru) терпит. Отчёт классифицирует ноду
        • локальная нода: /proc/stat (агрегат + per-core) + /proc/loadavg;
          дельта от прошлого тика → %steal/%busy/%iowait + boot-avg с бута;
        • peers (каскад, tg_bot.json→cascade_peers + extra_peers из конфига):
-         тот же замер по SSH (BatchMode, ключ), ошибки пишутся как err-сэмпл;
+         тот же замер по SSH (BatchMode, ключ) + hostname peer'а, ошибки
+         пишутся как err-сэмпл;
+       • идентичность ноды (label · IP · hostname) пишется в каждый сэмпл
+         и показывается в отчёте — видно, КТО именно, а не «local (vmNNN)»;
        • мгновенный алерт в TG при N сэмплах подряд ≥ crit_peak (anti-spam
          cooldown), событие "steal_alert".
   2. send_daily_report()  — дневной отчёт (cron H:M, по умолчанию 23:50):
-       • per-node: avg/p95/пик, busy, per-core разброс (SMT-сосед), boot-avg,
-         украденная доля желаемого CPU (oversubscription), часовая динамика;
+       • шапка: монитор-нода (label · IP · hostname) + сводка флота с
+         ярлыками нод: «Флот: 🔴 1 (NL) | 🟢 5 (RU-1, RU-2, ...)»;
+       • per-node: «NL · 203.0.113.30 · vm134610 — КРИТИЧНО — есть
+         проблемы», avg/p95/пик, busy, per-core разброс (SMT-сосед),
+         boot-avg, украденная доля желаемого CPU (oversubscription),
+         часовая динамика;
        • классификация НОРМА/ВНИМАНИЕ/КРИТИЧНО по порогам (настраиваются);
        • рекомендации «делать/не делать» по уровню;
-       • тикет-блок (монопространственный) — готовые доказательства;
+       • развёрнутый черновик тикета провайдеру НА РУССКОМ (для КРИТИЧНО —
+         требование миграции с доказательствами; для ВНИМАНИЕ — вежливая
+         просьба проверить физхост) — копи-паст целиком;
        • копия отчёта: reports/YYYY-MM-DD.txt (вложение в тикет);
        • событие "steal_report"; чистка samples/reports старше retention.
   3. live_measure()       — быстрый замер (6 сек, 3 чтения) для меню.
@@ -53,6 +62,7 @@ TCP-relay (Mieru) терпит. Отчёт классифицирует ноду
     is_monitor_installed()        → bool
     load_config() / save_config() → dict / None
     classify_day(stats, thr)      → (str, list)  — ok|warn|crit|data
+    _local_identity(cfg)          → dict         — label/ip/hostname ноды
     do_steal_monitor_menu()       → None         — TUI
 
 Модуль standalone (без _core на уровне импорта — паттерн node_health_monitor):
@@ -110,6 +120,9 @@ DEFAULT_CONFIG: dict = {
     "extra_peers": [],               # [{host,user,port,name}] — свой список
     "peer_filter": [],               # [] = все; имена/хосты для выборки
     "peer_timeout_s": SSH_TIMEOUT,
+    "node_label": "",                # имя локальной ноды в отчётах (напр. "RU-1");
+                                     # пусто = hostname (криптичные vm134610 и т.п.)
+    "node_ip": "",                   # публичный IP локальной ноды; пусто = автодетект
     "alerts_enabled": True,          # мгновенные алерты при серии ≥ crit_peak
     "thresholds": {
         "warn_avg": 3.0,             # дневной средний %steal
@@ -155,6 +168,69 @@ def _hostname() -> str:
         return _run(["hostname", "-s"]).stdout.strip() or "server"
     except Exception:
         return "server"
+
+
+def _is_private_ip(ip: str) -> bool:
+    """Внутренний/не-маршрутизируемый адрес (NAT/link-local/loopback)."""
+    if not ip or ip.count(".") != 3:
+        return True  # не IPv4 (в т.ч. IPv6 ULA) — как «частный» не показываем
+    try:
+        a, b, _c, _d = (int(x) for x in ip.split("."))
+    except ValueError:
+        return True
+    return (a == 10 or a == 127 or a == 0
+            or (a == 172 and 16 <= b <= 31)
+            or (a == 192 and b == 168)
+            or (a == 169 and b == 254))
+
+
+def _detect_local_ip() -> str:
+    """Публичный IP локальной ноды без внешних сервисов.
+
+    Порядок: src из `ip route get` (адрес исходящего интерфейса) →
+    hostname -I (первый не-внутренний) → "". Внешние IP-эхо-сервисы
+    сознательно не используем: из РФ они часто недоступны/медленны,
+    а замер идёт по cron каждые 5 минут.
+    """
+    try:
+        r = _run(["ip", "-4", "route", "get", "1.1.1.1"], timeout=6)
+        toks = (r.stdout or "").split()
+        if "src" in toks:
+            ip = toks[toks.index("src") + 1]
+            if ip and not _is_private_ip(ip):
+                return ip
+    except Exception:
+        pass
+    try:
+        r = _run(["hostname", "-I"], timeout=6)
+        for ip in (r.stdout or "").split():
+            if not _is_private_ip(ip):
+                return ip
+    except Exception:
+        pass
+    return ""
+
+
+def _local_identity(cfg: Optional[dict] = None) -> dict:
+    """Идентичность локальной ноды для отчётов/алертов.
+
+    {"label", "ip", "hostname"}: label из конфига (node_label, напр. "RU-1")
+    или hostname; ip из конфига (node_ip) или автодетект. Именно эти три
+    значения показываются в шапке отчёта и заголовке блока каждой ноды —
+    чтобы по отчёту было сразу видно, КТО это (а не «local (vm134610)»).
+    """
+    cfg = cfg or load_config()
+    hostname = _hostname()
+    label = str(cfg.get("node_label") or "").strip() or hostname
+    ip = str(cfg.get("node_ip") or "").strip() or _detect_local_ip()
+    return {"label": label, "ip": ip, "hostname": hostname}
+
+
+def _peer_identity(peer: dict, ssh_hostname: Optional[str] = None) -> dict:
+    """Идентичность peer-ноды: label = имя из конфига, ip = host."""
+    name = str(peer.get("name") or peer.get("host") or "?")
+    host = str(peer.get("host") or "")
+    return {"label": name, "ip": host, "hostname": ssh_hostname or ""}
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -363,10 +439,11 @@ def _load_peers(cfg: dict) -> list:
 
 
 def _ssh_proc_stat(peer: dict, timeout: int = SSH_TIMEOUT) -> Optional[dict]:
-    """Замер /proc/stat + /proc/loadavg + /proc/uptime на peer по SSH.
+    """Замер /proc/stat + /proc/loadavg + /proc/uptime + hostname на peer.
 
     BatchMode (только ключ) — пароли не поддерживаем, как и везде в Chimera.
-    /proc читается всеми — sudo не нужен.
+    /proc читается всеми — sudo не нужен. Hostname берём маркер-строкой
+    (___HOSTNAME___...) для отчёта: «название машины» peer-ноды.
     """
     host = peer.get("host", "")
     if not host:
@@ -381,7 +458,8 @@ def _ssh_proc_stat(peer: dict, timeout: int = SSH_TIMEOUT) -> Optional[dict]:
         "-o", "ConnectTimeout=%d" % timeout,
         "-p", str(port),
         target,
-        "cat /proc/stat /proc/loadavg /proc/uptime",
+        "cat /proc/stat /proc/loadavg /proc/uptime; "
+        "echo ___HOSTNAME___$(hostname -s)",
     ]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 8)
@@ -392,8 +470,16 @@ def _ssh_proc_stat(peer: dict, timeout: int = SSH_TIMEOUT) -> Optional[dict]:
     if r.returncode != 0:
         return None
     out = (r.stdout or "")
-    stat_lines = [ln for ln in out.splitlines() if ln.startswith("cpu")]
-    rest = [ln.strip() for ln in out.splitlines()
+    # маркер hostname вынимаем до общего парсинга
+    hostname = None
+    kept: list = []
+    for ln in out.splitlines():
+        if ln.startswith("___HOSTNAME___"):
+            hostname = ln[len("___HOSTNAME___"):].strip() or None
+        else:
+            kept.append(ln)
+    stat_lines = [ln for ln in kept if ln.startswith("cpu")]
+    rest = [ln.strip() for ln in kept
             if ln.strip() and not ln.strip().startswith("cpu")]
     # хвост cat'а: /proc/stat после cpu-строк содержит intr/ctxt, а loadavg
     # и uptime — в самом конце. Берём с конца, иначе load1 парсится из intr.
@@ -402,7 +488,8 @@ def _ssh_proc_stat(peer: dict, timeout: int = SSH_TIMEOUT) -> Optional[dict]:
     st = read_proc_stat("\n".join(stat_lines))
     if st is None:
         return None
-    return {"stat": st, "load1": loadavg, "uptime_s": uptime}
+    return {"stat": st, "load1": loadavg, "uptime_s": uptime,
+            "hostname": hostname}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -465,8 +552,32 @@ def _save_prev(st: dict) -> None:
 #  Telegram (events-aware, паттерн b4_monitor)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _split_tg_chunks(msg: str, limit: int = TG_CHUNK_LIMIT) -> list:
+    """Делит сообщение на чанки ≤ limit, разрезая ПО ГРАНИЦА СТРОК.
+
+    Хард-рез посимвольно мог разрезать тикет-черновик или HTML-тег
+    посередине. Строку без переносов длиннее limit режем жёстко (некуда).
+    """
+    if len(msg) <= limit:
+        return [msg]
+    chunks: list = []
+    cur = ""
+    for line in msg.split("\n"):
+        while len(line) > limit:          # гигантская строка без переносов
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if cur and len(cur) + 1 + len(line) > limit:
+            chunks.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+    return chunks or [msg]
+
+
 def _tg_send(msg: str, event: str = "") -> bool:
-    """Отправка в TG: events-фильтр, чанки, ретраи.
+    """Отправка в TG: events-фильтр, чанки (по строкам), ретраи.
 
     Ретраи нужны: на части сетей (RU-транзит) первое TLS-соединение к
     api.telegram.org сбрасывается DPI, повтор проходит (замерено на 45:
@@ -487,8 +598,7 @@ def _tg_send(msg: str, event: str = "") -> bool:
                                                          TG_RETRIES))))
         except Exception:
             retries = TG_RETRIES
-        chunks = [msg[i:i + TG_CHUNK_LIMIT]
-                  for i in range(0, len(msg), TG_CHUNK_LIMIT)] or [msg]
+        chunks = _split_tg_chunks(msg)
         all_ok = True
         for c in chunks:
             ok_chunk = False
@@ -539,11 +649,13 @@ def _save_tg_state(st: dict) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _alert_check(node: str, host: str, steal: Optional[float],
-                 cfg: dict, tgst: dict) -> Optional[str]:
+                 cfg: dict, tgst: dict, ip: Optional[str] = None) -> Optional[str]:
     """Обновляет стрик; возвращает текст алерта или None.
 
     steal=None (ошибка замера) сбрасывает стрик — данные с дыркой не считаем
     серией. Алерт: streak >= alert_consecutive и прошёл cooldown.
+    ip — публичный IP ноды (если известен), показывается в алерте вместо
+    криптичного hostname.
     """
     thr = cfg.get("thresholds", {})
     nodes = tgst.setdefault("nodes", {})
@@ -574,8 +686,8 @@ def _alert_check(node: str, host: str, steal: Optional[float],
     nodes[node] = ns
     ts = datetime.now().strftime("%d.%m.%Y %H:%M")
     return (
-        f"🚨 <b>[{_hostname()}] CPU Steal критический</b>\n"
-        f"🔴 <b>{node}</b> (<code>{host}</code>): "
+        f"🚨 <b>[{_local_identity(cfg)['label']}] CPU Steal критический</b>\n"
+        f"🔴 <b>{node}</b> (<code>{ip or host}</code>): "
         f"steal <b>{steal:.1f}%</b> — {consec} замера подряд ≥ {crit_peak:.0f}%\n"
         f"<i>{ts}</i>\n\n"
         f"Дневной отчёт и доказательства: Диагностика → CPU Steal монитор.\n"
@@ -589,8 +701,13 @@ def _alert_check(node: str, host: str, steal: Optional[float],
 
 def _record_node_sample(node: str, host: str, cur: dict, load1: Optional[float],
                         uptime_s: Optional[float], prev_store: dict,
-                        cfg: dict, tgst: dict, alerts: list) -> Optional[dict]:
-    """Дельта против prev → сэмпл в JSONL (+алерт-проверка). Возвращает сэмпл."""
+                        cfg: dict, tgst: dict, alerts: list,
+                        ident: Optional[dict] = None) -> Optional[dict]:
+    """Дельта против prev → сэмпл в JSONL (+алерт-проверка). Возвращает сэмпл.
+
+    ident ("label"/"ip"/"hostname") пишется в сэмпл — отчёт показывает ноду
+    как «RU-1 · 203.0.113.10 · srv-ru1», а не «local (vm134610)».
+    """
     prev = prev_store.get(node)
     d = compute_deltas(prev, cur)
     per = percpu_steal(prev, cur)
@@ -620,13 +737,18 @@ def _record_node_sample(node: str, host: str, cur: dict, load1: Optional[float],
         "boot_busy": boot_busy,
         "uptime_s": uptime_s,
     }
+    if ident:
+        for k in ("label", "ip", "hostname"):
+            if ident.get(k):
+                rec[k] = ident[k]
     if per is not None:
         rec["core_max"] = max(per)
         rec["core_min"] = min(per)
     _append_sample(rec)
 
     if cfg.get("alerts_enabled", True):
-        msg = _alert_check(node, host, d["steal"], cfg, tgst)
+        msg = _alert_check(node, host, d["steal"], cfg, tgst,
+                           ip=(ident or {}).get("ip"))
         if msg:
             alerts.append(msg)
     return rec
@@ -651,10 +773,11 @@ def sample_once(verbose: bool = False) -> dict:
         if cur is None:
             _log(f"{ts} sample: /proc/stat unreadable")
         else:
+            ident = _local_identity(cfg)
             rec = _record_node_sample(
                 "local", _hostname(), cur,
                 read_loadavg(), read_uptime(),
-                prev_store, cfg, tgst, alerts)
+                prev_store, cfg, tgst, alerts, ident=ident)
             result["local"] = rec
 
     # ── peers по SSH ──────────────────────────────────────────────────────
@@ -675,7 +798,8 @@ def sample_once(verbose: bool = False) -> dict:
                 continue
             rec = _record_node_sample(
                 name, host, got["stat"], got["load1"], got["uptime_s"],
-                prev_store, cfg, tgst, alerts)
+                prev_store, cfg, tgst, alerts,
+                ident=_peer_identity(peer, got.get("hostname")))
             result["peers"].append(rec or {"node": name, "host": host,
                                            "ok": False, "err": "no delta"})
             if verbose and rec:
@@ -863,6 +987,34 @@ def recommendations(level: str, stats: dict) -> list:
 _LEVEL_ICON = {"ok": "🟢", "warn": "🟡", "crit": "🔴", "data": "⚪️"}
 _LEVEL_NAME = {"ok": "НОРМА", "warn": "ВНИМАНИЕ", "crit": "КРИТИЧНО",
                "data": "МАЛО ДАННЫХ"}
+# Человекочитаемое пояснение статуса (запрос юзера: «есть проблемы —
+# критично, нет проблем — норма, внимание — при пограничных состояниях»)
+_LEVEL_DESC = {
+    "ok": "НОРМА — проблем нет",
+    "warn": "ВНИМАНИЕ — пограничное состояние",
+    "crit": "КРИТИЧНО — есть проблемы",
+    "data": "МАЛО ДАННЫХ",
+}
+
+
+def _display_title(ident: Optional[dict], node: str, host: str) -> str:
+    """Заголовок блока ноды: label · IP · hostname (без дублей).
+
+    Примеры: «NL · 203.0.113.30 · vm134610», «RU-2 · 203.0.113.20».
+    Старые сэмплы без ident → «local (srv45)» как раньше.
+    """
+    ident = ident or {}
+    label = str(ident.get("label") or "").strip() or node
+    ip = str(ident.get("ip") or "").strip()
+    hostname = str(ident.get("hostname") or "").strip()
+    if not ip and not hostname:
+        return f"<b>{label}</b>" + (f" ({host})" if host and host != label else "")
+    parts = [f"<b>{label}</b>"]
+    if ip and ip != label:
+        parts.append(f"<code>{ip}</code>")
+    if hostname and hostname != label and hostname != ip:
+        parts.append(hostname)
+    return " · ".join(parts)
 
 
 def _fmt_uptime(sec) -> str:
@@ -894,11 +1046,17 @@ def _worst_hours(stats: dict, top: int = 3) -> str:
 
 
 def _node_block(node: str, host: str, stats: dict, level: str, reasons: list,
-                cfg: dict) -> list:
-    """HTML-блок одной ноды для дневного отчёта."""
+                cfg: dict, ident: Optional[dict] = None) -> list:
+    """HTML-блок одной ноды для дневного отчёта.
+
+    Первая строка — идентификация и статус: «NL · IP · vm134610 —
+    КРИТИЧНО — есть проблемы», чтобы по одному взгляду было ясно, КАКАЯ
+    нода и что с ней (а не «local (vm134610) — КРИТИЧНО»).
+    """
     rep = cfg.get("report", {})
     icon = _LEVEL_ICON[level]
-    lines = [f"{icon} <b>{node}</b> ({host}) — {_LEVEL_NAME[level]}"]
+    lines = [f"{icon} {_display_title(ident, node, host)} — "
+             f"<b>{_LEVEL_DESC[level]}</b>"]
     if stats.get("n_ok"):
         lines.append(f"avg <b>{stats['avg']:.1f}%</b> | p95 {stats['p95']:.1f}% "
                      f"| пик {stats['peak']:.1f}%"
@@ -933,32 +1091,142 @@ def _node_block(node: str, host: str, stats: dict, level: str, reasons: list,
     return lines
 
 
-def _ticket_block(node: str, host: str, stats: dict, level: str) -> str:
-    """Монопространственный блок доказательств — копи-паст в тикет."""
+def _ticket_block(node: str, host: str, stats: dict, level: str,
+                  ident: Optional[dict] = None,
+                  date_str: Optional[str] = None) -> str:
+    """Развёрнутый черновик тикета провайдеру на русском (копи-паст).
+
+    Уровень crit — требование миграции с доказательствами; warn — вежливая
+    просьба проверить физхост. Все цифры подставляются из фактов дня:
+    avg/p95/пик/пиковое время, boot-avg (хроника), busy (собственная
+    загрузка — доказывает невиновность наших нагрузок), stolen_share,
+    худшие часы, per-core разброс (SMT), ошибки замера.
+
+    Текст без символов «меньше/больше/амперсанд» — блок уходит в TG-HTML
+    внутри <code>.
+    """
     if not stats.get("n_ok"):
         return ""
-    L = []
-    L.append(f"Node: {node} ({host})")
-    L.append(f"Date: {datetime.now().strftime('%Y-%m-%d')}")
-    L.append(f"CPU steal (kernel /proc/stat, {stats['n_ok']} samples):")
-    L.append(f"  daily avg {stats['avg']:.1f}%, p95 {stats['p95']:.1f}%, "
-             f"peak {stats['peak']:.1f}%"
-             + (f" at {datetime.fromtimestamp(stats['peak_ts']).strftime('%H:%M')}"
-                if stats.get("peak_ts") else ""))
+    ident = ident or {}
+    label = str(ident.get("label") or "").strip() or node
+    ip = str(ident.get("ip") or "").strip() or host
+    hostname = str(ident.get("hostname") or "").strip()
+    dstr = date_str or datetime.now().strftime("%Y-%m-%d")
+    try:
+        dhuman = datetime.strptime(dstr, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except ValueError:
+        dhuman = dstr
+    vm = f"IP {ip}" + (f", hostname {hostname}" if hostname else "")
+    peak_time = (datetime.fromtimestamp(stats["peak_ts"]).strftime("%H:%M")
+                 if stats.get("peak_ts") else "—")
+
+    # ── факты (общие для обоих уровней) ─────────────────────────────────
+    facts = [f"• средний %steal за сутки: {stats['avg']:.1f}% "
+             f"(собственная загрузка VM — busy {stats['busy_avg']:.1f}%)",
+             f"• 95-й перцентиль: {stats['p95']:.1f}%, "
+             f"пиковое значение: {stats['peak']:.1f}% в {peak_time}"]
     if stats.get("boot_steal") is not None:
-        L.append(f"  since-boot avg {stats['boot_steal']:.2f}% "
-                 f"(uptime {_fmt_uptime(stats.get('uptime_s'))}) — chronic, "
-                 "not a single-day spike")
-    L.append(f"  own load (busy) avg {stats['busy_avg']:.1f}% — steal is NOT "
-             "caused by this VM's workload")
+        facts.append(f"• среднее с момента загрузки "
+                     f"(uptime {_fmt_uptime(stats.get('uptime_s'))}): "
+                     f"{stats['boot_steal']:.2f}% — проблема хроническая, "
+                     "не разовый эпизод")
     if stats.get("stolen_share", 0) >= 3.0:
-        L.append(f"  hypervisor withheld ~{stats['stolen_share']:.0f}% of "
-                 "desired CPU time (steal/(busy+steal))")
-    L.append(f"  worst hours: {_worst_hours(stats)}")
-    L.append("=> sustained CPU oversubscription on the physical host; "
-             "requesting migration to a non-overloaded host (reboot is NOT "
-             "a fix)")
+        facts.append(f"• суммарно за сутки гипервизор забрал "
+                     f"~{stats['stolen_share']:.0f}% желаемого CPU-времени "
+                     "(доля steal в steal+busy)")
+    if stats.get("hourly"):
+        facts.append(f"• худшие часы: {_worst_hours(stats)}")
+    if stats.get("smt_spread"):
+        facts.append(f"• разброс по ядрам (per-core): max {stats['core_max']}% "
+                     f"при min {stats['core_min']}% — похоже на шумного соседа "
+                     "на SMT-сиблинге")
+    if stats.get("load_max") is not None:
+        facts.append(f"• собственная нагрузка низкая: load max "
+                     f"{stats['load_max']} — отнятие CPU не связано с нашими "
+                     "процессами")
+
+    L = []
+    if level == "crit":
+        L.append(f"Тема: Хронический CPU steal (оверселл физического хоста) "
+                 f"на VM {label} ({ip}) — требуется миграция на другой хост")
+        L.append("")
+        L.append("Здравствуйте!")
+        L.append("")
+        L.append(f"На нашей виртуальной машине ({vm}) мониторинг фиксирует "
+                 "хроническое отнятие процессорного времени гипервизором "
+                 "(CPU steal, счётчик st ядра Linux в /proc/stat).")
+        L.append("")
+        L.append(f"Данные за {dhuman} ({stats['n_ok']} замеров, интервал "
+                 "несколько минут, ядро Linux /proc/stat):")
+        L.extend(facts)
+        L.append("")
+        L.append("Показатели устойчиво выше нормы: хронический steal при "
+                 "низкой собственной загрузке означает перегрузку "
+                 "(оверселлинг) физического хоста соседними VM.")
+        L.append("")
+        L.append("Просим:")
+        L.append("1. Проверить загрузку физического хоста, на котором "
+                 "размещена наша VM.")
+        L.append("2. Перенести (мигрировать) нашу VM на неперегруженный "
+                 "физический хост.")
+        L.append("")
+        L.append("Перезагрузка VM проблему не решает: кумулятивные счётчики "
+                 "с момента загрузки (см. выше) подтверждают хронический "
+                 "характер. Готовы приложить выгрузку sar -u и данные "
+                 "мониторинга за другие дни.")
+    else:  # warn — пограничное состояние
+        L.append(f"Тема: Повышенный CPU steal на VM {label} ({ip}) — "
+                 "просьба проверить загрузку физического хоста")
+        L.append("")
+        L.append("Здравствуйте!")
+        L.append("")
+        L.append(f"На нашей виртуальной машине ({vm}) в последние сутки "
+                 "наблюдается повышенный CPU steal (отнятие процессорного "
+                 "времени гипервизором, счётчик st ядра Linux).")
+        L.append("")
+        L.append(f"Данные за {dhuman} ({stats['n_ok']} замеров, ядро Linux "
+                 "/proc/stat):")
+        L.extend(facts)
+        L.append("")
+        L.append("Показатели пограничные: стабильной деградации ещё нет, но "
+                 "хронический характер (особенно среднее с момента загрузки) "
+                 "указывает на шумных соседей на физическом хосте.")
+        L.append("")
+        L.append("Просим проверить загрузку физического хоста и, если "
+                 "соседние VM перегружают его, рассмотреть перенос наших "
+                 "или их VM. Если показатели сохранятся или вырастут, мы "
+                 "вернёмся с просьбой о миграции на менее загруженный хост.")
+        L.append("")
+        L.append("Готовы приложить выгрузку sar -u и данные мониторинга за "
+                 "другие дни.")
+    L.append("")
+    L.append("Спасибо!")
     return "\n".join(L)
+
+
+def _fleet_summary_line(node_data: list) -> str:
+    """«Флот: 🔴 1 (NL) | 🟡 1 (RU-3) | 🟢 5 (RU-1, RU-2, DE, PL, EE)».
+
+    Ярлыки problem-нод показываем всегда; для ok-нод — если строка не
+    разрастается (иначе только счётчик).
+    """
+    levels: dict = {}
+    for _nd, _host, _stats, level, _r, _ident in node_data:
+        levels.setdefault(level, []).append((_nd, _ident))
+    parts = []
+    for level in ("crit", "warn", "ok", "data"):
+        if not levels.get(level):
+            continue
+        entries = levels[level]
+        base = f"{_LEVEL_ICON[level]} {len(entries)}"
+        labels = [str((ident or {}).get("label") or "").strip() or nd
+                  for nd, ident in entries]
+        with_labels = base + f" ({', '.join(labels)})"
+        if level in ("crit", "warn") or len(with_labels) <= 120:
+            parts.append(with_labels)
+        else:
+            parts.append(base)
+    return " | ".join(parts)
 
 
 def build_report(date: Optional[str] = None) -> str:
@@ -969,39 +1237,47 @@ def build_report(date: Optional[str] = None) -> str:
     dhuman = datetime.strptime(dstr, "%Y-%m-%d").strftime("%d.%m.%Y")
     samples = read_samples(dstr)
 
-    # группировка по нодам (порядок: local первым, далее по алфавиту)
+    # группировка по нодам (порядок: local первым, далее по алфавиту);
+    # identity (label/ip/hostname) — из последних сэмплов ноды, для local
+    # конфиг (node_label/node_ip) приоритетнее сохранённых значений
     by_node: dict = {}
     for s in samples:
         nd = str(s.get("node", "?"))
-        by_node.setdefault(nd, {"host": str(s.get("host", "?")), "rows": []})
-        by_node[nd]["rows"].append(s)
+        ent = by_node.setdefault(nd, {"host": str(s.get("host", "?")),
+                                      "rows": [], "ident": {}})
+        ent["rows"].append(s)
+        for k in ("label", "ip", "hostname"):
+            if s.get(k):
+                ent["ident"][k] = s.get(k)
+    if "local" in by_node:
+        li = _local_identity(cfg)
+        by_node["local"]["ident"].update(
+            {k: v for k, v in li.items() if v})
     ordered = sorted(by_node.keys(),
                      key=lambda n: (n != "local", n.lower()))
 
-    lines = [f"🧟 <b>CPU Steal Report [{_hostname()}]</b> — {dhuman} "
-             f"{datetime.now().strftime('%Z') or ''}".rstrip()]
+    ident_local = _local_identity(cfg)
+    lines = [f"🧟 <b>CPU Steal Report</b> — {dhuman}",
+             f"Монитор: {_display_title(ident_local, 'local', _hostname())}"]
     if not ordered:
         lines.append("")
         lines.append("Сэмплов нет — мониторинг не запущен или был выключен весь день.")
         return "\n".join(lines)
 
     # сводка флота
-    levels = {}
     node_data = []
     for nd in ordered:
         host = by_node[nd]["host"]
         stats = compute_stats(by_node[nd]["rows"])
         level, reasons = classify_day(stats, thr)
-        levels[level] = levels.get(level, 0) + 1
-        node_data.append((nd, host, stats, level, reasons))
-    fleet = " | ".join(f"{_LEVEL_ICON[l]} {levels[l]}"
-                       for l in ("ok", "warn", "crit", "data") if levels.get(l))
-    lines.append(f"Флот: {fleet}")
+        node_data.append((nd, host, stats, level, reasons, by_node[nd]["ident"]))
+    lines.append(f"Флот: {_fleet_summary_line(node_data)}")
     lines.append("")
 
     rep = cfg.get("report", {})
-    for nd, host, stats, level, reasons in node_data:
-        lines.extend(_node_block(nd, host, stats, level, reasons, cfg))
+    for nd, host, stats, level, reasons, ident in node_data:
+        lines.extend(_node_block(nd, host, stats, level, reasons, cfg,
+                                 ident=ident))
         lines.append("")
 
     # рекомендации
@@ -1010,22 +1286,30 @@ def build_report(date: Optional[str] = None) -> str:
         # проблемные ноды всегда; одиночная ok-нода — тоже (подтверждение,
         # что всё чисто); уровень data — только если нода единственная
         single = len(node_data) == 1
-        for nd, host, stats, level, reasons in node_data:
+        for nd, host, stats, level, reasons, ident in node_data:
             if level not in ("warn", "crit") and not single:
                 continue
-            lines.append(f"<b>{_LEVEL_ICON[level]} {nd}</b>:")
+            short = (str((ident or {}).get("label") or "").strip() or nd)
+            ip = str((ident or {}).get("ip") or "").strip()
+            lines.append(f"<b>{_LEVEL_ICON[level]} {short}"
+                         + (f" ({ip})" if ip else "") + ":</b>")
             for r in recommendations(level, stats):
                 lines.append(f"  {r}")
             lines.append("")
 
-    # тикет-блоки (только проблемные ноды)
+    # черновики тикетов (только проблемные/пограничные ноды)
     if rep.get("include_ticket_block", True):
-        tb = [(nd, host, stats, level) for nd, host, stats, level, _ in node_data
+        tb = [(nd, host, stats, level, ident)
+              for nd, host, stats, level, _r, ident in node_data
               if level in ("warn", "crit") and stats.get("n_ok")]
         if tb:
-            lines.append("<b>🎫 Тикет-блок (копи-паст)</b>")
-            for nd, host, stats, level in tb:
-                lines.append(f"<code>{_ticket_block(nd, host, stats, level)}</code>")
+            lines.append("<b>🎫 Черновик тикета в поддержку (копи-паст)</b>")
+            for nd, host, stats, level, ident in tb:
+                short = (str((ident or {}).get("label") or "").strip() or nd)
+                ip = str((ident or {}).get("ip") or "").strip() or host
+                lines.append(f"— <b>{short}</b> (<code>{ip}</code>) — "
+                             f"{_LEVEL_NAME[level]}")
+                lines.append(f"<code>{_ticket_block(nd, host, stats, level, ident=ident, date_str=dstr)}</code>")
                 lines.append("")
 
     lines.append(f"<i>Данные: {SAMPLES_DIR}/{dstr}.jsonl | отчёт: "
@@ -1394,11 +1678,14 @@ def _nodes_menu(cfg: dict) -> None:
     while True:
         os.system("clear")
         peers = _load_peers(cfg)
+        ident = _local_identity(cfg)
         print()
         _box_top("🧟  STEAL-МОНИТОР — НАБЛЮДАЕМЫЕ НОДЫ")
         _box_row(f"  Локальная нода: "
                  + (GREEN + " мониторится" + NC if cfg.get("monitor_local", True)
                     else YELLOW + " ВЫКЛЮЧЕНА" + NC))
+        _box_row(f"  В отчётах:      {BOLD}{ident['label']}{NC} · "
+                 f"{ident['ip'] or 'IP не определён'} · {ident['hostname']}")
         _box_row(f"  Peers по SSH:   "
                  + (GREEN + f" включено ({len(peers)})" + NC
                     if cfg.get("monitor_peers", False) and peers
@@ -1424,6 +1711,7 @@ def _nodes_menu(cfg: dict) -> None:
         _box_item("3", "Добавить extra-peer (host user port name)")
         _box_item("4", "Удалить extra-peer")
         _box_item("5", "Фильтр peers (пусто = все)")
+        _box_item("6", "Имя локальной ноды в отчётах (label / IP)")
         _box_back()
         _box_bottom()
         try:
@@ -1476,6 +1764,26 @@ def _nodes_menu(cfg: dict) -> None:
             cfg["peer_filter"] = [x.strip() for x in raw.split(",") if x.strip()] if raw else []
             save_config(cfg)
             _box_ok("Фильтр сохранён")
+        elif ch == "6":
+            ident = _local_identity(cfg)
+            print(f"\n  Текущее: label={ident['label']} ip={ident['ip'] or '-'} "
+                  f"hostname={ident['hostname']}")
+            raw = input(f"  короткое имя для отчётов, напр. RU-1 "
+                        f"[пусто = {cfg.get('node_label') or 'hostname'}]: ").strip()
+            if raw == "-":
+                cfg["node_label"] = ""
+            elif raw:
+                cfg["node_label"] = raw
+            raw = input(f"  публичный IP ноды [пусто = авто-детект "
+                        f"({cfg.get('node_ip') or ident['ip'] or '?'})]: ").strip()
+            if raw == "-":
+                cfg["node_ip"] = ""
+            elif raw:
+                cfg["node_ip"] = raw
+            save_config(cfg)
+            ident = _local_identity(cfg)
+            _box_ok(f"Отчёты покажут: {ident['label']} · "
+                    f"{ident['ip'] or 'IP?'} · {ident['hostname']}")
 
 
 def do_steal_monitor_menu() -> None:
@@ -1498,6 +1806,9 @@ def do_steal_monitor_menu() -> None:
         _box_row("  >5–10% = оверселл провайдера: CPU-роли (AWG-каскад, TLS)")
         _box_row("  душатся, TCP-relay (Mieru) терпит. Отчёт — в конце суток.")
         _box_sep()
+        ident = _local_identity(cfg)
+        _box_row(f"  Нода в отчётах: {ident['label']} · "
+                 f"{ident['ip'] or 'IP не определён'} · {ident['hostname']}")
         _box_row(f"  Мониторинг:    "
                  + (GREEN + f"АКТИВЕН (cron */{interval} мин)" + NC if installed
                     else YELLOW + "не установлен" + NC)
