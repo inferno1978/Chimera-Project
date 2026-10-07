@@ -381,8 +381,10 @@ def do_check_domain_external() -> None:
         _box_warn(f"  DNS: домен не резолвится через 8.8.8.8!")
         resolved_ip = ""
 
-    # 2. HTTP /.well-known/
-    _box_info("  [2/4] HTTP 200 на /.well-known/ ...")
+    # 2. HTTP /.well-known/ (порт 80) — редирект 301/302 на HTTPS валиден:
+    # label раньше обещал «200», а OK-ветка печатала фактический код (301) —
+    # на скрине выглядело как противоречие.
+    _box_info("  [2/4] HTTP на /.well-known/ (порт 80) ...")
     r = _run(
         ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
          "--max-time", "10",
@@ -395,12 +397,23 @@ def do_check_domain_external() -> None:
     else:
         _box_warn(f"  HTTP недоступен или таймаут (код {code or 'нет ответа'})")
 
-    # 3. HTTPS TLS-рукопожатие
-    _box_info("  [3/4] HTTPS TLS-рукопожатие ...")
+    # 3. HTTPS TLS-рукопожатие — НА СЕРВИСНОМ ПОРТУ
+    # Раньше проба шла на дефолтный 443 (https://{domain}/), а VLESS/REALITY
+    # слушает на server_port (живой кейс окт. 2026: chimera-c.example.com:9443,
+    # 443 закрыт) → curl rc=7 «HTTPS недоступен» при живом сервисе — шаг
+    # противоречил [4/4], который честно подключался к server_port и писал
+    # «Порт доступен снаружи». Теперь TLS-проба идёт на тот же порт, тем же
+    # --connect-to (IP из шага 1, минуя локальный /etc/hosts).
+    # 35/60 — хендшейк СОСТОЯЛСЯ, но SSL-ошибка/сертификат не проходит CA:
+    # норм для REALITY-камуфляжа (dest-сертификат чужого сайта) и self-signed
+    # — это НЕ «недоступен», порт отвечает TLS.
+    _box_info(f"  [3/4] HTTPS TLS-рукопожатие (порт {port}) ...")
+    _tgt = resolved_ip or domain
     r = _run(
         ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code} %{ssl_verify_result}",
          "--max-time", "10",
-         f"https://{domain}/"],
+         "--connect-to", f"{domain}:{port}:{_tgt}:{port}",
+         f"https://{domain}:{port}/"],
         capture=True, check=False
     )
     parts = r.stdout.strip().split()
@@ -410,8 +423,12 @@ def do_check_domain_external() -> None:
         tls_ok = tls_verify == "0"
         colour = GREEN if tls_ok else YELLOW
         _box_row(f"    {colour}HTTPS код: {tls_code}  TLS verify: {'OK' if tls_ok else 'ОШИБКА ('+tls_verify+')'}{NC}")
+    elif r.returncode in (35, 60):
+        _why = ("SSL-ошибка после хендшейка" if r.returncode == 35
+                else "сертификат не проходит CA-проверку — норм для REALITY-камуфляжа/self-signed")
+        _box_ok(f"  TLS на порту {port} отвечает (returncode={r.returncode}: {_why})")
     else:
-        _box_warn(f"  HTTPS недоступен (returncode={r.returncode})")
+        _box_warn(f"  HTTPS недоступен на порту {port} (returncode={r.returncode})")
 
     # 4. TCP доступность VLESS-порта снаружи
     _box_info(f"  [4/4] TCP доступность порта {port} (через curl --connect-to) ...")
