@@ -66,7 +66,7 @@ def configure_firewall() -> None:
     # а реальная внешняя доступность проверяется финальной «Проверкой
     # сетевой доступности» — поэтому info вместо warn (4× [WARN]
     # на полностью штатной ситуации, инцидент переустановки
-    # 203.0.113.109).
+    # <ip>).
     try:
         _r = subprocess.run(["iptables", "-L", "INPUT", "-n"],
                             capture_output=True, text=True)

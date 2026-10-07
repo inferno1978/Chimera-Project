@@ -191,7 +191,9 @@ def check_nodes_once() -> list[dict]:
                 from chimera.modules.chain_relay import (
                     check_via_node_full_path, load_relay_hops)
                 _hops = load_relay_hops()
-                _r = check_via_node_full_path(nd, _hops)
+                # deep_diag=False: HM работает по cron, его интересует
+                # ok/не-ok; развёрнутую диагностику ног дают меню [T]/шаг 11
+                _r = check_via_node_full_path(nd, _hops, deep_diag=False)
                 up, ms = bool(_r.get("ok")), float(_r.get("ms", 0.0) or 0.0)
                 _log(f"[{host}:{port}] via:{via} full-path "
                      f"{'up' if up else 'DOWN'}"

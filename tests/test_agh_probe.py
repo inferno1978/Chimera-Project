@@ -65,7 +65,7 @@ SS_AGH_ON_53 = (
     "State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n"
     "UNCONN 0      0         127.0.0.54:53        0.0.0.0:*    users:((\"systemd-resolve\",pid=1,fd=16))\n"
     "UNCONN 0      0      127.0.0.53%lo:53         0.0.0.0:*    users:((\"systemd-resolve\",pid=1,fd=14))\n"
-    "UNCONN 0      0     203.0.113.109:53         0.0.0.0:*    users:((\"AdGuardHome\",pid=3526174,fd=13))\n"
+    "UNCONN 0      0     <ip>:53         0.0.0.0:*    users:((\"AdGuardHome\",pid=3526174,fd=13))\n"
     "UNCONN 0      0         127.0.0.1:53          0.0.0.0:*    users:((\"AdGuardHome\",pid=3526174,fd=6))\n"
 )
 

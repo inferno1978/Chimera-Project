@@ -589,5 +589,279 @@ class TestFullPathSpeed(unittest.TestCase):
         self.assertEqual(res["exit_ip"], "")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  check_via_node_full_path v2: probe-ladder + deep-диагностика ног
+#  (живой кейс окт. 2026: exit резал порт 80 → вечный ложный «HTTP 000»)
+# ══════════════════════════════════════════════════════════════════════════════
+class TestProbeLadder(unittest.TestCase):
+    """Лестница проб http → https → IP-literal различает отказы."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _ladder(self, responses):
+        """responses — (rc, code, ms) по порядку вызовов _curl_socks."""
+        import chimera.modules.chain_relay as cr
+        seq = list(responses)
+
+        def fake_curl(port, url, timeout, insecure=False):
+            return seq.pop(0) if seq else (28, "000", None)
+
+        with patch.object(cr, "_curl_socks", side_effect=fake_curl):
+            return cr._probe_ladder(12345, 20)
+
+    def test_http_204_first(self):
+        r = self._ladder([(0, "204", 250.0)])
+        self.assertTrue(r["delivered"])
+        self.assertTrue(r["domain_ok"])
+        self.assertEqual(r["code"], "204")
+        self.assertFalse(r["port80_blocked"])
+        self.assertFalse(r["ip_only"])
+
+    def test_https_fallback_port80_blocked(self):
+        # P1 (http, порт 80) молчит, P2 (https) отвечает → цепь жива,
+        # 80-й режется на exit (живой кейс: exit-сеть с ограниченным egress)
+        r = self._ladder([(0, "000", 20000.0), (0, "204", 300.0)])
+        self.assertTrue(r["delivered"])
+        self.assertTrue(r["domain_ok"])
+        self.assertTrue(r["port80_blocked"])
+        self.assertFalse(r["ip_only"])
+        self.assertEqual(r["code"], "204")
+
+    def test_ip_only_dns_broken(self):
+        # доменные пробы молчат, IP-проба отвечает → DNS на exit сломан
+        r = self._ladder([(0, "000", None), (0, "000", None), (0, "301", 400.0)])
+        self.assertTrue(r["delivered"])
+        self.assertFalse(r["domain_ok"])
+        self.assertTrue(r["ip_only"])
+
+    def test_all_dead(self):
+        r = self._ladder([(28, "000", None)] * 5)
+        self.assertFalse(r["delivered"])
+        self.assertFalse(r["domain_ok"])
+        self.assertEqual(r["code"], "")
+
+    def test_non_204_http_code_still_delivered(self):
+        # перехват/кэш отдаёт 302 вместо 204 — цепь ДОСТАВЛЯЕТ трафик
+        r = self._ladder([(0, "302", 250.0)])
+        self.assertTrue(r["delivered"])
+        self.assertTrue(r["domain_ok"])
+        self.assertEqual(r["code"], "302")
+
+    def test_startup_retry_on_rc7(self):
+        # rc=7 (socks ещё не поднялся) → ретраи вместо ложного FAIL
+        import chimera.modules.chain_relay as cr
+        calls = []
+
+        def fake_curl(port, url, timeout, insecure=False):
+            calls.append(url)
+            if len(calls) == 1:
+                return (7, "000", None)
+            return (0, "204", 250.0)
+
+        with patch.object(cr, "_curl_socks", side_effect=fake_curl), \
+             patch.object(cr.time, "sleep", lambda s: None):
+            r = cr._probe_ladder(12345, 20)
+        self.assertTrue(r["domain_ok"])
+        self.assertEqual(len(calls), 2)
+
+
+class TestDiagnoseDeadChain(unittest.TestCase):
+    """Диагностика ног при полном отказе: хоп / нода напрямую / обе."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self.hops = [_mk_hop("hop-a")]
+        self.nd = _mk_node(via="hop-a")
+
+    def _diag(self, hop_delivered, direct_delivered):
+        import chimera.modules.chain_relay as cr
+
+        def _res(ok):
+            return {"delivered": ok, "domain_ok": ok,
+                    "code": "204" if ok else "", "ms": 100.0,
+                    "port80_blocked": False, "ip_only": False}
+
+        results = iter([_res(hop_delivered), _res(direct_delivered)])
+
+        class _FakeClient:
+            start_error = ""
+
+            def __init__(self, cfg, xbin):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def alive(self):
+                return True
+
+            def err_tail(self, limit=240):
+                return ""
+
+        with patch.object(cr, "_TempXrayClient", _FakeClient), \
+             patch.object(cr, "_probe_ladder",
+                          lambda *a, **kw: next(results)), \
+             patch.object(cr, "_free_local_port", lambda: 4711):
+            return cr._diagnose_dead_chain(self.nd, [self.hops[0]],
+                                           "/usr/local/bin/xray", 20)
+
+    def test_hop_broken_direct_ok(self):
+        d = self._diag(hop_delivered=False, direct_delivered=True)
+        self.assertEqual(d["legs"], {"hop": "fail", "direct": "ok"})
+        self.assertEqual(d["reason"], "хоп не отвечает")
+        self.assertIn("uuid/pbk/sid/sni/flow", d["detail"])
+
+    def test_hop_ok_direct_ok(self):
+        # обе ноги по отдельности живы → сломана именно хоп→нода
+        d = self._diag(True, True)
+        self.assertEqual(d["legs"], {"hop": "ok", "direct": "ok"})
+        self.assertEqual(d["reason"], "хоп→нода недостижима")
+        self.assertIn("с хопа", d["detail"])
+
+    def test_hop_ok_direct_fail(self):
+        d = self._diag(True, False)
+        self.assertEqual(d["legs"], {"hop": "ok", "direct": "fail"})
+        self.assertEqual(d["reason"], "нода не отвечает")
+
+    def test_both_dead(self):
+        d = self._diag(False, False)
+        self.assertEqual(d["legs"], {"hop": "fail", "direct": "fail"})
+        self.assertEqual(d["reason"], "хоп и нода не отвечают")
+
+
+class TestFullPathV2(unittest.TestCase):
+    """check_via_node_full_path v2: лестница + deep_diag в интеграции."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self.hops = [_mk_hop("hop-a")]
+        self.nd = _mk_node(via="hop-a")
+
+    class _FakeProc:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            pass
+
+        def kill(self):
+            pass
+
+    def _run(self, fake_run, popen=None, **kw):
+        import chimera.modules.chain_relay as cr
+        _popen = popen or (lambda cmd, **k: TestFullPathV2._FakeProc())
+        with patch.object(cr, "_find_xray_bin",
+                          return_value="/usr/local/bin/xray"), \
+             patch.object(cr.subprocess, "Popen", side_effect=_popen), \
+             patch.object(cr.subprocess, "run", side_effect=fake_run), \
+             patch.object(cr.tempfile, "mkstemp",
+                          return_value=(99, "/tmp/relaycheck_test.json")), \
+             patch("os.write", lambda *a, **kw: None), \
+             patch("os.close", lambda *a, **kw: None), \
+             patch.object(Path, "unlink", lambda self, **kw: None):
+            return cr.check_via_node_full_path(self.nd, self.hops, **kw)
+
+    def test_port80_blocked_chain_alive(self):
+        # http-проба 000 (порт 80 резался на exit), https — 204 → ok
+        def fake_run(cmd, **kw):
+            url = cmd[-1]
+            if url.startswith("http://"):
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="000 20.0", stderr="")
+            if url == "https://cp.cloudflare.com/generate_204":
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="204 0.30", stderr="")
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        res = self._run(fake_run)
+        self.assertTrue(res["ok"], res)
+        self.assertAlmostEqual(res["ms"], 300.0, delta=1)
+        self.assertIn("порт 80", res["detail"])
+        self.assertEqual(res["reason"], "цепь жива")
+
+    def test_ip_only_dns_broken_not_ok(self):
+        # IP-проба проходит, доменные — нет: цепь доходит, но реальный
+        # трафик (домены) не пойдёт → ok=False с диагнозом DNS
+        def fake_run(cmd, **kw):
+            url = cmd[-1]
+            if "generate_204" in url:
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="000 6.0", stderr="")
+            if url in ("https://1.1.1.1/", "https://8.8.8.8/"):
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="301 0.5", stderr="")
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        res = self._run(fake_run)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["reason"], "DNS на exit")
+        self.assertIn("домены", res["detail"])
+        # диагностика ног не нужна — и не запускалась
+        self.assertEqual(res["legs"], {})
+
+    def test_dead_chain_deep_diag_runs(self):
+        # все пробы молчат → deep_diag поднимает ещё 2 xray (хоп / нода)
+        popen_calls = []
+
+        def fake_run(cmd, **kw):
+            return types.SimpleNamespace(returncode=0, stdout="000 20.0",
+                                         stderr="")
+
+        def fake_popen(cmd, **k):
+            popen_calls.append(cmd)
+            return TestFullPathV2._FakeProc()
+
+        res = self._run(fake_run, popen=fake_popen)
+        self.assertFalse(res["ok"])
+        self.assertEqual(len(popen_calls), 3)     # main + hop-leg + direct-leg
+        self.assertEqual(res["legs"], {"hop": "fail", "direct": "fail"})
+        self.assertEqual(res["reason"], "хоп и нода не отвечают")
+        self.assertIn("не отвечают", res["detail"])
+
+    def test_dead_chain_deep_diag_off(self):
+        # deep_diag=False (HM/балансер) — один xray, без диагностики ног
+        popen_calls = []
+
+        def fake_run(cmd, **kw):
+            return types.SimpleNamespace(returncode=0, stdout="000 20.0",
+                                         stderr="")
+
+        def fake_popen(cmd, **k):
+            popen_calls.append(cmd)
+            return TestFullPathV2._FakeProc()
+
+        res = self._run(fake_run, popen=fake_popen, deep_diag=False)
+        self.assertFalse(res["ok"])
+        self.assertEqual(len(popen_calls), 1)
+        self.assertEqual(res["legs"], {})
+        self.assertEqual(res["reason"], "цепь не отвечает")
+
+    def test_legacy_204_contract_unchanged(self):
+        # обычный живой путь: те же поля, что и раньше (HM/меню/шаг 11)
+        def fake_run(cmd, **kw):
+            url = cmd[-1]
+            if "generate_204" in url:
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="204 0.25", stderr="")
+            if "api.ipify.org" in url:
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="203.0.113.77\n", stderr="")
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        res = self._run(fake_run, want_ip=True)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["exit_ip"], "203.0.113.77")
+        self.assertAlmostEqual(res["ms"], 250.0, delta=1)
+        self.assertEqual(res["speed_mbps"], 0.0)
+        self.assertIn("цепочка жива", res["detail"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

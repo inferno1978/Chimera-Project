@@ -275,9 +275,18 @@ def do_speed_test(auto_mode: bool = False) -> None:
                 if _chain_r.get("exit_ip"):
                     _lat_line += f"  {DIM}(exit IP {_chain_r['exit_ip']}){NC}"
                 _box_row(_lat_line)
+                # некритичные заметки чекера (порт 80 режется и т.п.)
+                _note = _chain_r.get("detail", "")
+                if " — " in _note:
+                    _box_row(f"    {DIM}↳ {_note.split(' — ', 1)[1][:90]}{NC}")
             elif _chain_r is not None:
-                _box_row(f"    Цепочка: {RED}недоступна "
-                         f"({_chain_r.get('detail', '')[:60]}){NC}")
+                # Цепочка не работает: показываем диагноз чекера (какая нога
+                # сломана / DNS / и т.п.), НЕ подменяя его прямым замером.
+                _box_row(f"    Цепочка: {RED}недоступна{NC} — "
+                         f"{_chain_r.get('reason', '')}")
+                _detail = str(_chain_r.get("detail", ""))[:100]
+                if _detail:
+                    _box_row(f"    {DIM}↳ {_detail}{NC}")
             else:
                 # chain_relay недоступен — старый прямой замер (может таймаутить)
                 _box_info(f"  Измерение TCP-латентности до {host}:{port}...")
@@ -300,6 +309,16 @@ def do_speed_test(auto_mode: bool = False) -> None:
             else:
                 _box_row(f"    Download (через цепочку): "
                          f"{YELLOW}не измерен{NC}")
+        elif _chain_r is not None:
+            # Живой кейс (окт. 2026, прод-юзер): рядом с FAIL цепочки
+            # выводился прямой «Download: 25 Мбит/с» — но это канал САМОГО
+            # entry (замер идёт напрямую в Cloudflare, минуя ноду), и юзер
+            # решал, что «всё работает». Прямой замер для упавшей цепочки
+            # НЕ показываем — только честный диагноз и что делать.
+            _box_row(f"    Download: {RED}не измерен — цепочка недоступна{NC}")
+            _box_warn(f"  Скорость напрямую не меряется: это канал entry, а не "
+                      f"нода. Проверьте цепочку (меню [E] → [H] → [T]) "
+                      f"и повторите тест")
         else:
             _box_info(f"  Тест загрузки {dl_size_mb} МБ (Cloudflare)...")
             dl = _speed_test_download(host, ip, port, dl_size_mb)

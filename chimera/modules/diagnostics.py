@@ -2312,7 +2312,7 @@ def do_full_diagnostic() -> None:
                         _box_info(f"  {_idx}{_hp:<{_HP_W}}  "
                                   f"{RED}цепь FAIL{NC}  "
                                   f"{DIM}(via {_via_tag}: "
-                                  f"{str(_vr.get('detail', ''))[:60]}){NC}")
+                                  f"{str(_vr.get('detail', ''))[:90]}){NC}")
                         _node_fails.append(f"{_nh}:{_np} (цепь via {_via_tag})")
                         continue
                     except ImportError:

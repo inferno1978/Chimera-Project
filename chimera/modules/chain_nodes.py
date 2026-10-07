@@ -3773,7 +3773,7 @@ def _validate_chain_node_host(host: str) -> "tuple[bool, str, Optional[str]]":
                             f"Домен '{host}' похож на reverse-DNS hostname (домен "
                             f"'{hostname_domain}' совпадает с hostname сервера). "
                             f"Резолвится в {resolved_ip} — это не похоже на exit-ноду. "
-                            f"Укажите IP зарубежного VPS напрямую (например 203.0.113.105)."
+                            f"Укажите IP зарубежного VPS напрямую (например 203.0.113.20)."
                         ), resolved_ip
 
     except Exception:

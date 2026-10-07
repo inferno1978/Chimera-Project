@@ -66,6 +66,8 @@ STATE (state.json)
     build_hop_outbound(hop) -> dict           — один hop-outbound (3 протокола)
     check_hop_tcp(hop) -> tuple[bool, float]  — TCP-проверка хопа
     check_via_node_full_path(nd, hops) -> dict— full-path проверка цепочки
+        (probe-ladder http→https→IP + deep-диагностика ног; поля ответа:
+         ok/ms/exit_ip/speed_mbps/detail/reason/legs/xray_tail)
     do_chain_relay_menu()                     — интерактивное меню (E → H)
 
 Живой PoC (окт. 2026, прод-ноды, обезличено): entry → hop-a → exit и
@@ -545,148 +547,419 @@ def _free_local_port() -> int:
     return port
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  full-path чекер v2: probe-ladder + диагностика ног
+#
+#  Живой кейс (окт. 2026, прод-юзер): единственная HTTP-проба
+#  http://cp.cloudflare.com/generate_204 через цепочку отдавала 000 → «цепочка
+#  отвечает некорректно (HTTP 000)» FAIL, при том что канал работал: exit-нода
+#  (сеть с ограниченным egress) резала исходящий порт 80. Лестница проб различает
+#  «цепь мертва» и «цепь жива, но endpoint/порт/DNS недоступны», а при полном
+#  отказе диагностирует, КАКАЯ нога сломана (entry→хоп / хоп→нода / нода).
+# ─────────────────────────────────────────────────────────────────────────────
+_PROBE_HTTP_204  = "http://cp.cloudflare.com/generate_204"   # домен + порт 80
+_PROBE_HTTPS_204 = "https://cp.cloudflare.com/generate_204"  # домен + порт 443
+_PROBE_IP_CF     = "https://1.1.1.1/"                        # IP, без DNS (Cloudflare)
+_PROBE_IP_GG     = "https://8.8.8.8/"                        # IP, без DNS (Google)
+
+
+def _socks_check_inbound(socks_port: int) -> dict:
+    """Socks-инбаунд временного xray-клиента чекера."""
+    return {
+        "tag": "socks-check",
+        "listen": "127.0.0.1",
+        "port": socks_port,
+        "protocol": "socks",
+        "settings": {"auth": "noauth", "udp": False},
+    }
+
+
+def _curl_socks(socks_port: int, url: str, timeout: int,
+                insecure: bool = False) -> tuple[int, str, Optional[float]]:
+    """curl через socks5h → (rc, http_code, ms). '000'/'' — HTTP-ответа нет.
+
+    rc=7 — не поднялся сам socks (xray ещё стартует); 28 — таймаут на цепи.
+    """
+    cmd = ["curl", "-s", "-o", "/dev/null",
+           "-w", "%{http_code} %{time_total}",
+           "-m", str(timeout),
+           "-x", f"socks5h://127.0.0.1:{socks_port}"]
+    if insecure:
+        cmd.append("-k")
+    cmd.append(url)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout + 10)
+    except subprocess.TimeoutExpired:
+        return 28, "000", None
+    parts = (r.stdout or "").split()
+    code = parts[0] if parts else ""
+    ms: Optional[float] = None
+    if len(parts) > 1:
+        try:
+            ms = float(parts[1]) * 1000
+        except ValueError:
+            pass
+    return r.returncode, code, ms
+
+
+class _TempXrayClient:
+    """Временный xray-клиент (контекст-менеджер).
+
+    Отличия от старого инлайн-запуска в check_via_node_full_path:
+      • stderr пишется в ФАЙЛ, а не в PIPE — пайп без дренажа мог
+        переполниться (64 КБ) и заблокировать xray посреди проверки;
+        заодно хвост ошибок доступен для диагностики (err_tail);
+      • готовность определяется ретраями curl по rc=7 (см. _probe_ladder),
+        а не сном time.sleep(1.5): на медленном VPS xray мог не успеть
+        подняться за 1.5 с → ложный «HTTP 000».
+    """
+
+    def __init__(self, cfg: dict, xbin: str):
+        self.cfg = cfg
+        self.xbin = xbin
+        self.proc = None
+        self.cfg_path: Optional[str] = None
+        self.err_path: Optional[str] = None
+        self.start_error = ""
+
+    def __enter__(self) -> "_TempXrayClient":
+        import os as _os
+        fd, self.cfg_path = tempfile.mkstemp(prefix="relaycheck_", suffix=".json")
+        _os.write(fd, json.dumps(self.cfg, indent=2,
+                                 ensure_ascii=False).encode("utf-8"))
+        _os.close(fd)
+        self.err_path = self.cfg_path + ".err"
+        err_fh = open(self.err_path, "w+b")
+        try:
+            self.proc = subprocess.Popen(
+                [self.xbin, "run", "-c", self.cfg_path],
+                stdout=subprocess.DEVNULL, stderr=err_fh)
+        except Exception as e:
+            self.start_error = f"xray не стартовал: {e}"
+        finally:
+            err_fh.close()
+        return self
+
+    def alive(self) -> bool:
+        """xray жив (не упал на старте)."""
+        return self.proc is not None and self.proc.poll() is None
+
+    def err_tail(self, limit: int = 240) -> str:
+        """Хвост stderr xray (последние строки) — для диагностики отказа."""
+        try:
+            txt = Path(self.err_path).read_text(encoding="utf-8",
+                                                errors="replace")
+        except Exception:
+            return ""
+        lines = [ln.strip() for ln in txt.strip().splitlines() if ln.strip()]
+        return (" | ".join(lines[-2:]))[-limit:] if lines else ""
+
+    def __exit__(self, *exc) -> bool:
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=3)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+        for p in (self.cfg_path, self.err_path):
+            if p:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        return False
+
+
+def _probe_ladder(socks_port: int, t_domain: int, t_fast: int = 6,
+                  t_ip: int = 5, retry_startup: float = 8.0) -> dict:
+    """Лестница HTTP-проб через socks-цепочку (различает отказы).
+
+    P1 http  generate_204  — порт 80 + DNS на exit (с ретраями rc=7,
+         пока xray не поднялся — вместо слепого sleep);
+    P2 https generate_204  — порт 443 + DNS (exit может резать 80-й);
+    P3/P4 https IP-literal — 443 без DNS и без привязки к Cloudflare-домену.
+
+    Любой HTTP-код ≠ 000 = цепь ДОСТАВЛЯЕТ трафик. Возвращает:
+      delivered      — есть хоть какой-то HTTP-ответ
+      domain_ok      — ответила доменная проба (P1/P2) → цепь + DNS живы
+      code / ms      — код и латентность успешной пробы
+      port80_blocked — P1 молчит, P2 отвечает (80-й режется на exit)
+      ip_only        — доменные пробы молчат, IP-проба отвечает (DNS на exit)
+    """
+    res = {"delivered": False, "domain_ok": False, "code": "", "ms": None,
+           "port80_blocked": False, "ip_only": False}
+
+    # P1: http 204 (порт 80 + DNS), с ожиданием старта socks
+    deadline = time.time() + retry_startup
+    while True:
+        rc, code, ms = _curl_socks(socks_port, _PROBE_HTTP_204, t_domain)
+        if code and code != "000":
+            res.update(delivered=True, domain_ok=True, code=code, ms=ms)
+            return res
+        if rc == 7 and time.time() < deadline:
+            time.sleep(0.4)          # socks ещё не поднялся — xray стартует
+            continue
+        break
+
+    # P2: https 204 (порт 443 + DNS)
+    rc, code, ms = _curl_socks(socks_port, _PROBE_HTTPS_204, t_fast)
+    if code and code != "000":
+        res.update(delivered=True, domain_ok=True, code=code, ms=ms,
+                   port80_blocked=True)
+        return res
+
+    # P3/P4: https на IP-literal (-k): без DNS, не только Cloudflare
+    for url in (_PROBE_IP_CF, _PROBE_IP_GG):
+        rc, code, ms = _curl_socks(socks_port, url, t_ip, insecure=True)
+        if code and code != "000":
+            res.update(delivered=True, code=code, ms=ms, ip_only=True)
+            return res
+    return res
+
+
+def _diagnose_dead_chain(nd: dict, chain: list[dict], xbin: str,
+                         curl_timeout: int) -> dict:
+    """Все пробы молчат → определяем, КАКАЯ нога цепочки сломана.
+
+    Поднимает два коротких временных xray-клиента:
+      1) только хопы (entry → hop-1 → … → интернет) — жива ли нога до хопа
+         (REALITY-хендшейк с хопом, а не только TCP-пинг);
+      2) только нода БЕЗ dialerProxy (entry → exit напрямую).
+    По сочетанию результатов — диагноз и подсказка, что проверять.
+    """
+    legs = {"hop": "skip", "direct": "skip"}
+    hop = chain[0]
+    fast = max(4, min(8, curl_timeout))
+
+    # 1) нога entry → хоп(ы) → интернет
+    socks1 = _free_local_port()
+    cfg1 = {
+        "log": {"loglevel": "warning"},
+        "inbounds": [_socks_check_inbound(socks1)],
+        "outbounds": [build_hop_outbound(h) for h in chain],
+        "routing": {"rules": [{
+            "type": "field", "inboundTag": ["socks-check"],
+            "outboundTag": hop.get("tag", "hop"),
+        }]},
+    }
+    with _TempXrayClient(cfg1, xbin) as c1:
+        if c1.start_error or not c1.alive():
+            legs["hop"] = "fail"
+        else:
+            p1 = _probe_ladder(socks1, fast, t_fast=fast, t_ip=fast,
+                               retry_startup=4.0)
+            legs["hop"] = "ok" if p1["delivered"] else "fail"
+
+    # 2) нода напрямую (без хопа)
+    socks2 = _free_local_port()
+    exit_ob = build_hop_outbound({**nd, "tag": "exit-check", "via": ""})
+    cfg2 = {
+        "log": {"loglevel": "warning"},
+        "inbounds": [_socks_check_inbound(socks2)],
+        "outbounds": [exit_ob],
+        "routing": {"rules": [{
+            "type": "field", "inboundTag": ["socks-check"],
+            "outboundTag": "exit-check",
+        }]},
+    }
+    with _TempXrayClient(cfg2, xbin) as c2:
+        if c2.start_error or not c2.alive():
+            legs["direct"] = "fail"
+        else:
+            p2 = _probe_ladder(socks2, fast, t_fast=fast, t_ip=fast,
+                               retry_startup=4.0)
+            legs["direct"] = "ok" if p2["delivered"] else "fail"
+
+    hp = f"{hop.get('host', '?')}:{hop.get('port', '?')}"
+    xp = f"{nd.get('host', '?')}:{nd.get('port', '?')}"
+    hop_tag = hop.get("tag", "hop")
+    if legs["hop"] == "fail" and legs["direct"] == "ok":
+        reason = "хоп не отвечает"
+        detail = (f"хоп «{hop_tag}» ({hp}): TCP до него есть, но VLESS через "
+                  f"него не устанавливается — проверьте uuid/pbk/sid/sni/flow "
+                  f"хопа (или хоп-сервер жив?)")
+    elif legs["hop"] == "ok" and legs["direct"] == "ok":
+        reason = "хоп→нода недостижима"
+        detail = (f"хоп «{hop_tag}» жив, нода {xp} напрямую жива, но с хопа до "
+                  f"ноды не достучаться — проверьте на ноде файервол/порт и "
+                  f"доступность {xp} с хопа")
+    elif legs["hop"] == "ok" and legs["direct"] == "fail":
+        reason = "нода не отвечает"
+        detail = (f"нода {xp} не отвечает ни через хоп, ни напрямую (прямой "
+                  f"путь может быть перерезан ТСПУ, но через хоп тоже не идёт "
+                  f"— проверьте uuid/pbk/sid/sni ноды и xray на ней)")
+    else:
+        reason = "хоп и нода не отвечают"
+        detail = (f"не отвечают ни хоп «{hop_tag}» ({hp}), ни нода {xp} по "
+                  f"VLESS — проверьте ключи/серверы обоих")
+    return {"legs": legs, "reason": reason, "detail": detail}
+
+
 def check_via_node_full_path(nd: dict, hops: list[dict],
                              want_ip: bool = False,
                              curl_timeout: int = 20,
-                             want_speed_mb: int = 0) -> dict:
+                             want_speed_mb: int = 0,
+                             deep_diag: bool = True) -> dict:
     """Full-path проверка exit-ноды с via: временный xray-клиент + curl.
 
     Поднимается отдельный xray (socks 127.0.0.1:<free port>) с цепочкой
-    hop-1 → … → hop-N → exit (dialerProxy), через него курлится
-    http://cp.cloudflare.com/generate_204. Это проверяет РЕАЛЬНУЮ
-    работоспособность цепочки (REALITY-хендшейки обоих ног + маршрутизацию),
-    а не только TCP-доступность — прямой TCP к via-ноде может быть
-    перерезан ТСПУ и не является признаком отказа.
+    hop-1 → … → hop-N → exit (dialerProxy), через него гоняется ЛЕСТНИЦА
+    проб (_probe_ladder): http 204 → https 204 → https на IP-literal.
+    Это проверяет РЕАЛЬНУЮ работоспособность цепочки (REALITY-хендшейки
+    обеих ног + маршрутизацию), а не только TCP-доступность — прямой TCP
+    к via-ноде может быть перерезан ТСПУ и не является признаком отказа.
+
+    Лестница различает отказы (живой кейс окт. 2026: exit резал порт 80 →
+    старая одиночная http-проба вечно FAIL при живой цепи):
+      • http 204 → цепь жива;
+      • https 204 (http молчит) → цепь жива, exit режет порт 80 — ок;
+      • только IP-проба проходит → цепь доходит, но DNS/domains на exit
+        сломаны → ok=False с диагнозом;
+      • всё молчит → ok=False; при deep_diag=True дополнительно
+        поднимаются два мини-клиента (только хоп / только нода напрямую)
+        и определяется, КАКАЯ нога сломана (см. _diagnose_dead_chain).
 
     want_speed_mb > 0 — дополнительно качает want_speed_mb МБ с Cloudflare
     SpeedTest ЧЕРЕЗ цепочку и возвращает поле speed_mbps (реальная скорость
     полного пути, а не прямого канала entry-сервера).
 
+    deep_diag=False — не запускать диагностику ног при отказе (для частых
+    фоновых вызовов HM/балансера: их интересует только ok/не-ok).
+
     Возвращает dict:
-        ok          — цепочка жива (HTTP 204 получен)
+        ok          — цепочка жива (доменная проба доставила ответ)
         ms          — латентность полного пути (time_total curl)
         exit_ip     — внешний IP (только при want_ip=True и ok)
         speed_mbps  — Мбит/с через цепочку (только при want_speed_mb>0 и ok)
         detail      — человекочитаемое описание (для HM-лога/меню)
+        reason      — короткая причина отказа (для однострочного вывода)
+        legs        — {'hop': ok|fail|skip, 'direct': ok|fail|skip}
+                      (диагностика ног, только при deep_diag и отказе)
+        xray_tail   — хвост stderr xray-чекера (при отказе)
     """
     res = {"ok": False, "ms": 0.0, "exit_ip": "", "speed_mbps": 0.0,
-           "detail": ""}
+           "detail": "", "reason": "", "legs": {}, "xray_tail": ""}
     via = hop_via_tag_for(nd, hops)
     if not via:
         res["detail"] = (f"via «{(nd or {}).get('via', '')}» не найден/выключен"
                          if (nd or {}).get("via") else "via не задан")
+        res["reason"] = "via не задан"
         return res
     chain = hop_chain(via, hops)
     if not chain:
         res["detail"] = f"цепочка via «{via}» битая (цикл/битая ссылка)"
+        res["reason"] = "битая via"
         return res
 
     xbin = _find_xray_bin()
     if not xbin:
         res["detail"] = "xray-бинарь не найден для full-path проверки"
+        res["reason"] = "нет xray"
         return res
 
     socks_port = _free_local_port()
     cfg = build_check_client_config(nd, hops, socks_port)
     if cfg is None:
         res["detail"] = "не удалось собрать конфиг проверки"
+        res["reason"] = "конфиг не собрался"
         return res
 
-    cfg_path = None
-    proc = None
     try:
-        import os as _os
-        fd, cfg_path = tempfile.mkstemp(prefix="relaycheck_", suffix=".json")
-        _os.write(fd, json.dumps(cfg, indent=2, ensure_ascii=False).encode("utf-8"))
-        _os.close(fd)
-        proc = subprocess.Popen(
-            [xbin, "run", "-c", cfg_path],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        time.sleep(1.5)          # старт ядра + подхват socks
-        if proc.poll() is not None:
-            err = (proc.stderr.read() or b"").decode("utf-8", "replace")[-300:]
-            res["detail"] = f"xray чекера упал: {err.strip()[:200]}"
-            return res
+        with _TempXrayClient(cfg, xbin) as client:
+            if client.start_error:
+                res["detail"] = client.start_error
+                res["reason"] = "xray не стартовал"
+                return res
+            if not client.alive():
+                err = client.err_tail(200)
+                res["detail"] = f"xray чекера упал: {err or '?'}"
+                res["reason"] = "xray упал"
+                return res
 
-        # 1) liveness: generate_204 через цепочку
-        r = subprocess.run(
-            ["curl", "-s", "-o", "/dev/null",
-             "-w", "%{http_code} %{time_total}",
-             "-m", str(curl_timeout),
-             "-x", f"socks5h://127.0.0.1:{socks_port}",
-             "http://cp.cloudflare.com/generate_204"],
-            capture_output=True, text=True, timeout=curl_timeout + 10)
-        parts = (r.stdout or "").split()
-        code = parts[0] if parts else ""
-        res["ok"] = (code == "204")
-        if len(parts) > 1:
-            try:
-                res["ms"] = float(parts[1]) * 1000
-            except ValueError:
-                pass
-        if not res["ok"]:
-            res["detail"] = f"цепочка отвечает некорректно (HTTP {code or '—'})"
-            return res
+            # 1) liveness: лестница проб через цепочку
+            pr = _probe_ladder(socks_port, curl_timeout)
+            hops_lbl = " → ".join([h.get("tag", "?") for h in chain])
+            if pr["domain_ok"]:
+                res["ok"] = True
+                res["ms"] = pr["ms"] or 0.0
+                res["reason"] = "цепь жива"
+                note = ""
+                if pr["port80_blocked"]:
+                    note = " — порт 80 с exit режется, 443 ок"
+                elif pr["code"] != "204":
+                    note = f" — проба отдала HTTP {pr['code']}, не 204"
+                res["detail"] = f"цепочка жива ({hops_lbl} → exit){note}"
+            elif pr["delivered"]:
+                # IP-проба проходит, доменные — нет: цепь доходит, но
+                # DNS/домены на exit-ноде не работают → реальный трафик
+                # (клиенты шлют домены) через такую ноду не пойдёт.
+                res["reason"] = "DNS на exit"
+                res["detail"] = ("цепь доходит (IP-проба проходит), но домены "
+                                 "с ноды не резолвятся — проверьте DNS/порт 53 "
+                                 "на exit-ноде")
+            else:
+                # полный отказ: все пробы без ответа
+                res["xray_tail"] = client.err_tail()
+                if deep_diag:
+                    _d = _diagnose_dead_chain(nd, chain, xbin, curl_timeout)
+                    res["legs"] = _d["legs"]
+                    res["reason"] = _d["reason"]
+                    res["detail"] = _d["detail"]
+                else:
+                    res["reason"] = "цепь не отвечает"
+                    res["detail"] = "цепочка не отвечает (все HTTP-пробы 000)"
+                if res["xray_tail"]:
+                    res["detail"] += f"  |  xray: {res['xray_tail'][-120:]}"
+            if not res["ok"]:
+                return res
 
-        # 2) exit-IP (опционально, для меню)
-        if want_ip:
-            r2 = subprocess.run(
-                ["curl", "-s", "-m", str(curl_timeout),
-                 "-x", f"socks5h://127.0.0.1:{socks_port}",
-                 "https://api.ipify.org"],
-                capture_output=True, text=True, timeout=curl_timeout + 10)
-            ip = (r2.stdout or "").strip()
-            if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', ip):
-                res["exit_ip"] = ip
+            # 2) exit-IP (опционально, для меню)
+            if want_ip:
+                r2 = subprocess.run(
+                    ["curl", "-s", "-m", str(curl_timeout),
+                     "-x", f"socks5h://127.0.0.1:{socks_port}",
+                     "https://api.ipify.org"],
+                    capture_output=True, text=True, timeout=curl_timeout + 10)
+                ip = (r2.stdout or "").strip()
+                if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', ip):
+                    res["exit_ip"] = ip
 
-        # 3) скорость через цепочку (опционально, для speed-test)
-        if want_speed_mb > 0:
-            _mb = max(1, int(want_speed_mb))
-            _dl_timeout = max(60, _mb * 8)
-            try:
-                from chimera.modules.chain_nodes import _resolve_host_fresh
-                _cf_ip = _resolve_host_fresh("speed.cloudflare.com")
-            except Exception:
-                _cf_ip = None
-            _dl = ["curl", "-s", "-o", "/dev/null", "-m", str(_dl_timeout),
-                   "-w", "%{size_download} %{time_total} %{speed_download}",
-                   "-x", f"socks5h://127.0.0.1:{socks_port}"]
-            if _cf_ip:
-                _dl += ["--resolve", f"speed.cloudflare.com:443:{_cf_ip}"]
-            _dl.append(f"https://speed.cloudflare.com/__down?bytes={_mb * 1048576}")
-            r3 = subprocess.run(_dl, capture_output=True, text=True,
-                                timeout=_dl_timeout + 15)
-            _p = (r3.stdout or "").split()
-            if r3.returncode == 0 and len(_p) >= 3:
+            # 3) скорость через цепочку (опционально, для speed-test)
+            if want_speed_mb > 0:
+                _mb = max(1, int(want_speed_mb))
+                _dl_timeout = max(60, _mb * 8)
                 try:
-                    _size_b = int(_p[0])
-                    if _size_b >= 1024 * 100:      # ≥100 КБ — считаем валидным
-                        res["speed_mbps"] = float(_p[2]) * 8 / 1_000_000
-                except ValueError:
-                    pass
+                    from chimera.modules.chain_nodes import _resolve_host_fresh
+                    _cf_ip = _resolve_host_fresh("speed.cloudflare.com")
+                except Exception:
+                    _cf_ip = None
+                _dl = ["curl", "-s", "-o", "/dev/null", "-m", str(_dl_timeout),
+                       "-w", "%{size_download} %{time_total} %{speed_download}",
+                       "-x", f"socks5h://127.0.0.1:{socks_port}"]
+                if _cf_ip:
+                    _dl += ["--resolve", f"speed.cloudflare.com:443:{_cf_ip}"]
+                _dl.append(f"https://speed.cloudflare.com/__down?bytes={_mb * 1048576}")
+                r3 = subprocess.run(_dl, capture_output=True, text=True,
+                                    timeout=_dl_timeout + 15)
+                _p = (r3.stdout or "").split()
+                if r3.returncode == 0 and len(_p) >= 3:
+                    try:
+                        _size_b = int(_p[0])
+                        if _size_b >= 1024 * 100:      # ≥100 КБ — считаем валидным
+                            res["speed_mbps"] = float(_p[2]) * 8 / 1_000_000
+                    except ValueError:
+                        pass
 
-        hops_lbl = " → ".join([h.get("tag", "?") for h in chain])
-        res["detail"] = f"цепочка жива ({hops_lbl} → exit)"
-        return res
+            return res
 
     except Exception as e:
         res["detail"] = f"ошибка full-path проверки: {type(e).__name__}: {e}"
+        res["reason"] = "ошибка проверки"
         return res
-    finally:
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        if cfg_path:
-            try:
-                Path(cfg_path).unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 # =============================================================================
@@ -1070,8 +1343,16 @@ def do_chain_relay_menu() -> None:
                     if r["ok"]:
                         st = (f"{GREEN}OK {r['ms']:.0f} мс{NC}  "
                               f"exit-IP: {BOLD}{r['exit_ip'] or '?'}{NC}")
+                        _box_row(f"  exit {nd.get('host')}:  (via {via})  →  {st}")
+                        # некритичные заметки (порт 80 режется и т.п.)
+                        _note = r.get("detail", "")
+                        if " — " in _note:
+                            _box_row(f"    {DIM}↳ "
+                                     f"{_note.split(' — ', 1)[1][:90]}{NC}")
                     else:
-                        st = f"{RED}FAIL{NC}  {DIM}{r['detail'][:60]}{NC}"
-                    _box_row(f"  exit {nd.get('host')}:  (via {via})  →  {st}")
+                        _box_row(f"  exit {nd.get('host')}:  (via {via})  →  "
+                                 f"{RED}FAIL{NC}  {DIM}{r.get('reason', '')}{NC}")
+                        if r.get("detail"):
+                            _box_row(f"    {DIM}↳ {r['detail'][:120]}{NC}")
             _box_bottom()
             input(f"{BLUE}Нажмите Enter...{NC}")

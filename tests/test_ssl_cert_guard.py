@@ -137,7 +137,7 @@ class TestDomainPointsToServer(unittest.TestCase):
 
     def test_resolves_but_wrong_ip_false(self):
         # домен резолвится, но в ДРУГОЙ IP (A-запись не переведена) — честный False
-        self._dig({"127.0.0.1": ["203.0.113.109"]})
+        self._dig({"127.0.0.1": ["<ip>"]})
         with patch("time.sleep"), \
              patch("socket.getaddrinfo", side_effect=OSError("no dns")):
             ok, via = self.sc.domain_points_to_server("panel.example", "203.0.113.102")
