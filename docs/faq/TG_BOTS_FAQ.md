@@ -93,7 +93,7 @@ Primary-бот имеет опциональное поле `cascade_peers` в `
 ```
 📊 Статус каскада (24.09.2026 11:09)
 
-• Server 1 (inferno1978) (inferno1978) — <server1-ip>
+• Server 1 (<owner>) (<owner>) — <server1-ip>
    🟢 Xray=active | REALITY:443 | М=B | Апт: up 6 days, 11 hours, 22 minutes
 • Server 2 (<node-2>) (<node-2>) — <server2-ip>
    🟢 Xray=active | REALITY:9443 | М=B | Апт: up 3 days, 1 hour, 37 minutes
@@ -106,7 +106,7 @@ Primary-бот имеет опциональное поле `cascade_peers` в `
    → добавлен в `authorized_keys` на peer)
 2. Скрипт `/usr/local/bin/chimera-remote-status.py` на каждом peer
    (standalone Python, возвращает JSON со статусом)
-3. Для non-root SSH user (например `inferno1978@server3`) — `sudo: true`
+3. Для non-root SSH user (например `<user>@server3`) — `sudo: true`
    в peer-конфиге, чтобы вызывать скрипт через `sudo -n`
 
 ---
@@ -120,11 +120,11 @@ Primary-бот имеет опциональное поле `cascade_peers` в `
 2. /newbot
    - Имя: "Chimeravpnproject bot"
    - Username: <домен3>project_bot
-   - Получить ADMIN_TOKEN (вида 8866274071:AA...)
+   - Получить ADMIN_TOKEN (вида <bot-id>:AA...)
 3. /newbot (снова)
    - Имя: "ChimeraVPN Client bot"
    - Username: chimera_vpn_client_bot (или любой свободный)
-   - Получить CLIENT_TOKEN (вида 8859136245:AA...)
+   - Получить CLIENT_TOKEN (вида <bot-id>:AA...)
 ```
 
 **Два токена обязательно** — раздельная ответственность (см. §1).
@@ -137,7 +137,7 @@ Primary-бот имеет опциональное поле `cascade_peers` в `
 
 Проверить что Chat ID получен:
 ```bash
-ADMIN_TOKEN='8866274071:AA...'
+ADMIN_TOKEN='<bot-id>:AA...'
 curl -sS "https://api.telegram.org/bot${ADMIN_TOKEN}/getUpdates" | python3 -m json.tool
 # В response.result[0].message.chat.id — твой chat_id (число, например <chat-id>)
 ```
@@ -161,15 +161,15 @@ cd /opt/chimera && python3 -m chimera
 Для cascade_peers — вручную отредактировать `/var/lib/xray-installer/tg_bot.json`:
 ```json
 {
-  "token": "8866274071:AA...",
+  "token": "<bot-id>:AA...",
   "admin_id": "<chat-id>",
   "allowed_users": [<chat-id>],
   "invite_tokens": {},
-  "local_name": "Server 1 (inferno1978)",
+  "local_name": "Server 1 (<owner>)",
   "local_ip": "<server1-ip>",
   "cascade_peers": [
     {"host": "<server2-ip>", "user": "root", "port": 22, "name": "Server 2 (<node-2>)", "sudo": false},
-    {"host": "<server3-ip>", "user": "inferno1978", "port": 22, "name": "Server 3 (server-ru)", "sudo": true}
+    {"host": "<server3-ip>", "user": "<user>", "port": 22, "name": "Server 3 (server-ru)", "sudo": true}
   ]
 }
 ```
@@ -192,10 +192,10 @@ ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519
 
 # Добавить public key на каждый peer
 ssh-copy-id root@<server2-ip>
-ssh-copy-id inferno1978@<server3-ip>
+ssh-copy-id <user>@<server3-ip>
 
 # ИЛИ вручную: cat /root/.ssh/id_ed25519.pub → добавить в peer's
-# /root/.ssh/authorized_keys (или /home/inferno1978/.ssh/authorized_keys)
+# /root/.ssh/authorized_keys (или /home/<user>/.ssh/authorized_keys)
 ```
 
 Также установить `/usr/local/bin/chimera-remote-status.py` на каждый peer
@@ -206,7 +206,7 @@ ssh-copy-id inferno1978@<server3-ip>
 На **каждом** сервере отредактировать `/var/lib/xray-installer/telegram.json`:
 ```json
 {
-  "token": "8866274071:AA...",
+  "token": "<bot-id>:AA...",
   "chat_id": "<chat-id>",
   "server_ip": "<server1-ip>",
   "events": {
@@ -438,7 +438,7 @@ handle_* функцию (config/status/protocols/guide/help).
   },
   {
     "host": "<server3-ip>",
-    "user": "inferno1978",
+    "user": "<user>",
     "port": 22,
     "name": "Server 3 (server-ru)",
     "sudo": true
@@ -466,7 +466,7 @@ ls -la /root/.ssh/id_ed25519.pub
 
 # Тест passwordless SSH:
 ssh root@<server2-ip> 'hostname'   # должно вывести <node-2> без пароля
-ssh inferno1978@<server3-ip> 'id'    # должно показать uid=1000
+ssh <user>@<server3-ip> 'id'    # должно показать uid=1000
 ```
 
 ### Remote status script
@@ -492,7 +492,7 @@ Bot-скрипт primary-сервера вызывает:
 ```
 📊 Статус каскада (24.09.2026 11:09)
 
-• Server 1 (inferno1978) (inferno1978) — <server1-ip>
+• Server 1 (<owner>) (<owner>) — <server1-ip>
    🟢 Xray=active | REALITY:443 | М=B | Апт: up 6 days, 11 hours, 22 minutes
 • Server 2 (<node-2>) (<node-2>) — <server2-ip>
    🟢 Xray=active | REALITY:9443 | М=B | Апт: up 3 days, 1 hour, 37 minutes
@@ -682,7 +682,7 @@ find /etc/letsencrypt/live -name 'cert.pem' 2>/dev/null
 О: Проверь SSH-связку с primary на этот peer:
 ```bash
 # На primary
-ssh root@peer-host 'hostname'   # или inferno1978@peer-host для non-root
+ssh root@peer-host 'hostname'   # или <user>@peer-host для non-root
 ```
 Если просит пароль — нужно перенастроить authorized_keys.
 Если connection timed out — peer недоступен по сети (упал?).
