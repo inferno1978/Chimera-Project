@@ -699,6 +699,51 @@ class TestGeneratedScriptVlessLink(unittest.TestCase):
         self.assertIn("#VLESS-REALITY", link)
 
 
+class TestGeneratedBotHardening(unittest.TestCase):
+    """Харденинг сгенерированного админ-бота (инцидент 08.10.2026, RU-2).
+
+    Мёртвый IPv6-маршрут убивал urllib-поллинг (Errno 101 Network is
+    unreachable) — urllib, в отличие от curl, не умеет happy-eyeballs.
+    Плюс mieru-прокси транзиентно рвёт отдельные запросы (~1 на 2-3 мин
+    поллинга) — один разрыв не должен стоить потерянного сообщения.
+    """
+
+    def _script(self):
+        from chimera.modules.tg_bot import _generate_bot_script
+        cfg = {"token": "123456:ABC", "admin_id": "111",
+               "allowed_users": [111], "invite_tokens": {}}
+        notif = {"token": "123456:ABC", "chat_id": "111", "events": {}}
+        return _generate_bot_script(cfg, notif)
+
+    def test_ipv4_first_pinning_present(self):
+        """В преамбуле сгенерированного скрипта — IPv4-first обёртка getaddrinfo."""
+        script = self._script()
+        self.assertIn("_gai_ipv4_first", script)
+        self.assertIn("_socket.getaddrinfo = _gai_ipv4_first", script)
+
+    def test_api_retries_present(self):
+        """api() делает до 3 попыток с паузой 2с и логирует номер попытки."""
+        script = self._script()
+        self.assertIn("for _att in range(1, 4):", script)
+        self.assertIn("time.sleep(2)", script)
+        self.assertIn('f"API error {method} (попытка {_att}/3): {e}"', script)
+
+    def test_api_proxy_support_present(self):
+        """api() читает proxy-ключ из telegram.json при каждом вызове (фикс 4e645199)."""
+        script = self._script()
+        self.assertIn("ProxyHandler", script)
+        self.assertIn('str(_pc.get("proxy") or "").strip()', script)
+
+    def test_send_routes_via_api(self):
+        """send() идёт через api() — наследует прокси и ретраи, не дублирует логику."""
+        script = self._script()
+        self.assertIn('def send(chat_id, text, parse_mode="HTML"):\n    api("sendMessage"', script)
+
+    def test_hardened_script_still_compiles(self):
+        import ast
+        ast.parse(self._script())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

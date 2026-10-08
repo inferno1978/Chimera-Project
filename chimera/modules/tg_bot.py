@@ -530,6 +530,20 @@ import json, os, sys, time, re, subprocess, urllib.request, urllib.parse, urllib
 from pathlib import Path
 from datetime import datetime
 
+# IPv4-first (инцидент 08.10.2026, RU-2): мёртвый IPv6-маршрут убивал
+# urllib-поллинг (Errno 101 Network is unreachable) — urllib, в отличие
+# от curl, не умеет happy-eyeballs. Принудительно предпочитаем A-записи;
+# если их нет — прежний резолв (поведение не меняется).
+import socket as _socket
+_gai_orig = _socket.getaddrinfo
+def _gai_ipv4_first(host, port, family=0, type=0, proto=0, flags=0):
+    try:
+        return _gai_orig(host, port, _socket.AF_INET,
+                         type or _socket.SOCK_STREAM, proto, flags)
+    except Exception:
+        return _gai_orig(host, port, family, type, proto, flags)
+_socket.getaddrinfo = _gai_ipv4_first
+
 TOKEN    = {token}
 ADMIN_ID = {admin_id}
 CASCADE_PEERS = {cascade_peers}
@@ -572,23 +586,29 @@ def api(method, **params):
     url = f"https://api.telegram.org/bot{{TOKEN}}/{{method}}"
     data = urllib.parse.urlencode(params).encode()
     try:
-        req = urllib.request.Request(url, data=data)
+        _tgp = Path("/var/lib/xray-installer/telegram.json")
+        _pc = json.loads(_tgp.read_text()) if _tgp.exists() else {{}}
+        _px = str(_pc.get("proxy") or "").strip()
+    except Exception:
+        _px = ""
+    # Ретраи: локальный mieru-прокси транзиентно рвёт отдельные запросы
+    # (замер 08.10.2026, RU-2: ~1 разрыв на 2-3 мин поллинга) — один
+    # разрыв не должен стоить потерянного сообщения/команды.
+    for _att in range(1, 4):
         try:
-            _tgp = Path("/var/lib/xray-installer/telegram.json")
-            _pc = json.loads(_tgp.read_text()) if _tgp.exists() else {{}}
-            _px = str(_pc.get("proxy") or "").strip()
-        except Exception:
-            _px = ""
-        if _px:
-            opener = urllib.request.build_opener(
-                urllib.request.ProxyHandler({{"https": _px, "http": _px}}))
-            resp = opener.open(req, timeout=30)
-        else:
-            resp = urllib.request.urlopen(req, timeout=30)
-        return json.loads(resp.read())
-    except Exception as e:
-        _log(f"API error {{method}}: {{e}}")
-        return {{}}
+            req = urllib.request.Request(url, data=data)
+            if _px:
+                opener = urllib.request.build_opener(
+                    urllib.request.ProxyHandler({{"https": _px, "http": _px}}))
+                resp = opener.open(req, timeout=30)
+            else:
+                resp = urllib.request.urlopen(req, timeout=30)
+            return json.loads(resp.read())
+        except Exception as e:
+            _log(f"API error {{method}} (попытка {{_att}}/3): {{e}}")
+            if _att < 3:
+                time.sleep(2)
+    return {{}}
 
 def send(chat_id, text, parse_mode="HTML"):
     api("sendMessage", chat_id=chat_id, text=text, parse_mode=parse_mode)

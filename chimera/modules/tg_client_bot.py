@@ -645,6 +645,20 @@ import json, os, sys, time, re, subprocess, urllib.request, urllib.parse, urllib
 from pathlib import Path
 from datetime import datetime, timezone
 
+# IPv4-first (инцидент 08.10.2026, RU-2): мёртвый IPv6-маршрут убивал
+# urllib-поллинг (Errno 101 Network is unreachable) — urllib, в отличие
+# от curl, не умеет happy-eyeballs. Принудительно предпочитаем A-записи;
+# если их нет — прежний резолв (поведение не меняется).
+import socket as _socket
+_gai_orig = _socket.getaddrinfo
+def _gai_ipv4_first(host, port, family=0, type=0, proto=0, flags=0):
+    try:
+        return _gai_orig(host, port, _socket.AF_INET,
+                         type or _socket.SOCK_STREAM, proto, flags)
+    except Exception:
+        return _gai_orig(host, port, family, type, proto, flags)
+_socket.getaddrinfo = _gai_ipv4_first
+
 TOKEN        = {token}
 ADMIN_ID     = {admin_id}
 RATE_LIMIT_S = {rate_limit_s}
@@ -1213,15 +1227,38 @@ def _generate_qr_png(text, out_path):
 
 # ── Telegram Bot API ─────────────────────────────────────────────────────────
 def api(method, **params):
+    """Вызов Telegram Bot API через urllib.
+
+    Прокси: необязательный ключ "proxy" в telegram.json — urllib
+    ProxyHandler (CONNECT для https), как в админ-боте (фикс 4e645199
+    пропустил клиентский шаблон — инцидент 08.10.2026, RU-2: клиентский
+    бот продолжал ходить напрямую и умирал на мёртвом IPv6).
+    Ключа нет → напрямую. Ретраи: до 3 попыток с паузой 2с — транзиентные
+    разрывы mieru-прокси не должны стоить потерянного сообщения.
+    """
     url = f"https://api.telegram.org/bot{{TOKEN}}/{{method}}"
     data = urllib.parse.urlencode(params).encode()
     try:
-        req = urllib.request.Request(url, data=data)
-        resp = urllib.request.urlopen(req, timeout=30)
-        return json.loads(resp.read())
-    except Exception as e:
-        _log(f"API error {{method}}: {{e}}")
-        return {{}}
+        _tgp = Path("/var/lib/xray-installer/telegram.json")
+        _pc = json.loads(_tgp.read_text()) if _tgp.exists() else {{}}
+        _px = str(_pc.get("proxy") or "").strip()
+    except Exception:
+        _px = ""
+    for _att in range(1, 4):
+        try:
+            req = urllib.request.Request(url, data=data)
+            if _px:
+                opener = urllib.request.build_opener(
+                    urllib.request.ProxyHandler({{"https": _px, "http": _px}}))
+                resp = opener.open(req, timeout=30)
+            else:
+                resp = urllib.request.urlopen(req, timeout=30)
+            return json.loads(resp.read())
+        except Exception as e:
+            _log(f"API error {{method}} (попытка {{_att}}/3): {{e}}")
+            if _att < 3:
+                time.sleep(2)
+    return {{}}
 
 def send(chat_id, text, parse_mode="HTML", reply_markup=None):
     params = dict(chat_id=chat_id, text=text, parse_mode=parse_mode)
@@ -1234,9 +1271,17 @@ def send_photo(chat_id, photo_path, caption=""):
     import subprocess as _sp
     try:
         url = f"https://api.telegram.org/bot{{TOKEN}}/sendPhoto"
+        _px = ""
+        try:
+            _pc = json.loads(Path("/var/lib/xray-installer/telegram.json").read_text())
+            _px = str(_pc.get("proxy") or "").strip()
+        except Exception:
+            pass
         cmd = ["curl", "-s", "-m", "30", url,
                "-F", f"chat_id={{chat_id}}",
                "-F", f"photo=@{{photo_path}};type=image/png"]
+        if _px:
+            cmd += ["-x", _px]
         if caption:
             cmd += ["-F", f"caption={{caption}}"]
         r = _sp.run(cmd, capture_output=True, text=True, check=False)
