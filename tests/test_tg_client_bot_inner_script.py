@@ -666,5 +666,53 @@ class TestInnerScriptRealLinkqrLibIntegration(unittest.TestCase):
         self.assertIn("vpn.example.com", result)
 
 
+class TestClientBotTemplateProxyIPv4Retries(unittest.TestCase):
+    """Прокси/IPv4-first/ретраи в сгенерированном клиентском боте.
+
+    Фикс 4e645199 покрыл админ-бота, но ПРОПУСТИЛ клиентский шаблон —
+    инцидент 08.10.2026, RU-2: клиентский бот продолжал ходить напрямую
+    и умирал на мёртвом IPv6 (Errno 101, ~36ч дауна). Этот класс держит
+    регрессию: прокси в api()/send_photo, ретраи, IPv4-first.
+    """
+
+    def _script(self):
+        from chimera.modules import tg_client_bot
+        return tg_client_bot._generate_client_bot_script(
+            {"token": "T", "admin_id": "A", "rate_limit_seconds": 2})
+
+    def test_api_proxy_support_present(self):
+        """api() поддерживает proxy-ключ telegram.json через ProxyHandler."""
+        script = self._script()
+        self.assertIn("ProxyHandler", script,
+                      "клиентский api() должен поддерживать proxy-ключ (как админ-бот)")
+        self.assertIn('str(_pc.get("proxy") or "").strip()', script)
+
+    def test_api_reads_proxy_at_runtime(self):
+        """Прокси читается из telegram.json при каждом вызове — смена ключа без регенерации."""
+        script = self._script()
+        self.assertIn('Path("/var/lib/xray-installer/telegram.json")', script)
+
+    def test_api_retries_present(self):
+        """api() делает до 3 попыток с паузой 2с (транзиентные разрывы mieru-прокси)."""
+        script = self._script()
+        self.assertIn("for _att in range(1, 4):", script)
+        self.assertIn('f"API error {method} (попытка {_att}/3): {e}"', script)
+
+    def test_ipv4_first_pinning_present(self):
+        """IPv4-first обёртка getaddrinfo — защита от мёртвого IPv6-маршрута."""
+        script = self._script()
+        self.assertIn("_gai_ipv4_first", script)
+        self.assertIn("_socket.getaddrinfo = _gai_ipv4_first", script)
+
+    def test_send_photo_uses_proxy_flag(self):
+        """send_photo передаёт curl -x при заданном proxy."""
+        script = self._script()
+        self.assertIn('cmd += ["-x", _px]', script)
+
+    def test_hardened_script_still_compiles(self):
+        import ast
+        ast.parse(self._script())
+
+
 if __name__ == "__main__":
     unittest.main()
