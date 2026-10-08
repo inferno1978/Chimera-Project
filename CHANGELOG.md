@@ -1,3 +1,58 @@
+# Changelog new entry — TG-боты всего флота замолчали: два независимых лома TG-пути на RU-нодах + прокси-фолбэк для отправителей (08 Oct 2026)
+
+## FIX(tg_send/tg_bot/xray-config): ключ proxy в telegram.json (curl -x) во всех отправителях; честная диагностика тест-отправки; восстановление листенера tproxy-telemt
+
+**Контекст (прод, 07-08.10.2026):** юзер перестал получать ТГ-уведомления
+со всех нод (последним пришёл вечерний CPU Steal Report от монитора).
+Разбор по нодам: токен/чат валидны (getMe ok), exit-ноды шлют отчёты
+нормально — два независимых лома на RU-нодах:
+
+**(1) RU-2 — листенер tproxy-telemt потерян при регенерации конфига.**
+Схема ТГ-пути: nft nat OUTPUT редиректит TG-подсети → 127.0.0.1:10811
+(dokodemo-door followRedirect) → chain-balancer → VLESS+REALITY на
+exit'ы. 07.10 ~15:18 UTC xray перезапустился с конфигом БЕЗ inbound
+tproxy-telemt (правило нат-редиректа осталось) → весь локальный ТГ-трафик
+мгновенно connection refused: интерактивный бот (getUpdates) и дневные
+отчёты легли на 8 часов. Фикс на ноде: восстановлен inbound + routing
+rule (первым правилом → balancerTag chain-balancer), отчёт за сутки
+доотправлен вручную. Отдельно: WARP-туннель wg-warp на этой ноде терял
+handshake — оживлён ротацией endpoint-портов, рабочий порт закреплён
+в конфиге.
+
+**(2) RU-3 — хостовый инжектор рвёт локальные ТГ-потоки.** Прямой путь
+к TG-подсетям блокируется (TLS-alert «protocol version» за ~0.2с), и
+ДЖЕП через xray-цепь тоже: tcpdump на lo:10811 показывает подделанные
+перекрывающиеся сегменты (seq 2:3 дважды, URG-байт) и фальшивый
+alert-рекорд, инжектированные в локальный поток curl→xray; при этом на
+exit'ах запросы приняты и dial к TG без ошибок (логи exit'ов чистые),
+v6-MTU в норме. Вывод: DPI на хосте матчит TG-подсеть по conntrack
+original-dst даже после редиректа на loopback. Обход: цель обязана
+уезжать ВНУТРЬ зашифрованного запроса — локальный mieru-HTTP-прокси
+(127.0.0.1:25181, CONNECT) → mieru-каскад на exit → TG: стабильно 302/200.
+Схема работает и не зависит от xray-балансера.
+
+**Код.** Все curl-отправители (steal_monitor, tg_bot + шаблон
+xray-tg-monitor.sh, mieru_cascade_monitor, node_health_monitor,
+b4_monitor, fw_guard, hysteria2_common, diagnostics sendMessage/
+sendDocument, autoban, health_report, traffic_tracking, ssl_certbot,
+failover, nginx_watchdog, awg_transport) получили необязательный ключ
+"proxy" в telegram.json → curl -x <proxy>; отсутствие ключа = прежнее
+поведение (нулевое влияние на ноды без ключа). steal_monitor: лог
+«TG send FAILED (gate/no config)» заменён честной причиной (нет
+конфига/события либо все попытки curl). tg_bot: тест-отправка в меню
+теперь различает HTTP 000 (нет связи — сеть/DPI/прокси, токен ни при
+чём) / 401 (токен) / 400 (chat_id) / 403 (бот заблокирован) / 429
+(flood) вместо слепого «проверьте токен и chat_id»; сгенерированный
+бот-скрипт: api() умеет ProxyHandler (urllib) по тому же ключу.
++тесты ×8: proxy x-флаг/нет-ключа/пустая-строка, send_code, словарь
+диагностики, no-config.
+
+**Деплой:** chimera-v5 939bf03 на всех трёх RU-нодах (git pull
+/opt/chimera), RU-3 дополнительно: ключ proxy в telegram.json +
+патч установленных xray-tg-monitor.sh / xray-autoban.sh. Верификация:
+8/8 нод TG=200, дневной отчёт за 07.10 отправлен со всех 8 (RU-3 —
+впервые), бот на RU-2 опрашивает TG.
+
 # Changelog new entry — [T]/full-path: ложный FAIL «нода не отвечает» на медленной цепи при живой цепочке (RU→EU-каскад) (08 Oct 2026)
 
 ## FIX(chain_relay/_probe_ladder/_diagnose_dead_chain): P2 с ретраем + P2b через --resolve + честный вердикт ног
