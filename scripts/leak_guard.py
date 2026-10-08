@@ -126,6 +126,8 @@ TOKEN_PATTERNS = [
         r"|_get_creds|user\.get|form\.get|user_pass|new_pass|line\.split"
         r"|derive|generate|_gen_|gen_pw"
         r"|alice-|bob-|carol-|s3cret|shadow_pw|p@ss|new-pass|with:colons"
+        r"|anytls_pw|anytls-|reapplypw|mypassword|fallback|proto_ask"
+        r"|node\.get|state\.get|user_record|decoded\.partition|users_by_name"
         r")[^\s\"'<>{ }()=]{8,}")),
     ("ssh-user-host", re.compile(
         r"\b(?:ssh|scp|sftp)\s+(?:-\S+\s+)*[A-Za-z0-9_.-]+@\s*\d{1,3}(?:\.\d{1,3}){3}")),
