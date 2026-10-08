@@ -93,21 +93,35 @@ Primary-бот имеет опциональное поле `cascade_peers` в `
 ```
 📊 Статус каскада (24.09.2026 11:09)
 
-• Server 1 (<owner>) (<owner>) — <server1-ip>
-   🟢 Xray=active | REALITY:443 | М=B | Апт: up 6 days, 11 hours, 22 minutes
-• Server 2 (<node-2>) (<node-2>) — <server2-ip>
-   🟢 Xray=active | REALITY:9443 | М=B | Апт: up 3 days, 1 hour, 37 minutes
-• Server 3 (server-ru) (server-ru) — <server3-ip>
-   🟢 Xray=active | REALITY:443 | М=B | Апт: up 3 weeks, 4 days, 13 hours, 37 minutes
+• Server 1 (<owner>) — <server1-ip>
+   🟢 Xray=active | REALITY:443 | Режим B | 🛡 AWG: вход ✓ · LB smart 5/5 · hs 70с | 🧅 Mieru: 4/4 ✓ | Апт: up 6 days, 11 hours, 22 minutes
+• Server 2 (<node-2>) — <server2-ip>
+   🟢 Xray=active | REALITY:9443 | Режим B | 🛡 AWG: вход ✓ · актив exit-c · hs 45с | 🧅 Mieru: 4/4 ✓ | Апт: up 3 days, 1 hour, 37 minutes
+• Server 3 (server-ru) — <server3-ip>
+   🔴 Xray=inactive | REALITY:443 | Режим B | 🛡 AWG: вход ✗ · LB smart 0/2 · hs — | Апт: up 3 weeks, 4 days, 13 hours, 37 minutes
 ```
 
 **Зависимости для cascade_peers:**
 1. Passwordless SSH-ключ на primary к каждому peer (`/root/.ssh/id_ed25519`
    → добавлен в `authorized_keys` на peer)
 2. Скрипт `/usr/local/bin/chimera-remote-status.py` на каждом peer
-   (standalone Python, возвращает JSON со статусом)
+   (standalone Python, возвращает JSON со статусом; v3 — с AWG-каскадом)
 3. Для non-root SSH user (например `<user>@server3`) — `sudo: true`
    в peer-конфиге, чтобы вызывать скрипт через `sudo -n`
+
+Пиры опрашиваются параллельно (ThreadPoolExecutor) — сводка по 3+
+серверам собирается за время самого медленного пира, а не сумму всех.
+
+Чтение строки статуса:
+- `Режим A/B` — режим установки (A = прямой, B = цепь через AWG-exit)
+- `🛡 AWG` — статус AWG-каскада ноды: `вход ✓/✗` (туннель awg1 +
+  routing + свежий handshake ≤ 180с), далее через `·` — режим
+  экзитов: `LB <стратегия> <живые>/<слоты>` (балансировка) или
+  `актив <имя>` (single-exit), и `hs <возраст>` — возраст последнего
+  handshake; для ноды-выхода — `выход ✓/✗`
+- `🧅 Mieru` — статус mieru-каскада (healthy/total + mita)
+- сегменты AWG/Mieru появляются ТОЛЬКО если нода отдала
+  соответствующие поля (старый remote-status без них — строка короче)
 
 ---
 
@@ -478,9 +492,11 @@ ssh <user>@<server3-ip> 'id'    # должно показать uid=1000
 1. Читает `/var/lib/xray-installer/state.json` (поля protocol_mode,
    server_port, install_mode)
 2. Выполняет `systemctl is-active xray` и `hostname -s` и `uptime -p`
-3. Возвращает одну JSON-строку:
+3. Возвращает одну JSON-строку (v3 — с ключами mieru/awg при
+   настроенных каскадах):
    ```json
-   {"host":"<node-2>","xray":"active","proto":"reality","port":9443,"mode":"B","uptime":"up 3 days"}
+   {"host":"<node-2>","xray":"active","proto":"reality","port":9443,"mode":"B","uptime":"up 3 days",
+    "awg":{"role":"entry","awg1":true,"routing":true,"hs":45,"exits":5,"lb":true,"strategy":"smart","slots":5,"alive":5}}
    ```
 
 Bot-скрипт primary-сервера вызывает:
@@ -492,12 +508,12 @@ Bot-скрипт primary-сервера вызывает:
 ```
 📊 Статус каскада (24.09.2026 11:09)
 
-• Server 1 (<owner>) (<owner>) — <server1-ip>
-   🟢 Xray=active | REALITY:443 | М=B | Апт: up 6 days, 11 hours, 22 minutes
-• Server 2 (<node-2>) (<node-2>) — <server2-ip>
-   🟢 Xray=active | REALITY:9443 | М=B | Апт: up 3 days, 1 hour, 37 minutes
-• Server 3 (server-ru) (server-ru) — <server3-ip>
-   🟢 Xray=active | REALITY:443 | М=B | Апт: up 3 weeks, 4 days, 13 hours, 37 minutes
+• Server 1 (<owner>) — <server1-ip>
+   🟢 Xray=active | REALITY:443 | Режим B | 🛡 AWG: вход ✓ · LB smart 5/5 · hs 70с | 🧅 Mieru: 4/4 ✓ | Апт: up 6 days, 11 hours, 22 minutes
+• Server 2 (<node-2>) — <server2-ip>
+   🟢 Xray=active | REALITY:9443 | Режим B | 🛡 AWG: вход ✓ · актив exit-c · hs 45с | 🧅 Mieru: 4/4 ✓ | Апт: up 3 days, 1 hour, 37 minutes
+• Server 3 (server-ru) — <server3-ip>
+   🔴 Xray=inactive | REALITY:443 | Режим B | 🛡 AWG: вход ✗ · LB smart 0/2 · hs — | Апт: up 3 weeks, 4 days, 13 hours, 37 minutes
 ```
 
 Если peer недоступен — вместо статуса:
@@ -604,7 +620,7 @@ Client-бот не имеет ни одной команды, которая м�
 
 | Файл | Назначение |
 |---|---|
-| `/usr/local/bin/chimera-remote-status.py` | Standalone Python-скрипт, возвращает JSON со статусом сервера (вызывается primary-ботом через SSH при /status) |
+| `/usr/local/bin/chimera-remote-status.py` | Standalone Python-скрипт, возвращает JSON со статусом сервера (вызывается primary-ботом через SSH при /status); v3 — с сегментами mieru/awg каскадов |
 
 ### Логи
 
