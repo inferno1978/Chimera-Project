@@ -529,6 +529,7 @@ def _generate_bot_script(bot_cfg: dict, notif_cfg: dict) -> str:
 import json, os, sys, time, re, subprocess, urllib.request, urllib.parse, urllib.error
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 # IPv4-first (инцидент 08.10.2026, RU-2): мёртвый IPv6-маршрут убивал
 # urllib-поллинг (Errno 101 Network is unreachable) — urllib, в отличие
@@ -742,7 +743,98 @@ def _local_status_dict():
                            "stalled": bool(stalled)}}
     except Exception:
         pass
+    # AWG-каскад (v3, 08.10.2026): сегмент только при настроенном
+    # каскаде — формат ключа зеркалит chimera-remote-status.py v3.
+    try:
+        _awg = _awg_local_status()
+        if _awg:
+            d["awg"] = _awg
+    except Exception:
+        pass
     return d
+
+
+def _awg_hs_age(text):
+    """Возраст handshake из вывода `awg show` (сек) или None.
+
+    «latest handshake: 1 minute, 10 seconds ago» → 70.
+    Зеркало chimera-remote-status.py v3 _hs_age / awg_cascade.
+    """
+    m = re.search(r"latest handshake:\\s*(.+?)\\s+ago", text or "")
+    if not m:
+        return None
+    total, found = 0, False
+    for part in m.group(1).split(","):
+        pm = re.match(r"(\\d+)\\s+(second|minute|hour|day|week)s?",
+                      part.strip())
+        if pm:
+            found = True
+            total += int(pm.group(1)) * {{
+                "second": 1, "minute": 60, "hour": 3600,
+                "day": 86400, "week": 604800}}[pm.group(2)]
+    return total if found else None
+
+
+def _awg_svc_active(unit):
+    """systemctl is-active <unit> → bool (False при любой ошибке)."""
+    try:
+        r = subprocess.run(["systemctl", "is-active", unit],
+                           capture_output=True, text=True, timeout=5)
+        return (r.stdout or "").strip() == "active"
+    except Exception:
+        return False
+
+
+def _awg_local_status():
+    """Статус AWG-каскада ЭТОЙ ноды (dict) или None (каскада нет).
+
+    Ключ awg — тот же формат, что отдаёт chimera-remote-status.py v3:
+      entry → {{role, awg1, routing, hs, exits, active}} или
+              {{..., lb, strategy, slots, alive}} в LB-режиме;
+      exit  → {{role, awg0}}.
+    Слоты awg1..awgN перебираются только до эффективного числа
+    экзитов (LB-фильтр lb_exits), handshake — минимальный возраст.
+    """
+    try:
+        awst = json.loads(Path(
+            "/var/lib/xray-installer/awg_standalone_state.json").read_text())
+    except Exception:
+        return None
+    arole = awst.get("cascade_role", "")
+    if arole == "entry":
+        all_exits = awst.get("cascade_exits") or []
+        sel = awst.get("lb_exits") or None
+        eff = [e for e in all_exits if (not sel or e.get("name") in sel)]
+        n_eff = min(len(eff), 10)
+        hs = None
+        for i in range(1, n_eff + 1):
+            try:
+                r = subprocess.run(["awg", "show", "awg%d" % i],
+                                   capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    age = _awg_hs_age(r.stdout or "")
+                    if age is not None and (hs is None or age < hs):
+                        hs = age
+            except Exception:
+                pass
+        awg = {{"role": "entry",
+               "awg1": _awg_svc_active("awg-quick@awg1"),
+               "routing": _awg_svc_active("awg-cascade-routing"),
+               "hs": hs, "exits": len(all_exits)}}
+        if awst.get("lb_mode") and n_eff >= 2:
+            alive = awst.get("lb", {{}}).get("alive") or []
+            eff_names = {{e.get("name") for e in eff}}
+            awg["lb"] = True
+            awg["strategy"] = awst.get("lb_strategy", "")
+            awg["slots"] = n_eff
+            awg["alive"] = len([a for a in alive if a in eff_names])
+        else:
+            awg["active"] = awst.get("cascade_active_exit", "")
+        return awg
+    if arole == "exit":
+        return {{"role": "exit",
+                "awg0": _awg_svc_active("awg-quick@awg0")}}
+    return None
 
 def _remote_status_dict(peer):
     """Получает статус с удалённого сервера через SSH.
@@ -815,6 +907,11 @@ def get_status_text_all():
     """Агрегированный статус: локальный + все cascade_peers через SSH.
 
     Возвращает HTML-сообщение со списком всех серверов.
+
+    Пиры опрашиваются ПАРАЛЛЕЛЬНО (ThreadPoolExecutor): последовательный
+    SSH-опрос стоил до 20с на пир (медленные каскадные линги + таймауты
+    недоступных) — сводка собиралась заметно дольше, чем юзер ждал ответ.
+    ex.map сохраняет порядок строк = порядок CASCADE_PEERS.
     """
     ts = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [f"📊 <b>Статус каскада ({{ts}})</b>\\n"]
@@ -823,24 +920,47 @@ def get_status_text_all():
     local = _local_status_dict()
     lines.append(_format_status_line(local, is_first=True))
 
-    # Remote peers
-    for peer in CASCADE_PEERS:
-        name = peer.get("name", peer.get("host", "?"))
-        r = _remote_status_dict(peer)
-        if "error" in r:
-            # ошибка remote: показываем peer name + peer IP + причину
-            peer_ip = peer.get("host", "?")
-            lines.append(f"\\n• <b>{{name}}</b> ({{peer_ip}}): ❌ {{r['error']}}")
-        else:
-            lines.append(_format_status_line(r, is_first=False))
+    # Remote peers — параллельно (фолбэк на последовательный опрос при
+    # любом сбое пула — сводка важнее скорости)
+    if CASCADE_PEERS:
+        try:
+            with ThreadPoolExecutor(
+                    max_workers=max(1, len(CASCADE_PEERS))) as ex:
+                results = list(ex.map(_remote_status_dict, CASCADE_PEERS))
+        except Exception:
+            results = [_remote_status_dict(p) for p in CASCADE_PEERS]
+        for peer, r in zip(CASCADE_PEERS, results):
+            if "error" in r:
+                # ошибка remote: показываем peer name + peer IP + причину
+                peer_ip = peer.get("host", "?")
+                lines.append(
+                    f"\\n• <b>{{peer.get('name', peer_ip)}}</b> ({{peer_ip}}): ❌ {{r['error']}}")
+            else:
+                lines.append(_format_status_line(r, is_first=False))
 
     return "\\n".join(lines)
+
+def _fmt_hs(sec):
+    """Компактный возраст handshake: 70с / 5м / 3ч / 2д (None → —)."""
+    if sec is None:
+        return "—"
+    if sec < 90:
+        return f"{{sec}}с"
+    if sec < 5400:
+        return f"{{sec // 60}}м"
+    if sec < 129600:
+        return f"{{sec // 3600}}ч"
+    return f"{{sec // 86400}}д"
+
 
 def _format_status_line(d, is_first=False):
     """Форматирует dict статуса в HTML-строку.
 
-    Формат:  • <name> (<host>) — <ip>
-                🟢 Xray=active | REALITY:443 | М=B | Апт: up X days
+    Формат:  • <name> — <ip>
+                🟢 Xray=active | REALITY:443 | Режим B | 🛡 AWG: вход ✓ · LB smart 5/5 · hs 70с | 🧅 Mieru: 4/4 ✓ | Апт: up X days
+
+    Сегменты 🛡 AWG / 🧅 Mieru — только если сервер отдал соответствующие
+    поля (обратная совместимость со старыми remote-status без них).
     """
     if "error" in d:
         ip = d.get("ip", "")
@@ -852,6 +972,9 @@ def _format_status_line(d, is_first=False):
     name = d.get("name") or host
     ip = d.get("ip", "")
     ip_part = f" — <code>{{ip}}</code>" if ip else ""
+    # Дедуп hostname: имя пира из конфига часто уже содержит его в
+    # скобках («Server 2 (vds13195)») — не дублируем «(vds13195)».
+    host_part = "" if f"({{host}})" in name else f" ({{host}})"
     xray = d.get("xray", "?")
     xray_emoji = "🟢" if xray == "active" else "🔴" if xray in ("inactive", "failed") else "❓"
     proto = str(d.get("proto", "?")).upper()
@@ -859,6 +982,27 @@ def _format_status_line(d, is_first=False):
     mode = d.get("mode", "?")
     up = d.get("uptime", "")
     up_str = f" | Апт: {{up}}" if up else ""
+    # AWG-каскад (v3): вход здоров = awg1 + routing + свежий handshake
+    # (<= 180с); LB-режим — стратегия и живые слоты, иначе активный exit.
+    aw = d.get("awg")
+    awg_str = ""
+    if isinstance(aw, dict):
+        if aw.get("role") == "entry":
+            hs = aw.get("hs")
+            healthy = (aw.get("awg1") and aw.get("routing")
+                       and hs is not None and hs <= 180)
+            mark = "✓" if healthy else "✗"
+            seg = f"вход {{mark}}"
+            if aw.get("lb"):
+                seg += (f" · LB {{aw.get('strategy') or 'on'}} "
+                        f"{{aw.get('alive', '?')}}/{{aw.get('slots', '?')}}")
+            elif aw.get("active"):
+                seg += f" · актив {{aw['active']}}"
+            seg += f" · hs {{_fmt_hs(hs)}}"
+            awg_str = f" | 🛡 AWG: {{seg}}"
+        elif aw.get("role") == "exit":
+            mark = "✓" if aw.get("awg0") else "✗"
+            awg_str = f" | 🛡 AWG: выход {{mark}}"
     # Mieru-каскад: сегмент только если сервер отдал mieru-поля
     # (старые chimera-remote-status.py без mieru — просто нет ключа).
     mi = d.get("mieru")
@@ -871,8 +1015,8 @@ def _format_status_line(d, is_first=False):
             mieru_str += " [mita ✗]"
         if mi.get("stalled"):
             mieru_str += " [tick ✗]"
-    return (f"• <b>{{name}}</b> ({{host}}){{ip_part}}\\n"
-            f"   {{xray_emoji}} Xray={{xray}} | {{proto}}:{{port}} | М={{mode}}{{mieru_str}}{{up_str}}")
+    return (f"• <b>{{name}}</b>{{host_part}}{{ip_part}}\\n"
+            f"   {{xray_emoji}} Xray={{xray}} | {{proto}}:{{port}} | Режим {{mode}}{{awg_str}}{{mieru_str}}{{up_str}}")
 
 
 def get_users_text():
