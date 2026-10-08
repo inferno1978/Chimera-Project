@@ -94,9 +94,18 @@ def _failover_install(nodes: list, tg_token: str = "", tg_chat: str = "") -> Non
     )
     tg_block = ""
     if tg_token and tg_chat:
+        try:
+            _px = ""
+            _tj = Path("/var/lib/xray-installer/telegram.json")
+            if _tj.exists():
+                _px = str(json.loads(_tj.read_text()).get("proxy")
+                          or "").strip()
+        except Exception:
+            _px = ""
+        _popt = f" -x '{_px}'" if _px else ""
         tg_block = textwrap.dedent(f"""\
             send_tg() {{
-                curl -s -o /dev/null -m 5 \\
+                curl -s -o /dev/null -m 5{_popt} \\
                     "https://api.telegram.org/bot{tg_token}/sendMessage" \\
                     -d chat_id="{tg_chat}" -d text="$1" || true
             }}

@@ -202,14 +202,18 @@ def _tg_send(msg: str, event: str = "") -> bool:
         ip = cfg.get("server_ip", "")
         header = f"[{host} | {ip}]" if ip else f"[{host}]"
         text = msg.replace("{H}", header)
-        r = _run([
-            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-            "-m", str(TG_TIMEOUT),
+        _cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                "-m", str(TG_TIMEOUT)]
+        _px = str(cfg.get("proxy") or "").strip()
+        if _px:
+            _cmd += ["-x", _px]
+        _cmd += [
             f"https://api.telegram.org/bot{token}/sendMessage",
             "-d", f"chat_id={chat}",
             "-d", f"text={text}",
             "-d", "parse_mode=HTML",
-        ])
+        ]
+        r = _run(_cmd)
         return (r.stdout or "").strip() == "200"
     except Exception:
         return False

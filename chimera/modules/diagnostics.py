@@ -2581,25 +2581,32 @@ def do_full_diagnostic() -> None:
             _txt = report_path.read_text()
             _header = (f"🩺 Диагностический отчёт\n"
                        f"Дата: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
-            _r = _run([
-                "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                "-m", "15",
+            _cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                    "-m", "15"]
+            _px = str(_tg_cfg.get("proxy") or "").strip()
+            if _px:
+                _cmd += ["-x", _px]
+            _cmd += [
                 f"https://api.telegram.org/bot{_token}/sendMessage",
                 "-d", f"chat_id={_chat_id}",
                 "--data-urlencode", f"text={_header + _txt[:3800]}",
-            ], capture=True, check=False)
+            ]
+            _r = _run(_cmd, capture=True, check=False)
             _box_top("Telegram")
             if _r.stdout.strip() == "200":
                 _box_ok("Сообщение отправлено ✓")
                 if len(_txt) > 3800:
-                    _rf = _run([
-                        "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                        "-m", "20",
+                    _cmdf = ["curl", "-s", "-o", "/dev/null",
+                             "-w", "%{http_code}", "-m", "20"]
+                    if _px:
+                        _cmdf += ["-x", _px]
+                    _cmdf += [
                         f"https://api.telegram.org/bot{_token}/sendDocument",
                         "-F", f"chat_id={_chat_id}",
                         "-F", f"document=@{report_path}",
                         "-F", "caption=Полный отчёт (файл)",
-                    ], capture=True, check=False)
+                    ]
+                    _rf = _run(_cmdf, capture=True, check=False)
                     if _rf.stdout.strip() == "200":
                         _box_ok("Полный файл также отправлен ✓")
                     else:

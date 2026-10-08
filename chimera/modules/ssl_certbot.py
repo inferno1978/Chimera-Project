@@ -639,11 +639,15 @@ try:
     host = socket.gethostname().split(".")[0]
     ip = cfg.get("server_ip", "")
     header = "[{{}} | {{}}]".format(host, ip) if ip else "[{{}}]".format(host)
-    subprocess.run(["curl", "-s", "-o", "/dev/null", "-m", "10",
-        "https://api.telegram.org/bot" + token + "/sendMessage",
+    _cmd = ["curl", "-s", "-o", "/dev/null", "-m", "10"]
+    _px = (cfg.get("proxy") or "").strip()
+    if _px:
+        _cmd += ["-x", _px]
+    _cmd += ["https://api.telegram.org/bot" + token + "/sendMessage",
         "-d", "chat_id=" + chat,
         "-d", "text=" + header + " " + msg,
-        "-d", "parse_mode=HTML"], capture_output=True)
+        "-d", "parse_mode=HTML"]
+    subprocess.run(_cmd, capture_output=True)
 except Exception:
     pass
 ' "$1"

@@ -251,6 +251,78 @@ class TestTgLoadSave(unittest.TestCase):
         self.assertEqual(mode, 0o600)
 
 
+class TestTgSendProxy(unittest.TestCase):
+    """tg_send / tg_send_code — поддержка необязательного proxy (curl -x)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._notif = self._tmpdir / "telegram.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write_cfg(self, proxy=None):
+        cfg = {"token": "T", "chat_id": "C"}
+        if proxy is not None:
+            cfg["proxy"] = proxy
+        self._notif.write_text(json.dumps(cfg), encoding="utf-8")
+
+    def _patch(self):
+        return patch("chimera.modules.tg_bot._NOTIF_FILE", self._notif)
+
+    def test_proxy_adds_x_flag(self):
+        from chimera.modules import tg_bot
+        from unittest.mock import MagicMock
+        self._write_cfg(proxy="http://127.0.0.1:25181")
+        resp = MagicMock(stdout="200", returncode=0)
+        with self._patch(), \
+             patch.object(tg_bot, "_run", return_value=resp) as m:
+            self.assertTrue(tg_bot.tg_send("msg", "T", "C"))
+            cmd = m.call_args[0][0] if m.call_args else m.call_args[1]
+            # cmd может прийти позиционно или через capture-kwargs
+            flat = cmd if isinstance(cmd, list) else cmd.get("args", cmd)
+            self.assertIn("-x", flat)
+            self.assertEqual(flat[flat.index("-x") + 1],
+                             "http://127.0.0.1:25181")
+
+    def test_no_proxy_keeps_old_behavior(self):
+        from chimera.modules import tg_bot
+        from unittest.mock import MagicMock
+        self._write_cfg()
+        resp = MagicMock(stdout="200", returncode=0)
+        with self._patch(), \
+             patch.object(tg_bot, "_run", return_value=resp) as m:
+            self.assertTrue(tg_bot.tg_send("msg", "T", "C"))
+            cmd = m.call_args[0][0] if m.call_args else m.call_args[1]
+            flat = cmd if isinstance(cmd, list) else cmd.get("args", cmd)
+            self.assertNotIn("-x", flat)
+
+    def test_send_code_returns_http_code(self):
+        from chimera.modules import tg_bot
+        from unittest.mock import MagicMock
+        self._write_cfg()
+        resp = MagicMock(stdout="401", returncode=0)
+        with self._patch(), \
+             patch.object(tg_bot, "_run", return_value=resp):
+            self.assertEqual(tg_bot.tg_send_code("msg", "T", "C"), "401")
+
+    def test_diag_msg_known_codes(self):
+        from chimera.modules.tg_bot import tg_send_diag_msg
+        self.assertIn("нет связи", tg_send_diag_msg("000"))
+        self.assertIn("токен", tg_send_diag_msg("401"))
+        self.assertIn("chat_id", tg_send_diag_msg("400"))
+        self.assertIn("заблокирован", tg_send_diag_msg("403"))
+        self.assertIn("flood", tg_send_diag_msg("429"))
+        self.assertTrue(tg_send_diag_msg("500").startswith("HTTP 500"))
+
+    def test_send_code_no_config(self):
+        from chimera.modules import tg_bot
+        with self._patch():   # файла нет
+            self.assertEqual(tg_bot.tg_send_code("msg"), "no-config")
+
+
 class TestBotLoadSave(unittest.TestCase):
     """_bot_load / _bot_save — JSON I/O."""
 

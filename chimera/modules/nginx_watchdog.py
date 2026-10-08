@@ -343,7 +343,9 @@ def _build_watchdog_script() -> str:
             BOT=$(python3 -c "import json; d=json.load(open('$STATE')); print(d.get('tg_bot_token',''))" 2>/dev/null)
             CID=$(python3 -c "import json; d=json.load(open('$STATE')); print(d.get('tg_chat_id',''))"   2>/dev/null)
             [[ -z "$BOT" || -z "$CID" ]] && return
-            curl -s -X POST "https://api.telegram.org/bot${{BOT}}/sendMessage" \\
+            PX=$(python3 -c "import json; d=json.load(open('/var/lib/xray-installer/telegram.json')); print(d.get('proxy',''))" 2>/dev/null)
+            PXA=(); [ -n "$PX" ] && PXA=(-x "$PX")
+            curl -s -X POST "${{PXA[@]}}" "https://api.telegram.org/bot${{BOT}}/sendMessage" \\
                 --data-urlencode "chat_id=${{CID}}" \\
                 --data-urlencode "text=${{MSG}}" \\
                 --data-urlencode "parse_mode=HTML" >/dev/null 2>&1

@@ -162,14 +162,18 @@ def _tg_send(msg: str) -> bool:
         chat_id = cfg.get("chat_id", "")
         if not token or not chat_id:
             return False
-        r = _run([
-            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-            "-m", "10",
+        _cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                "-m", "10"]
+        _px = str(cfg.get("proxy") or "").strip()
+        if _px:
+            _cmd += ["-x", _px]
+        _cmd += [
             f"https://api.telegram.org/bot{token}/sendMessage",
             "-d", f"chat_id={chat_id}",
             "-d", f"text={msg}",
             "-d", "parse_mode=HTML",
-        ], capture=True, check=False)
+        ]
+        r = _run(_cmd, capture=True, check=False)
         return r.stdout.strip() == "200"
     except Exception:
         return False

@@ -3744,7 +3744,9 @@ def awg_multinode_watchdog_install() -> None:
         "TG_CHAT=$(python3 -c \"import json; s=json.load(open('/etc/xray/state.json')); "
         "print(s.get('tg_chat_id',''))\" 2>/dev/null); "
         "[ -n \"$TG_TOKEN\" ] && [ -n \"$TG_CHAT\" ] && "
-        "curl -sS \"https://api.telegram.org/bot${TG_TOKEN}/sendMessage\" "
+        "TG_PX=$(python3 -c \"import json; s=json.load(open('/var/lib/xray-installer/telegram.json')); print(s.get('proxy',''))\" 2>/dev/null); "
+        "TG_PXA=(); [ -n \"$TG_PX\" ] && TG_PXA=(-x \"$TG_PX\"); "
+        "curl -sS \"${TG_PXA[@]}\" \"https://api.telegram.org/bot${TG_TOKEN}/sendMessage\" "
         "--data-urlencode \"chat_id=${TG_CHAT}\" "
         "--data-urlencode \"text=${TG_MSG}\" >/dev/null 2>&1 || true"
     )

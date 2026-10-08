@@ -946,11 +946,14 @@ def tg(msg):
         _sip  = c.get('server_ip', '')
         _header = '\U0001f6ab [' + _host + ('] ' if not _sip else ' | ' + _sip + '] ')
         if t and ch:
-            subprocess.run(['curl','-s','-o','/dev/null','-m','10',
-                f'https://api.telegram.org/bot{{t}}/sendMessage',
+            _cmd=['curl','-s','-o','/dev/null','-m','10']
+            _px=(c.get('proxy') or '').strip()
+            if _px: _cmd+=['-x',_px]
+            _cmd+=[f'https://api.telegram.org/bot{{t}}/sendMessage',
                 '-d',f'chat_id={{ch}}',
                 '-d',f'text={{_header}}{{msg}}',
-                '-d','parse_mode=HTML'],capture_output=True)
+                '-d','parse_mode=HTML']
+            subprocess.run(_cmd,capture_output=True)
     except: pass
 
 def fw_ban(ip):
