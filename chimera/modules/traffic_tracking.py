@@ -533,9 +533,12 @@ def tg_send(msg):
         cfg=json.loads(TG_CONFIG_FILE.read_text()) if TG_CONFIG_FILE.exists() else {{}}
         t,c=cfg.get('token'),cfg.get('chat_id')
         if t and c:
-            subprocess.run(['curl','-s','-o','/dev/null','-m','10',
-                f'https://api.telegram.org/bot{{t}}/sendMessage',
-                '-d',f'chat_id={{c}}','-d',f'text={{msg}}','-d','parse_mode=HTML'],capture_output=True)
+            _cmd=['curl','-s','-o','/dev/null','-m','10']
+            _px=(cfg.get('proxy') or '').strip()
+            if _px: _cmd+=['-x',_px]
+            _cmd+=[f'https://api.telegram.org/bot{{t}}/sendMessage',
+                '-d',f'chat_id={{c}}','-d',f'text={{msg}}','-d','parse_mode=HTML']
+            subprocess.run(_cmd,capture_output=True)
     except: pass
 
 def qbytes(email):

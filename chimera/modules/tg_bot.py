@@ -138,25 +138,74 @@ def tg_send(msg: str, token: str = "", chat_id: str = "") -> bool:
     Отправляет сообщение в Telegram через curl.
     Если token/chat_id не переданы — берёт из _NOTIF_FILE.
     Совместим с tg_send() из _core.py.
+
+    Прокси: необязательный ключ "proxy" в telegram.json — curl -x
+    (напр. "http://127.0.0.1:25181", локальный mieru-прокси; кейс
+    RU-3 — хостовый инжектор рвёт прямые TG-потоки, 2026-10-08).
     """
+    cfg = tg_load()
     if not token or not chat_id:
-        cfg = tg_load()
-        token   = cfg.get("token", "")
-        chat_id = cfg.get("chat_id", "")
+        token   = token or cfg.get("token", "")
+        chat_id = chat_id or cfg.get("chat_id", "")
     if not token or not chat_id:
         return False
     try:
-        r = _run([
-            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-            "-m", "10",
+        cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+               "-m", "10"]
+        proxy = str(cfg.get("proxy") or "").strip()
+        if proxy:
+            cmd += ["-x", proxy]
+        cmd += [
             f"https://api.telegram.org/bot{token}/sendMessage",
             "-d", f"chat_id={chat_id}",
             "-d", f"text={msg}",
             "-d", "parse_mode=HTML",
-        ], capture=True)
+        ]
+        r = _run(cmd, capture=True)
         return r.stdout.strip() == "200"
     except Exception:
         return False
+
+
+def tg_send_code(msg: str, token: str = "", chat_id: str = "") -> str:
+    """Как tg_send, но возвращает HTTP-код ("200"/"000"/"401"/...) —
+    для честной диагностики в меню (тест-отправка)."""
+    cfg = tg_load()
+    if not token or not chat_id:
+        token   = token or cfg.get("token", "")
+        chat_id = chat_id or cfg.get("chat_id", "")
+    if not token or not chat_id:
+        return "no-config"
+    try:
+        cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+               "-m", "10"]
+        proxy = str(cfg.get("proxy") or "").strip()
+        if proxy:
+            cmd += ["-x", proxy]
+        cmd += [
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            "-d", f"chat_id={chat_id}",
+            "-d", f"text={msg}",
+            "-d", "parse_mode=HTML",
+        ]
+        r = _run(cmd, capture=True)
+        return (r.stdout or "").strip() or "000"
+    except Exception:
+        return "000"
+
+
+def tg_send_diag_msg(code: str) -> str:
+    """Человекочитаемая причина ошибки тест-отправки по HTTP-коду."""
+    return {
+        "000": "нет связи с api.telegram.org (сеть/DPI/прокси — токен ни при чём;"
+               " проверьте маршрут или задайте proxy в telegram.json)",
+        "401": "токен неверён (отозван в BotFather?) — обновите токен",
+        "400": "chat_id неверён (бот не найдёт диалог) — проверьте Chat ID",
+        "403": "бот заблокирован пользователем или не может писать в чат",
+        "404": "токен неверён (бот не существует) — обновите токен",
+        "429": "слишком часто (flood limit) — повторите позже",
+        "no-config": "не задан token/chat_id в telegram.json",
+    }.get(code, f"HTTP {code} — см. документацию Telegram Bot API")
 
 
 def tg_notify_event(event: str, detail: str = "") -> None:
@@ -256,11 +305,16 @@ def _install_monitor_cron() -> None:
         "    host = socket.gethostname().split(\".\")[0]\n"
         "    ip = cfg.get(\"server_ip\", \"\")\n"
         "    header = \"[{} | {}]\".format(host, ip) if ip else \"[{}]\".format(host)\n"
-        "    subprocess.run([\"curl\", \"-s\", \"-o\", \"/dev/null\", \"-m\", \"10\",\n"
+        "    proxy = (cfg.get(\"proxy\") or \"\").strip()\n"
+        "    cmd = [\"curl\", \"-s\", \"-o\", \"/dev/null\", \"-m\", \"10\"]\n"
+        "    if proxy:\n"
+        "        cmd += [\"-x\", proxy]\n"
+        "    cmd += [\n"
         "        \"https://api.telegram.org/bot\" + token + \"/sendMessage\",\n"
         "        \"-d\", \"chat_id=\" + chat,\n"
         "        \"-d\", \"text=\" + msg.replace(\"{H}\", header),\n"
-        "        \"-d\", \"parse_mode=HTML\"], capture_output=True)\n"
+        "        \"-d\", \"parse_mode=HTML\"]\n"
+        "    subprocess.run(cmd, capture_output=True)\n"
         "except Exception:\n"
         "    pass\n"
         "' \"$1\" \"$2\"\n"
@@ -510,12 +564,27 @@ def _state():
         return {{}}
 
 def api(method, **params):
-    """Вызов Telegram Bot API через urllib (нет зависимостей)."""
+    """Вызов Telegram Bot API через urllib (нет зависимостей).
+
+    Прокси: необязательный ключ "proxy" в telegram.json — urllib
+    ProxyHandler (CONNECT для https). Ключа нет → напрямую.
+    """
     url = f"https://api.telegram.org/bot{{TOKEN}}/{{method}}"
     data = urllib.parse.urlencode(params).encode()
     try:
         req = urllib.request.Request(url, data=data)
-        resp = urllib.request.urlopen(req, timeout=30)
+        try:
+            _tgp = Path("/var/lib/xray-installer/telegram.json")
+            _pc = json.loads(_tgp.read_text()) if _tgp.exists() else {{}}
+            _px = str(_pc.get("proxy") or "").strip()
+        except Exception:
+            _px = ""
+        if _px:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({{"https": _px, "http": _px}}))
+            resp = opener.open(req, timeout=30)
+        else:
+            resp = urllib.request.urlopen(req, timeout=30)
         return json.loads(resp.read())
     except Exception as e:
         _log(f"API error {{method}}: {{e}}")

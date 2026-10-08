@@ -168,9 +168,13 @@ def _notify_tg(msg: str) -> None:
         c = json.loads(TG_CONFIG.read_text())
         t, ch = c.get("token"), c.get("chat_id")
         if t and ch:
-            _run(["curl", "-s", "-o", "/dev/null", "-m", "10",
-                  f"https://api.telegram.org/bot{t}/sendMessage",
-                  "-d", f"chat_id={ch}", "-d", f"text={msg}"], timeout=15)
+            _cmd = ["curl", "-s", "-o", "/dev/null", "-m", "10"]
+            _px = str(c.get("proxy") or "").strip()
+            if _px:
+                _cmd += ["-x", _px]
+            _cmd += [f"https://api.telegram.org/bot{t}/sendMessage",
+                     "-d", f"chat_id={ch}", "-d", f"text={msg}"]
+            _run(_cmd, timeout=15)
     except Exception:
         pass
 

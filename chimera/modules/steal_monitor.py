@@ -577,12 +577,20 @@ def _split_tg_chunks(msg: str, limit: int = TG_CHUNK_LIMIT) -> list:
 
 
 def _tg_send(msg: str, event: str = "") -> bool:
-    """Отправка в TG: events-фильтр, чанки (по строкам), ретраи.
+    """Отправка в TG: events-фильтр, чанки (по строкам), ретраи, прокси.
 
     Ретраи нужны: на части сетей (RU-транзит) первое TLS-соединение к
     api.telegram.org сбрасывается DPI, повтор проходит (замерено на 45:
     попытка 1 — reset, попытка 2 — 200 за 0.3с). Число попыток —
     cfg["tg_retries"] из steal-monitor.json (1..5, дефолт TG_RETRIES).
+
+    Прокси: необязательный ключ "proxy" в telegram.json (напр.
+    "http://127.0.0.1:25181" — локальный mieru-HTTP-прокси). Нужен на
+    нодах, откуда api.telegram.org недоступен напрямую даже через
+    xray-цепь (хостовый инжектор рвёт потоки к TG-подсетям по conntrack
+    original-dst — кейс RU-3, 2026-10-08): через прокси цель
+    уезжает внутрь CONNECT-запроса и локального TG-потока не возникает.
+    Ключ отсутствует → поведение прежнее (напрямую curl).
     """
     try:
         if not TG_CONFIG.exists():
@@ -593,6 +601,7 @@ def _tg_send(msg: str, event: str = "") -> bool:
             return False
         if event and not cfg.get("events", {}).get(event, True):
             return False
+        proxy = str(cfg.get("proxy") or "").strip()
         try:
             retries = max(1, min(5, int(load_config().get("tg_retries",
                                                          TG_RETRIES))))
@@ -603,14 +612,17 @@ def _tg_send(msg: str, event: str = "") -> bool:
         for c in chunks:
             ok_chunk = False
             for attempt in range(1, retries + 1):
-                r = _run([
-                    "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                    "-m", str(TG_TIMEOUT),
+                cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                       "-m", str(TG_TIMEOUT)]
+                if proxy:
+                    cmd += ["-x", proxy]
+                cmd += [
                     f"https://api.telegram.org/bot{token}/sendMessage",
                     "-d", f"chat_id={chat}",
                     "-d", f"text={c}",
                     "-d", "parse_mode=HTML",
-                ], timeout=TG_TIMEOUT + 5)
+                ]
+                r = _run(cmd, timeout=TG_TIMEOUT + 5)
                 code = (r.stdout or "").strip()
                 if code == "200":
                     ok_chunk = True
@@ -1360,7 +1372,10 @@ def send_daily_report(date: Optional[str] = None, send_tg: bool = True) -> str:
             _log(f"daily report {dstr} sent"
                  + (f" (retention -{removed})" if removed else ""))
         else:
-            _log(f"daily report {dstr} TG send FAILED (gate/no config)")
+            # честная причина: конфиг/событие/все попытки curl (детали —
+            # в строках «tg send: попытка N/M — код X» выше по логу)
+            _log(f"daily report {dstr} TG send FAILED "
+                 "(нет конфига/события либо все попытки curl — см. выше)")
     else:
         _log(f"daily report {dstr} built (no send)")
     return text

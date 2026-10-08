@@ -591,6 +591,41 @@ class TestTgSend(StealMonitorTestBase):
             self.assertFalse(sm._tg_send("msg", "steal_report"))
             m.assert_not_called()
 
+    def test_proxy_adds_x_flag(self):
+        """Ключ proxy в telegram.json → curl получает -x <proxy>."""
+        sm.TG_CONFIG.write_text(json.dumps(
+            {"token": "T", "chat_id": "C",
+             "proxy": "http://127.0.0.1:25181"}), encoding="utf-8")
+        resp = MagicMock(stdout="200")
+        with patch.object(sm, "_run", return_value=resp) as m:
+            self.assertTrue(sm._tg_send("msg", "steal_report"))
+            cmd = m.call_args[0][0]
+            self.assertIn("-x", cmd)
+            self.assertEqual(cmd[cmd.index("-x") + 1],
+                             "http://127.0.0.1:25181")
+            # URL по-прежнему присутствует
+            self.assertTrue(any("api.telegram.org" in a for a in cmd))
+
+    def test_no_proxy_no_x_flag(self):
+        """Нет ключа proxy → curl без -x (прежнее поведение)."""
+        self._tg_cfg({})
+        resp = MagicMock(stdout="200")
+        with patch.object(sm, "_run", return_value=resp) as m:
+            self.assertTrue(sm._tg_send("msg", "steal_report"))
+            cmd = m.call_args[0][0]
+            self.assertNotIn("-x", cmd)
+
+    def test_proxy_empty_string_ignored(self):
+        """Пустой proxy → без -x (защита от ''.strip()-мусора в конфиге)."""
+        sm.TG_CONFIG.write_text(json.dumps(
+            {"token": "T", "chat_id": "C", "proxy": "   "}),
+            encoding="utf-8")
+        resp = MagicMock(stdout="200")
+        with patch.object(sm, "_run", return_value=resp) as m:
+            self.assertTrue(sm._tg_send("msg", "steal_report"))
+            cmd = m.call_args[0][0]
+            self.assertNotIn("-x", cmd)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  16. SSH-замер peer

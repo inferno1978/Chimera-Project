@@ -183,10 +183,12 @@ def _run(args):
     return subprocess.run(args, capture_output=True, text=True)
 
 def tg_send(msg, token, chat_id):
-    subprocess.run(['curl','-s','-o','/dev/null','-m','10',
-        f'https://api.telegram.org/bot{{token}}/sendMessage',
-        '-d',f'chat_id={{chat_id}}','-d',f'text={{msg}}','-d','parse_mode=HTML'],
-        capture_output=True)
+    _cmd=['curl','-s','-o','/dev/null','-m','10']
+    _px=(cfg.get('proxy') or '').strip() if cfg else ''
+    if _px: _cmd+=['-x',_px]
+    _cmd+=[f'https://api.telegram.org/bot{{token}}/sendMessage',
+        '-d',f'chat_id={{chat_id}}','-d',f'text={{msg}}','-d','parse_mode=HTML']
+    subprocess.run(_cmd, capture_output=True)
 
 cfg = {{}}
 try:
