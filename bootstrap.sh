@@ -2,7 +2,7 @@
 # ============================================================
 #  Chimera Project v5.0.0 — Bootstrap
 #  Multi-Protocol Anti-DPI Installer
-#  bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
+#  bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh)
 #
 #  Универсальная команда с авто-fallback (Forgejo → GitLab → GitHub):
 #  bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh \
@@ -10,13 +10,13 @@
 #      || curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
 #
 #  ENV-переопределения источника загрузки репозитория:
-#    CHIMERA_MIRROR — gitlab (по умолчанию) | github | forgejo | <URL кастомного зеркала>
+#    CHIMERA_MIRROR — forgejo (по умолчанию) | gitlab | github | <URL кастомного зеркала>
 #        (напр. https://host.example/owner/repo.git или ssh://root@1.2.3.4/srv/git/chimera.git)
-#    CHIMERA_BRANCH — ветка; авто по умолчанию: chimera-v5 для gitlab и кастомного
-#        зеркала, main для github и forgejo (при своём зеркале переопределяйте явно)
+#    CHIMERA_BRANCH — ветка; авто по умолчанию: main для forgejo и github,
+#        chimera-v5 для gitlab и кастомного зеркала (при своём зеркале переопределяйте явно)
 #  При сбое источника (clone/pull/archive timeout или ошибка) — автоматический
-#  fallback на следующее зеркало: gitlab→forgejo→github; github→forgejo→gitlab;
-#  forgejo→gitlab→github; кастом→gitlab→forgejo→github.
+#  fallback на следующее зеркало: forgejo→gitlab→github (по умолчанию);
+#  gitlab→forgejo→github; github→forgejo→gitlab; кастом→forgejo→gitlab→github.
 #  Каждая попытка логируется. Кастомное зеркало — только git clone (tar.gz может
 #  не отдаваться), проверка bootstrap.sh.sha256 пропускается (WARN в логе).
 # ============================================================
@@ -25,15 +25,16 @@
 # SHA256 этого файла публикуется в bootstrap.sh.sha256 (рядом).
 # Проверить целостность перед запуском:
 #
-#   curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh -o /tmp/bootstrap.sh
-#   curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh.sha256 -o /tmp/bootstrap.sh.sha256
+#   curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh -o /tmp/bootstrap.sh
+#   curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh.sha256 -o /tmp/bootstrap.sh.sha256
 #   cd /tmp && sha256sum -c bootstrap.sh.sha256
 #
 # Или одной командой (без зависимости от имени файла):
-#   [ "$(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh | sha256sum | awk '{print $1}')" = "$(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh.sha256 | awk '{print $1}')" ] && echo "OK" || echo "MISMATCH"
+#   [ "$(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh | sha256sum | awk '{print $1}')" = "$(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh.sha256 | awk '{print $1}')" ] && echo "OK" || echo "MISMATCH"
 #
-# То же для GitHub-зеркала (ветка main) — замените оба URL на:
-#   https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh(.sha256)
+# То же для зеркал — замените оба URL на:
+#   GitHub: https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh(.sha256)
+#   GitLab: https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh(.sha256)
 #
 # SHA256 генерируется автоматически при каждом коммите (pre-commit hook).
 # ────────────────────────────────────────────────────────────────
@@ -121,10 +122,10 @@ INSTALL_DIR="/opt/chimera"
 
 # >>> CHIMERA MIRRORS (мульти-источник; проверяется tests/test_bootstrap_mirrors.py)
 # Переопределение через окружение (см. шапку файла):
-#   CHIMERA_MIRROR — gitlab (по умолчанию) | github | forgejo | <URL кастомного зеркала>
-#   CHIMERA_BRANCH — ветка (авто: chimera-v5 для gitlab/кастома, main для github/forgejo)
-# Цепочка fallback: gitlab→forgejo→github; github→forgejo→gitlab;
-#   forgejo→gitlab→github; кастом→gitlab→forgejo→github.
+#   CHIMERA_MIRROR — forgejo (по умолчанию) | gitlab | github | <URL кастомного зеркала>
+#   CHIMERA_BRANCH — ветка (авто: main для forgejo/github, chimera-v5 для gitlab/кастома)
+# Цепочка fallback: forgejo→gitlab→github (по умолчанию); gitlab→forgejo→github;
+#   github→forgejo→gitlab; кастом→forgejo→gitlab→github.
 
 # Настройка переменных ОДНОГО источника: SRC_LABEL / BRANCH / REPO_URL /
 # ARCHIVE_URL / SHA256_URL (последние две пустые для кастомного зеркала).
@@ -166,24 +167,24 @@ _src_setup() {
 
 # Цепочка источников: основной (CHIMERA_MIRROR) первым, затем резервные зеркала.
 _build_source_chain() {
-    local mirror="${CHIMERA_MIRROR:-gitlab}"
+    local mirror="${CHIMERA_MIRROR:-forgejo}"
     if [[ -z "$mirror" ]]; then
-        mirror="gitlab"
+        mirror="forgejo"
     fi
     if [[ "$mirror" != "gitlab" && "$mirror" != "github" && "$mirror" != "forgejo" ]]; then
         if [[ "$mirror" != *"://"* && "$mirror" != "git@"* ]]; then
-            warn "CHIMERA_MIRROR='${mirror}' не похож на URL зеркала — использую gitlab."
-            mirror="gitlab"
+            warn "CHIMERA_MIRROR='${mirror}' не похож на URL зеркала — использую forgejo."
+            mirror="forgejo"
         fi
     fi
-    if [[ "$mirror" == "gitlab" ]]; then
+    if [[ "$mirror" == "forgejo" ]]; then
+        SOURCE_CHAIN=("forgejo" "gitlab" "github")
+    elif [[ "$mirror" == "gitlab" ]]; then
         SOURCE_CHAIN=("gitlab" "forgejo" "github")
     elif [[ "$mirror" == "github" ]]; then
         SOURCE_CHAIN=("github" "forgejo" "gitlab")
-    elif [[ "$mirror" == "forgejo" ]]; then
-        SOURCE_CHAIN=("forgejo" "gitlab" "github")
     else
-        SOURCE_CHAIN=("$mirror" "gitlab" "forgejo" "github")
+        SOURCE_CHAIN=("$mirror" "forgejo" "gitlab" "github")
     fi
 }
 

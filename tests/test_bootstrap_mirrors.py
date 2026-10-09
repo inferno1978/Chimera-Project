@@ -5,16 +5,17 @@ tests/test_bootstrap_mirrors.py
 Unit-тесты мульти-источникового bootstrap.sh (CHIMERA_MIRROR / CHIMERA_BRANCH).
 
 Проверки (БЕЗ сети — только bash-выполнение конфиг-блока и парсинг):
-  1. Дефолт без env: gitlab + ветка chimera-v5 + БИТ-В-БИТ старые URL —
-     полная обратная совместимость (backward compat).
+  1. Дефолт без env: forgejo + ветка main + БИТ-В-БИТ forgejo-URL
+     (канонический источник — свой хаб, зеркала: GitLab/GitHub).
   2. CHIMERA_MIRROR=github: REPO_URL/ARCHIVE_URL/SHA256_URL/ветка main.
      CHIMERA_MIRROR=forgejo: свой Forgejo-хаб, ветка main, свои URL.
   3. Кастомное зеркало (https:// и ssh://, git@): только git clone
      (ARCHIVE_URL/SHA256_URL пустые), ветка chimera-v5.
-  4. Порядок цепочки fallback: gitlab→forgejo→github; github→forgejo→gitlab;
-     forgejo→gitlab→github; кастом→gitlab→forgejo→github.
+  4. Порядок цепочки fallback: forgejo→gitlab→github (дефолт);
+     gitlab→forgejo→github; github→forgejo→gitlab;
+     кастом→forgejo→gitlab→github.
   5. CHIMERA_BRANCH переопределяет ветку (URL'ы становятся branch-динамическими).
-  6. Мусорный CHIMERA_MIRROR (не URL) → откат на gitlab-цепочку (WARN в лог).
+  6. Мусорный CHIMERA_MIRROR (не URL) → откат на forgejo-цепочку (WARN в лог).
   7. Структурные инварианты bootstrap.sh: unset-прокси guard, clone по $REPO_URL,
      integrity-проверка в обоих archive-путях, fallback-цикл, bash -n.
   8. bootstrap.sh.sha256 актуален (формат sha256sum -c, hash = hashlib).
@@ -88,41 +89,41 @@ def _sources(env: dict) -> list:
 
 
 # ============================================================================
-#  1. ДЕФОЛТ (БЕЗ ENV) — ОБРАТНАЯ СОВМЕСТИМОСТЬ
+#  1. ДЕФОЛТ (БЕЗ ENV) — КАНОНИЧЕСКИЙ FORGEJO
 # ============================================================================
-class TestDefaultGitlabBackwardCompat(unittest.TestCase):
-    """Дефолт без env — GitLab-источник первым, как до мульти-источника."""
+class TestDefaultForgejo(unittest.TestCase):
+    """Дефолт без env — Forgejo-источник первым (канонический хаб проекта)."""
 
-    def test_chain_gitlab_forgejo_github(self):
+    def test_chain_forgejo_gitlab_github(self):
         rows = _sources({})
-        self.assertEqual([r[0] for r in rows], ["gitlab", "forgejo", "github"])
+        self.assertEqual([r[0] for r in rows], ["forgejo", "gitlab", "github"])
 
-    def test_gitlab_row_bit_exact(self):
-        gl_label, branch, repo, archive, sha256 = _sources({})[0]
-        self.assertEqual(gl_label, "gitlab")
-        self.assertEqual(branch, "chimera-v5")
-        self.assertEqual(repo, "https://gitlab.com/netwalker071778/chimera-project")
+    def test_forgejo_row_bit_exact(self):
+        fj_label, branch, repo, archive, sha256 = _sources({})[0]
+        self.assertEqual(fj_label, "forgejo")
+        self.assertEqual(branch, "main")
+        self.assertEqual(repo, "https://git.chimeraprodvpn.online/inferno1978/chimera.git")
         self.assertEqual(
             archive,
+            "https://git.chimeraprodvpn.online/inferno1978/chimera/archive/main.tar.gz")
+        self.assertEqual(
+            sha256,
+            "https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh.sha256")
+
+    def test_fallback_rows_in_default_chain(self):
+        # rows[1] — gitlab (зеркало), rows[2] — github
+        gl_label, gl_branch, gl_repo, gl_archive, gl_sha = _sources({})[1]
+        self.assertEqual(gl_label, "gitlab")
+        self.assertEqual(gl_branch, "chimera-v5")
+        self.assertEqual(gl_repo, "https://gitlab.com/netwalker071778/chimera-project")
+        self.assertEqual(
+            gl_archive,
             "https://gitlab.com/netwalker071778/chimera-project/-/archive/"
             "chimera-v5/chimera-project-chimera-v5.tar.gz")
         self.assertEqual(
-            sha256,
+            gl_sha,
             "https://gitlab.com/netwalker071778/chimera-project/-/raw/"
             "chimera-v5/bootstrap.sh.sha256")
-
-    def test_fallback_rows_in_default_chain(self):
-        # rows[1] — forgejo (своё зеркало), rows[2] — github
-        fj_label, fj_branch, fj_repo, fj_archive, fj_sha = _sources({})[1]
-        self.assertEqual(fj_label, "forgejo")
-        self.assertEqual(fj_branch, "main")
-        self.assertEqual(fj_repo, "https://git.chimeraprodvpn.online/inferno1978/chimera.git")
-        self.assertEqual(
-            fj_archive,
-            "https://git.chimeraprodvpn.online/inferno1978/chimera/archive/main.tar.gz")
-        self.assertEqual(
-            fj_sha,
-            "https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh.sha256")
         gh_label, gh_branch, gh_repo, _, _ = _sources({})[2]
         self.assertEqual(gh_label, "github")
         self.assertEqual(gh_branch, "main")
@@ -209,15 +210,15 @@ class TestCustomMirror(unittest.TestCase):
 
     def test_chain_custom_first_https(self):
         labels = [r[0] for r in self._custom_row(CUSTOM_HTTPS)]
-        self.assertEqual(labels, ["custom", "gitlab", "forgejo", "github"])
+        self.assertEqual(labels, ["custom", "forgejo", "gitlab", "github"])
 
     def test_chain_custom_first_ssh(self):
         labels = [r[0] for r in self._custom_row(CUSTOM_SSH)]
-        self.assertEqual(labels, ["custom", "gitlab", "forgejo", "github"])
+        self.assertEqual(labels, ["custom", "forgejo", "gitlab", "github"])
 
     def test_chain_custom_first_gitat(self):
         labels = [r[0] for r in self._custom_row(CUSTOM_GITAT)]
-        self.assertEqual(labels, ["custom", "gitlab", "forgejo", "github"])
+        self.assertEqual(labels, ["custom", "forgejo", "gitlab", "github"])
 
     def test_custom_row_clone_only(self):
         for url in (CUSTOM_HTTPS, CUSTOM_SSH, CUSTOM_GITAT):
@@ -229,10 +230,10 @@ class TestCustomMirror(unittest.TestCase):
 
     def test_custom_fallback_rows(self):
         rows = self._custom_row(CUSTOM_HTTPS)
-        self.assertEqual(rows[1][0], "gitlab")
-        self.assertEqual(rows[1][1], "chimera-v5")
-        self.assertEqual(rows[2][0], "forgejo")
-        self.assertEqual(rows[2][1], "main")
+        self.assertEqual(rows[1][0], "forgejo")
+        self.assertEqual(rows[1][1], "main")
+        self.assertEqual(rows[2][0], "gitlab")
+        self.assertEqual(rows[2][1], "chimera-v5")
         self.assertEqual(rows[3][0], "github")
         self.assertEqual(rows[3][1], "main")
 
@@ -257,7 +258,8 @@ class TestBranchOverride(unittest.TestCase):
         self.assertEqual(archive, "")  # ветка не включает tar.gz для кастома
 
     def test_gitlab_with_branch_override(self):
-        _, branch, _, archive, sha256 = _sources({"CHIMERA_BRANCH": "main"})[0]
+        _, branch, _, archive, sha256 = _sources(
+            {"CHIMERA_MIRROR": "gitlab", "CHIMERA_BRANCH": "main"})[0]
         self.assertEqual(branch, "main")
         self.assertEqual(
             archive,
@@ -267,10 +269,10 @@ class TestBranchOverride(unittest.TestCase):
 
     def test_empty_branch_values_mean_default(self):
         # Пустые значения = «не задано» → авто-ветки
-        # (gitlab: chimera-v5; forgejo/github: main)
+        # (forgejo/github: main; gitlab: chimera-v5)
         rows = _sources({"CHIMERA_MIRROR": "", "CHIMERA_BRANCH": ""})
-        self.assertEqual(rows[0][1], "chimera-v5")
-        self.assertEqual(rows[1][1], "main")
+        self.assertEqual(rows[0][1], "main")
+        self.assertEqual(rows[1][1], "chimera-v5")
         self.assertEqual(rows[2][1], "main")
 
 
@@ -278,11 +280,11 @@ class TestBranchOverride(unittest.TestCase):
 #  5. НЕВАЛИДНЫЙ CHIMERA_MIRROR
 # ============================================================================
 class TestInvalidMirror(unittest.TestCase):
-    """Мусорное значение (не URL) → откат на gitlab-цепочку с WARN."""
+    """Мусорное значение (не URL) → откат на forgejo-цепочку с WARN."""
 
-    def test_garbage_falls_back_to_gitlab_chain(self):
+    def test_garbage_falls_back_to_forgejo_chain(self):
         rows = _sources({"CHIMERA_MIRROR": "not-a-mirror"})
-        self.assertEqual([r[0] for r in rows], ["gitlab", "forgejo", "github"])
+        self.assertEqual([r[0] for r in rows], ["forgejo", "gitlab", "github"])
 
     def test_garbage_logs_warning(self):
         body = (
@@ -291,7 +293,7 @@ class TestInvalidMirror(unittest.TestCase):
         )
         out = _run_block({"CHIMERA_MIRROR": "not-a-mirror"}, body)
         self.assertIn("WARN:", out)
-        self.assertIn("gitlab", out)
+        self.assertIn("forgejo", out)
 
 
 # ============================================================================

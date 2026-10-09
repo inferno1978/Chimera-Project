@@ -22,7 +22,7 @@
 
 Если вы обнаружили уязвимость — **не публикуйте её в Issues**.
 
-Напишите напрямую: откройте **приватное Security Advisory** на GitHub:
+Напишите напрямую: откройте **приватное Security Advisory** на GitLab:
 `https://gitlab.com/netwalker071778/chimera-project/-/security`
 
 Либо свяжитесь через контакты в профиле. Ответ — в течение 72 часов.

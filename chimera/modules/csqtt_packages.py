@@ -905,7 +905,7 @@ def _post_install_csqtt_source(src: Path, install_dests: list[Path]) -> bool:
         print(f"      - Медленный диск (HDD вместо SSD)")
         print(f"      - Сетевые паузы при скачивании crates с crates.io")
         print(f"[ERR] Попробуйте запустить direct-build скрипт для повторной попытки:")
-        print(f"      bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/scripts/csqtt-direct-build.sh)")
+        print(f"      bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/scripts/csqtt-direct-build.sh)")
         return False
     except Exception as e:
         print(f"[ERR] cargo zigbuild упал с исключением: {type(e).__name__}: {e}")

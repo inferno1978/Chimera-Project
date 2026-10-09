@@ -928,7 +928,7 @@ def _print_install_failure_box() -> None:
         _box_row(f"  {DIM}  • /root/csqtt-main.tar.gz — найден ({ms} байт){NC}")
         _box_row(f"  {DIM}    файл есть, но сборка упала. Смотрите ошибку выше.{NC}")
         _box_row(f"  {DIM}    Запустите direct-build скрипт для подробных логов:{NC}")
-        _box_row(f"  {CYAN}    bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/scripts/csqtt-direct-build.sh){NC}")
+        _box_row(f"  {CYAN}    bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/scripts/csqtt-direct-build.sh){NC}")
     else:
         _box_row(f"  {DIM}  • /root/csqtt-main.tar.gz — НЕ найден{NC}")
         _box_row(f"  {DIM}    Скачайте вручную:{NC}")

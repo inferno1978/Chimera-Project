@@ -970,9 +970,13 @@ fatal: expected flush after ref listing
 endpoint на gitlab.com с некоторых IP.
 
 **Решение**: обновите Chimera через `bootstrap.sh` — он автоматически
-переключится на GitLab archive endpoint:
+переключится на доступное зеркало (Forgejo → GitLab → GitHub, далее
+archive-endpoint каждого зеркала):
 ```bash
-bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
+bash <(curl -fsSL --connect-timeout 10 --max-time 60 https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh \
+    || curl -fsSL --connect-timeout 10 --max-time 60 https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh \
+    || curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh \
+    || echo 'echo "ОШИБКА: bootstrap.sh недоступен ни с одного зеркала (forgejo/gitlab/github) — проверьте сеть" >&2; exit 1')
 ```
 
 ### Проблема: VK-call link не работает (FreeTurn)
@@ -1149,6 +1153,7 @@ VLESS-конфиг и другие модули Chimera не затрагива�
 ## Ссылки
 
 - **Главное меню Chimera** → пункт `8. 📱 VK Whitelist Bypass (4 модуля)`
+- **Forgejo (основной)**: https://git.chimeraprodvpn.online/inferno1978/chimera
 - **GitLab**: https://gitlab.com/netwalker071778/chimera-project
 - **GitHub**: https://github.com/inferno1978/Chimera-Project
 - **Upstream-репозитории**:
