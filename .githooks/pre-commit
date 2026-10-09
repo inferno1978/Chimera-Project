@@ -1,19 +1,56 @@
 #!/usr/bin/env bash
 # ============================================================
 # Git pre-commit hook
-# Автоматически генерирует bootstrap.sh.sha256, если bootstrap.sh
-# был изменен и staged в текущем коммите.
+# 1. Автоматически генерирует bootstrap.sh.sha256, если bootstrap.sh
+#    изменён и staged в текущем коммите.
+# 2. SECURE BOOTSTRAP GATE: если bootstrap.sh staged — блокирует коммит,
+#    пока рядом не staged валидная Ed25519-подпись (bootstrap.sh.sig),
+#    соответствующая публичному ключу scripts/bootstrap-release/bootstrap.pub
+#    (тоже staged-версии, если ключ меняется — ротация).
+#    Обход только для dev-веток: CHIMERA_ALLOW_UNSIGNED_BOOTSTRAP=1
+#    (пуш в основной репозиторий с неподписанным bootstrap.sh не должен
+#    происходить никогда — на зеркала уедет команда, которая не пройдёт
+#    проверку подписи у пользователей).
 # ============================================================
 # Установка:
 #   git config core.hooksPath .githooks
 # ============================================================
 set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
 
-# Проверяем, есть ли bootstrap.sh в staged changes
 if git diff --cached --name-only | grep -q '^bootstrap\.sh$'; then
     echo "[pre-commit] bootstrap.sh изменён — авто-генерация SHA256..."
-    GIT_HOOK_MODE=1 bash "$(git rev-parse --show-toplevel)/scripts/generate_checksum.sh"
+    GIT_HOOK_MODE=1 bash "$ROOT/scripts/generate_checksum.sh"
     echo "[pre-commit] ✓ bootstrap.sh.sha256 обновлён и staged"
+
+    # ---- подпись (staged-контент, не worktree) ----
+    if [ "${CHIMERA_ALLOW_UNSIGNED_BOOTSTRAP:-0}" = "1" ]; then
+        echo "[pre-commit] ⚠ CHIMERA_ALLOW_UNSIGNED_BOOTSTRAP=1 — gate подписи ПРОПУЩЕН (только для dev; НЕ пушить такие коммиты в main!)"
+    else
+        if ! git diff --cached --name-only | grep -q '^bootstrap\.sh\.sig$'; then
+            echo "[pre-commit] ✗ bootstrap.sh staged, но bootstrap.sh.sig НЕ staged." >&2
+            echo "  Подпишите релиз: CHIMERA_SIGN_KEY=/путь/к/ключу.pem bash scripts/bootstrap-release/sign_bootstrap.sh" >&2
+            echo "  Затем: git add bootstrap.sh bootstrap.sh.sig && git commit" >&2
+            exit 1
+        fi
+        _vtmp="$(mktemp -d)"
+        git show :bootstrap.sh > "$_vtmp/bootstrap.sh"
+        git show :bootstrap.sh.sig > "$_vtmp/bootstrap.sh.sig"
+        if git diff --cached --name-only | grep -q '^scripts/bootstrap-release/bootstrap\.pub$'; then
+            git show :scripts/bootstrap-release/bootstrap.pub > "$_vtmp/bootstrap.pub"
+        else
+            cp "$ROOT/scripts/bootstrap-release/bootstrap.pub" "$_vtmp/bootstrap.pub"
+        fi
+        if ! openssl pkeyutl -verify -pubin -inkey "$_vtmp/bootstrap.pub" \
+                -rawin -in "$_vtmp/bootstrap.sh" -sigfile "$_vtmp/bootstrap.sh.sig" >/dev/null 2>&1; then
+            rm -rf "$_vtmp"
+            echo "[pre-commit] ✗ подпись staged bootstrap.sh НЕ соответствует публичному ключу." >&2
+            echo "  Переподпишите: CHIMERA_SIGN_KEY=… bash scripts/bootstrap-release/sign_bootstrap.sh" >&2
+            exit 1
+        fi
+        rm -rf "$_vtmp"
+        echo "[pre-commit] ✓ подпись staged bootstrap.sh проверена (Ed25519)"
+    fi
 fi
 
 exit 0

@@ -973,10 +973,82 @@ endpoint на gitlab.com с некоторых IP.
 переключится на доступное зеркало (Forgejo → GitLab → GitHub, далее
 archive-endpoint каждого зеркала):
 ```bash
-bash <(curl -fsSL --connect-timeout 10 --max-time 60 https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh \
-    || curl -fsSL --connect-timeout 10 --max-time 60 https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh \
-    || curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh \
-    || echo 'echo "ОШИБКА: bootstrap.sh недоступен ни с одного зеркала (forgejo/gitlab/github) — проверьте сеть" >&2; exit 1')
+# >>> CHIMERA SECURE INSTALL (канонический блок; проверяется tests/test_secure_bootstrap.py)
+# Никакой bootstrap не исполняется до успешной проверки подписи Ed25519.
+chimera_install() (
+    set -euo pipefail
+    CHIMERA_PUBKEY='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA+6KSAskfo+LBzW/io8q376wAULspfGTik674H1o8Gu4=
+-----END PUBLIC KEY-----'
+    CHIMERA_MIRRORS=(
+        "https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh"
+        "https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh"
+        "https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh"
+    )
+    MAX_SIZE=524288  # 512 KiB — разумный потолок размера bootstrap
+
+    command -v openssl >/dev/null 2>&1 || {
+        echo "ОШИБКА: не найден openssl — проверка подписи невозможна, установка прервана (см. docs/faq/BOOTSTRAP_SECURITY.md)." >&2
+        exit 1
+    }
+    tmp="$(mktemp /tmp/chimera-bootstrap.XXXXXXXX)"
+    sig="${tmp}.sig"
+    pub="${tmp}.pub"
+    trap 'rm -f "$tmp" "$sig" "$pub"' EXIT
+    trap 'rm -f "$tmp" "$sig" "$pub"; exit 130' INT TERM HUP
+    printf '%s\n' "$CHIMERA_PUBKEY" > "$pub"
+    chmod 600 "$tmp" "$sig" "$pub" 2>/dev/null || true
+    openssl pkey -pubin -in "$pub" -noout >/dev/null 2>&1 || {
+        echo "ОШИБКА: установленный openssl не поддерживает Ed25519 (требуется OpenSSL >= 1.1.1) — установка прервана." >&2
+        exit 1
+    }
+
+    n_dl=0; n_bad=0; reasons=""
+    for url in "${CHIMERA_MIRRORS[@]}"; do
+        rm -f "$tmp" "$sig"
+        if ! curl -fsSL --connect-timeout 10 --max-time 60 "$url" -o "$tmp" 2>/dev/null; then
+            n_dl=$((n_dl+1)); reasons="${reasons}
+  - недоступно (сеть/HTTP): ${url}"
+            continue
+        fi
+        size="$(wc -c < "$tmp")"
+        if [ "$size" -eq 0 ] || [ "$size" -gt "$MAX_SIZE" ]; then
+            n_bad=$((n_bad+1)); reasons="${reasons}
+  - подозрительный размер файла (${size} байт): ${url}"
+            continue
+        fi
+        if ! curl -fsSL --connect-timeout 10 --max-time 30 "${url}.sig" -o "$sig" 2>/dev/null; then
+            n_bad=$((n_bad+1)); reasons="${reasons}
+  - не удалось скачать подпись: ${url}.sig"
+            continue
+        fi
+        if [ "$(wc -c < "$sig")" -ne 64 ]; then
+            n_bad=$((n_bad+1)); reasons="${reasons}
+  - повреждённая подпись (не 64 байта): ${url}"
+            continue
+        fi
+        if openssl pkeyutl -verify -pubin -inkey "$pub" -rawin -in "$tmp" -sigfile "$sig" >/dev/null 2>&1; then
+            rc=0
+            bash "$tmp" "$@" || rc=$?
+            exit "$rc"
+        fi
+        n_bad=$((n_bad+1)); reasons="${reasons}
+  - ПОДПИСЬ НЕ ПРОШЛА: ${url}"
+    done
+    if [ "$n_dl" -eq "${#CHIMERA_MIRRORS[@]}" ]; then
+        echo "ОШИБКА: не удалось скачать bootstrap ни с одного зеркала (forgejo/gitlab/github). Проверьте сеть и повторите." >&2
+    else
+        echo "ОШИБКА: проверенный bootstrap получить не удалось — исполнение запрещено (скачанные файлы не прошли проверку подлинности)." >&2
+    fi
+    echo "Причины:${reasons}" >&2
+    exit 1
+)
+chimera_install "$@"
+_chimera_install_rc=$?
+unset -f chimera_install 2>/dev/null || true
+# Код возврата блока = коду возврата bootstrap (paste-safe: без exit из шелла пользователя)
+( exit "$_chimera_install_rc" )
+# <<< CHIMERA SECURE INSTALL
 ```
 
 ### Проблема: VK-call link не работает (FreeTurn)
