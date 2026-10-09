@@ -4,16 +4,19 @@
 #  Multi-Protocol Anti-DPI Installer
 #  bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
 #
-#  Зеркало GitHub (ветка main):
-#  bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
+#  Универсальная команда с авто-fallback (Forgejo → GitLab → GitHub):
+#  bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh \
+#      || curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh \
+#      || curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
 #
 #  ENV-переопределения источника загрузки репозитория:
-#    CHIMERA_MIRROR — gitlab (по умолчанию) | github | <URL кастомного зеркала>
+#    CHIMERA_MIRROR — gitlab (по умолчанию) | github | forgejo | <URL кастомного зеркала>
 #        (напр. https://host.example/owner/repo.git или ssh://root@1.2.3.4/srv/git/chimera.git)
 #    CHIMERA_BRANCH — ветка; авто по умолчанию: chimera-v5 для gitlab и кастомного
-#        зеркала, main для github (при своём зеркале переопределяйте явно)
+#        зеркала, main для github и forgejo (при своём зеркале переопределяйте явно)
 #  При сбое источника (clone/pull/archive timeout или ошибка) — автоматический
-#  fallback на следующее зеркало: gitlab→github; github→gitlab; кастом→gitlab→github.
+#  fallback на следующее зеркало: gitlab→forgejo→github; github→forgejo→gitlab;
+#  forgejo→gitlab→github; кастом→gitlab→forgejo→github.
 #  Каждая попытка логируется. Кастомное зеркало — только git clone (tar.gz может
 #  не отдаваться), проверка bootstrap.sh.sha256 пропускается (WARN в логе).
 # ============================================================
@@ -64,7 +67,7 @@ echo -e "${NC}"
 echo -e "${BOLD}[1/5] Проверка прав${NC}"
 if [[ $EUID -ne 0 ]]; then
     err "Требуются права root"
-    echo -e "     ${YELLOW}sudo bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)${NC}"
+    echo -e "     ${YELLOW}sudo bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh)${NC}"
     exit 1
 fi
 ok "root: OK"
@@ -118,9 +121,10 @@ INSTALL_DIR="/opt/chimera"
 
 # >>> CHIMERA MIRRORS (мульти-источник; проверяется tests/test_bootstrap_mirrors.py)
 # Переопределение через окружение (см. шапку файла):
-#   CHIMERA_MIRROR — gitlab (по умолчанию) | github | <URL кастомного зеркала>
-#   CHIMERA_BRANCH — ветка (авто: chimera-v5 для gitlab/кастома, main для github)
-# Цепочка fallback: gitlab→github; github→gitlab; кастом→gitlab→github.
+#   CHIMERA_MIRROR — gitlab (по умолчанию) | github | forgejo | <URL кастомного зеркала>
+#   CHIMERA_BRANCH — ветка (авто: chimera-v5 для gitlab/кастома, main для github/forgejo)
+# Цепочка fallback: gitlab→forgejo→github; github→forgejo→gitlab;
+#   forgejo→gitlab→github; кастом→gitlab→forgejo→github.
 
 # Настройка переменных ОДНОГО источника: SRC_LABEL / BRANCH / REPO_URL /
 # ARCHIVE_URL / SHA256_URL (последние две пустые для кастомного зеркала).
@@ -141,6 +145,14 @@ _src_setup() {
         REPO_URL="https://github.com/inferno1978/Chimera-Project.git"
         ARCHIVE_URL="https://github.com/inferno1978/Chimera-Project/archive/refs/heads/${BRANCH}.tar.gz"
         SHA256_URL="https://raw.githubusercontent.com/inferno1978/Chimera-Project/${BRANCH}/bootstrap.sh.sha256"
+    elif [[ "$src" == "forgejo" ]]; then
+        SRC_LABEL="forgejo"
+        BRANCH="${CHIMERA_BRANCH:-main}"
+        REPO_URL="https://git.chimeraprodvpn.online/inferno1978/chimera.git"
+        # Forgejo-style archive: /archive/{branch}.tar.gz; корневая папка архива —
+        # «chimera/» (имя репозитория, без суффикса ветки — см. поиск _extracted).
+        ARCHIVE_URL="https://git.chimeraprodvpn.online/inferno1978/chimera/archive/${BRANCH}.tar.gz"
+        SHA256_URL="https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/${BRANCH}/bootstrap.sh.sha256"
     else
         # Кастомное зеркало: только git clone — tar.gz и bootstrap.sh.sha256
         # кастомный хост может не отдавать (обе переменные пустые).
@@ -158,18 +170,20 @@ _build_source_chain() {
     if [[ -z "$mirror" ]]; then
         mirror="gitlab"
     fi
-    if [[ "$mirror" != "gitlab" && "$mirror" != "github" ]]; then
+    if [[ "$mirror" != "gitlab" && "$mirror" != "github" && "$mirror" != "forgejo" ]]; then
         if [[ "$mirror" != *"://"* && "$mirror" != "git@"* ]]; then
             warn "CHIMERA_MIRROR='${mirror}' не похож на URL зеркала — использую gitlab."
             mirror="gitlab"
         fi
     fi
     if [[ "$mirror" == "gitlab" ]]; then
-        SOURCE_CHAIN=("gitlab" "github")
+        SOURCE_CHAIN=("gitlab" "forgejo" "github")
     elif [[ "$mirror" == "github" ]]; then
-        SOURCE_CHAIN=("github" "gitlab")
+        SOURCE_CHAIN=("github" "forgejo" "gitlab")
+    elif [[ "$mirror" == "forgejo" ]]; then
+        SOURCE_CHAIN=("forgejo" "gitlab" "github")
     else
-        SOURCE_CHAIN=("$mirror" "gitlab" "github")
+        SOURCE_CHAIN=("$mirror" "gitlab" "forgejo" "github")
     fi
 }
 
@@ -276,7 +290,7 @@ _archive_update() {
 
     # --- Stage 3: Find extracted dir + verify key files ---
     local _extracted=""
-    for _d in "${_staging}/chimera-project-${BRANCH}" "${_staging}/Chimera-Project-${BRANCH}" "${_staging}/VLESS-Ultimate-Installer-${BRANCH}"; do
+    for _d in "${_staging}/chimera-project-${BRANCH}" "${_staging}/Chimera-Project-${BRANCH}" "${_staging}/chimera" "${_staging}/VLESS-Ultimate-Installer-${BRANCH}"; do
         if [[ -d "$_d" ]]; then _extracted="$_d"; break; fi
     done
     if [[ -z "$_extracted" ]]; then
@@ -419,7 +433,7 @@ _acquire_one() {
         mkdir -p "$_CLONE_STAGING"
         if tar -xzf "$_CLONE_TMP" -C "$_CLONE_STAGING" 2>/dev/null; then
             _extracted=""
-            for _d in "${_CLONE_STAGING}/chimera-project-${BRANCH}" "${_CLONE_STAGING}/Chimera-Project-${BRANCH}" "${_CLONE_STAGING}/VLESS-Ultimate-Installer-${BRANCH}"; do
+            for _d in "${_CLONE_STAGING}/chimera-project-${BRANCH}" "${_CLONE_STAGING}/Chimera-Project-${BRANCH}" "${_CLONE_STAGING}/chimera" "${_CLONE_STAGING}/VLESS-Ultimate-Installer-${BRANCH}"; do
                 if [[ -d "$_d" ]]; then _extracted="$_d"; break; fi
             done
             if [[ -n "$_extracted" ]] && [[ -f "${_extracted}/main.py" ]]; then
@@ -476,7 +490,7 @@ if [[ "$_ACQUIRE_OK" != "1" ]]; then
         warn "Запускаю установщик с текущей (существующей) версией."
         warn "Попробуйте позже вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
     else
-        err "Не удалось загрузить Chimera Project ни с одного источника (gitlab/github)."
+        err "Не удалось загрузить Chimera Project ни с одного источника (forgejo/gitlab/github)."
         err "Проверьте соединение или укажите зеркало:"
         err "  CHIMERA_MIRROR=<mirror-url> bash bootstrap.sh"
         exit 1

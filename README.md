@@ -21,7 +21,16 @@
 
 ## ⚡ Быстрый старт
 
-**GitLab** (основной источник, ветка `chimera-v5`):
+**Универсальная команда** — авто-fallback по зеркалам (Forgejo → GitLab → GitHub), сработает, даже если часть хостингов недоступна:
+
+```bash
+bash <(curl -fsSL --connect-timeout 10 --max-time 60 https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh \
+    || curl -fsSL --connect-timeout 10 --max-time 60 https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh \
+    || curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh \
+    || echo 'echo "ОШИБКА: bootstrap.sh недоступен ни с одного зеркала (forgejo/gitlab/github) — проверьте сеть" >&2; exit 1')
+```
+
+**GitLab** (ветка `chimera-v5`):
 
 ```bash
 bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
@@ -35,10 +44,16 @@ chmod +x bootstrap.sh
 bash bootstrap.sh
 ```
 
-**Зеркало на GitHub** (ветка `main`):
+**GitHub** (зеркало, ветка `main`):
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
+```
+
+**Forgejo** (self-hosted зеркало, ветка `main`):
+
+```bash
+bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh)
 ```
 
 **Своё зеркало** (self-hosted git):
@@ -47,9 +62,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/
 CHIMERA_MIRROR=https://git.<mirror-domain>/owner/chimera.git bash <(curl -fsSL <bootstrap-url>)
 ```
 
-> **Note:** bootstrap — мульти-источник: при сбое основного источника автоматический fallback на зеркала (`gitlab→github`; при `CHIMERA_MIRROR=github` — наоборот; своё зеркало — первым, затем `gitlab` и `github`). Ветка выбирается автоматически (`chimera-v5`/`main`), переопределяется через `CHIMERA_BRANCH`. Своё зеркало — только git-clone (tar.gz-фолбэк и проверка `bootstrap.sh.sha256` пропускаются).
+> **Note:** bootstrap — мульти-источник: при сбое основного источника автоматический fallback по цепочке (`gitlab→forgejo→github`; при `CHIMERA_MIRROR=github` — `github→forgejo→gitlab`; при `CHIMERA_MIRROR=forgejo` — `forgejo→gitlab→github`; своё зеркало — первым, затем `gitlab`, `forgejo` и `github`). Ветка выбирается автоматически (`chimera-v5`/`main`), переопределяется через `CHIMERA_BRANCH`. Кастомное зеркало — только git-clone (tar.gz-фолбэк и проверка `bootstrap.sh.sha256` пропускаются).
 >
-> **⚠️ GitLab branch `chimera-v5` is a mirror only — never commit directly to it, changes will be force-overwritten on next push to `main` on GitHub.**
+> **⚠️ Ветки `chimera-v5` (GitLab) и `main` (GitHub) — зеркала: коммитьте в основной репозиторий (Forgejo `main`), прямые пуши в зеркальные ветки перезаписываются автосинком.**
 
 ## 🎯 Возможности
 
@@ -121,6 +136,7 @@ CHIMERA_MIRROR=https://git.<mirror-domain>/owner/chimera.git bash <(curl -fsSL <
 
 ```bash
 git clone -b chimera-v5 https://gitlab.com/netwalker071778/chimera-project.git /opt/chimera
+# или с зеркал: -b main https://git.chimeraprodvpn.online/inferno1978/chimera.git
 cd /opt/chimera
 sudo python3 main.py
 ```
