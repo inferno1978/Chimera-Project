@@ -9,7 +9,7 @@ tests/test_secure_bootstrap.py
 openssl + тестовый Ed25519-ключ (PEM из блока подменяется на тестовый).
 Сеть — заглушка curl (map-файл), прод-серверы не затрагиваются.
 
-Сценарии (ТЗ «Secure Multi-Mirror Bootstrap»):
+Сценарии (ТЗ «Secure Multi-Mirror Bootstrap» + ревью-правки):
   1.  Основное зеркало доступно, подпись верна → запуск (+args, +exit code).
   2.  Основное недоступно → переход на второе.
   3.  Первые два недоступны → переход на третье.
@@ -19,6 +19,9 @@ openssl + тестовый Ed25519-ключ (PEM из блока подменя�
   7.  Повреждённая подпись → не исполнено.
   8.  Изменённый скрипт при старой подписи → не исполнено.
   9.  Нет openssl → отказ ДО загрузки, rc=1.
+  9b. OpenSSL без -rawin (эмуляция 1.1.1) → отказ ДО загрузки с «требуется >= 3.0».
+  9c. FIPS-подобный openssl (Ed25519 keygen запрещён) → тот же честный отказ.
+  9d. Повреждённый PEM в блоке → отказ «не удалось разобрать ключ», без загрузки.
   10. Подпись чужим ключом / подменённый файл → не исполнено.
   11. Ошибка проверки первого зеркала при недоступных остальных →
       корректный вердикт («не прошли проверку», НЕ «все недоступны»).
@@ -26,6 +29,9 @@ openssl + тестовый Ed25519-ключ (PEM из блока подменя�
   13. Временные файлы удаляются (успех и ошибки).
   14. Аргументы и код возврата bootstrap сохраняются.
   15. Минимальное окружение (без python/git и прочих необязательных утилит).
+  16. Права скачанных файлов — 600 (не полагаемся на umask).
+  17. CHIMERA_INSTALL_DEBUG=1 — прогресс/причины на stderr; по умолчанию — тихо.
+  18. bootstrap скачан, .sig недоступен → зеркало отбраковано → следующее.
 
 Плюс консистентность: блок идентичен во всех документах; PEM блока ==
 scripts/bootstrap-release/bootstrap.pub; bootstrap.sh.sig валиден;
@@ -80,12 +86,36 @@ exit 6
 FIXTURE_OK = r'''#!/bin/bash
 sha256sum "$0" | awk '{print $1}' > ran.sha256
 echo "ARGS:[$*]"
+command -v stat >/dev/null 2>&1 && stat -c '%a' "$0" "$0.sig" > perms.txt
 exit "${CHIMERA_TEST_EXIT:-0}"
 '''
 
 FIXTURE_EVIL = r'''#!/bin/bash
 echo "EVIL EXECUTED" > evil-ran
 exit 0
+'''
+
+
+# Эмуляция старого openssl (1.1.1): pkeyutl не знает -rawin (появился в 3.0)
+OPENSSL_STUB_NORAWIN = r'''#!/bin/bash
+for a in "$@"; do
+    if [ "$a" = "-rawin" ]; then
+        echo "openssl: Unknown option: -rawin" >&2
+        exit 1
+    fi
+done
+exec "{real_openssl}" "$@"
+'''
+
+# Эмуляция FIPS-сборки: Ed25519 недоступен целиком (даже keygen)
+OPENSSL_STUB_NOED25519 = r'''#!/bin/bash
+for a in "$@"; do
+    if [ "$a" = "ed25519" ]; then
+        echo "openssl: Error setting algorithm ed25519: unsupported" >&2
+        exit 1
+    fi
+done
+exec "{real_openssl}" "$@"
 '''
 
 
@@ -155,8 +185,12 @@ class SecureBootstrapTestCase(unittest.TestCase):
 
     # ── инфраструктура прогона ─────────────────────────────────────
     def run_block(self, mirror_map, args=(), env_extra=None,
-                  exclude_openssl=False, minimal_path=False):
+                  exclude_openssl=False, minimal_path=False,
+                  block_path=None, openssl_stub=None):
         """Прогнать блок. mirror_map: {url: ('file', path)|('exit', N)}.
+        block_path — альтернативный файл блока (по умолчанию канонический
+        с тестовым ключом); openssl_stub — 'norawin'|'noed25519' (эмуляция
+        старого/FIPS openssl поверх настоящего).
         Возвращает (rc, stdout, stderr, workdir)."""
         work = Path(tempfile.mkdtemp(prefix="secboot-run.", dir=str(self.dir)))
         stub_dir = work / "stub"
@@ -176,8 +210,9 @@ class SecureBootstrapTestCase(unittest.TestCase):
             minbin = work / "minbin"
             minbin.mkdir()
             for tool in ["bash", "cat", "wc", "mktemp", "rm", "chmod", "grep",
-                         "head",           # нужен curl-заглушке
-                         "sha256sum", "awk"]:  # нужны тестовой фикстуре ok.sh (не блоку)
+                         "head",                # нужен curl-заглушке
+                         "sha256sum", "awk",    # нужны тестовой фикстуре ok.sh (не блоку)
+                         "stat"]:               # фикстура пишет права скачанных файлов
                 real = shutil.which(tool)
                 assert real, f"{tool} не найден в системе"
                 shutil.copy2(real, str(minbin / tool))
@@ -190,6 +225,18 @@ class SecureBootstrapTestCase(unittest.TestCase):
             for tool in ["bash", "cat", "wc", "mktemp", "rm", "chmod", "grep"]:
                 shutil.copy2(shutil.which(tool), str(nobin / tool))
             path = f"{self.bin_dir}:{nobin}"
+        elif openssl_stub:
+            # Настоящий openssl, прикрытый заглушкой-эмулятором
+            real = shutil.which("openssl")
+            assert real, "openssl не найден в системе"
+            tmpl = {"norawin": OPENSSL_STUB_NORAWIN,
+                    "noed25519": OPENSSL_STUB_NOED25519}[openssl_stub]
+            obin = work / "osslstub"
+            obin.mkdir()
+            (obin / "openssl").write_text(
+                tmpl.replace("{real_openssl}", real), encoding="utf-8")
+            os.chmod(obin / "openssl", 0o755)
+            path = f"{obin}:{self.bin_dir}:/usr/bin:/bin"
         else:
             path = f"{self.bin_dir}:/usr/bin:/bin"
 
@@ -203,12 +250,17 @@ class SecureBootstrapTestCase(unittest.TestCase):
 
         pre = set(glob.glob("/tmp/chimera-bootstrap.*"))
         proc = subprocess.run(
-            ["bash", str(self.dir / "block.sh"), *args],
+            ["bash", str(block_path or (self.dir / "block.sh")), *args],
             capture_output=True, text=True, env=env, cwd=str(work), timeout=120)
         post = set(glob.glob("/tmp/chimera-bootstrap.*"))
         self.assertEqual(pre, post,
                          f"утечка временных файлов: {sorted(post - pre)}")
         return proc.returncode, proc.stdout, proc.stderr, work
+
+    def assert_curl_never_called(self, work):
+        calls = work / "stub" / "calls.log"
+        self.assertFalse(calls.exists() and calls.read_text().strip(),
+                         "curl вызывался до прохождения префлайт-проверок")
 
     def assert_ran(self, work, fixture="ok.sh"):
         self.assertTrue((work / "ran.sha256").exists(),
@@ -297,6 +349,7 @@ class SecureBootstrapTestCase(unittest.TestCase):
         } | {u + ".sig": ("file", str(self.fixtures / "ok.sh"))  # sig-файл = сам скрипт (мусор)
              for u in (M1, M2, M3)})
         self.assertEqual(rc, 1)
+        self.assertIn("повреждённая подпись", err)   # не 64 байта → явная причина
         self.assertIn("не прошли проверку", err)
         self.assert_not_ran(w)
 
@@ -318,7 +371,7 @@ class SecureBootstrapTestCase(unittest.TestCase):
         self.assertIn("ПОДПИСЬ НЕ ПРОШЛА", err)
         self.assert_not_ran(w)
 
-    # ── 9. нет проверочного инструмента ────────────────────────────
+    # ── 9. нет проверочного инструмента / несовместимый openssl ────
     def test_09_no_openssl_fail_before_download(self):
         rc, out, err, w = self.run_block({
             M1: ("file", str(self.fixtures / "ok.sh")),
@@ -327,10 +380,50 @@ class SecureBootstrapTestCase(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("не найден openssl", err)
         self.assert_not_ran(w)
-        # curl вообще не должен вызываться (проверка инструмента — до загрузки)
-        calls = w / "stub" / "calls.log"
-        self.assertFalse(calls.exists() and calls.read_text().strip(),
-                         "curl вызывался при отсутствии openssl")
+        self.assert_curl_never_called(w)   # проверка инструмента — до загрузки
+
+    def test_09b_old_openssl_no_rawin_rejected(self):
+        # Эмуляция OpenSSL 1.1.1: PEM-парсинг проходит, но -rawin неизвестен.
+        # Раньше это давало МИМОПОНЯТНОЕ «ПОДПИСЬ НЕ ПРОШЛА» на всех зеркалах;
+        # теперь — честный отказ ДО загрузки с требованием OpenSSL >= 3.0.
+        rc, out, err, w = self.run_block({
+            M1: ("file", str(self.fixtures / "ok.sh")),
+            M1 + ".sig": ("file", str(self.sigs["ok"]))},
+            openssl_stub="norawin")
+        self.assertEqual(rc, 1)
+        self.assertIn("требуется OpenSSL >= 3.0", err)
+        self.assertIn("raw-режиме", err)
+        self.assert_not_ran(w)
+        self.assert_curl_never_called(w)   # проба — до цикла зеркал, без сети
+
+    def test_09c_fips_like_no_ed25519(self):
+        # Эмуляция FIPS-сборки: keygen Ed25519 запрещён провайдером —
+        # функциональная проба обязана упасть ДО загрузки, без исполнения
+        rc, out, err, w = self.run_block({
+            M1: ("file", str(self.fixtures / "ok.sh")),
+            M1 + ".sig": ("file", str(self.sigs["ok"]))},
+            openssl_stub="noed25519")
+        self.assertEqual(rc, 1)
+        self.assertIn("требуется OpenSSL >= 3.0", err)
+        self.assertIn("FIPS", err)
+        self.assert_not_ran(w)
+        self.assert_curl_never_called(w)
+
+    def test_09d_corrupt_pinned_key_rejected(self):
+        # Повреждённый PEM в блоке (битая вставка) → отказ до загрузки
+        corrupt = PEM_RE.sub(
+            "-----BEGIN PUBLIC KEY-----\nZ29vZF9sdWNrX3RyeWluZw==\n-----END PUBLIC KEY-----",
+            self.block)
+        bpath = Path(tempfile.mkdtemp(prefix="secboot-cpk.", dir=str(self.dir))) / "block.sh"
+        bpath.write_text(corrupt, encoding="utf-8")
+        rc, out, err, w = self.run_block({
+            M1: ("file", str(self.fixtures / "ok.sh")),
+            M1 + ".sig": ("file", str(self.sigs["ok"]))},
+            block_path=bpath)
+        self.assertEqual(rc, 1)
+        self.assertIn("не удалось разобрать закреплённый Ed25519-ключ", err)
+        self.assert_not_ran(w)
+        self.assert_curl_never_called(w)
 
     # ── 10. подменённый файл / чужой ключ ──────────────────────────
     def test_10_forged_by_attacker_key(self):
@@ -391,6 +484,61 @@ class SecureBootstrapTestCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assert_ran(w)
 
+    # ── 16. права скачанных файлов ──────────────────────────────
+    def test_16_downloaded_files_mode_600(self):
+        # После успешного скачивания bootstrap и .sig должны получить 600
+        # (не полагаемся на umask); проверяет сама фикстура по $0 и $0.sig
+        rc, out, err, w = self.run_block({
+            M1: ("file", str(self.fixtures / "ok.sh")),
+            M1 + ".sig": ("file", str(self.sigs["ok"]))})
+        self.assertEqual(rc, 0)
+        perms = w / "perms.txt"
+        self.assertTrue(perms.exists(), "фикстура не записала права (нет stat?)")
+        modes = perms.read_text().split()
+        self.assertEqual(modes, ["600", "600"],
+                         f"права скачанных файлов не 600: {modes}")
+
+    # ── 17. debug-режим ───────────────────────────────────────────
+    def test_17_debug_mode_progress(self):
+        rc, out, err, w = self.run_block({
+            M1: ("exit", 6),
+            M2: ("file", str(self.fixtures / "ok.sh")),
+            M2 + ".sig": ("file", str(self.sigs["ok"]))},
+            env_extra={"CHIMERA_INSTALL_DEBUG": "1"})
+        self.assertEqual(rc, 0)
+        self.assert_ran(w)
+        self.assertIn("[chimera-install]", err)
+        self.assertIn("Пробую зеркало", err)
+        self.assertIn("Отклонено (недоступно)", err)
+        self.assertIn("Подпись подтверждена", err)
+
+    def test_17b_silent_by_default(self):
+        rc, out, err, w = self.run_block({
+            M1: ("file", str(self.fixtures / "ok.sh")),
+            M1 + ".sig": ("file", str(self.sigs["ok"]))})
+        self.assertEqual(rc, 0)
+        self.assertNotIn("[chimera-install]", err,
+                         "без CHIMERA_INSTALL_DEBUG отладочный вывод не нужен")
+
+    # ── 18. подпись недоступна ───────────────────────────────────
+    def test_18_sig_download_fail_fallback(self):
+        # bootstrap скачан, .sig не отдаётся → зеркало отбраковано → следующее
+        rc, out, err, w = self.run_block({
+            M1: ("file", str(self.fixtures / "ok.sh")),
+            M2: ("file", str(self.fixtures / "ok.sh")),
+            M2 + ".sig": ("file", str(self.sigs["ok"]))})  # M1.sig не в map → exit 6
+        self.assertEqual(rc, 0)
+        self.assert_ran(w)
+
+    def test_18b_all_sigs_down(self):
+        rc, out, err, w = self.run_block({
+            u: ("file", str(self.fixtures / "ok.sh")) for u in (M1, M2, M3)})
+        self.assertEqual(rc, 1)
+        self.assertIn("не прошли проверку", err)
+        self.assertIn("не удалось скачать подпись", err)
+        self.assertNotIn("не удалось скачать bootstrap ни с одного зеркала", err)
+        self.assert_not_ran(w)
+
 
 class TestBlockConsistency(unittest.TestCase):
     """Статические инварианты блока и репозитория (без прогона)."""
@@ -449,13 +597,32 @@ class TestBlockConsistency(unittest.TestCase):
                 f"{name}: осталась pipe-команда установки bootstrap")
 
     def test_fail_closed_branches_present(self):
-        # статическое наличие всех веток отказов (5 различимых причин)
-        for marker in ["не найден openssl",              # нет инструмента
-                       "не поддерживает Ed25519",         # ключ не поддерживается
+        # статическое наличие всех веток отказов (различимые причины)
+        for marker in ["не найден openssl",                       # нет инструмента
+                       "не удалось разобрать закреплённый Ed25519-ключ",  # битый PEM
+                       "не поддерживает проверку подписи Ed25519",        # нет -rawin/FIPS
+                       "требуется OpenSSL >= 3.0",                     # явная версия
                        "не удалось скачать bootstrap ни с одного зеркала",  # все недоступны
-                       "не прошли проверку",              # скачалось, но не проверено
-                       "ПОДПИСЬ НЕ ПРОШЛА"]:              # конкретная причина
+                       "не прошли проверку",                          # скачалось, но не проверено
+                       "повреждённая подпись",                        # .sig не 64 байта
+                       "ПОДПИСЬ НЕ ПРОШЛА"]:                          # конкретная причина
             self.assertIn(marker, self.block, f"в блоке нет ветки: {marker}")
+
+    def test_preflight_and_hardening_markers(self):
+        # Инварианты ревью-правок: проба openssl ДО цикла зеркал, права 600
+        # после каждой успешной загрузки, debug-режим, каталог mktemp -d
+        for marker in ["ed25519_verify_supported",
+                       "mktemp -d /tmp/chimera-bootstrap.XXXXXXXX",
+                       'chmod 600 "$pub"',
+                       'chmod 600 "$tmp"',
+                       'chmod 600 "$sig"',
+                       "CHIMERA_INSTALL_DEBUG",
+                       'trap \'rm -rf "$d"\' EXIT']:
+            self.assertIn(marker, self.block, f"в блоке нет элемента: {marker}")
+        # проба обязана идти ДО цикла по зеркалам (fail-closed до сети)
+        self.assertLess(self.block.index("ed25519_verify_supported ||"),
+                        self.block.index('for url in "${CHIMERA_MIRRORS[@]}"'),
+                        "функциональная проба openssl должна выполняться до цикла зеркал")
 
 
 if __name__ == "__main__":

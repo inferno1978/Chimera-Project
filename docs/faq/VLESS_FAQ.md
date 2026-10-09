@@ -104,6 +104,8 @@ TTL:  3600 (1 час)
 ```bash
 # >>> CHIMERA SECURE INSTALL (канонический блок; проверяется tests/test_secure_bootstrap.py)
 # Никакой bootstrap не исполняется до успешной проверки подписи Ed25519.
+# Требования: bash, curl, mktemp, openssl >= 3.0 (проверяется ДО загрузки).
+# Отладка: CHIMERA_INSTALL_DEBUG=1 — показывать ход установки на stderr.
 chimera_install() (
     set -euo pipefail
     CHIMERA_PUBKEY='-----BEGIN PUBLIC KEY-----
@@ -116,53 +118,88 @@ MCowBQYDK2VwAyEA+6KSAskfo+LBzW/io8q376wAULspfGTik674H1o8Gu4=
     )
     MAX_SIZE=524288  # 512 KiB — разумный потолок размера bootstrap
 
+    dbg() { # печатает строку на stderr только при CHIMERA_INSTALL_DEBUG=1
+        if [ "${CHIMERA_INSTALL_DEBUG:-0}" = "1" ]; then echo "[chimera-install] $*" >&2; fi
+        return 0
+    }
+    fetch() { # fetch <url> <max-time> <outfile>; в debug-режиме stderr curl не глушится
+        if [ "${CHIMERA_INSTALL_DEBUG:-0}" = "1" ]; then
+            curl -fsSL --connect-timeout 10 --max-time "$2" "$1" -o "$3"
+        else
+            curl -fsSL --connect-timeout 10 --max-time "$2" "$1" -o "$3" 2>/dev/null
+        fi
+    }
+    ed25519_verify_supported() { # функциональная проба openssl ДО загрузки: keygen -> sign -> verify
+        openssl genpkey -algorithm ed25519 -out "$d/probe.key" >/dev/null 2>&1 || return 1
+        printf 'x' > "$d/probe.in"
+        openssl pkeyutl -sign -inkey "$d/probe.key" -rawin -in "$d/probe.in" -out "$d/probe.sig" >/dev/null 2>&1 || return 1
+        openssl pkey -in "$d/probe.key" -pubout -out "$d/probe.pub" >/dev/null 2>&1 || return 1
+        openssl pkeyutl -verify -pubin -inkey "$d/probe.pub" -rawin -in "$d/probe.in" -sigfile "$d/probe.sig" >/dev/null 2>&1 || return 1
+        return 0
+    }
+
     command -v openssl >/dev/null 2>&1 || {
         echo "ОШИБКА: не найден openssl — проверка подписи невозможна, установка прервана (см. docs/faq/BOOTSTRAP_SECURITY.md)." >&2
         exit 1
     }
-    tmp="$(mktemp /tmp/chimera-bootstrap.XXXXXXXX)"
-    sig="${tmp}.sig"
-    pub="${tmp}.pub"
-    trap 'rm -f "$tmp" "$sig" "$pub"' EXIT
-    trap 'rm -f "$tmp" "$sig" "$pub"; exit 130' INT TERM HUP
+    d="$(mktemp -d /tmp/chimera-bootstrap.XXXXXXXX)"   # каталог с правами 700; всё скачанное — только здесь
+    tmp="$d/bootstrap.sh"
+    sig="$d/bootstrap.sh.sig"
+    pub="$d/pinned.pub"
+    trap 'rm -rf "$d"' EXIT
+    trap 'rm -rf "$d"; exit 130' INT TERM HUP
     printf '%s\n' "$CHIMERA_PUBKEY" > "$pub"
-    chmod 600 "$tmp" "$sig" "$pub" 2>/dev/null || true
+    chmod 600 "$pub"
+
     openssl pkey -pubin -in "$pub" -noout >/dev/null 2>&1 || {
-        echo "ОШИБКА: установленный openssl не поддерживает Ed25519 (требуется OpenSSL >= 1.1.1) — установка прервана." >&2
+        echo "ОШИБКА: не удалось разобрать закреплённый Ed25519-ключ (блок повреждён при вставке или openssl слишком старый) — установка прервана (см. docs/faq/BOOTSTRAP_SECURITY.md)." >&2
+        exit 1
+    }
+    ed25519_verify_supported || {
+        echo "ОШИБКА: openssl не поддерживает проверку подписи Ed25519 в raw-режиме — требуется OpenSSL >= 3.0 (сейчас: $(openssl version 2>/dev/null || echo 'версия не определена'); в FIPS-сборках Ed25519 может быть отключён). Установка прервана (см. docs/faq/BOOTSTRAP_SECURITY.md)." >&2
         exit 1
     }
 
     n_dl=0; n_bad=0; reasons=""
     for url in "${CHIMERA_MIRRORS[@]}"; do
+        dbg "Пробую зеркало: $url"
         rm -f "$tmp" "$sig"
-        if ! curl -fsSL --connect-timeout 10 --max-time 60 "$url" -o "$tmp" 2>/dev/null; then
+        if ! fetch "$url" 60 "$tmp"; then
             n_dl=$((n_dl+1)); reasons="${reasons}
   - недоступно (сеть/HTTP): ${url}"
+            dbg "Отклонено (недоступно): $url"
             continue
         fi
+        chmod 600 "$tmp"   # не полагаемся на umask
         size="$(wc -c < "$tmp")"
         if [ "$size" -eq 0 ] || [ "$size" -gt "$MAX_SIZE" ]; then
             n_bad=$((n_bad+1)); reasons="${reasons}
   - подозрительный размер файла (${size} байт): ${url}"
+            dbg "Отклонено (размер ${size} байт): $url"
             continue
         fi
-        if ! curl -fsSL --connect-timeout 10 --max-time 30 "${url}.sig" -o "$sig" 2>/dev/null; then
+        if ! fetch "${url}.sig" 30 "$sig"; then
             n_bad=$((n_bad+1)); reasons="${reasons}
   - не удалось скачать подпись: ${url}.sig"
+            dbg "Отклонено (нет подписи): ${url}.sig"
             continue
         fi
+        chmod 600 "$sig"   # не полагаемся на umask
         if [ "$(wc -c < "$sig")" -ne 64 ]; then
             n_bad=$((n_bad+1)); reasons="${reasons}
   - повреждённая подпись (не 64 байта): ${url}"
+            dbg "Отклонено (подпись не 64 байта): $url"
             continue
         fi
         if openssl pkeyutl -verify -pubin -inkey "$pub" -rawin -in "$tmp" -sigfile "$sig" >/dev/null 2>&1; then
+            dbg "Подпись подтверждена: $url — исполняю проверенный bootstrap"
             rc=0
             bash "$tmp" "$@" || rc=$?
             exit "$rc"
         fi
         n_bad=$((n_bad+1)); reasons="${reasons}
   - ПОДПИСЬ НЕ ПРОШЛА: ${url}"
+        dbg "Отклонено (подпись не прошла): $url"
     done
     if [ "$n_dl" -eq "${#CHIMERA_MIRRORS[@]}" ]; then
         echo "ОШИБКА: не удалось скачать bootstrap ни с одного зеркала (forgejo/gitlab/github). Проверьте сеть и повторите." >&2
