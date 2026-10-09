@@ -2,12 +2,16 @@
 # ============================================================
 #  Chimera Project v5.0.0 — Bootstrap
 #  Multi-Protocol Anti-DPI Installer
-#  bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh)
 #
-#  Универсальная команда с авто-fallback (Forgejo → GitLab → GitHub):
-#  bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh \
-#      || curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh \
-#      || curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
+#  УСТАНОВКА (безопасная, с проверкой подписи Ed25519 перед запуском):
+#  вставьте блок «CHIMERA SECURE INSTALL» из README.md (Раздел «Быстрый
+#  старт»). Скрипт скачивается во временный файл, подпись проверяется
+#  закреплённым публичным ключом (openssl >= 1.1.1) и только затем
+#  исполняется. Зеркала: Forgejo → GitLab → GitHub (авто-fallback,
+#  каждое проверяется независимо; fail-closed — без валидной подписи
+#  ничего не запускается). Модель доверия/ротация ключей:
+#  docs/faq/BOOTSTRAP_SECURITY.md.
+#  Прямое исполнение потока (bash <(curl ...)) НЕ используется.
 #
 #  ENV-переопределения источника загрузки репозитория:
 #    CHIMERA_MIRROR — forgejo (по умолчанию) | gitlab | github | <URL кастомного зеркала>
@@ -22,19 +26,20 @@
 # ============================================================
 #
 # ─── INTEGRITY VERIFICATION ─────────────────────────────────────
-# SHA256 этого файла публикуется в bootstrap.sh.sha256 (рядом).
-# Проверить целостность перед запуском:
+# Подлинность ЭТОГО файла при установке проверяется Ed25519-подписью
+# (bootstrap.sh.sig + публичный ключ, закреплённый в команде установки;
+# см. README и docs/faq/BOOTSTRAP_SECURITY.md).
+# Дополнительная проверка ниже — целостность РЕПОЗИТОРИЯ после загрузки
+# (bootstrap.sh из архива сверяется с bootstrap.sh.sha256 источника).
 #
 #   curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh -o /tmp/bootstrap.sh
-#   curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh.sha256 -o /tmp/bootstrap.sh.sha256
-#   cd /tmp && sha256sum -c bootstrap.sh.sha256
+#   curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh.sig -o /tmp/bootstrap.sh.sig
+#   printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'MCowBQYDK2VwAyEA+6KSAskfo+LBzW/io8q376wAULspfGTik674H1o8Gu4=' '-----END PUBLIC KEY-----' > /tmp/bootstrap.pub
+#   openssl pkeyutl -verify -pubin -inkey /tmp/bootstrap.pub -rawin -in /tmp/bootstrap.sh -sigfile /tmp/bootstrap.sh.sig
 #
-# Или одной командой (без зависимости от имени файла):
-#   [ "$(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh | sha256sum | awk '{print $1}')" = "$(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh.sha256 | awk '{print $1}')" ] && echo "OK" || echo "MISMATCH"
-#
-# То же для зеркал — замените оба URL на:
-#   GitHub: https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh(.sha256)
-#   GitLab: https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh(.sha256)
+# Публичный ключ — из README/docs (не с зеркала!). Для зеркал замените оба URL:
+#   GitHub: https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh(.sig)
+#   GitLab: https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh(.sig)
 #
 # SHA256 генерируется автоматически при каждом коммите (pre-commit hook).
 # ────────────────────────────────────────────────────────────────
@@ -68,7 +73,7 @@ echo -e "${NC}"
 echo -e "${BOLD}[1/5] Проверка прав${NC}"
 if [[ $EUID -ne 0 ]]; then
     err "Требуются права root"
-    echo -e "     ${YELLOW}sudo bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh)${NC}"
+    echo -e "     ${YELLOW}Запустите от root: вставьте блок безопасной установки из README (проверка подписи Ed25519)${NC}"
     exit 1
 fi
 ok "root: OK"

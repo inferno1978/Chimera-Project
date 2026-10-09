@@ -214,17 +214,19 @@ def tracked_files() -> list:
 
 
 def added_lines(ref: str) -> str:
+    # text=True с errors=replace: бинарные файлы (напр. *.sig) не валят аудит
     diff = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "diff", ref, "--no-color", "-U0"],
-        capture_output=True, text=True).stdout
+        capture_output=True).stdout.decode("utf-8", "replace")
     return "\n".join(l[1:] for l in diff.splitlines() if l.startswith("+")
                      and not l.startswith("+++"))
 
 
 def staged_lines() -> str:
+    # text=True с errors=replace: бинарные файлы (напр. *.sig) не валят аудит
     diff = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "diff", "--cached", "--no-color", "-U0"],
-        capture_output=True, text=True).stdout
+        capture_output=True).stdout.decode("utf-8", "replace")
     return "\n".join(l[1:] for l in diff.splitlines() if l.startswith("+")
                      and not l.startswith("+++"))
 

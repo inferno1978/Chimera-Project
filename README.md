@@ -21,46 +21,107 @@
 
 ## ⚡ Быстрый старт
 
-**Универсальная команда** — авто-fallback по зеркалам (Forgejo → GitLab → GitHub), сработает, даже если часть хостингов недоступна:
+**Безопасная установка** — bootstrap скачивается во временный файл, проверяется подпись Ed25519 (публичный ключ закреплён в самой команде) и только потом запускается. Зеркала с авто-fallback: Forgejo → GitLab → GitHub. Скопируйте и вставьте весь блок целиком:
 
 ```bash
-bash <(curl -fsSL --connect-timeout 10 --max-time 60 https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh \
-    || curl -fsSL --connect-timeout 10 --max-time 60 https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh \
-    || curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh \
-    || echo 'echo "ОШИБКА: bootstrap.sh недоступен ни с одного зеркала (forgejo/gitlab/github) — проверьте сеть" >&2; exit 1')
+# >>> CHIMERA SECURE INSTALL (канонический блок; проверяется tests/test_secure_bootstrap.py)
+# Никакой bootstrap не исполняется до успешной проверки подписи Ed25519.
+chimera_install() (
+    set -euo pipefail
+    CHIMERA_PUBKEY='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA+6KSAskfo+LBzW/io8q376wAULspfGTik674H1o8Gu4=
+-----END PUBLIC KEY-----'
+    CHIMERA_MIRRORS=(
+        "https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh"
+        "https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh"
+        "https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh"
+    )
+    MAX_SIZE=524288  # 512 KiB — разумный потолок размера bootstrap
+
+    command -v openssl >/dev/null 2>&1 || {
+        echo "ОШИБКА: не найден openssl — проверка подписи невозможна, установка прервана (см. docs/faq/BOOTSTRAP_SECURITY.md)." >&2
+        exit 1
+    }
+    tmp="$(mktemp /tmp/chimera-bootstrap.XXXXXXXX)"
+    sig="${tmp}.sig"
+    pub="${tmp}.pub"
+    trap 'rm -f "$tmp" "$sig" "$pub"' EXIT
+    trap 'rm -f "$tmp" "$sig" "$pub"; exit 130' INT TERM HUP
+    printf '%s\n' "$CHIMERA_PUBKEY" > "$pub"
+    chmod 600 "$tmp" "$sig" "$pub" 2>/dev/null || true
+    openssl pkey -pubin -in "$pub" -noout >/dev/null 2>&1 || {
+        echo "ОШИБКА: установленный openssl не поддерживает Ed25519 (требуется OpenSSL >= 1.1.1) — установка прервана." >&2
+        exit 1
+    }
+
+    n_dl=0; n_bad=0; reasons=""
+    for url in "${CHIMERA_MIRRORS[@]}"; do
+        rm -f "$tmp" "$sig"
+        if ! curl -fsSL --connect-timeout 10 --max-time 60 "$url" -o "$tmp" 2>/dev/null; then
+            n_dl=$((n_dl+1)); reasons="${reasons}
+  - недоступно (сеть/HTTP): ${url}"
+            continue
+        fi
+        size="$(wc -c < "$tmp")"
+        if [ "$size" -eq 0 ] || [ "$size" -gt "$MAX_SIZE" ]; then
+            n_bad=$((n_bad+1)); reasons="${reasons}
+  - подозрительный размер файла (${size} байт): ${url}"
+            continue
+        fi
+        if ! curl -fsSL --connect-timeout 10 --max-time 30 "${url}.sig" -o "$sig" 2>/dev/null; then
+            n_bad=$((n_bad+1)); reasons="${reasons}
+  - не удалось скачать подпись: ${url}.sig"
+            continue
+        fi
+        if [ "$(wc -c < "$sig")" -ne 64 ]; then
+            n_bad=$((n_bad+1)); reasons="${reasons}
+  - повреждённая подпись (не 64 байта): ${url}"
+            continue
+        fi
+        if openssl pkeyutl -verify -pubin -inkey "$pub" -rawin -in "$tmp" -sigfile "$sig" >/dev/null 2>&1; then
+            rc=0
+            bash "$tmp" "$@" || rc=$?
+            exit "$rc"
+        fi
+        n_bad=$((n_bad+1)); reasons="${reasons}
+  - ПОДПИСЬ НЕ ПРОШЛА: ${url}"
+    done
+    if [ "$n_dl" -eq "${#CHIMERA_MIRRORS[@]}" ]; then
+        echo "ОШИБКА: не удалось скачать bootstrap ни с одного зеркала (forgejo/gitlab/github). Проверьте сеть и повторите." >&2
+    else
+        echo "ОШИБКА: проверенный bootstrap получить не удалось — исполнение запрещено (скачанные файлы не прошли проверку подлинности)." >&2
+    fi
+    echo "Причины:${reasons}" >&2
+    exit 1
+)
+chimera_install "$@"
+_chimera_install_rc=$?
+unset -f chimera_install 2>/dev/null || true
+# Код возврата блока = коду возврата bootstrap (paste-safe: без exit из шелла пользователя)
+( exit "$_chimera_install_rc" )
+# <<< CHIMERA SECURE INSTALL
 ```
 
-**Forgejo** (основной репозиторий, ветка `main`):
+> **Как это работает:** команда скачивает `bootstrap.sh` и его Ed25519-подпись (`bootstrap.sh.sig`) с первого доступного зеркала **во временный файл**, проверяет подпись закреплённым в команде публичным ключом через `openssl` и только после успешной проверки запускает скрипт (с теми же аргументами и кодом возврата). Зеркало с изменённым/повреждённым файлом или неверной подписью пропускается — каждое проверяется независимо. Если ни одно зеркало не прошло проверку — установка завершается с ошибкой, ничего не исполняется (fail-closed). Модель доверия, ротация ключей и действия при компрометации — в [docs/faq/BOOTSTRAP_SECURITY.md](docs/faq/BOOTSTRAP_SECURITY.md). Требования: `bash`, `curl`, `openssl >= 1.1.1` (Ubuntu 20.04+/Debian 11+ — уже есть).
+
+**Ручная установка (wget, без вставки блока)** — скачать, проверить подпись, запустить:
 
 ```bash
-bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh)
+wget -O /tmp/bootstrap.sh https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh
+wget -O /tmp/bootstrap.sh.sig https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh.sig
+# Публичный ключ возьмите из README (блок выше) или docs/faq/BOOTSTRAP_SECURITY.md — НЕ с зеркала!
+printf '%s\n' '-----BEGIN PUBLIC KEY-----' 'MCowBQYDK2VwAyEA+6KSAskfo+LBzW/io8q376wAULspfGTik674H1o8Gu4=' '-----END PUBLIC KEY-----' > /tmp/bootstrap.pub
+openssl pkeyutl -verify -pubin -inkey /tmp/bootstrap.pub -rawin -in /tmp/bootstrap.sh -sigfile /tmp/bootstrap.sh.sig && bash /tmp/bootstrap.sh
 ```
 
-Или с `wget`:
+**Своё зеркало репозитория** (self-hosted git) — источник загрузки самого репозитория задаётся переменной `CHIMERA_MIRROR` для bootstrap (не для команды установки):
 
 ```bash
-wget -O bootstrap.sh https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh
-chmod +x bootstrap.sh
-bash bootstrap.sh
+export CHIMERA_MIRROR=https://git.<mirror-domain>/owner/chimera.git   # или ssh://…
+# затем — тот же блок безопасной установки из раздела выше
 ```
 
-**GitLab** (зеркало, ветка `chimera-v5`):
-
-```bash
-bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
-```
-
-**GitHub** (зеркало, ветка `main`):
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
-```
-
-**Своё зеркало** (self-hosted git):
-
-```bash
-CHIMERA_MIRROR=https://git.<mirror-domain>/owner/chimera.git bash <(curl -fsSL <bootstrap-url>)
-```
+**Зеркала:** основной репозиторий — само-хостед Forgejo (ветка `main`); GitLab (ветка `chimera-v5`) и GitHub (ветка `main`) — зеркала с автосинком: коммит в Forgejo автоматически разливается на все хостинги, поэтому `bootstrap.sh` и `bootstrap.sh.sig` на всех зеркалах всегда из одного коммита. Команда установки сама перебирает зеркала — отдельные команды для каждого хостинга не нужны и не используются (исполнение непроверенного потока запрещено).
 
 > **Note:** bootstrap — мульти-источник: при сбое основного источника автоматический fallback по цепочке. По умолчанию `forgejo→gitlab→github`; при `CHIMERA_MIRROR=gitlab` — `gitlab→forgejo→github`; при `CHIMERA_MIRROR=github` — `github→forgejo→gitlab`; своё зеркало — первым, затем `forgejo`, `gitlab` и `github`. Ветка выбирается автоматически (`main` для forgejo/github, `chimera-v5` для gitlab), переопределяется через `CHIMERA_BRANCH`. Кастомное зеркало — только git-clone (tar.gz-фолбэк и проверка `bootstrap.sh.sha256` пропускаются).
 >

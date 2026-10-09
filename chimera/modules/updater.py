@@ -379,7 +379,8 @@ def do_update_interactive() -> None:
     if repo is None:
         _box_row(f"  {RED}Установка без git (архив/bootstrap без .git){NC}")
         _box_row(f"  Обновление из TUI недоступно — используйте bootstrap.sh:")
-        _box_row(f"  {CYAN}bash <(curl -sL <bootstrap-url>){NC}")
+        _box_row(f"  {CYAN}README → «Быстрый старт»: блок безопасной установки{NC}")
+        _box_row(f"  {DIM}(проверка подписи Ed25519 перед запуском — docs/faq/BOOTSTRAP_SECURITY.md){NC}")
         _box_bottom()
         input(f"{BLUE}Нажмите Enter...{NC}")
         return
