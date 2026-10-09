@@ -3,7 +3,10 @@
 ## Быстрый старт (рекомендуется)
 
 ```bash
-bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
+bash <(curl -fsSL --connect-timeout 10 --max-time 60 https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh \
+    || curl -fsSL --connect-timeout 10 --max-time 60 https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh \
+    || curl -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh \
+    || echo 'echo "ОШИБКА: bootstrap.sh недоступен ни с одного зеркала (forgejo/gitlab/github) — проверьте сеть" >&2; exit 1')
 ```
 
 Bootstrap скрипт автоматически:
@@ -18,7 +21,8 @@ Bootstrap скрипт автоматически:
 
 ```bash
 # 1. Клонировать репозиторий
-git clone -b chimera-v5 https://gitlab.com/netwalker071778/chimera-project.git /opt/chimera
+git clone -b main https://git.chimeraprodvpn.online/inferno1978/chimera.git /opt/chimera
+# или с зеркал: -b chimera-v5 https://gitlab.com/netwalker071778/chimera-project.git
 cd /opt/chimera
 
 # 2. Проверить целостность

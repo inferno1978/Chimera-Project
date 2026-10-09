@@ -1,8 +1,8 @@
 # Chimera Project 
 
-[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](https://gitlab.com/netwalker071778/chimera-project)
+[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](https://git.chimeraprodvpn.online/inferno1978/chimera)
 [![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://gitlab.com/netwalker071778/chimera-project/-/blob/chimera-v5/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://git.chimeraprodvpn.online/inferno1978/chimera/src/branch/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
 
 **Multi-Protocol Anti-DPI Installer** — мульти-протокольный установщик для обхода цензуры: VLESS REALITY/xHTTP, Hysteria2, AmneziaWG, TrustTunnel, MTProto, NaiveProxy, Mieru, FPTN, Slipgate и др. Полная автоматизация: от установки до мониторинга, с кластеризацией, балансировкой, веб-панелью и REST API.
@@ -30,18 +30,24 @@ bash <(curl -fsSL --connect-timeout 10 --max-time 60 https://git.chimeraprodvpn.
     || echo 'echo "ОШИБКА: bootstrap.sh недоступен ни с одного зеркала (forgejo/gitlab/github) — проверьте сеть" >&2; exit 1')
 ```
 
-**GitLab** (ветка `chimera-v5`):
+**Forgejo** (основной репозиторий, ветка `main`):
 
 ```bash
-bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
+bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh)
 ```
 
 Или с `wget`:
 
 ```bash
-wget -O bootstrap.sh https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh
+wget -O bootstrap.sh https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh
 chmod +x bootstrap.sh
 bash bootstrap.sh
+```
+
+**GitLab** (зеркало, ветка `chimera-v5`):
+
+```bash
+bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
 ```
 
 **GitHub** (зеркало, ветка `main`):
@@ -50,19 +56,13 @@ bash bootstrap.sh
 bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
 ```
 
-**Forgejo** (self-hosted зеркало, ветка `main`):
-
-```bash
-bash <(curl -fsSL https://git.chimeraprodvpn.online/inferno1978/chimera/raw/branch/main/bootstrap.sh)
-```
-
 **Своё зеркало** (self-hosted git):
 
 ```bash
 CHIMERA_MIRROR=https://git.<mirror-domain>/owner/chimera.git bash <(curl -fsSL <bootstrap-url>)
 ```
 
-> **Note:** bootstrap — мульти-источник: при сбое основного источника автоматический fallback по цепочке (`gitlab→forgejo→github`; при `CHIMERA_MIRROR=github` — `github→forgejo→gitlab`; при `CHIMERA_MIRROR=forgejo` — `forgejo→gitlab→github`; своё зеркало — первым, затем `gitlab`, `forgejo` и `github`). Ветка выбирается автоматически (`chimera-v5`/`main`), переопределяется через `CHIMERA_BRANCH`. Кастомное зеркало — только git-clone (tar.gz-фолбэк и проверка `bootstrap.sh.sha256` пропускаются).
+> **Note:** bootstrap — мульти-источник: при сбое основного источника автоматический fallback по цепочке. По умолчанию `forgejo→gitlab→github`; при `CHIMERA_MIRROR=gitlab` — `gitlab→forgejo→github`; при `CHIMERA_MIRROR=github` — `github→forgejo→gitlab`; своё зеркало — первым, затем `forgejo`, `gitlab` и `github`. Ветка выбирается автоматически (`main` для forgejo/github, `chimera-v5` для gitlab), переопределяется через `CHIMERA_BRANCH`. Кастомное зеркало — только git-clone (tar.gz-фолбэк и проверка `bootstrap.sh.sha256` пропускаются).
 >
 > **⚠️ Ветки `chimera-v5` (GitLab) и `main` (GitHub) — зеркала: коммитьте в основной репозиторий (Forgejo `main`), прямые пуши в зеркальные ветки перезаписываются автосинком.**
 
@@ -135,8 +135,9 @@ CHIMERA_MIRROR=https://git.<mirror-domain>/owner/chimera.git bash <(curl -fsSL <
 ## 🔧 Ручная установка
 
 ```bash
-git clone -b chimera-v5 https://gitlab.com/netwalker071778/chimera-project.git /opt/chimera
-# или с зеркал: -b main https://git.chimeraprodvpn.online/inferno1978/chimera.git
+git clone -b main https://git.chimeraprodvpn.online/inferno1978/chimera.git /opt/chimera
+# или с зеркал: -b chimera-v5 https://gitlab.com/netwalker071778/chimera-project.git
+#               -b main https://github.com/inferno1978/Chimera-Project.git
 cd /opt/chimera
 sudo python3 main.py
 ```
@@ -432,7 +433,7 @@ sudo python3 /opt/chimera/main.py --scheduled-backup
 
 ## ❓ Решение проблем
 
-Смотри [TROUBLESHOOTING.md](https://gitlab.com/netwalker071778/chimera-project/-/blob/chimera-v5/TROUBLESHOOTING.md).
+Смотри [TROUBLESHOOTING.md](https://git.chimeraprodvpn.online/inferno1978/chimera/src/branch/main/TROUBLESHOOTING.md).
 
 ## 📌 О проекте и формате общения
 
@@ -464,8 +465,8 @@ sudo python3 /opt/chimera/main.py --scheduled-backup
 
 ## 📄 Лицензия
 
-MIT — см. [LICENSE](https://gitlab.com/netwalker071778/chimera-project/-/blob/chimera-v5/LICENSE)
+MIT — см. [LICENSE](https://git.chimeraprodvpn.online/inferno1978/chimera/src/branch/main/LICENSE)
 
 ## ✍️ Автор
 
-inferno1978 · [GitLab](https://gitlab.com/netwalker071778/chimera-project) · [GitHub](https://github.com/inferno1978)
+inferno1978 · [Forgejo](https://git.chimeraprodvpn.online/inferno1978/chimera) · [GitLab](https://gitlab.com/netwalker071778/chimera-project) · [GitHub](https://github.com/inferno1978)

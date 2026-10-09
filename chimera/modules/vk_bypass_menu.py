@@ -285,7 +285,7 @@ def _show_faq_hint() -> None:
     _box_row(f"  {CYAN}less /opt/chimera/docs/faq/VK_BYPASS_FAQ.md{NC}")
     _box_row()
     _box_row(f"  {DIM}Или онлайн:{NC}")
-    _box_row(f"  {CYAN}https://gitlab.com/netwalker071778/chimera-project/-/blob/chimera-v5/docs/faq/VK_BYPASS_FAQ.md{NC}")
+    _box_row(f"  {CYAN}https://git.chimeraprodvpn.online/inferno1978/chimera/src/branch/main/docs/faq/VK_BYPASS_FAQ.md{NC}")
     _box_bot()
     print()
     input(f"  {DIM}Enter чтобы вернуться...{NC}")
