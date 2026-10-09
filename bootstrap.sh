@@ -3,6 +3,19 @@
 #  Chimera Project v5.0.0 — Bootstrap
 #  Multi-Protocol Anti-DPI Installer
 #  bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
+#
+#  Зеркало GitHub (ветка main):
+#  bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
+#
+#  ENV-переопределения источника загрузки репозитория:
+#    CHIMERA_MIRROR — gitlab (по умолчанию) | github | <URL кастомного зеркала>
+#        (напр. https://host.example/owner/repo.git или ssh://root@1.2.3.4/srv/git/chimera.git)
+#    CHIMERA_BRANCH — ветка; авто по умолчанию: chimera-v5 для gitlab и кастомного
+#        зеркала, main для github (при своём зеркале переопределяйте явно)
+#  При сбое источника (clone/pull/archive timeout или ошибка) — автоматический
+#  fallback на следующее зеркало: gitlab→github; github→gitlab; кастом→gitlab→github.
+#  Каждая попытка логируется. Кастомное зеркало — только git clone (tar.gz может
+#  не отдаваться), проверка bootstrap.sh.sha256 пропускается (WARN в логе).
 # ============================================================
 #
 # ─── INTEGRITY VERIFICATION ─────────────────────────────────────
@@ -15,6 +28,9 @@
 #
 # Или одной командой (без зависимости от имени файла):
 #   [ "$(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh | sha256sum | awk '{print $1}')" = "$(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh.sha256 | awk '{print $1}')" ] && echo "OK" || echo "MISMATCH"
+#
+# То же для GitHub-зеркала (ветка main) — замените оба URL на:
+#   https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh(.sha256)
 #
 # SHA256 генерируется автоматически при каждом коммите (pre-commit hook).
 # ────────────────────────────────────────────────────────────────
@@ -99,12 +115,90 @@ fi
 # [4] Загрузка / обновление
 echo -e "\n${BOLD}[4/5] Загрузка Chimera Project${NC}"
 INSTALL_DIR="/opt/chimera"
-REPO_URL="https://gitlab.com/netwalker071778/chimera-project"
-BRANCH="chimera-v5"
-# GitLab-style archive URL (НЕ GitHub-style /archive/refs/heads/,
-# который GitLab перенаправляет на /users/sign_in — требует логина).
-# GitLab-style: /-/archive/{branch}/{project}-{branch}.tar.gz — работает анонимно.
-ARCHIVE_URL="https://gitlab.com/netwalker071778/chimera-project/-/archive/chimera-v5/chimera-project-chimera-v5.tar.gz"
+
+# >>> CHIMERA MIRRORS (мульти-источник; проверяется tests/test_bootstrap_mirrors.py)
+# Переопределение через окружение (см. шапку файла):
+#   CHIMERA_MIRROR — gitlab (по умолчанию) | github | <URL кастомного зеркала>
+#   CHIMERA_BRANCH — ветка (авто: chimera-v5 для gitlab/кастома, main для github)
+# Цепочка fallback: gitlab→github; github→gitlab; кастом→gitlab→github.
+
+# Настройка переменных ОДНОГО источника: SRC_LABEL / BRANCH / REPO_URL /
+# ARCHIVE_URL / SHA256_URL (последние две пустые для кастомного зеркала).
+_src_setup() {
+    local src="$1"
+    if [[ "$src" == "gitlab" ]]; then
+        SRC_LABEL="gitlab"
+        BRANCH="${CHIMERA_BRANCH:-chimera-v5}"
+        REPO_URL="https://gitlab.com/netwalker071778/chimera-project"
+        # GitLab-style archive URL (НЕ GitHub-style /archive/refs/heads/,
+        # который GitLab перенаправляет на /users/sign_in — требует логина).
+        # GitLab-style: /-/archive/{branch}/{project}-{branch}.tar.gz — работает анонимно.
+        ARCHIVE_URL="https://gitlab.com/netwalker071778/chimera-project/-/archive/${BRANCH}/chimera-project-${BRANCH}.tar.gz"
+        SHA256_URL="https://gitlab.com/netwalker071778/chimera-project/-/raw/${BRANCH}/bootstrap.sh.sha256"
+    elif [[ "$src" == "github" ]]; then
+        SRC_LABEL="github"
+        BRANCH="${CHIMERA_BRANCH:-main}"
+        REPO_URL="https://github.com/inferno1978/Chimera-Project.git"
+        ARCHIVE_URL="https://github.com/inferno1978/Chimera-Project/archive/refs/heads/${BRANCH}.tar.gz"
+        SHA256_URL="https://raw.githubusercontent.com/inferno1978/Chimera-Project/${BRANCH}/bootstrap.sh.sha256"
+    else
+        # Кастомное зеркало: только git clone — tar.gz и bootstrap.sh.sha256
+        # кастомный хост может не отдавать (обе переменные пустые).
+        SRC_LABEL="custom"
+        BRANCH="${CHIMERA_BRANCH:-chimera-v5}"
+        REPO_URL="$src"
+        ARCHIVE_URL=""
+        SHA256_URL=""
+    fi
+}
+
+# Цепочка источников: основной (CHIMERA_MIRROR) первым, затем резервные зеркала.
+_build_source_chain() {
+    local mirror="${CHIMERA_MIRROR:-gitlab}"
+    if [[ -z "$mirror" ]]; then
+        mirror="gitlab"
+    fi
+    if [[ "$mirror" != "gitlab" && "$mirror" != "github" ]]; then
+        if [[ "$mirror" != *"://"* && "$mirror" != "git@"* ]]; then
+            warn "CHIMERA_MIRROR='${mirror}' не похож на URL зеркала — использую gitlab."
+            mirror="gitlab"
+        fi
+    fi
+    if [[ "$mirror" == "gitlab" ]]; then
+        SOURCE_CHAIN=("gitlab" "github")
+    elif [[ "$mirror" == "github" ]]; then
+        SOURCE_CHAIN=("github" "gitlab")
+    else
+        SOURCE_CHAIN=("$mirror" "gitlab" "github")
+    fi
+}
+
+# Проверка целостности: bootstrap.sh из распакованного репозитория сверяется с
+# опубликованным bootstrap.sh.sha256 источника (raw-URL). Кастомное зеркало
+# (SHA256_URL пуст) или недоступный файл чексуммы → WARN и пропуск (не блокируем).
+# Возврат: 0 = OK/пропущено; 1 = РАСХОЖДЕНИЕ (архив битый — пробуем следующее зеркало).
+_verify_bootstrap_integrity() {
+    local extracted="$1"
+    if [[ -z "${SHA256_URL:-}" ]]; then
+        warn "Кастомное зеркало: bootstrap.sh.sha256 не используется — проверка целостности пропущена."
+        return 0
+    fi
+    local _expected=""
+    _expected=$(curl -fsSL --connect-timeout 15 --retry 2 "${SHA256_URL}" 2>/dev/null | awk '{print $1}') || _expected=""
+    if [[ ! "$_expected" =~ ^[0-9a-f]{64}$ ]]; then
+        warn "Не удалось получить bootstrap.sh.sha256 (${SRC_LABEL}) — проверка целостности пропущена."
+        return 0
+    fi
+    local _actual=""
+    _actual=$(sha256sum "${extracted}/bootstrap.sh" 2>/dev/null | awk '{print $1}') || _actual=""
+    if [[ -n "$_actual" && "$_actual" == "$_expected" ]]; then
+        ok "Целостность проверена: bootstrap.sh = bootstrap.sh.sha256 (${SRC_LABEL})"
+        return 0
+    fi
+    warn "РАСХОЖДЕНИЕ целостности: bootstrap.sh из архива ≠ bootstrap.sh.sha256 источника (${SRC_LABEL})."
+    return 1
+}
+# <<< CHIMERA MIRRORS
 
 # Ищем существующую установку в стандартных системных путях.
 # ВАЖНО: домашние директории разработчиков НЕ проверяем — это личные пути,
@@ -159,7 +253,7 @@ _archive_update() {
 
     # --- Stage 1: Download ---
     if ! curl -fsSL --connect-timeout 30 --retry 3 -o "$_archive_tmp" "$archive_url" 2>/dev/null; then
-        warn "Не удалось скачать архив. Проверьте соединение с GitHub."
+        warn "Не удалось скачать архив (${SRC_LABEL}). Проверьте соединение."
         warn "Установка НЕ изменена. Попробуйте вручную:"
         warn "  cd ${install_dir} && git reset --hard origin/${BRANCH}"
         rm -f "$_archive_tmp"
@@ -202,6 +296,13 @@ _archive_update() {
         return 1
     fi
     ok "Staging проверен: main.py, chimera/__init__.py, chimera/_core.py — на месте"
+
+    # --- Stage 3.5: Integrity check (bootstrap.sh ↔ bootstrap.sh.sha256 источника) ---
+    if ! _verify_bootstrap_integrity "$_extracted"; then
+        warn "Установка НЕ изменена. Пробую следующее зеркало..."
+        rm -rf "$_staging" "$_archive_tmp"
+        return 1
+    fi
 
     # --- Stage 4: Backup current installation ---
     local _backup="${install_dir}.pre-chimera-backup"
@@ -252,72 +353,133 @@ _archive_update() {
 }
 
 # =============================================================================
-#  Основная логика обновления / установки
+#  Основная логика обновления / установки (мульти-источник, autofallback)
 # =============================================================================
-if [[ -d "${INSTALL_DIR}/.git" ]]; then
-    info "Обновление существующей git-установки..."
-    cd "$INSTALL_DIR"
-
-    # Пробуем обычный git pull. Если упал (divergent branches, нет сети и т.п.) —
-    # fallback на полный archive-tarball через _archive_update (atomic, с rollback).
-    if git pull --quiet origin "$BRANCH" 2>/dev/null; then
-        ok "Обновлено до последней версии (fast-forward)"
-    else
-        warn "git pull не удался (возможно divergent branches) — полное обновление через archive..."
+# Один источник (переменные уже настроены через _src_setup). Пробуем штатный
+# путь (git pull origin / git clone), при сбое — archive-tarball (если источник
+# его отдаёт). Возврат: 0 — успех; 1 — источник не сработал (пробуем следующее).
+_acquire_one() {
+    if [[ -d "${INSTALL_DIR}/.git" ]]; then
+        # Git-установка: сначала штатный git pull origin, затем прямой pull
+        # с зеркала, затем полный archive-tarball через _archive_update (atomic, с rollback).
+        info "Обновление существующей git-установки (${SRC_LABEL})..."
+        if git -C "$INSTALL_DIR" pull --quiet origin "$BRANCH" 2>/dev/null; then
+            ok "Обновлено до последней версии (fast-forward, origin)"
+            return 0
+        fi
+        info "git pull origin не удался — пробую напрямую ${REPO_URL} (${BRANCH})..."
+        if git -C "$INSTALL_DIR" pull --quiet "$REPO_URL" "$BRANCH" 2>/dev/null; then
+            ok "Обновлено напрямую с ${SRC_LABEL} (fast-forward)"
+            return 0
+        fi
+        warn "git pull (${SRC_LABEL}) не удался (возможно divergent branches) — полное обновление через archive..."
+        if [[ -z "$ARCHIVE_URL" ]]; then
+            warn "Кастомное зеркало (${SRC_LABEL}) не отдаёт tar.gz — archive-обновление недоступно."
+            return 1
+        fi
         # _archive_update может вернуть 1 (graceful failure) — не дадим set -e убить скрипт
         if ! _archive_update "$INSTALL_DIR" "${ARCHIVE_URL}"; then
-            warn "Обновление через archive не удалось. Установка НЕ изменена."
-            warn "Попробуйте вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
+            return 1
         fi
+        return 0
     fi
-else
+
     if [[ -d "$INSTALL_DIR" ]] && [[ -f "${INSTALL_DIR}/main.py" ]]; then
         # Установка без .git — обновляем через _archive_update (atomic, с rollback)
-        info "Установка без git обнаружена — полное обновление через archive..."
-        if ! _archive_update "$INSTALL_DIR" "${ARCHIVE_URL}"; then
-            warn "Обновление через archive не удалось. Установка НЕ изменена."
-            warn "Попробуйте вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
+        info "Установка без git обнаружена — полное обновление через archive (${SRC_LABEL})..."
+        if [[ -z "$ARCHIVE_URL" ]]; then
+            warn "Кастомное зеркало (${SRC_LABEL}) не отдаёт tar.gz — archive-обновление недоступно."
+            return 1
         fi
-    else
-        info "Клонирование репозитория..."
-        if ! git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
-            warn "git clone не удался — загружаю архив..."
-            mkdir -p "$INSTALL_DIR"
-            _ARCHIVE_URL="${ARCHIVE_URL}"
-            # Для свежей установки используем упрощённый путь (backup не нужен —
-            # INSTALL_DIR пустой, откатываться некуда). Но staging + verify — обязательно.
-            _CLONE_TMP="/tmp/chimera_install_$$.tar.gz"
-            _CLONE_STAGING="/tmp/chimera_clone_staging_$$"
-            rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
-            if curl -fsSL --connect-timeout 30 --retry 3 -o "$_CLONE_TMP" "$_ARCHIVE_URL" 2>/dev/null; then
-                mkdir -p "$_CLONE_STAGING"
-                if tar -xzf "$_CLONE_TMP" -C "$_CLONE_STAGING" 2>/dev/null; then
-                    _extracted=""
-                    for _d in "${_CLONE_STAGING}/chimera-project-${BRANCH}" "${_CLONE_STAGING}/Chimera-Project-${BRANCH}" "${_CLONE_STAGING}/VLESS-Ultimate-Installer-${BRANCH}"; do
-                        if [[ -d "$_d" ]]; then _extracted="$_d"; break; fi
-                    done
-                    if [[ -n "$_extracted" ]] && [[ -f "${_extracted}/main.py" ]]; then
-                        cp -r "${_extracted}/." "$INSTALL_DIR/"
-                        ok "Загружено в ${INSTALL_DIR}"
-                    else
-                        err "Архив скачан, но директория или main.py не найдены."
-                        rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
-                        exit 1
-                    fi
-                else
-                    err "Не удалось распаковать архив."
+        if ! _archive_update "$INSTALL_DIR" "${ARCHIVE_URL}"; then
+            return 1
+        fi
+        return 0
+    fi
+
+    # Свежая установка: git clone → tar.gz fallback (кастомное зеркало — только clone)
+    info "Клонирование репозитория (${SRC_LABEL})..."
+    if git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" 2>/dev/null; then
+        ok "Загружено в ${INSTALL_DIR} (${SRC_LABEL}, git clone)"
+        return 0
+    fi
+    warn "git clone (${SRC_LABEL}) не удался — загружаю архив..."
+    if [[ -z "$ARCHIVE_URL" ]]; then
+        warn "Кастомное зеркало (${SRC_LABEL}) может не отдавать tar.gz — только git clone."
+        return 1
+    fi
+    mkdir -p "$INSTALL_DIR"
+    _ARCHIVE_URL="${ARCHIVE_URL}"
+    # Для свежей установки используем упрощённый путь (backup не нужен —
+    # INSTALL_DIR пустой, откатываться некуда). Но staging + verify — обязательно.
+    _CLONE_TMP="/tmp/chimera_install_$$.tar.gz"
+    _CLONE_STAGING="/tmp/chimera_clone_staging_$$"
+    rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
+    if curl -fsSL --connect-timeout 30 --retry 3 -o "$_CLONE_TMP" "$_ARCHIVE_URL" 2>/dev/null; then
+        mkdir -p "$_CLONE_STAGING"
+        if tar -xzf "$_CLONE_TMP" -C "$_CLONE_STAGING" 2>/dev/null; then
+            _extracted=""
+            for _d in "${_CLONE_STAGING}/chimera-project-${BRANCH}" "${_CLONE_STAGING}/Chimera-Project-${BRANCH}" "${_CLONE_STAGING}/VLESS-Ultimate-Installer-${BRANCH}"; do
+                if [[ -d "$_d" ]]; then _extracted="$_d"; break; fi
+            done
+            if [[ -n "$_extracted" ]] && [[ -f "${_extracted}/main.py" ]]; then
+                # Integrity: bootstrap.sh из архива ↔ bootstrap.sh.sha256 источника
+                if ! _verify_bootstrap_integrity "$_extracted"; then
+                    warn "Архив (${SRC_LABEL}) не прошёл проверку целостности — пробую следующее зеркало..."
                     rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
-                    exit 1
+                    return 1
                 fi
-                rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
+                cp -r "${_extracted}/." "$INSTALL_DIR/"
+                ok "Загружено в ${INSTALL_DIR} (${SRC_LABEL}, archive)"
             else
-                err "Не удалось загрузить архив. Проверьте соединение."
-                rm -f "$_CLONE_TMP"
-                exit 1
+                warn "Архив скачан (${SRC_LABEL}), но директория или main.py не найдены."
+                rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
+                return 1
             fi
         else
-            ok "Загружено в ${INSTALL_DIR}"
+            warn "Не удалось распаковать архив (${SRC_LABEL})."
+            rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
+            return 1
         fi
+        rm -rf "$_CLONE_STAGING" "$_CLONE_TMP"
+        return 0
+    else
+        warn "Не удалось загрузить архив (${SRC_LABEL}). Проверьте соединение."
+        rm -f "$_CLONE_TMP"
+        return 1
+    fi
+}
+
+# Основной цикл: источники по цепочке, каждый сбой (timeout/ошибка/битый архив)
+# → следующее зеркало. Каждая попытка логируется.
+_build_source_chain
+_ACQUIRE_OK=0
+_src_total=${#SOURCE_CHAIN[@]}
+_src_i=0
+for _src in "${SOURCE_CHAIN[@]}"; do
+    _src_i=$((_src_i + 1))
+    _src_setup "$_src"
+    info "Источник ${_src_i}/${_src_total}: ${SRC_LABEL} — ${REPO_URL} (ветка ${BRANCH})"
+    if _acquire_one; then
+        _ACQUIRE_OK=1
+        break
+    fi
+    if [[ "$_src_i" -lt "$_src_total" ]]; then
+        warn "Источник «${SRC_LABEL}» не сработал — перехожу к следующему зеркалу..."
+    fi
+done
+
+if [[ "$_ACQUIRE_OK" != "1" ]]; then
+    if [[ -f "${INSTALL_DIR}/main.py" ]]; then
+        # Существующая установка не обновлена, но работоспособна — запускаем как есть
+        warn "Все источники не сработали — обновление НЕ выполнено, установка НЕ изменена."
+        warn "Запускаю установщик с текущей (существующей) версией."
+        warn "Попробуйте позже вручную: cd ${INSTALL_DIR} && git reset --hard origin/${BRANCH}"
+    else
+        err "Не удалось загрузить Chimera Project ни с одного источника (gitlab/github)."
+        err "Проверьте соединение или укажите зеркало:"
+        err "  CHIMERA_MIRROR=<mirror-url> bash bootstrap.sh"
+        exit 1
     fi
 fi
 

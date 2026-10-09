@@ -21,6 +21,8 @@
 
 ## ⚡ Быстрый старт
 
+**GitLab** (основной источник, ветка `chimera-v5`):
+
 ```bash
 bash <(curl -fsSL https://gitlab.com/netwalker071778/chimera-project/-/raw/chimera-v5/bootstrap.sh)
 ```
@@ -33,7 +35,19 @@ chmod +x bootstrap.sh
 bash bootstrap.sh
 ```
 
-> **Note:** Репозиторий также доступен на GitHub: `github.com/inferno1978/Chimera-Project` (ветка `main`, временно недоступен из-за spam-flag). GitLab (ветка `chimera-v5`) — основной источник.
+**Зеркало на GitHub** (ветка `main`):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/inferno1978/Chimera-Project/main/bootstrap.sh)
+```
+
+**Своё зеркало** (self-hosted git):
+
+```bash
+CHIMERA_MIRROR=https://git.<mirror-domain>/owner/chimera.git bash <(curl -fsSL <bootstrap-url>)
+```
+
+> **Note:** bootstrap — мульти-источник: при сбое основного источника автоматический fallback на зеркала (`gitlab→github`; при `CHIMERA_MIRROR=github` — наоборот; своё зеркало — первым, затем `gitlab` и `github`). Ветка выбирается автоматически (`chimera-v5`/`main`), переопределяется через `CHIMERA_BRANCH`. Своё зеркало — только git-clone (tar.gz-фолбэк и проверка `bootstrap.sh.sha256` пропускаются).
 >
 > **⚠️ GitLab branch `chimera-v5` is a mirror only — never commit directly to it, changes will be force-overwritten on next push to `main` on GitHub.**
 
