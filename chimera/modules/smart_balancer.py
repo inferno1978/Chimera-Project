@@ -247,11 +247,57 @@ def _probe_active_connections(host: str, port: int) -> int:
         return 0
 
 
-def _probe_node(host: str, port: int) -> dict:
+def _sb_fullpath_direct(nd: dict) -> Optional[dict]:
+    """Полный REALITY-зонд прямой ноды с ключами → метрики _probe_node-формы.
+
+    Обёртка над chain_relay.check_node_full_path (валидиный REALITY-
+    хендшейк + HTTP-проба). Возвращает None, если зонд неприменим
+    (нет ключей / нет xray / сбой механизма) — вызывающий код честно
+    падает на TCP-зонд. ok=False зонда — НЕ None: это честный
+    «нода не работает» (alive=False).
+
+    Зачем: голый TCP-connect к REALITY-порту пишется на chimera-нодах
+    в error.log как invalid connection → fail2ban/DPI-detector цели
+    банят мониторящий IP (живой кейс окт. 2026 №3: один раунд зонда
+    балансера = 3 коннекта × вес 3 = score 9 → DPI-бан входной ноды
+    на собственной exit-ноде, «DOWN» при живом трафике).
+    """
+    try:
+        from chimera.modules import chain_relay
+        if not chain_relay.node_has_reality_creds(nd):
+            return None
+        r = chain_relay.check_node_full_path(nd, deep_diag=False)
+    except Exception:
+        return None
+    if r.get("infra"):
+        # сбой МЕХАНИЗМА зонда (нет xray-бинарня и т.п.) — о ноде ничего
+        # не говорит: вызывающий код честно падает на TCP-зонд
+        return None
+    if not r.get("ok"):
+        return {"alive": False, "lat_ms": None, "bw_ms": None, "load": None}
+    ms = float(r.get("ms", 0.0) or 0.0)
+    load = _probe_active_connections(str(nd.get("host", "")),
+                                     int(nd.get("port", 443) or 443))
+    # bw ≈ lat × 1.5 — та же эвристика, что у TCP-зонда (avg × 1.5)
+    return {"alive": True, "lat_ms": round(ms, 1),
+            "bw_ms": round(ms * 1.5, 1), "load": load}
+
+
+def _probe_node(host: str, port: int, nd: dict = None) -> dict:
     """
     Полный зонд одной ноды.
+
+    nd с клиентскими REALITY-ключами (chain_nodes / relay_hops) →
+    ПОЛНЫЙ зонд (_sb_fullpath_direct: валидный REALITY-хендшейк +
+    HTTP-проба) — голый TCP-connect банится анти-DPI защитой
+    chimera-нод-целей (кейс окт. 2026 №3). Без nd/ключей — TCP-зонд
+    (латентность + bandwidth-прокси двумя замерами + load через ss).
     Возвращает dict с метриками или {"alive": False}.
     """
+    if nd is not None:
+        fp = _sb_fullpath_direct(nd)
+        if fp is not None:
+            return fp
     lat_ms = _probe_tcp_latency(host, port)
     if lat_ms == float("inf"):
         return {"alive": False, "lat_ms": None, "bw_ms": None, "load": None}
@@ -606,7 +652,7 @@ def _sb_hop_probe_metrics(tag: str, hops: list,
     h = next((x for x in (hops or [])
               if str(x.get("tag") or "") == tag), None)
     if h:
-        p = _probe_node(h.get("host", ""), int(h.get("port", 443) or 443))
+        p = _probe_node(h.get("host", ""), int(h.get("port", 443) or 443), nd=h)
         if p.get("alive"):
             return p
     return {"alive": True, "lat_ms": fallback_ms,
@@ -671,11 +717,11 @@ def _sb_try_relay_failover(node: dict, hops: list,
         return _sb_hop_probe_metrics(
             via, hops, float(fp.get("ms") or 0.0))
 
-    # 2) резервные хопи: TCP-живые, по возрастанию латентности
+    # 2) резервные хопи: живые (полный зонд для REALITY), по возрастанию латентности
     scored: list[tuple[float, dict]] = []
     for h in _sb_failover_candidates(node, hops):
         p = _probe_node(h.get("host", ""),
-                        int(h.get("port", 443) or 443))
+                        int(h.get("port", 443) or 443), nd=h)
         if p.get("alive"):
             scored.append((float(p.get("lat_ms") or 1e9), h))
     scored.sort(key=lambda x: x[0])
@@ -816,11 +862,18 @@ def _smart_balancer_run_once() -> None:
         # Собственно зонд. Via-aware: релейная нода (via=<tag>) зондируется
         # через свой хоп — прямой путь до неё может быть транзитно дропнут
         # (см. _sb_relay_probe_target); метрика пути = первый сегмент.
+        # REALITY-цели с ключами зондируются ПОЛНЫМ зондом (валидный
+        # хендшейк): голый TCP банится анти-DPI защитой chimera-целей
+        # (кейс окт. 2026 №3 — один раунд = DPI-бан).
         p_host, p_port, p_via = _sb_relay_probe_target(node, hops)
         if p_via:
             _sb_log(f"INFO: нода {key} зондируется через релей {p_via} "
                     f"({p_host}:{p_port}) — прямой путь может быть дропнут")
-        result = _probe_node(p_host, p_port)
+            _hop_nd = next((h for h in (hops or [])
+                            if str(h.get("tag") or "") == p_via), None)
+            result = _probe_node(p_host, p_port, nd=_hop_nd)
+        else:
+            result = _probe_node(p_host, p_port, nd=node)
 
         if not result["alive"]:
             meta["fails"] = meta.get("fails", 0) + 1
@@ -1384,7 +1437,14 @@ def do_manage_smart_balancer() -> None:
                 _via_note = f"  {DIM}через релей {_pv}{NC}" if _pv else ""
                 _box_row(f"  Зондирую {CYAN}{h}:{p}{NC}{_via_note}...")  # type: ignore[name-defined]
 
-                result = _probe_node(_ph, _pp)
+                # REALITY-цель с ключами — полный зонд (анти-DPI цели
+                # банит голый TCP: кейс окт. 2026 №3)
+                if _pv:
+                    _hop_nd = next((x for x in (hops or [])
+                                    if str(x.get("tag") or "") == _pv), None)
+                    result = _probe_node(_ph, _pp, nd=_hop_nd)
+                else:
+                    result = _probe_node(_ph, _pp, nd=nd)
                 if result["alive"]:
                     lat  = result["lat_ms"]
                     bw   = result["bw_ms"] or lat * 1.5

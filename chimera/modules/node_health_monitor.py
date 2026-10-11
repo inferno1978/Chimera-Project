@@ -217,7 +217,37 @@ def check_nodes_once() -> list[dict]:
             except Exception:
                 up, ms = _tcp_ping(host, port)
         else:
-            up, ms = _tcp_ping(host, port)
+            # Прямая нода (без via). Голый TCP-ping к REALITY-порту пишется
+            # на ноде-цели в error.log как «REALITY: processed invalid
+            # connection ... failed to read client hello» → fail2ban-джейл
+            # xray-reality и DPI-detector ЦЕЛИ банят мониторящий IP:
+            # HM собственной рукой роняет ноду в DOWN при живом трафике
+            # (живой кейс окт. 2026 №3: u1nl забанила entry-ноду за зонды
+            # HM/балансера/диагностики). Нода с клиентскими REALITY-ключами
+            # (state.json chain_nodes) проверяется ПОЛНЫМ зондом — валидный
+            # REALITY-хендшейк легитимен, invalid-логов не пишет и проверяет
+            # реальную работоспособность, а не только TCP-порт. TCP-ping —
+            # fallback для нод без ключей и при сбое механизма зонда.
+            up = None
+            try:
+                from chimera.modules.chain_relay import (
+                    check_node_full_path, node_has_reality_creds)
+                if node_has_reality_creds(nd):
+                    _r = check_node_full_path(nd, deep_diag=False)
+                    if _r.get("infra"):
+                        # сбой МЕХАНИЗМА зонда (нет xray-бинарня и т.п.) —
+                        # о ноде ничего не говорит: честный TCP-fallback
+                        _log(f"[{host}:{port}] full-path зонд недоступен "
+                             f"({_r.get('reason', '')}) — TCP-fallback")
+                    else:
+                        up, ms = bool(_r.get("ok")), float(_r.get("ms", 0.0) or 0.0)
+                        _log(f"[{host}:{port}] full-path(прямой) "
+                             f"{'up' if up else 'DOWN'}"
+                             f"{' ' + _r.get('detail', '')[:120] if _r.get('detail') else ''}")
+            except Exception:
+                up = None
+            if up is None:
+                up, ms = _tcp_ping(host, port)
         key    = f"{host}:{port}"
 
         prev_up      = prev_state.get(key, {}).get("up", None)

@@ -532,7 +532,7 @@ class TestRunOnceObservationAndVia(unittest.TestCase):
             self._cfg.write_text(cfg_text)
         probe_calls = []
 
-        def _fake_probe(host, port):
+        def _fake_probe(host, port, nd=None):
             probe_calls.append((host, port))
             return self._alive()
 
@@ -598,7 +598,7 @@ class TestRunOnceObservationAndVia(unittest.TestCase):
         }))
         probe_calls = []
 
-        def _fake_probe(host, port):
+        def _fake_probe(host, port, nd=None):
             probe_calls.append((host, port))
             return self._alive()
 
@@ -703,7 +703,7 @@ class TestRelayFailover(unittest.TestCase):
          "strategy": {"type": "roundRobin"}},
     ]}})
 
-    def _probe(self, host, port):
+    def _probe(self, host, port, nd=None):
         """hop-a мёртв; все остальные цели живы."""
         if host == "hop-a.example":
             return {"alive": False, "lat_ms": None, "bw_ms": None,
@@ -737,7 +737,7 @@ class TestRelayFailover(unittest.TestCase):
         self._cfg.write_text(self._CFG_BALANCER)
         probe_calls = []
 
-        def _fake_probe(host, port):
+        def _fake_probe(host, port, nd=None):
             probe_calls.append((host, port))
             return self._probe(host, port)
 
@@ -779,7 +779,7 @@ class TestRelayFailover(unittest.TestCase):
     def test_failover_prefers_fastest_candidate(self):
         """Кандидаты сортируются по TCP-латентности: hop-b быстрее —
         переключаемся на него."""
-        def _probe_fast_de(host, port):
+        def _probe_fast_de(host, port, nd=None):
             if host == "hop-a.example":
                 return {"alive": False, "lat_ms": None, "bw_ms": None,
                         "load": None}
@@ -874,7 +874,7 @@ class TestRelayFailover(unittest.TestCase):
         }))
         self._cfg.write_text(self._CFG_BALANCER)
 
-        def _dead_probe(host, port):
+        def _dead_probe(host, port, nd=None):
             return {"alive": False, "lat_ms": None, "bw_ms": None,
                     "load": None}
 
@@ -951,6 +951,106 @@ class TestSbSwitchNodeVia(unittest.TestCase):
         self.assertFalse(ok)
         m_save.assert_not_called()
         m_rebuild.assert_not_called()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  _sb_fullpath_direct — полный REALITY-зонд прямой ноды (анти-DPI, кейс
+#  окт. 2026 №3: голый TCP-зонд балансера банится на chimera-нодах-целях).
+# ══════════════════════════════════════════════════════════════════════════════
+class TestSbFullpathDirect(unittest.TestCase):
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self.nd = {
+            "host": "nl.example.com", "port": 443, "proto": "reality",
+            "uuid": "00000000-0000-0000-0000-000000000001",
+            "pubkey": "PUBKEY-NL", "shortid": "deadbeef",
+            "sni": "nl.example.com", "fp": "firefox",
+            "flow": "xtls-rprx-vision",
+        }
+
+    def _patch_relay(self, has_creds=True, result=None):
+        """Мок chain_relay: node_has_reality_creds + check_node_full_path."""
+        import chimera.modules.chain_relay as cr
+        calls = {"creds": [], "fp": []}
+
+        def fake_creds(nd):
+            calls["creds"].append(nd.get("host"))
+            return has_creds
+
+        def fake_fp(nd, **kw):
+            calls["fp"].append(nd.get("host"))
+            return result
+
+        return patch.object(cr, "node_has_reality_creds", side_effect=fake_creds), \
+               patch.object(cr, "check_node_full_path", side_effect=fake_fp), \
+               calls
+
+    def test_no_creds_returns_none(self):
+        import chimera.modules.smart_balancer as sbm
+        p_creds, p_fp, calls = self._patch_relay(
+            has_creds=False, result={"ok": True, "ms": 5.0, "infra": False})
+        with p_creds, p_fp:
+            self.assertIsNone(sbm._sb_fullpath_direct(self.nd))
+        self.assertEqual(calls["creds"], ["nl.example.com"])
+        self.assertEqual(calls["fp"], [])       # зонд не запускался
+
+    def test_ok_returns_metrics(self):
+        import chimera.modules.smart_balancer as sbm
+        p_creds, p_fp, _ = self._patch_relay(
+            has_creds=True, result={"ok": True, "ms": 321.0, "infra": False})
+        with p_creds, p_fp, \
+             patch.object(sbm, "_probe_active_connections", return_value=4):
+            r = sbm._sb_fullpath_direct(self.nd)
+        self.assertTrue(r["alive"])
+        self.assertEqual(r["lat_ms"], 321.0)
+        self.assertEqual(r["bw_ms"], 481.5)     # ms * 1.5
+        self.assertEqual(r["load"], 4)
+
+    def test_dead_node_honest_fail(self):
+        import chimera.modules.smart_balancer as sbm
+        p_creds, p_fp, _ = self._patch_relay(
+            has_creds=True,
+            result={"ok": False, "ms": 0.0, "reason": "нода не отвечает",
+                    "infra": False})
+        with p_creds, p_fp:
+            r = sbm._sb_fullpath_direct(self.nd)
+        self.assertIsNotNone(r)
+        self.assertFalse(r["alive"])            # честный вердикт, не None
+
+    def test_infra_error_returns_none_for_tcp_fallback(self):
+        import chimera.modules.smart_balancer as sbm
+        p_creds, p_fp, _ = self._patch_relay(
+            has_creds=True,
+            result={"ok": False, "ms": 0.0, "reason": "нет xray",
+                    "infra": True})
+        with p_creds, p_fp:
+            self.assertIsNone(sbm._sb_fullpath_direct(self.nd))
+
+    def test_probe_node_uses_fullpath_with_nd(self):
+        """_probe_node(nd=...) с ключами идёт в полный зонд, не в TCP."""
+        import chimera.modules.smart_balancer as sbm
+        p_creds, p_fp, _ = self._patch_relay(
+            has_creds=True, result={"ok": True, "ms": 100.0, "infra": False})
+        with p_creds, p_fp, \
+             patch.object(sbm, "_probe_active_connections", return_value=0), \
+             patch.object(sbm, "_probe_tcp_latency",
+                          side_effect=AssertionError("TCP не должен зваться")):
+            r = sbm._probe_node("nl.example.com", 443, nd=self.nd)
+        self.assertTrue(r["alive"])
+        self.assertEqual(r["lat_ms"], 100.0)
+
+    def test_probe_node_tcp_fallback_without_nd(self):
+        """Без nd — классический TCP-зонд (латентность ×2 + load)."""
+        import chimera.modules.smart_balancer as sbm
+        with patch.object(sbm, "_probe_tcp_latency", return_value=52.0), \
+             patch.object(sbm, "_probe_bandwidth_ttfb", return_value=78.0), \
+             patch.object(sbm, "_probe_active_connections", return_value=1):
+            r = sbm._probe_node("nl.example.com", 443)
+        self.assertTrue(r["alive"])
+        self.assertEqual(r["lat_ms"], 52.0)
+        self.assertEqual(r["bw_ms"], 78.0)
+        self.assertEqual(r["load"], 1)
 
 
 if __name__ == "__main__":

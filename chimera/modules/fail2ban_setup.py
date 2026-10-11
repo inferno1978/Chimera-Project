@@ -68,6 +68,28 @@ def setup_fail2ban() -> None:
     FAIL2BAN_CONF.parent.mkdir(parents=True, exist_ok=True)
     Path("/etc/fail2ban/filter.d").mkdir(parents=True, exist_ok=True)
 
+    # ignoreip для xray-reality: собственные IP сервера + IP нод каскада +
+    # whitelist из autoban.json (единая БД, её же читают dpi_detector и
+    # autoban). Без этого fail2ban банит легитимных соседей по инфраструктуре:
+    # живой кейс окт. 2026 №3 — мониторящие зонды (Health Monitor /
+    # SmartBalancer / диагностика) входной ноды пишут на chimera-exit-ноде
+    # «REALITY: processed invalid connection», fail2ban банит entry-IP →
+    # все проверки падают «Connection refused» при живом трафике.
+    _ignore = ["127.0.0.1/8", "::1"]
+    try:
+        _ab = core._autoban_load()
+        for _ip in (_ab.get("whitelist") or []):
+            _ip = str(_ip).strip()
+            if _ip and _ip not in _ignore:
+                _ignore.append(_ip)
+        for _ip in (core._autoban_get_chain_ips() or []):
+            _ip = str(_ip).strip()
+            if _ip and _ip not in _ignore:
+                _ignore.append(_ip)
+    except Exception:
+        pass
+    _ignoreip_line = " ".join(_ignore)
+
     FAIL2BAN_CONF.write_text(textwrap.dedent(f"""\
         [xray-reality]
         enabled = true
@@ -78,6 +100,7 @@ def setup_fail2ban() -> None:
         maxretry = 5
         bantime = 3600
         findtime = 600
+        ignoreip = {_ignoreip_line}
 
         [sshd]
         enabled = true

@@ -3069,12 +3069,13 @@ def do_manage_nodes() -> None:
         elif ch == "t" and CHAIN_NODES:
             print()
             _box_top("Пинг Exit Node")
-            _box_row(f"  {DIM}TCP-латентность до каждой ноды:{NC}")
+            _box_row(f"  {DIM}Латентность нод: REALITY — полный зонд (хендшейк+проба),")
+            _box_row(f"  прочие — TCP. Полный зонд не палит нас анти-DPI защитой{NC}")
             _box_sep()
             for i, nd in enumerate(CHAIN_NODES):
                 host, port = nd["host"], nd["port"]
                 _box_row(f"  {CYAN}[{i+1}]{NC} {host}:{port}  →  измеряю...")
-                lat = _speed_test_node_latency(host, port)
+                lat = _speed_test_node_latency(host, port, nd)
                 flag_str = ""
                 try:
                     # Используем _resolve_host_fresh (DoH + fallback) вместо
@@ -3861,17 +3862,47 @@ def _resolve_host_fresh(host: str, timeout: int = 3) -> Optional[str]:
         return None
 
 
-def _speed_test_node_latency(host: str, port: int) -> str:
+def _speed_test_node_latency(host: str, port: int, nd: dict = None) -> str:
     """
-    Измеряет TCP-латентность до хоста через прямое подключение (socket).
-    Резолв домена выполняется через _resolve_host_fresh (DoH + fallback),
-    чтобы не ловить устаревший IP из локального DNS-кэша.
+    Латентность до exit-ноды.
+
+    REALITY-нода с клиентскими ключами (nd из state.json chain_nodes)
+    зондируется ПОЛНЫМ зондом (check_node_full_path: валидный REALITY-
+    хендшейк + HTTP-проба через временный xray-клиент). Голый TCP-connect
+    к REALITY-порту пишется на chimera-нодах-целях в error.log как
+    «REALITY: processed invalid connection ... failed to read client
+    hello» → fail2ban xray-reality + DPI-detector цели БАНЯТ мониторящий
+    IP: собственный «Пинг Exit Node» роняет ноду в DOWN при живом
+    трафике (живой кейс окт. 2026 №3). Полный зонд баном не считается
+    и честнее: проверяет хендшейк+маршрут, а не только SYN/ACK.
+
+    Ноды без ключей (nd=None, чужие host:port, не-REALITY) — TCP-пинг
+    через _resolve_host_fresh (DoH + fallback), как раньше.
     Возвращает строку с результатом.
     """
     core = _core_module()
     GREEN = core.GREEN
     RED = core.RED
     NC = core.NC
+    DIM = core.DIM
+    # 1) Полный зонд для REALITY-нод с ключами
+    if nd is not None:
+        try:
+            from chimera.modules.chain_relay import (
+                check_node_full_path, node_has_reality_creds)
+            if node_has_reality_creds(nd):
+                r = check_node_full_path(nd)
+                if r.get("infra"):
+                    pass    # сбой механизма зонда → TCP-пинг ниже
+                elif r.get("ok"):
+                    return (f"{GREEN}{r.get('ms', 0):.0f} мс{NC} "
+                            f"{DIM}(full-path){NC}")
+                else:
+                    return (f"{RED}недоступна "
+                            f"({r.get('reason') or 'full-path FAIL'}){NC}")
+        except Exception:
+            pass    # сбой механизма зонда → честный TCP-пинг ниже
+    # 2) TCP-пинг (ноды без ключей / сбой полного зонда)
     try:
         start = time.time()
         ip = _resolve_host_fresh(host)
