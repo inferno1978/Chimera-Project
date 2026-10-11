@@ -872,7 +872,7 @@ class TestDiagnoseDeadChain(unittest.TestCase):
         # обе ноги по отдельности живы → сломана именно хоп→нода
         d = self._diag(True, True)
         self.assertEqual(d["legs"], {"hop": "ok", "direct": "ok"})
-        self.assertEqual(d["reason"], "хоп→нода недостижима")
+        self.assertEqual(d["reason"], "хоп->нода недостижима")
         self.assertIn("с хопа", d["detail"])
 
     def test_hop_ok_direct_fail(self):
@@ -882,7 +882,7 @@ class TestDiagnoseDeadChain(unittest.TestCase):
         # (прямой fail для via-ноды — норма) и подсказкой перепроверки
         d = self._diag(True, False)
         self.assertEqual(d["legs"], {"hop": "ok", "direct": "fail"})
-        self.assertEqual(d["reason"], "хоп→нода не доставляет")
+        self.assertEqual(d["reason"], "хоп->нода не доставляет")
         self.assertNotEqual(d["reason"], "нода не отвечает")
         self.assertIn("ТСПУ", d["detail"])
         self.assertIn("норма", d["detail"])
@@ -1417,9 +1417,9 @@ class TestIcmpRtt(unittest.TestCase):
 
     def test_fmt_not_ok_dash(self):
         import chimera.modules.chain_relay as cr
-        self.assertEqual(cr.fmt_icmp_rtt({"ok": False}), "—")
-        self.assertEqual(cr.fmt_icmp_rtt({}), "—")
-        self.assertEqual(cr.fmt_icmp_rtt(None), "—")
+        self.assertEqual(cr.fmt_icmp_rtt({"ok": False}), "-")
+        self.assertEqual(cr.fmt_icmp_rtt({}), "-")
+        self.assertEqual(cr.fmt_icmp_rtt(None), "-")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1486,7 +1486,7 @@ class TestHealthMonitorRtt(unittest.TestCase):
         st = json.loads(self._nhm.HEALTH_STATE.read_text())
         self.assertIsNone(st["de.example.com:443"]["rtt"])
         log = self._nhm.HEALTH_LOG.read_text()
-        self.assertIn("RTT —", log)
+        self.assertIn("RTT -", log)
 
     def test_down_with_live_rtt_logged(self):
         """DOWN при живом RTT — сразу виден класс отказа («сеть есть,

@@ -440,7 +440,7 @@ class TestSpeedTestNodeLatency(unittest.TestCase):
         from chimera.modules import chain_nodes
         saved = self._patch_relay(
             check_via_node_full_path=lambda nd, hops, **kw: {
-                "ok": False, "ms": 0.0, "reason": "хоп→нода не доставляет",
+                "ok": False, "ms": 0.0, "reason": "хоп->нода не доставляет",
                 "infra": False},
             load_relay_hops=lambda: [],
             hop_via_tag_for=lambda nd, hops: "hop-fi")
@@ -450,7 +450,7 @@ class TestSpeedTestNodeLatency(unittest.TestCase):
         finally:
             self._restore_relay(saved)
         self.assertIn("недоступна", result)
-        self.assertIn("хоп→нода не доставляет", result)
+        self.assertIn("хоп->нода не доставляет", result)
 
     def test_via_node_infra_falls_back_tcp(self):
         """Сбой МЕХАНИЗМА via-зонда → честный TCP-пинг (не ложный DOWN)."""
@@ -479,7 +479,7 @@ class TestSpeedTestNodeLatency(unittest.TestCase):
 
     def test_via_node_disabled_hop_direct_probe_with_note(self):
         """Хоп выключен → нода в проде прямая: прямой полный зонд
-        + пометка «(via hop-fi выключен — напрямую)»."""
+        + пометка «(via hop-fi выключен - напрямую)»."""
         from chimera.modules import chain_nodes
         calls = []
 
@@ -498,7 +498,7 @@ class TestSpeedTestNodeLatency(unittest.TestCase):
         finally:
             self._restore_relay(saved)
         self.assertIn("full-path", result)
-        self.assertIn("(via hop-fi выключен — напрямую)", result)
+        self.assertIn("(via hop-fi выключен - напрямую)", result)
         self.assertEqual(calls, ["fp"])
 
     def test_via_node_disabled_hop_no_creds_tcp_with_note(self):
@@ -517,7 +517,7 @@ class TestSpeedTestNodeLatency(unittest.TestCase):
         finally:
             self._restore_relay(saved)
         self.assertIn("мс", result)
-        self.assertIn("(via hop-fi выключен — напрямую)", result)
+        self.assertIn("(via hop-fi выключен - напрямую)", result)
         self.assertNotIn("full-path", result)
 
 

@@ -297,7 +297,7 @@ def check_nodes_once() -> list[dict]:
             "up": up, "ms": ms, "rtt": rtt, "changed": changed,
         })
 
-        rtt_str = f"{rtt:.0f}ms" if rtt else "—"
+        rtt_str = f"{rtt:.0f}ms" if rtt else "-"
         status_str = f"up ({ms:.0f}ms / RTT {rtt_str})" if up else f"DOWN (RTT {rtt_str})"
         _log(f"[{key}] {status_str}" + (" [CHANGED]" if changed else ""))
 
@@ -423,7 +423,7 @@ def do_health_monitor_menu() -> None:
 
         _box_top("📡  HEALTH MONITOR EXIT-НОД")
         _box_row("  Периодическая проверка доступности exit-нод.")
-        _box_row("  При падении/восстановлении ноды — уведомление в Telegram.")
+        _box_row("  При падении/восстановлении ноды - уведомление в Telegram.")
         _box_sep()
         _box_row(f"  Статус:    {status}")
         if installed:
@@ -436,8 +436,10 @@ def do_health_monitor_menu() -> None:
             # «Full-path» — латентность полного зонда (TCP+REALITY+DNS+
             # HTTP, для via-нод — через хоп-цепочку); «RTT» — прямой
             # сетевой ICMP до хоста (инфо-контекст, не вердикт: кейс №6,
-            # full-path ≈ 3-4×RTT — норма, DOWN при живом RTT — «сеть
-            # есть, туннеля нет»).
+            # full-path ~ 3-4 x RTT - норма, DOWN при живом RTT - "сеть
+            # есть, туннеля нет"). Плейсхолдеры «-» (ASCII, не «—»):
+            # em-dash — ambiguous-ширина → лесенка рамки (кейс №7).
+            from chimera.modules.box_renderer import _box_narrow
             _box_row(f"  {'Нода':<26} {'Статус':<7} {'Full-path':>9} {'RTT':>8}  Проверка")
             _box_sep()
             for nd in nodes:
@@ -450,21 +452,22 @@ def do_health_monitor_menu() -> None:
                     ms      = h.get("ms", 0)
                     rtt     = h.get("rtt")
                     lc      = h.get("last_check", 0)
-                    lc_str  = time.strftime("%d.%m %H:%M", time.localtime(lc)) if lc else "—"
+                    lc_str  = time.strftime("%d.%m %H:%M", time.localtime(lc)) if lc else "-"
                     if up is True:
                         st, stc = "UP", GREEN
                     elif up is False:
                         st, stc = "DOWN", RED
                     else:
-                        st, stc = "—", DIM
-                    ms_str  = f"{ms:.0f} мс" if up else "—"
-                    rtt_str = f"{rtt:.0f} мс" if rtt else "—"
+                        st, stc = "-", DIM
+                    ms_str  = f"{ms:.0f} мс" if up else "-"
+                    rtt_str = f"{rtt:.0f} мс" if rtt else "-"
                 else:
-                    st, stc   = "—", DIM
-                    ms_str    = "—"
-                    rtt_str   = "—"
-                    lc_str    = "—"
-                _box_row(f"  {host:<26} {stc}{st:<7}{NC} {ms_str:>9} {rtt_str:>8}  {lc_str}")
+                    st, stc   = "-", DIM
+                    ms_str    = "-"
+                    rtt_str   = "-"
+                    lc_str    = "-"
+                _box_row(_box_narrow(
+                    f"  {host:<26} {stc}{st:<7}{NC} {ms_str:>9} {rtt_str:>8}  {lc_str}"))
         else:
             _box_row(f"  {DIM}Exit-ноды не настроены (только Режим B){NC}")
 
@@ -472,9 +475,9 @@ def do_health_monitor_menu() -> None:
         _box_item("C", "Проверить сейчас")
         if not installed:
             _box_item("I", f"Установить (интервал {DEFAULT_INTERVAL} мин)")
-            _box_item("I5",  "Установить — каждые 5 мин")
-            _box_item("I10", "Установить — каждые 10 мин")
-            _box_item("I30", "Установить — каждые 30 мин")
+            _box_item("I5",  "Установить - каждые 5 мин")
+            _box_item("I10", "Установить - каждые 10 мин")
+            _box_item("I30", "Установить - каждые 30 мин")
         else:
             _box_item("U", "Удалить")
         _box_back()
@@ -494,8 +497,11 @@ def do_health_monitor_menu() -> None:
                 for r in results:
                     icon = f"{GREEN}✓{NC}" if r["up"] else f"{RED}✗{NC}"
                     ms_s = f"{r['ms']:.0f} мс (full-path)" if r["up"] else "недоступна"
-                    rt_s = f"{r['rtt']:.0f} мс" if r.get("rtt") else "—"
-                    _box_row(f"  {icon} {r['host']}:{r['port']} — {ms_s}  ·  RTT {rt_s}")
+                    rt_s = f"{r['rtt']:.0f} мс" if r.get("rtt") else "-"
+                    # «-»/«|» (ASCII): em-dash/middot — ambiguous-ширина,
+                    # лесенит правую границу рамки (кейс №7)
+                    _box_row(_box_narrow(
+                        f"  {icon} {r['host']}:{r['port']} - {ms_s}  |  RTT {rt_s}"))
             input(f"{CYAN}Нажмите Enter...{NC}")
 
         elif ch in ("I", "I5"):
