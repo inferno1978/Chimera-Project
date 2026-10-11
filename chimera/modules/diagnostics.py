@@ -842,7 +842,8 @@ def _diag_tcp_probe(host: str, port: int, timeout: int = 10
     return False, failed_summary, -1
 
 
-def _fullpath_nd_from_outbound(ob: dict, vn: dict) -> Optional[dict]:
+def _fullpath_nd_from_outbound(ob: dict, vn: dict,
+                              require_via: bool = True) -> Optional[dict]:
     """Реконструкция nd-dict для full-path проверки из outbound прод-конфига.
 
     Чистая функция (шаг 5 мастера и тесты). outbound с sockopt.dialerProxy
@@ -850,12 +851,16 @@ def _fullpath_nd_from_outbound(ob: dict, vn: dict) -> Optional[dict]:
     РЕАЛЬНЫЕ path/mode в xhttpSettings. Раньше path/xhttp_mode не
     реконструировались и чекер уходил на дефолты "/"/"stream-up" — для нод
     с кастомным path full-path проверка падала ложно (REALITY/xHTTP не
-    сходился по пути). Возвращает None, если outbound не via (нет
-    dialerProxy) — вызывать проверку не нужно.
+    сходился по пути).
+    require_via=True (дефолт, обратная совместимость): возвращает None,
+    если outbound не via (нет dialerProxy) — вызывать проверку не нужно.
+    require_via=False: реконструкция для ПРЯМЫХ нод тоже (шаг 5: прямой
+    REALITY-зонд вместо голого TCP, кейс окт. 2026 №3 — TCP-ping банится
+    анти-DPI защитой chimera-целей).
     """
     _ss = ob.get("streamSettings", {}) or {}
     _dp = (_ss.get("sockopt", {}) or {}).get("dialerProxy", "")
-    if not _dp:
+    if require_via and not _dp:
         return None
     _vn_user = (vn.get("users") or [{}])[0]
     _rs = (_ss.get("realitySettings", {}) or {})
@@ -985,7 +990,7 @@ def _diag_check_routing_live(cfg: dict, counters: list) -> None:
             try:
                 from chimera.modules.chain_relay import (
                     check_node_full_path, node_has_reality_creds)
-                _nd = _fullpath_nd_from_outbound(ob, vn)
+                _nd = _fullpath_nd_from_outbound(ob, vn, require_via=False)
                 if _nd and node_has_reality_creds(_nd):
                     _r = check_node_full_path(_nd, deep_diag=False)
                     if not _r.get("infra"):

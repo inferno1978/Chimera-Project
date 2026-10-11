@@ -534,6 +534,26 @@ class TestFullpathNdFromOutbound(unittest.TestCase):
         vn = ob["settings"]["vnext"][0]
         self.assertIsNone(_fullpath_nd_from_outbound(ob, vn))
 
+    def test_no_dialer_proxy_direct_reconstruction_with_flag(self):
+        """require_via=False: прямые outbound-ы реконструируются тоже
+        (шаг 5: прямой REALITY-зонд вместо банящегося TCP-ping,
+        кейс окт. 2026 №3)."""
+        from chimera.modules.diagnostics import _fullpath_nd_from_outbound
+        ob = self._ob({
+            "network": "tcp", "security": "reality", "sockopt": {},
+            "realitySettings": {
+                "publicKey": "PUBKEY-DIRECT", "shortId": "abcd1234",
+                "serverName": "nl.example.com", "fingerprint": "firefox",
+            }})
+        vn = ob["settings"]["vnext"][0]
+        nd = _fullpath_nd_from_outbound(ob, vn, require_via=False)
+        self.assertIsNotNone(nd)
+        self.assertEqual(nd["host"], "203.0.113.10")   # address из vnext
+        self.assertEqual(nd["pubkey"], "PUBKEY-DIRECT")
+        self.assertEqual(nd["shortid"], "abcd1234")
+        self.assertEqual(nd["sni"], "nl.example.com")  # serverName из REALITY
+        self.assertEqual(nd["via"], "")
+
     def test_xhttp_reality_custom_path_mode(self):
         from chimera.modules.diagnostics import _fullpath_nd_from_outbound
         ob = self._ob({
