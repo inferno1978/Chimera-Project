@@ -407,5 +407,177 @@ class TestBoxWrapMsg(unittest.TestCase):
         self.assertIn("OK", out)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  _box_narrow — замена ambiguous-ширины (—, →, ·, «», ≈, ×, …) на ASCII.
+#  Живой кейс окт.2026 №7: часть терминалов рендерит эти символы в 2
+#  клетки при _wcslen=1 → правая граница рамки [T]/HM «лесенкой».
+# ══════════════════════════════════════════════════════════════════════════════
+class TestBoxNarrow(unittest.TestCase):
+    """_box_narrow — узкие ASCII-заместители для ambiguous-символов."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_dashes_to_hyphen(self):
+        from chimera.modules.box_renderer import _box_narrow
+        self.assertEqual(_box_narrow("ноды — уведомление"), "ноды - уведомление")
+        self.assertEqual(_box_narrow("1–2"), "1-2")
+
+    def test_arrows_to_ascii(self):
+        from chimera.modules.box_renderer import _box_narrow
+        self.assertEqual(_box_narrow("хоп→нода"), "хоп->нода")
+        self.assertEqual(_box_narrow("← Назад"), "<- Назад")
+
+    def test_middot_guillemets_math(self):
+        from chimera.modules.box_renderer import _box_narrow
+        self.assertEqual(_box_narrow("165 мс · RTT"), "165 мс | RTT")
+        self.assertEqual(_box_narrow("«сеть есть»"), '"сеть есть"')
+        self.assertEqual(_box_narrow("≈ 3-4×RTT"), "~ 3-4xRTT")
+        self.assertEqual(_box_narrow("нода…"), "нода...")
+
+    def test_noop_for_clean_strings(self):
+        from chimera.modules.box_renderer import _box_narrow
+        # кириллица/ASCII/флаги — 1-клеточные и так, не трогаем
+        s = "  [1] total-shadows.ru:443  \U0001F1F3\U0001F1F1  ->  199 мс  |  RTT 43 мс"
+        self.assertEqual(_box_narrow(s), s)
+
+    def test_ansi_untouched(self):
+        from chimera.modules.box_renderer import _box_narrow, RED, NC
+        s = f"{RED}недоступна (хоп→нода){NC}"
+        out = _box_narrow(s)
+        self.assertIn(RED, out)
+        self.assertIn(NC, out)
+        self.assertIn("хоп->нода", out)
+
+    def test_result_width_matches_wcslen(self):
+        """После замены _wcslen(строки) == len(plain) по клеткам: паддинг
+        _box_row совпадает с реальной шириной в любом терминале."""
+        from chimera.modules.box_renderer import _box_narrow, _wcslen, _plain
+        s = _box_narrow("full-path - полный зонд · RTT ≈ 3-4×RTT → норма")
+        plain = _plain(s)
+        self.assertEqual(_wcslen(plain), len(plain))
+
+
+class TestPingBoxUniformRender(unittest.TestCase):
+    """Регрессия «лесенка правой границы» (кейс №7): рендер [T]-бокса
+    «Пинг Exit Node» — все строки ОДНОЙ видимой ширины (_BOX_W+2),
+    без ambiguous-символов и без авто-переноса строк."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import box_renderer
+        self._br = box_renderer
+        self._patch_w = patch.object(box_renderer, "_BOX_W", 78)
+        self._patch_w.start()
+
+    def tearDown(self):
+        self._patch_w.stop()
+
+    def _render(self, lines):
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            self._br._box_top("Пинг Exit Node")
+            for ln in lines:
+                self._br._box_row(self._br._box_narrow(ln))
+            self._br._box_bottom()
+        return [l for l in buf.getvalue().splitlines() if l.strip()]
+
+    def test_ping_box_uniform(self):
+        # видимый текст [T]-строк (ANSI в тестах пустой — non-tty импорт)
+        lines = [
+            "  full-path - полный зонд: TCP + REALITY-хендшейк +",
+            "  DNS на exit + HTTP-проба через туннель (via-ноды -",
+            "  через хоп-цепочку); RTT - прямой сетевой ICMP до",
+            "  хоста ноды. Вердикт (UP/DOWN) решает full-path;",
+            "  RTT - эталон чистой сети: full-path ~ 3-4 x RTT -",
+            "  норма, DOWN при живом RTT = \"сеть есть, туннеля нет\".",
+            "  Зонды не палит нас анти-DPI, ноды без ключей - TCP.",
+            "  [1] total-shadows.ru:443  ->  измеряю...",
+            "  [1] total-shadows.ru:443  \U0001F1F3\U0001F1F1  ->  199 мс (full-path)  |  RTT 43 мс",
+            "  [2] totalshadows.online:443  \U0001F1E9\U0001F1EA  ->  163 мс (full-path)  |  RTT 43 мс",
+            "  [3] fi.total-shadows.online:443  \U0001F1EB\U0001F1EE  ->  115 мс (full-path)  |  RTT 29 мс",
+            "  [5] ee.total-shadows.online:443  \U0001F1EA\U0001F1EA  ->  175 мс (via hop-fi)  |  RTT 26 мс",
+        ]
+        out = self._render(lines)
+        # _box_top: рамка + заголовок + сепаратор (3) + 12 строк + низ (1) = 16
+        self.assertEqual(len(out), 16,
+                         f"строки перенеслись/слились: {len(out)} != 16")
+        widths = {self._br._wcslen(self._br._plain(l)) for l in out}
+        self.assertEqual(widths, {80},
+                         f"правая граница гуляет: ширины {sorted(widths)}")
+        # ни одной ambiguous-строки: замена не оставила «широких» символов
+        for l in out:
+            for ch in self._br._BOX_NARROW_MAP:
+                self.assertNotIn(ch, l, f"ambiguous {ch!r} в строке бокса")
+        # строки с результатом — по ОДНОЙ строке на ноду (без переноса)
+        self.assertEqual(
+            sum(1 for l in out if "мс (full-path)" in l or "мс (via" in l), 4)
+
+
+class TestBoxNarrowWrappersInPlace(unittest.TestCase):
+    """Source-гарант: [T]-блок chain_nodes и таблица/[C] HM обязаны
+    прогонять строки через _box_narrow, а их СТРОКОВЫЕ литералы —
+    без ambiguous-символов (кейс №7 — лесенка рамки). Проверяем только
+    литералы: комментарии имеют право объяснять проблему «— → ·»."""
+
+    _DANGER = ("—", "–", "→", "←", "·", "•", "«", "»", "≈", "×", "…")
+
+    def _string_literals(self, src: str) -> str:
+        """Только ОДНОстрочные литералы (UI-строки). Тройные кавычки —
+        докстринги, им можно объяснять проблему «— → ·» — пропускаем."""
+        import io as _io
+        import tokenize as _tk
+        parts = []
+        try:
+            for tok in _tk.generate_tokens(_io.StringIO(src).readline):
+                if tok.type == _tk.STRING and not tok.string.startswith(('"""', "'''")):
+                    parts.append(tok.string)
+        except _tk.TokenizeError:
+            pass
+        return "\n".join(parts)
+
+    def test_t_block_uses_narrow(self):
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "chain_nodes.py").read_text()
+        block = src.split('elif ch == "t" and CHAIN_NODES:', 1)[1] \
+                   .split('elif ch == "p" and CHAIN_NODES:', 1)[0]
+        self.assertIn("_box_narrow", block,
+                      "[T]-блок обязан оборачивать строки в _box_narrow")
+        lits = self._string_literals(block)
+        for danger in self._DANGER:
+            self.assertNotIn(danger, lits,
+                             f"ambiguous {danger!r} в литералах [T]-блока")
+
+    def test_speed_test_note_narrow(self):
+        """Пометка via-ноды «(via ... выключен - напрямую)» — в [T]-строке."""
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "chain_nodes.py").read_text()
+        block = src.split("def _speed_test_node_latency", 1)[1] \
+                   .split("def _speed_test_node_geo", 1)[0]
+        lits = self._string_literals(block)
+        for danger in self._DANGER:
+            self.assertNotIn(danger, lits,
+                             f"ambiguous {danger!r} в литералах _speed_test_node_latency")
+
+    def test_hm_menu_literals_narrow(self):
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "node_health_monitor.py").read_text()
+        menu = src.split("def do_health_monitor_menu", 1)[1]
+        lits = self._string_literals(menu)
+        for danger in self._DANGER:
+            self.assertNotIn(danger, lits,
+                             f"ambiguous {danger!r} в литералах меню HM")
+        self.assertIn("_box_narrow", menu)
+
+    def test_chain_relay_reasons_narrow(self):
+        """reason-строки зондов попадают в [T]-строку «недоступна (...)» —
+        обязаны быть узкими (fmt_icmp_rtt возвращает «-»)."""
+        import chimera.modules.chain_relay as cr
+        from chimera.modules.box_renderer import _box_narrow
+        self.assertEqual(_box_narrow(cr.fmt_icmp_rtt(None)), "-")
+        # словарь причин диагностики ног (хоп->нода) — узкие
+        for reason in ("хоп не отвечает", "хоп->нода недостижима",
+                       "хоп->нода не доставляет", "хоп и нода не отвечают"):
+            self.assertEqual(_box_narrow(reason), reason,
+                             f"reason {reason!r} несёт ambiguous-символ")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
