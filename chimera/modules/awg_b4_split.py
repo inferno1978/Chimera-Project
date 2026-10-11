@@ -94,8 +94,14 @@ _IPSET         = "awg_b4_direct"
 _IPSET_TMP     = "awg_b4_direct_new"
 _SNAPSHOT      = AWGS_CASCADE_DIR / "awg_b4_direct.snapshot"
 
-_NFT_TABLE     = "awg_b4exempt"          # inet-таблица b4-exempt
-_NFT_SET       = "awg_b4direct"          # named set ВНУТРИ таблицы
+# IPv6-аналоги (dual-stack split: v4+v6). см. _nft_ensure_base_v6/ipset_apply_v6.
+_IPSET_V6      = "awg_b4_direct_v6"
+_IPSET_V6_TMP  = "awg_b4_direct_v6_new"
+_SNAPSHOT_V6   = AWGS_CASCADE_DIR / "awg_b4_direct_v6.snapshot"
+
+_NFT_TABLE     = "awg_b4exempt"          # inet-таблица b4-exempt (покрывает v4+v6)
+_NFT_SET       = "awg_b4direct"          # v4 named set ВНУТРИ таблицы
+_NFT_SET_V6    = "awg_b4direct_v6"       # v6 named set ВНУТРИ таблицы
 
 _AGH_YAML      = Path("/opt/AdGuardHome/AdGuardHome.yaml")
 _AGH_BACKUP    = Path("/opt/AdGuardHome/AdGuardHome.yaml.bak-b4split")
@@ -326,13 +332,32 @@ def _ip_ok(ip: str) -> bool:
             and not p.is_unspecified and not p.is_reserved)
 
 
-def _resolve_system(domain: str) -> set:
-    """Системный резолвер ноды (127.0.0.1 → AGH → dnscrypt DoH)."""
+def _resolve_system(domain: str) -> tuple:
+    """Системный резолвер ноды (127.0.0.1 → AGH → dnscrypt DoH).
+
+    2026-10-11: возвращает (set(ipv4), set(ipv6)) — dual-stack.
+    socket.getaddrinfo() с AF_UNSPEC даёт оба стека сразу; фильтруем через
+    _ip_ok/_ip6_ok (публичные, без loopback/private/link-local).
+    """
+    ips4: set = set()
+    ips6: set = set()
     try:
-        _, _, ips = socket.gethostbyname_ex(domain)
-        return {ip for ip in ips if _ip_ok(ip)}
+        infos = socket.getaddrinfo(domain, None, socket.AF_UNSPEC,
+                                   socket.SOCK_STREAM)
+        for fam, _, _, _, sockaddr in infos:
+            if fam == socket.AF_INET:
+                ip = sockaddr[0]
+                if _ip_ok(ip):
+                    ips4.add(ip)
+            elif fam == socket.AF_INET6:
+                ip = sockaddr[0]
+                # сократить zone-id (::%eth0) — ipaddress не парсит
+                ip = ip.split("%")[0] if "%" in ip else ip
+                if _ip6_ok(ip):
+                    ips6.add(ip)
     except Exception:
-        return set()
+        pass
+    return ips4, ips6
 
 
 def _qlog_path() -> Optional[Path]:
@@ -422,20 +447,81 @@ def _dns_a_records(msg: bytes) -> set:
     return out
 
 
+def _dns_aaaa_records(msg: bytes) -> set:
+    """Публичные IPv6 из AAAA-записей DNS-ответа (wire); A/CNAME — мимо.
+
+    2026-10-11: dual-stack split — собираем v6 IP для awg_b4_direct_v6,
+    чтобы AWG-клиенты с v6 тоже шли через B4 direct-плечо, а не в каскад.
+    """
+    out: set = set()
+    if len(msg) < 12:
+        return out
+    try:
+        qd = int.from_bytes(msg[4:6], "big")
+        an = int.from_bytes(msg[6:8], "big")
+        i = 12
+        for _ in range(qd):
+            i = _dns_skip_name(msg, i)
+            if i < 0:
+                return out
+            i += 4
+        for _ in range(an):
+            i = _dns_skip_name(msg, i)
+            if i < 0 or i + 10 > len(msg):
+                return out
+            rtype = int.from_bytes(msg[i:i + 2], "big")
+            rdl = int.from_bytes(msg[i + 8:i + 10], "big")
+            i += 10
+            if i + rdl > len(msg):
+                return out
+            if rtype == 28 and rdl == 16:
+                # 16 байт → IPv6 canonical (socket.inet_ntop)
+                raw = msg[i:i + 16]
+                try:
+                    ip = socket.inet_ntop(socket.AF_INET6, raw)
+                except (ValueError, OSError):
+                    ip = None
+                if ip and _ip6_ok(ip):
+                    out.add(ip)
+            i += rdl
+    except Exception:
+        return out
+    return out
+
+
+def _ip6_ok(ip: str) -> bool:
+    """Публичный IPv6 (::/8 ::1 fc00::/7 fe80::/10 и пр. — мимо ipset)."""
+    try:
+        p = ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return False
+    return (p.version == 6
+            and not p.is_private
+            and not p.is_loopback
+            and not p.is_unspecified
+            and not p.is_link_local
+            and not p.is_multicast
+            and not p.is_reserved)
+
+
 def harvest_querylog(domains: list) -> tuple:
     """Клиентский вид: IP из querylog.json AGH (что клиенты РЕАЛЬНО получили).
 
     Критично для rr*.googlevideo.com: пер-видео имена в сетах отсутствуют,
     резолвятся в GGC-кэши провайдера — только querylog их видит.
-    Возвращает (set(ipv4), stats); любые сбои → пусто (мягкая деградация).
+    Возвращает (set(ipv4), set(ipv6), stats); любые сбои → пусто (мягкая деградация).
+
+    2026-10-11: v6 AAAA harvest добавлен — dual-stack split требует v6-IP
+    для awg_b4_direct_v6, иначе AWG-клиенты с v6 уходят в каскад (реклама).
     """
-    stats = {"names": 0, "entries": 0, "ips": 0}
+    stats = {"names": 0, "entries": 0, "ips": 0, "ips_v6": 0}
     ips: set = set()
+    ips6: set = set()
     if not domains:
-        return ips, stats
+        return ips, ips6, stats
     path = _qlog_path()
     if path is None:
-        return ips, stats
+        return ips, ips6, stats
     try:
         with path.open("rb") as f:
             f.seek(0, os.SEEK_END)
@@ -443,9 +529,9 @@ def harvest_querylog(domains: list) -> tuple:
             f.seek(max(0, size - _QLOG_TAIL_B))
             data = f.read()
     except Exception:
-        return ips, stats
+        return ips, ips6, stats
     if not data:
-        return ips, stats
+        return ips, ips6, stats
     if size > _QLOG_TAIL_B:
         nl = data.find(b"\n")
         data = data[nl + 1:] if nl >= 0 else b""
@@ -472,24 +558,34 @@ def harvest_querylog(domains: list) -> tuple:
             wire = base64.b64decode(b64 + "===")
         except Exception:
             continue
-        got = _dns_a_records(wire)
-        if got:
+        got4 = _dns_a_records(wire)
+        got6 = _dns_aaaa_records(wire)
+        if got4 or got6:
             names.add(qh)
             stats["entries"] += 1
-            ips |= got
+            ips |= got4
+            ips6 |= got6
     stats["names"] = len(names)
     stats["ips"] = len(ips)
-    return ips, stats
+    stats["ips_v6"] = len(ips6)
+    return ips, ips6, stats
 
 
 def resolve_domains(domains: list) -> dict:
-    """Все виды резолва → {'ips': set, 'stats': {...}} (guard — на вызывающем)."""
+    """Все виды резолва → {'ips': set(ipv4), 'ips_v6': set(ipv6), 'stats': {...}}.
+
+    2026-10-11: dual-stack — собираем и v4 (для awg_b4_direct), и v6
+    (для awg_b4_direct_v6). Guard от пустого результата — на вызывающем
+    (refresh_tick): пусто → не трогаем старый набор.
+    """
     stats = {"domains": len(domains), "sys_failed": 0,
-             "qlog_names": 0, "qlog_entries": 0, "qlog_ips": 0}
+             "qlog_names": 0, "qlog_entries": 0, "qlog_ips": 0, "qlog_ips_v6": 0}
     ips: set = set()
+    ips6: set = set()
     if not domains:
         stats["ips"] = 0
-        return {"ips": ips, "stats": stats}
+        stats["ips_v6"] = 0
+        return {"ips": ips, "ips_v6": ips6, "stats": stats}
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=_RESOLVE_MAX_WORKERS) as ex:
         futs = [ex.submit(_resolve_system, d) for d in domains]
@@ -497,21 +593,27 @@ def resolve_domains(domains: list) -> dict:
             for f in concurrent.futures.as_completed(
                     futs, timeout=_RESOLVE_OVERALL_S):
                 try:
-                    ips |= f.result(timeout=1)
+                    r4, r6 = f.result(timeout=1)
+                    ips |= r4
+                    ips6 |= r6
                 except Exception:
                     stats["sys_failed"] += 1
         except concurrent.futures.TimeoutError:
             stats["sys_failed"] += sum(1 for f in futs if not f.done())
     try:
-        harvested, hst = harvest_querylog(domains)
+        harvested4, harvested6, hst = harvest_querylog(domains)
     except Exception:
-        harvested, hst = set(), {"names": 0, "entries": 0, "ips": 0}
+        harvested4, harvested6 = set(), set()
+        hst = {"names": 0, "entries": 0, "ips": 0, "ips_v6": 0}
     stats["qlog_names"] = hst["names"]
     stats["qlog_entries"] = hst["entries"]
     stats["qlog_ips"] = hst["ips"]
-    ips |= harvested
+    stats["qlog_ips_v6"] = hst.get("ips_v6", 0)
+    ips |= harvested4
+    ips6 |= harvested6
     stats["ips"] = len(ips)
-    return {"ips": ips, "stats": stats}
+    stats["ips_v6"] = len(ips6)
+    return {"ips": ips, "ips_v6": ips6, "stats": stats}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -574,7 +676,70 @@ def ipset_size() -> int:
 
 def ipset_destroy() -> None:
     _bash(f"ipset destroy {_IPSET_TMP} 2>/dev/null; "
-          f"ipset destroy {_IPSET} 2>/dev/null; true")
+          f"ipset destroy {_IPSET} 2>/dev/null; "
+          f"ipset destroy {_IPSET_V6_TMP} 2>/dev/null; "
+          f"ipset destroy {_IPSET_V6} 2>/dev/null; true")
+
+
+# ── IPv6 ipset-аналог (dual-stack split, 2026-10-11) ─────────────────────
+# hash:ip family inet6 — для ip6tables исключения каскадной марки по v6-dest.
+# Заполняется из AAAA-резолва split-доменов; nft mirror — awg_b4direct_v6.
+
+def ipset_ensure_v6() -> bool:
+    """Создать v6 ipset-пару (боевой + tmp) — family inet6."""
+    if not shutil.which("ipset"):
+        return False
+    for name in (_IPSET_V6, _IPSET_V6_TMP):
+        _run(["ipset", "create", name, "hash:ip", "family", "inet6",
+              "hashsize", "1024", "maxelem", "65536", "-exist"],
+             capture=True)
+    return True
+
+
+def ipset_apply_v6(ips6: set) -> bool:
+    """Атомарный swap v6: tmp ← ips6, swap(tmp, боевой). Пусто → НЕ трогаем
+    (старый набор живее — guard от деградации в каскад при сбое резолва)."""
+    if not ips6:
+        return False
+    if not ipset_ensure_v6():
+        return False
+    _run(["ipset", "flush", _IPSET_V6_TMP], capture=True)
+    try:
+        subprocess.run(
+            ["ipset", "restore", "-exist"],
+            input="".join(f"add {_IPSET_V6_TMP} {ip}\n" for ip in sorted(ips6)),
+            capture_output=True, text=True, check=False, timeout=30)
+    except Exception:
+        pass
+    _run(["ipset", "swap", _IPSET_V6_TMP, _IPSET_V6], capture=True)
+    _run(["ipset", "flush", _IPSET_V6_TMP], capture=True)
+    # снапшот для быстрого бут-восстановления
+    try:
+        r = _run(["ipset", "save", _IPSET_V6], capture=True, timeout=30)
+        if r.returncode == 0 and r.stdout:
+            _SNAPSHOT_V6.parent.mkdir(parents=True, exist_ok=True)
+            _SNAPSHOT_V6.write_text(r.stdout)
+    except Exception:
+        pass
+    return True
+
+
+def ipset_restore_snapshot_v6() -> bool:
+    """Бут-восстановление v6 из снапшота (если есть) — до первого тика."""
+    if not _SNAPSHOT_V6.exists():
+        return False
+    r = _run(["bash", "-c",
+              f"grep -vE '^create|^swap|^flush' {_SNAPSHOT_V6} | "
+              f"ipset restore -exist"], capture=True, timeout=60)
+    return r.returncode == 0
+
+
+def ipset_size_v6() -> int:
+    r = _run(["ipset", "list", _IPSET_V6], capture=True)
+    if r.returncode != 0:
+        return -1
+    m = re.search(r"Number of entries:\s+(\d+)", r.stdout or "")
+    return int(m.group(1)) if m else 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -583,7 +748,12 @@ def ipset_destroy() -> None:
 
 def _nft_ensure_base() -> bool:
     """Таблица + обе цепи + named set (idempotent, ошибку существования
-    глотаем — батч ниже всё равно флешит и добавляет заново)."""
+    глотаем — батч ниже всё равно флешит и добавляет заново).
+
+    2026-10-11: создаём и v6 named set (_NFT_SET_V6, type ipv6_addr) для
+    dual-stack split — без него v6-трафик от awg0 не матчится по @set и
+    уходит в каскад (exit foreign IP → реклама на YouTube).
+    """
     r = _bash(
         f"nft add table inet {_NFT_TABLE} 2>/dev/null; "
         f"nft add chain inet {_NFT_TABLE} prerouting "
@@ -592,6 +762,8 @@ def _nft_ensure_base() -> bool:
         f"'{{ type filter hook output priority mangle - 10; policy accept; }}' 2>/dev/null; "
         f"nft list set inet {_NFT_TABLE} {_NFT_SET} >/dev/null 2>&1 || "
         f"nft add set inet {_NFT_TABLE} {_NFT_SET} '{{ type ipv4_addr; }}'; "
+        f"nft list set inet {_NFT_TABLE} {_NFT_SET_V6} >/dev/null 2>&1 || "
+        f"nft add set inet {_NFT_TABLE} {_NFT_SET_V6} '{{ type ipv6_addr; }}'; "
         f"true")
     return r.returncode == 0
 
@@ -634,10 +806,14 @@ def nft_apply_split() -> bool:
     """Сплит-форма awg_b4exempt (АТОМАРНЫЙ nft-батч).
 
     prerouting: туннели (awg1 [+ awg2..awgN при LB]) → exempt;
-    awg0+@set → return (b4 обработает); awg0 → exempt (каскад).
-    output: AGH-ответы (sport 53 → awg0) exempt — иначе b4 output
-    (udp sport 53 → queue) перехватил бы их. Порядок prerouting-правил
-    критичен: @set-return ДО blanket-awg0.
+    awg0+@set_v4 → return; awg0+@set_v6 → return (b4 обработает v4 И v6);
+    awg0 → exempt (каскад). output: AGH-ответы (sport 53 → awg0) exempt —
+    иначе b4 output (udp sport 53 → queue) перехватил бы их.
+
+    Порядок prerouting-правил критичен: @set-return ДО blanket-awg0.
+
+    2026-10-11: v6 @set-return добавлен ПЕРЕД blanket-awg0 — иначе v6-трафик
+    от AWG-клиентов к YouTube уходил в каскад (реклама на YouTube).
     """
     if not _nft_ensure_base():
         return False
@@ -649,6 +825,9 @@ def nft_apply_split() -> bool:
         f"ct mark set ct mark or {AWGS_B4_EXEMPT_BIT:#x}\n"
         f"add rule inet {_NFT_TABLE} prerouting iifname \"awg0\" "
         f"ip daddr @{_NFT_SET} return\n"
+        # v6: dual-stack split — без этой строки v6-трафик awg0 → cascade
+        f"add rule inet {_NFT_TABLE} prerouting iifname \"awg0\" "
+        f"ip6 daddr @{_NFT_SET_V6} return\n"
         f"add rule inet {_NFT_TABLE} prerouting iifname \"awg0\" "
         f"meta mark set meta mark or {AWGS_B4_EXEMPT_BIT:#x} "
         f"ct mark set ct mark or {AWGS_B4_EXEMPT_BIT:#x}\n"
@@ -667,7 +846,7 @@ def nft_apply_split() -> bool:
 
 def nft_apply_blanket() -> bool:
     """blanket-форма (сплит выключен): blanket awg0 + туннели awg1
-    [+ awg2..awgN при LB], без сета/output-цепи."""
+    [+ awg2..awgN при LB], без сета/output-цепи. v6-сет тоже сносим."""
     if not _nft_ensure_base():
         return False
     tun = _nft_ifaces("awg1")
@@ -683,6 +862,9 @@ def nft_apply_blanket() -> bool:
         f"delete chain inet {_NFT_TABLE} output\n"
         f"flush set inet {_NFT_TABLE} {_NFT_SET}\n"
         f"delete set inet {_NFT_TABLE} {_NFT_SET}\n"
+        # v6-сет тоже сносим (blanket-форма — split выключен)
+        f"flush set inet {_NFT_TABLE} {_NFT_SET_V6}\n"
+        f"delete set inet {_NFT_TABLE} {_NFT_SET_V6}\n"
     )
     r = _run(["nft", "-f", "-"], input_text=batch, capture=True, timeout=15)
     if r.returncode != 0:
@@ -756,6 +938,49 @@ def nft_set_replace(ips: set) -> bool:
 
 def nft_set_size() -> int:
     r = _run(["nft", "list", "set", "inet", _NFT_TABLE, _NFT_SET],
+             capture=True)
+    if r.returncode != 0:
+        return -1
+    m = re.search(r"elements\s*\{", r.stdout or "")
+    if not m:
+        return 0
+    body = (r.stdout or "")[m.end():]
+    end = body.find("}")
+    elems = [e for e in body[:end].split(",") if e.strip()]
+    return len(elems)
+
+
+# ── IPv6 nft-аналог (dual-stack split, 2026-10-11) ─────────────────────
+# nft set awg_b4direct_v6 (type ipv6_addr) — mirror v6 ipset для ip6 daddr match.
+# Без правила "iifname 'awg0' ip6 daddr @awg_b4direct_v6 return" v6-трафик
+# от AWG-клиентов к YouTube уходил в каскад (реклама). Заполняется из AAAA-резолва.
+
+def nft_set_replace_v6(ips6: set) -> bool:
+    """Атомарная замена элементов v6 named-сета (flush+add одним батчем)."""
+    if not ips6:
+        # пусто → flush, чтобы не осталось устаревших v6-адресов
+        r = _run(["nft", "flush", "set", "inet", _NFT_TABLE, _NFT_SET_V6],
+                 capture=True, timeout=15)
+        return r.returncode == 0
+    if not _nft_ensure_base():
+        return False
+    lines = [f"flush set inet {_NFT_TABLE} {_NFT_SET_V6}"]
+    sorted_ips = sorted(ips6)
+    CH = 500
+    for i in range(0, len(sorted_ips), CH):
+        chunk = ", ".join(sorted_ips[i:i + CH])
+        lines.append(
+            f"add element inet {_NFT_TABLE} {_NFT_SET_V6} {{ {chunk} }}")
+    r = _run(["nft", "-f", "-"], input_text="\n".join(lines) + "\n",
+             capture=True, timeout=30)
+    if r.returncode != 0:
+        _err(f"nft_set_replace_v6: {getattr(r, 'stderr', '')[:300]}")
+        return False
+    return True
+
+
+def nft_set_size_v6() -> int:
+    r = _run(["nft", "list", "set", "inet", _NFT_TABLE, _NFT_SET_V6],
              capture=True)
     if r.returncode != 0:
         return -1
@@ -1120,31 +1345,41 @@ def refresh_tick(verbose: bool = False) -> dict:
         state_save(st)
         return out
     res = resolve_domains(domains)
-    ips, stats = res["ips"], res["stats"]
+    ips, ips6, stats = res["ips"], res["ips_v6"], res["stats"]
     out.update(stats)
-    if not ips:
+    if not ips and not ips6:
         # guard пустого результата: старый набор живее (mieru-паттерн)
         out["skipped"] = "empty-resolve"
-        _warn("refresh: резолв дал 0 IP — ipset не трогаю (guard)")
+        _warn("refresh: резолв дал 0 IP (v4+v6) — ipset не трогаю (guard)")
         st["last_stats"] = out
         state_save(st)
         return out
 
-    # 4. nft-сет ПЕРВЫМ (каскад-консистентное окно), затем ipset-swap
-    nft_set_ok = nft_set_replace(ips)
-    ipset_ok = ipset_apply(ips)
-    out["applied"] = int(nft_set_ok and ipset_ok)
-    out["nft_ok"] = nft_set_ok
-    out["ipset_ok"] = ipset_ok
-    out["nft_form_ok"] = nft_ok
+    # 4. nft-сет ПЕРВЫМ (каскад-консистентное окно), затем ipset-swap.
+    # v4 и v6 атомарно; guard от пустого ips — не трогаем старый набор
+    # (мягкая деградация в каскад при сбое резолва одного из стеков).
+    nft_set_ok = nft_set_replace(ips) if ips else True
+    ipset_ok   = ipset_apply(ips)     if ips else True
+    nft_set_v6_ok = nft_set_replace_v6(ips6)   # flush even if empty
+    ipset_v6_ok   = ipset_apply_v6(ips6) if ips6 else True
+    out["applied"]    = int(nft_set_ok and ipset_ok)
+    out["applied_v6"] = int(nft_set_v6_ok and ipset_v6_ok)
+    out["nft_ok"]        = nft_set_ok
+    out["ipset_ok"]      = ipset_ok
+    out["nft_v6_ok"]     = nft_set_v6_ok
+    out["ipset_v6_ok"]   = ipset_v6_ok
+    out["nft_form_ok"]   = nft_ok
+    out["ips_v6_count"]  = len(ips6)
 
     if verbose:
-        print(f"  сплит: {len(ips)} IP ← {len(domains)} доменов "
-              f"(sys fails {stats['sys_failed']}, qlog +{stats['qlog_ips']})")
+        print(f"  сплит: v4={len(ips)} v6={len(ips6)} IP ← {len(domains)} доменов "
+              f"(sys fails {stats['sys_failed']}, qlog +{stats['qlog_ips']} v4 / "
+              f"+{stats.get('qlog_ips_v6', 0)} v6)")
     st["last_stats"] = out
     state_save(st)
-    _info(f"tick: {len(ips)} IP / {len(domains)} доменов "
-          f"(qlog +{stats['qlog_ips']}, applied={out['applied']})")
+    _info(f"tick: v4={len(ips)} v6={len(ips6)} / {len(domains)} доменов "
+          f"(qlog v4 +{stats['qlog_ips']}, v6 +{stats.get('qlog_ips_v6', 0)}, "
+          f"applied v4={out['applied']} v6={out['applied_v6']})")
     return out
 
 
@@ -1240,10 +1475,13 @@ def apply_all(verbose: bool = True) -> bool:
     if not ipset_ensure():
         _err("apply: ipset не доступен")
         return False
+    if not ipset_ensure_v6():
+        _warn("apply: v6 ipset не поднялся — v6 split неактивен (только v4)")
     ok = True
     if not nft_apply_split():
         ok = False
     ipset_restore_snapshot()
+    ipset_restore_snapshot_v6()
     cascade_mark_sync(excl=True)
     if st.get("dns_redirect"):
         if not dns_rules_apply():
@@ -1268,7 +1506,7 @@ def apply_all(verbose: bool = True) -> bool:
         st["installed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     st["enabled"] = True
     state_save(st)
-    _info("apply_all: сплит включён")
+    _info("apply_all: сплит включён (dual-stack v4+v6)")
     return ok
 
 
@@ -1280,6 +1518,7 @@ def deactivate(verbose: bool = True) -> None:
          каскада увидят «включён» и запишут split-форму в boot-скрипт;
       2. mark-правило без исключения ДО ipset_destroy — иначе iptables
          держит reference и сет не сносится.
+    2026-10-11: v6-снапшот и v6-nft-set (nft_apply_blanket сносит) тоже чистим.
     """
     timer_remove()
     dns_rules_remove()
@@ -1288,12 +1527,13 @@ def deactivate(verbose: bool = True) -> None:
     st["enabled"] = False
     st["last_stats"] = {}
     state_save(st)
-    nft_apply_blanket()
+    nft_apply_blanket()           # сносит и v4, и v6 nft-set + цепочку output
     cascade_mark_sync(excl=False)
-    ipset_destroy()
+    ipset_destroy()               # сносит и v4, и v6 ipset
     _SNAPSHOT.unlink(missing_ok=True)
+    _SNAPSHOT_V6.unlink(missing_ok=True)
     routing_script_regen()
-    _info("deactivate: сплит выключен, каскад в blanket-форме")
+    _info("deactivate: сплит выключен, каскад в blanket-форме (v4+v6 cleanup)")
     if verbose:
         print("  [OK] сплит снят: blanket-exempt + mark без исключения")
 
