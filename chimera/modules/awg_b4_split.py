@@ -1566,6 +1566,13 @@ def deactivate(verbose: bool = True) -> None:
       2. mark-правило без исключения ДО ipset_destroy — иначе iptables
          держит reference и сет не сносится.
     2026-10-11: v6-снапшот и v6-nft-set (nft_apply_blanket сносит) тоже чистим.
+    2026-10-11 (fix LB residue): в LB-режиме cascade_mark_sync делегирует
+      в lb_hook_sync, который использует lb_hook_argv с _split_excl() —
+      но при выключении сплита _split_excl() уже возвращает '' (state
+      enabled=False). Однако legacy правило с 'awg_b4_direct' могло
+      остаться от прошлой активации и не удалиться (lb_hook_sync сравнивает
+      формы по текущему _split_excl, а не по фактически висящим правилам).
+      Жёстко вычищаем ВСЕ PREROUTING правила с awg_b4_direct перед destroy.
     """
     timer_remove()
     dns_rules_remove()
@@ -1576,13 +1583,43 @@ def deactivate(verbose: bool = True) -> None:
     state_save(st)
     nft_apply_blanket()           # сносит и v4, и v6 nft-set + цепочку output
     cascade_mark_sync(excl=False)
-    ipset_destroy()               # сносит и v4, и v6 ipset
+    _purge_legacy_split_prerouting_rules()   # LB-residue fix
+    ipset_destroy()               # сносит и v4, и v6 ipset (теперь без ref)
     _SNAPSHOT.unlink(missing_ok=True)
     _SNAPSHOT_V6.unlink(missing_ok=True)
     routing_script_regen()
     _info("deactivate: сплит выключен, каскад в blanket-форме (v4+v6 cleanup)")
     if verbose:
         print("  [OK] сплит снят: blanket-exempt + mark без исключения")
+
+
+def _purge_legacy_split_prerouting_rules() -> None:
+    """Жёстко удалить ВСЕ iptables/ip6tables mangle PREROUTING правила,
+    ссылающиеся на awg_b4_direct / awg_b4_direct_v6.
+
+    LB-residue fix (2026-10-11): cascade_mark_sync→lb_hook_sync не всегда
+    вычищает старую split-форму хука, если _split_excl() уже пустой —
+    сравнение форм идёт по текущему state, а не по фактически висящим
+    правилам. Без этой очистки ipset_destroy падает (iptables держит
+    reference на awg_b4_direct → set cannot be destroyed).
+
+   Loop-delete по -S | grep | sed -D: удаляет все совпадения, пока есть.
+    Безопасно: правило '-i awg0 -j awg_lb' без awg_b4_direct НЕ трогает.
+    """
+    for ipt in ("iptables", "ip6tables"):
+        # получить все -A PREROUTING правила с awg_b4_direct
+        r = _run([ipt, "-t", "mangle", "-S", "PREROUTING"], capture=True, timeout=10)
+        if r.returncode != 0:
+            continue
+        for line in (r.stdout or "").splitlines():
+            line = line.strip()
+            if not line.startswith("-A ") or "awg_b4_direct" not in line:
+                continue
+            # -A PREROUTING ... → -D PREROUTING ...
+            del_argv = [ipt, "-t", "mangle"] + line.replace("-A ", "-D ", 1).split()
+            # loop-delete (правило могло дублироваться)
+            while _run(del_argv, capture=True, timeout=5).returncode == 0:
+                pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
