@@ -480,11 +480,14 @@ class TestHealthMonitorVia(unittest.TestCase):
         # full-path вызван только для via-ноды, TCP — только для прямой
         self.assertEqual(calls, ["ee.example.com", "tcp:de.example.com"])
 
-    def test_disabled_hop_falls_back_tcp_ping(self):
+    def test_disabled_hop_falls_back_direct_probe(self):
         """via указывает на ВЫКЛЮЧЕННЫЙ хоп: генератор прод-конфига в этом
-        случае не ставит dialerProxy (нода ходит напрямую) — HM обязан
-        проверять её TCP-пингом, а не врать DOWN «via не найден» (ложный
-        DOWN + TG-тревога при живой ноде)."""
+        случае не ставит dialerProxy (нода ходит напрямую) — HM проверяет
+        её КАК ПРЯМУЮ: REALITY-нода с ключами → полный зонд (голый TCP на
+        REALITY-порт chimera-ноды — бан-фуд, кейс окт.2026 №3; ранее тут
+        был голый TCP — регрессия №4 закрыта), без ключей → TCP. Не врёт
+        DOWN «via не найден» (ложный DOWN + TG-тревога при живой ноде)."""
+        import chimera.modules.chain_relay as cr
         from chimera.modules import node_health_monitor as nhm
 
         # Тот же state, но хоп выключен
@@ -494,20 +497,88 @@ class TestHealthMonitorVia(unittest.TestCase):
         }))
         calls = []
 
+        def fake_fp(nd, **kw):
+            calls.append("fp:" + nd["host"])
+            return {"ok": True, "ms": 33.0, "infra": False}
+
+        orig_fp = cr.check_node_full_path
+        cr.check_node_full_path = fake_fp
         orig_tcp = nhm._tcp_ping
         nhm._tcp_ping = lambda h, p: (calls.append("tcp:" + h) or (True, 12.0))
+        try:
+            results = nhm.check_nodes_once()
+        finally:
+            cr.check_node_full_path = orig_fp
+            nhm._tcp_ping = orig_tcp
+
+        by_host = {r["host"]: r for r in results}
+        # via-нода с выключенным хопом ЖИВА — проверена прямым полным
+        # зондом (как прямая нода с ключами), НЕ голым TCP
+        self.assertTrue(by_host["ee.example.com"]["up"])
+        self.assertEqual(by_host["ee.example.com"]["ms"], 33.0)
+        # обе ноды (via с выключенным хопом и прямая) — с ключами →
+        # обе зондируются прямым полным зондом, TCP не вызывается
+        self.assertEqual(calls, ["fp:ee.example.com", "fp:de.example.com"])
+
+    def test_disabled_hop_without_creds_uses_tcp(self):
+        """via-нода с выключенным хопом и БЕЗ клиентских ключей — прямой
+        полный зонд неприменим: честный TCP-пинг (как раньше)."""
+        from chimera.modules import node_health_monitor as nhm
+
+        self.core.STATE_FILE.write_text(json.dumps({
+            "chain_nodes": [_mk_node(via="hop-a")],
+            "relay_hops": [_mk_hop("hop-a", enabled=False)],
+        }))
+        st = json.loads(self.core.STATE_FILE.read_text())
+        st["chain_nodes"] = [{k: v for k, v in st["chain_nodes"][0].items()
+                              if k not in ("uuid", "pubkey", "shortid")}]
+        self.core.STATE_FILE.write_text(json.dumps(st))
+        calls = []
+        orig_tcp = nhm._tcp_ping
+        nhm._tcp_ping = lambda h, p: (calls.append("tcp:" + h) or (True, 44.0))
         try:
             results = nhm.check_nodes_once()
         finally:
             nhm._tcp_ping = orig_tcp
 
         by_host = {r["host"]: r for r in results}
-        # via-нода с выключенным хопом ЖИВА (проверена TCP, как прямая)
         self.assertTrue(by_host["ee.example.com"]["up"])
-        self.assertEqual(by_host["ee.example.com"]["ms"], 12.0)
-        # обе ноды проверены TCP-пингом
-        self.assertEqual(sorted(calls),
-                         ["tcp:de.example.com", "tcp:ee.example.com"])
+        self.assertEqual(by_host["ee.example.com"]["ms"], 44.0)
+        self.assertEqual(calls, ["tcp:ee.example.com"])
+
+    def test_via_infra_falls_back_tcp(self):
+        """Сбой МЕХАНИЗМА via-зонда (нет xray-бинарня и т.п.) — о ноде
+        ничего не говорит: честный TCP-fallback, а не ложный DOWN
+        (зеркалит infra-флаг check_via_node_full_path, кейс №4)."""
+        import chimera.modules.chain_relay as cr
+        from chimera.modules import node_health_monitor as nhm
+        # только via-нода (прямая нода с ключами ушла бы в реальный
+        # check_node_full_path и зашумляла бы счётчик вызовов)
+        self.core.STATE_FILE.write_text(json.dumps({
+            "chain_nodes": [_mk_node(via="hop-a")],
+            "relay_hops": self.hops,
+        }))
+        calls = []
+
+        def fake_via(nd, hops, **kw):
+            calls.append("via:" + nd["host"])
+            return {"ok": False, "ms": 0.0, "reason": "нет xray",
+                    "infra": True}
+
+        orig = cr.check_via_node_full_path
+        cr.check_via_node_full_path = fake_via
+        orig_tcp = nhm._tcp_ping
+        nhm._tcp_ping = lambda h, p: (calls.append("tcp:" + h) or (True, 21.0))
+        try:
+            results = nhm.check_nodes_once()
+        finally:
+            cr.check_via_node_full_path = orig
+            nhm._tcp_ping = orig_tcp
+
+        by_host = {r["host"]: r for r in results}
+        self.assertTrue(by_host["ee.example.com"]["up"])
+        self.assertEqual(by_host["ee.example.com"]["ms"], 21.0)
+        self.assertEqual(calls, ["via:ee.example.com", "tcp:ee.example.com"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1159,6 +1230,97 @@ class TestHealthMonitorDirectFullPath(unittest.TestCase):
         self.assertTrue(by_host["de.example.com"]["up"])
         self.assertEqual(by_host["de.example.com"]["ms"], 9.0)
         self.assertEqual(calls, ["tcp:de.example.com"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  check_via_node_full_path.infra + check_node_full_path via-strip.
+#  Живой кейс окт. 2026 №4: [T]-пинг via-ноды (ee via hop-fi) вечно писал
+#  «нода не отвечает» при живой цепочке 171 мс — прямой зонд строил outbound
+#  с sockopt.dialerProxy=hop-fi во временном конфиге БЕЗ хоп-outbound:
+#  xray не может набрать несуществующий прокси → все HTTP-пробы 000.
+#  Фикс: (а) вызывающий код гоняет via-ноду через check_via_node_full_path
+#  (цепочка), (б) check_node_full_path вырезает via из зонда, (в) у
+#  via-зонда появился infra-флаг (сбой механизма ≠ вердикт ноде).
+# ══════════════════════════════════════════════════════════════════════════════
+class TestViaProbeInfraAndViaStrip(unittest.TestCase):
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_via_probe_without_via_is_infra(self):
+        import chimera.modules.chain_relay as cr
+        res = cr.check_via_node_full_path(_mk_node(via=""), [_mk_hop("hop-a")])
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["infra"])
+        self.assertEqual(res["reason"], "via не задан")
+
+    def test_via_probe_disabled_hop_is_infra(self):
+        import chimera.modules.chain_relay as cr
+        res = cr.check_via_node_full_path(
+            _mk_node(via="hop-a"), [_mk_hop("hop-a", enabled=False)])
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["infra"])   # хоп выключен — механизм, не вердикт
+        self.assertEqual(res["reason"], "via не задан")
+
+    def test_via_probe_broken_chain_is_infra(self):
+        import chimera.modules.chain_relay as cr
+        # цикл hop-a → hop-b → hop-a: тег есть и включён, цепочка битая
+        hops = [_mk_hop("hop-a", via="hop-b"), _mk_hop("hop-b", via="hop-a")]
+        res = cr.check_via_node_full_path(_mk_node(via="hop-a"), hops)
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["infra"])
+        self.assertEqual(res["reason"], "битая via")
+
+    def test_via_probe_no_xray_is_infra(self):
+        import chimera.modules.chain_relay as cr
+        with patch.object(cr, "_find_xray_bin", return_value=None):
+            res = cr.check_via_node_full_path(
+                _mk_node(via="hop-a"), [_mk_hop("hop-a")])
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["infra"])
+        self.assertEqual(res["reason"], "нет xray")
+
+    def test_check_node_full_path_strips_via(self):
+        """Прямой зонд обязан вырезать via: dialerProxy во временном
+        конфиге указывал бы на несуществующий хоп-outbound (кейс №4)."""
+        import chimera.modules.chain_relay as cr
+
+        captured = {}
+
+        class _FakeClient:
+            def __init__(self, cfg, xbin):
+                captured["cfg"] = cfg
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            start_error = "fake-start-error"
+
+            def alive(self):
+                return False
+
+            def err_tail(self, n=200):
+                return ""
+
+        nd = _mk_node(via="hop-a")
+        with patch.object(cr, "_find_xray_bin",
+                          return_value="/usr/local/bin/xray"), \
+             patch.object(cr, "_TempXrayClient", _FakeClient):
+            res = cr.check_node_full_path(nd)
+        # start_error → infra=True (механизм), но конфиг уже построен —
+        # проверяем форму outbound-а зонда
+        self.assertTrue(res["infra"])
+        ob = captured["cfg"]["outbounds"][0]
+        sockopt = ob.get("streamSettings", {}).get("sockopt", {})
+        self.assertNotIn("dialerProxy", sockopt)     # ← ядро регрессии №4
+        self.assertEqual(ob["settings"]["vnext"][0]["address"],
+                         "ee.example.com")
+        self.assertEqual(ob["tag"], "exit-check")
+        # исходный nd вызывающего кода не мутирован
+        self.assertEqual(nd.get("via"), "hop-a")
 
 
 if __name__ == "__main__":

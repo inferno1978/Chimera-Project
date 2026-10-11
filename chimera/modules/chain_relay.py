@@ -901,28 +901,37 @@ def check_via_node_full_path(nd: dict, hops: list[dict],
         speed_mbps  — Мбит/с через цепочку (только при want_speed_mb>0 и ok)
         detail      — человекочитаемое описание (для HM-лога/меню)
         reason      — короткая причина отказа (для однострочного вывода)
+        infra       — True = сбой МЕХАНИЗМА зонда (нет xray-бинарня, битая
+                      via, не стартовал чекер): результат ничего не
+                      говорит о ноде — вызывающий код обязан фолбэкнуться
+                      на TCP-пробу. False = честный вердикт по цепочке
+                      (зеркалит семантику check_node_full_path)
         legs        — {'hop': ok|fail|skip, 'direct': ok|fail|skip}
                       (диагностика ног, только при deep_diag и отказе)
         xray_tail   — хвост stderr xray-чекера (при отказе)
     """
     res = {"ok": False, "ms": 0.0, "exit_ip": "", "speed_mbps": 0.0,
-           "detail": "", "reason": "", "legs": {}, "xray_tail": ""}
+           "detail": "", "reason": "", "legs": {}, "xray_tail": "",
+           "infra": False}
     via = hop_via_tag_for(nd, hops)
     if not via:
         res["detail"] = (f"via «{(nd or {}).get('via', '')}» не найден/выключен"
                          if (nd or {}).get("via") else "via не задан")
         res["reason"] = "via не задан"
+        res["infra"] = True   # механизм неприменим к такой ноде — не вердикт
         return res
     chain = hop_chain(via, hops)
     if not chain:
         res["detail"] = f"цепочка via «{via}» битая (цикл/битая ссылка)"
         res["reason"] = "битая via"
+        res["infra"] = True   # битое состояние хопов — не вердикт ноде
         return res
 
     xbin = _find_xray_bin()
     if not xbin:
         res["detail"] = "xray-бинарь не найден для full-path проверки"
         res["reason"] = "нет xray"
+        res["infra"] = True
         return res
 
     socks_port = _free_local_port()
@@ -930,6 +939,7 @@ def check_via_node_full_path(nd: dict, hops: list[dict],
     if cfg is None:
         res["detail"] = "не удалось собрать конфиг проверки"
         res["reason"] = "конфиг не собрался"
+        res["infra"] = True
         return res
 
     try:
@@ -937,11 +947,13 @@ def check_via_node_full_path(nd: dict, hops: list[dict],
             if client.start_error:
                 res["detail"] = client.start_error
                 res["reason"] = "xray не стартовал"
+                res["infra"] = True
                 return res
             if not client.alive():
                 err = client.err_tail(200)
                 res["detail"] = f"xray чекера упал: {err or '?'}"
                 res["reason"] = "xray упал"
+                res["infra"] = True
                 return res
 
             # 1) liveness: лестница проб через цепочку
@@ -1098,9 +1110,17 @@ def check_node_full_path(nd: dict,
         return res
 
     socks_port = _free_local_port()
-    # Конфиг проверки = прод-форма outbound-а (тот же билдер, что у каскада),
-    # без dialerProxy: socks-in → exit-check напрямую.
-    exit_ob = build_hop_outbound({**nd, "tag": "exit-check"})
+    # Конфиг проверки = прод-форма outbound-а (тот же билдер, что у
+    # каскада), без dialerProxy: socks-in → exit-check напрямую. Поле
+    # via вырезаем ЯВНО: это зонд ПРЯМОЙ ноды, во временном конфиге нет
+    # хоп-outbound — dialerProxy указывал бы в никуда (живой кейс
+    # окт.2026 №4: via-нода ee в [T]-пинге вечно «нода не отвечает» при
+    # живой цепочке: build_hop_outbound честно ставит sockopt.
+    # dialerProxy=via, xray не может набрать несуществующий прокси →
+    # все HTTP-пробы 000). Выбор зонда — обязанность вызывающего кода:
+    # via-нода с активным хопом → check_via_node_full_path (цепочка),
+    # хоп выключен/удалён → сюда (генератор подключает ноду напрямую).
+    exit_ob = build_hop_outbound({**nd, "via": "", "tag": "exit-check"})
     cfg = {
         "log": {"loglevel": "warning"},
         "inbounds": [{
