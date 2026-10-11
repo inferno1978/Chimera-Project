@@ -409,7 +409,9 @@ class TestSpeedTestNodeLatency(unittest.TestCase):
 
     def test_via_node_active_hop_chain_ok(self):
         """via-нода с активным хопом → зонд через цепочку, метка
-        (full-path via hop-fi) — НЕ прямой зонд (кейс №4)."""
+        (via hop-fi) — НЕ прямой зонд (кейс №4). Короткий маркер
+        «(via hop-fi)»: полный «(full-path via hop-fi)» + «· RTT …» не
+        влезал в 78 колонок бокса [T] и рвался переносом (№6)."""
         from chimera.modules import chain_nodes
         calls = []
 
@@ -428,7 +430,8 @@ class TestSpeedTestNodeLatency(unittest.TestCase):
                 "ee.example.com", 443, dict(self._ND_VIA))
         finally:
             self._restore_relay(saved)
-        self.assertIn("full-path via hop-fi", result)
+        self.assertIn("(via hop-fi)", result)
+        self.assertNotIn("(full-path via hop-fi)", result)
         self.assertIn("мс", result)
         self.assertEqual(calls, ["via"])
 
