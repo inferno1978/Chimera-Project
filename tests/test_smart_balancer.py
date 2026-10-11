@@ -1053,5 +1053,199 @@ class TestSbFullpathDirect(unittest.TestCase):
         self.assertEqual(r["load"], 1)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  _sb_patch_xray_active_node — регрессии живого кейса окт.2026 №5:
+#  патч балансера подменял chain-exit-1 (слот tproxy-telemt) creds-миксом:
+#  shortId не обновлялся (ключ short_id ≠ shortid в state), via-ноде не
+#  ставился dialerProxy → REALITY auth fail «received real certificate»,
+#  Telegram-трафик в retry-цикле при живых нодах.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestSbPatchXrayActiveNode(unittest.TestCase):
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg   = self._tmpdir / "config.json"   # xray config
+        self._state = self._tmpdir / "state.json"    # installer state (hops)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @staticmethod
+    def _exit_ob() -> dict:
+        """chain-exit-1 до патча: нода old.example (как после генератора)."""
+        return {
+            "tag": "chain-exit-1", "protocol": "vless",
+            "settings": {"vnext": [{
+                "address": "old.example", "port": 443,
+                "users": [{"id": "OLD-UUID", "encryption": "none",
+                           "flow": "xtls-rprx-vision"}],
+            }]},
+            "streamSettings": {
+                "network": "tcp", "security": "reality",
+                "sockopt": {},
+                "realitySettings": {
+                    "show": False, "fingerprint": "chrome",
+                    "serverName": "old.example", "publicKey": "OLD-PBK",
+                    "shortId": "OLD-SID", "spiderX": "/"},
+            },
+        }
+
+    def _patch_node(self, node, outbounds=None, hops=None):
+        """Пишет конфиг/state, зовёт _sb_patch_xray_active_node(node).
+        Возвращает итоговый конфиг (dict) или None при отказе."""
+        import chimera.modules.smart_balancer as sbm
+        self._cfg.write_text(json.dumps(
+            {"outbounds": outbounds if outbounds is not None
+             else [self._exit_ob()]}))
+        self._state.write_text(json.dumps({"relay_hops": hops or []}))
+        with patch("chimera.modules.smart_balancer._sb_get_xray_config_path",
+                   lambda: self._cfg), \
+             patch("chimera.modules.smart_balancer._STATE_FILE", self._state), \
+             patch("chimera.modules.smart_balancer._sb_log"):
+            ok = sbm._sb_patch_xray_active_node(node)
+        return json.loads(self._cfg.read_text()) if ok else None
+
+    _HOP_FI = {"tag": "hop-fi", "host": "fi.example", "port": 443,
+               "uuid": "FI-UUID", "pubkey": "FI-PBK", "shortid": "FI-SID",
+               "sni": "fi.example", "fp": "chrome", "proto": "reality",
+               "via": "", "enabled": True}
+
+    def test_shortid_updated_key_bug(self):
+        """ГЛАВНЫЙ кейс №5: node['shortid'] не патчился (код читал
+        short_id) → outbound с чужим shortId → REALITY auth fail."""
+        node = {"host": "ee.example", "port": 443, "uuid": "EE-UUID",
+                "pubkey": "EE-PBK", "shortid": "EE-SID",
+                "sni": "ee.example", "fp": "firefox"}
+        cfg = self._patch_node(node)
+        self.assertIsNotNone(cfg)
+        ob = cfg["outbounds"][0]
+        rs = ob["streamSettings"]["realitySettings"]
+        self.assertEqual(rs["shortId"], "EE-SID")       # ← была OLD-SID
+        self.assertEqual(ob["settings"]["vnext"][0]["address"], "ee.example")
+        self.assertEqual(ob["settings"]["vnext"][0]["users"][0]["id"], "EE-UUID")
+        self.assertEqual(rs["publicKey"], "EE-PBK")
+        self.assertEqual(rs["serverName"], "ee.example")
+
+    def test_legacy_short_id_form_accepted(self):
+        """Устаревшая форма short_id тоже принимается (робастность)."""
+        node = {"host": "ee.example", "port": 443, "uuid": "EE-UUID",
+                "pubkey": "EE-PBK", "short_id": "EE-SID-LEGACY",
+                "sni": "ee.example"}
+        cfg = self._patch_node(node)
+        self.assertEqual(
+            cfg["outbounds"][0]["streamSettings"]["realitySettings"]["shortId"],
+            "EE-SID-LEGACY")
+
+    def test_via_node_gets_dialer_proxy_and_hop_outbound(self):
+        """via-нода: dialerProxy ставится + hop-outbound добавляется,
+        если его нет в конфиге (иначе dialerProxy указал бы в никуда)."""
+        node = {"host": "ee.example", "port": 443, "uuid": "EE-UUID",
+                "pubkey": "EE-PBK", "shortid": "EE-SID",
+                "sni": "ee.example", "fp": "firefox", "via": "hop-fi"}
+        cfg = self._patch_node(node, hops=[self._HOP_FI])
+        self.assertIsNotNone(cfg)
+        ob = cfg["outbounds"][0]
+        self.assertEqual(ob["streamSettings"]["sockopt"]["dialerProxy"],
+                         "hop-fi")
+        tags = [o.get("tag") for o in cfg["outbounds"]]
+        self.assertIn("hop-fi", tags)
+
+    def test_via_node_hop_outbound_not_duplicated(self):
+        """Хоп-outbound уже в конфиге → не дублируется."""
+        node = {"host": "ee.example", "port": 443, "uuid": "EE-UUID",
+                "pubkey": "EE-PBK", "shortid": "EE-SID",
+                "sni": "ee.example", "fp": "firefox", "via": "hop-fi"}
+        import chimera.modules.chain_relay as cr
+        hop_ob = cr.build_hop_outbound(self._HOP_FI)
+        cfg = self._patch_node(node, outbounds=[self._exit_ob(), hop_ob],
+                               hops=[self._HOP_FI])
+        tags = [o.get("tag") for o in cfg["outbounds"]]
+        self.assertEqual(tags.count("hop-fi"), 1)
+
+    def test_direct_node_clears_stale_dialer_proxy(self):
+        """Прямая нода: dialerProxy от прежней via-ноды снимается
+        (генератор в этом случае подключает ноду напрямую)."""
+        ob = self._exit_ob()
+        ob["streamSettings"]["sockopt"]["dialerProxy"] = "hop-fi"
+        node = {"host": "ee.example", "port": 443, "uuid": "EE-UUID",
+                "pubkey": "EE-PBK", "shortid": "EE-SID",
+                "sni": "ee.example", "fp": "firefox"}
+        cfg = self._patch_node(node, outbounds=[ob], hops=[self._HOP_FI])
+        self.assertNotIn("dialerProxy",
+                         cfg["outbounds"][0]["streamSettings"]["sockopt"])
+
+    def test_disabled_via_hop_no_dialer_proxy(self):
+        """via-нодa с ВЫКЛЮЧЕННЫМ хопом → dialerProxy не ставится
+        (зеркало генератора: нода подключается напрямую)."""
+        node = {"host": "ee.example", "port": 443, "uuid": "EE-UUID",
+                "pubkey": "EE-PBK", "shortid": "EE-SID",
+                "sni": "ee.example", "fp": "firefox", "via": "hop-fi"}
+        hop_off = dict(self._HOP_FI, enabled=False)
+        cfg = self._patch_node(node, hops=[hop_off])
+        self.assertIsNotNone(cfg)
+        self.assertNotIn("dialerProxy",
+                         cfg["outbounds"][0]["streamSettings"]["sockopt"])
+
+
+class TestRunOncePinnedGuard(unittest.TestCase):
+    """run_once + pinned-режим: патч НЕ вызывается (ротация на закреплённой
+    ноде), пробы/мета продолжают работать. Живой кейс окт.2026 №5: патч
+    подменил chain-exit-1 (слот tproxy-telemt) при живом pin #6."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "state.json"
+        self._sb    = self._tmpdir / "sb.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_no_patch_when_pinned(self):
+        import chimera.modules.smart_balancer as sbm
+        nodes = [{"host": "a.example", "port": 443},
+                 {"host": "b.example", "port": 443}]
+        self._state.write_text(json.dumps({
+            "chain_nodes": nodes,
+            "chain_lb_nodes": [],
+            "chain_pinned_node_index": 5,   # pin #6 (u1nl), как в живом кейсе
+        }))
+        self._sb.write_text(json.dumps({
+            "enabled": True, "strategy": "smart", "active_node_idx": -1,
+        }))
+        probe_calls = []
+
+        def _fake_probe(host, port, nd=None):
+            probe_calls.append((host, port))
+            return {"alive": True, "lat_ms": 10.0, "bw_ms": 20.0, "load": 0}
+
+        with patch("chimera.modules.smart_balancer._STATE_FILE", self._state), \
+             patch("chimera.modules.smart_balancer._SB_STATE_FILE", self._sb), \
+             patch("chimera.modules.smart_balancer._sb_get_nodes_from_state",
+                   return_value=nodes), \
+             patch("chimera.modules.smart_balancer._sb_get_xray_config_path",
+                   lambda: None), \
+             patch("chimera.modules.smart_balancer._probe_node",
+                   side_effect=_fake_probe), \
+             patch("chimera.modules.smart_balancer._sb_patch_xray_active_node") as m_patch, \
+             patch("chimera.modules.smart_balancer._sb_reload_xray") as m_reload, \
+             patch("chimera.modules.smart_balancer._tg_notify_event"), \
+             patch("chimera.modules.smart_balancer._sb_log"):
+            sbm._smart_balancer_run_once()
+
+        m_patch.assert_not_called()      # ← ГЛАВНОЕ: патча нет при pin
+        m_reload.assert_not_called()
+        # наблюдаемость жива: обе ноды пробились и заскорились
+        self.assertEqual(probe_calls, [("a.example", 443), ("b.example", 443)])
+        saved = json.loads(self._sb.read_text())
+        self.assertIn("a.example:443", saved["nodes_meta"])
+        # гвард сработал ДО выбора/переключения — active_node_idx не тронут
+        self.assertEqual(saved.get("active_node_idx"), -1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

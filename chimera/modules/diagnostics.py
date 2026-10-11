@@ -902,6 +902,47 @@ def _fullpath_nd_from_outbound(ob: dict, vn: dict,
     }
 
 
+def _outbound_db_desync_hint(ob: dict, vn: dict) -> str:
+    """Подсказка «конфиг рассинхронизирован с БД нод» для шага 5.
+
+    Живой кейс окт.2026 №5: SmartBalancer патчнул chain-exit-1 вживую
+    (shortId не обновлялся из-за ключа short_id/shortid; via-ноде не
+    ставился dialerProxy) → outbound с чужим shortId → REALITY auth fail,
+    все HTTP-пробы 000 — «нода не отвечает» при живой ноде ([T]/HM по БД
+    зелёные). Креды chain-exit-* outbound ≠ state.json chain_nodes (или
+    outbound вообще не соответствует ни одной ноде БД) = конфиг патчен
+    без пересборки → лечится пересборкой конфига Xray.
+    Возвращает '' когда рассинхрона нет (не шумим на честные отказы).
+    """
+    try:
+        from chimera.modules.chain_relay import _chain_nodes_from_state
+        nodes = _chain_nodes_from_state() or []
+    except Exception:
+        return ""
+    if not nodes:
+        return ""
+    _ss = ob.get("streamSettings", {}) or {}
+    _rs = (_ss.get("realitySettings", {}) or {})
+    _uuid = str(((vn.get("users") or [{}])[0].get("id")) or "")
+    _ob_short = (_rs.get("shortId") if _rs.get("shortId") is not None
+                 else ((_rs.get("shortIds") or [""])[0]
+                       if isinstance(_rs.get("shortIds"), list) else ""))
+    _key = (str(vn.get("address") or ""), int(vn.get("port") or 0))
+    matches = [n for n in nodes
+               if (str(n.get("host") or ""), int(n.get("port") or 0)) == _key]
+    if not matches:
+        return ("  |  ⚠ outbound не соответствует ни одной ноде в state.json "
+                "(chain_nodes) — конфиг патчен без пересборки? Пересоберите "
+                "конфиг Xray (меню → Пересобрать конфиг и перезапустить)")
+    for n in matches:
+        if (str(n.get("uuid") or "") == _uuid
+                and str(n.get("pubkey") or "") == str(_rs.get("publicKey") or "")
+                and str(n.get("shortid") or "") == str(_ob_short or "")):
+            return ""      # креды совпадают хотя бы с одной нодой БД
+    return ("  |  ⚠ креды outbound ≠ state.json (chain_nodes) — конфиг "
+            "патчен без пересборки (SmartBalancer?) — пересоберите конфиг Xray")
+
+
 def _diag_check_routing_live(cfg: dict, counters: list) -> None:
     core = _core_module()
     _box_warn = core._box_warn
@@ -1002,11 +1043,22 @@ def _diag_check_routing_live(cfg: dict, counters: list) -> None:
                                       f"прямой REALITY-зонд ({_r.get('ms', 0):.0f} мс)",
                                       "")
                         else:
+                            # reason бывает уже вложен в detail («нода не
+                            # отвечает (нода не отвечает (все HTTP-пробы
+                            # 000)…)») — не дублируем
+                            _reason = str(_r.get("reason") or "").strip()
+                            _detail = str(_r.get("detail") or "").strip()
+                            if _reason and _detail.startswith(_reason):
+                                _why = _detail[:160]
+                            elif _reason:
+                                _why = f"{_reason} ({_detail[:100]})"
+                            else:
+                                _why = _detail[:160] or "full-path FAIL"
                             _diag_chk(counters, False,
                                       "",
                                       f"Exit-нода [{tag}] {host}:{port} — REALITY-зонд FAIL: "
-                                      f"{_r.get('reason', '')} "
-                                      f"({(_r.get('detail') or '')[:100]})")
+                                      f"{_why}"
+                                      + _outbound_db_desync_hint(ob, vn))
                         continue
             except Exception:
                 pass    # fallback на обычную TCP-пробу ниже

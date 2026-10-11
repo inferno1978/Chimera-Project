@@ -379,9 +379,12 @@ def _sb_get_xray_config_path() -> Path | None:
 def _sb_get_nodes_from_state() -> list[dict]:
     """
     Читает список exit-нод из state.json.
-    Возвращает список dict с ключами: host, port, uuid, pubkey, short_id, sni, fp.
+    Возвращает список dict с ключами: host, port, uuid, pubkey, shortid,
+    sni, fp (форма — как у chain_nodes в state.json / node_has_reality_creds;
+    «shortid» БЕЗ подчёркивания — раньше докстринг утверждал short_id,
+    и по нему писали кривой патч _sb_patch_xray_active_node, кейс №5).
     """
-    state_file = Path("/var/lib/xray-installer/state.json")
+    state_file = _STATE_FILE
     try:
         if state_file.exists():
             st = json.loads(state_file.read_text())
@@ -447,17 +450,53 @@ def _sb_patch_xray_active_node(node: dict) -> bool:
                     vnext[0]["users"][0]["id"] = node.get("uuid", vnext[0]["users"][0]["id"])
 
             # Обновляем SNI и fp в streamSettings
-            st = ob.get("streamSettings", {})
+            # (setdefault: streamSettings может отсутствовать у чужих
+            # outbound-ов — get({},) вернул бы ОТКОЛОТЫЙ dict, патч
+            # SNI/sockopt потерялся бы)
+            st = ob.setdefault("streamSettings", {})
             for tls_key in ("realitySettings", "tlsSettings"):
                 if tls_key in st:
                     if node.get("sni"):
                         st[tls_key]["serverName"] = node["sni"]
                     if node.get("pubkey") and tls_key == "realitySettings":
                         st[tls_key]["publicKey"] = node["pubkey"]
-                    if node.get("short_id") and tls_key == "realitySettings":
-                        st[tls_key]["shortId"] = node["short_id"]
+                    # FIX (живой кейс окт.2026 №5): ключ ноды в state.json —
+                    # «shortid» (без подчёркивания; см. node_has_reality_creds,
+                    # _fullpath_nd_from_outbound). Чтение «short_id» всегда
+                    # давало пусто → shortId НЕ патчился и оставался от
+                    # ПРЕДЫДУЩЕЙ ноды → REALITY auth fail на цели
+                    # («received real certificate»), все HTTP-пробы 000 при
+                    # живой ноде. Принимаем обе формы (shortid — канон).
+                    _sid = node.get("shortid") or node.get("short_id") or ""
+                    if _sid and tls_key == "realitySettings":
+                        st[tls_key]["shortId"] = _sid
                     if node.get("fp"):
                         st[tls_key]["fingerprint"] = node["fp"]
+
+            # FIX (живой кейс окт.2026 №5): via-нода обязана ходить через
+            # хоп-цепочку (sockopt.dialerProxy) — прямой путь до неё
+            # транзитно перерезан (ради этого хоп и поставлен). Патч без
+            # dialerProxy отправлял напрямую → зонд/трафик 000. Хоп
+            # выключен/удалён — генератор подключил бы ноду напрямую
+            # (зеркалим: dialerProxy снимаем). Отсутствующие hop-outbound-ы
+            # цепочки добавляем, иначе dialerProxy укажет в никуда
+            # (живой кейс окт.2026 №4 — зонд с прокси-в-никуда).
+            _hops_state = _sb_get_relay_hops() or []
+            _via = str(node.get("via") or "").strip()
+            _so = st.setdefault("sockopt", {})
+            if _via and any(str(h.get("tag") or "") == _via
+                            for h in _hops_state):
+                _so["dialerProxy"] = _via
+                try:
+                    from chimera.modules.chain_relay import collect_hop_outbounds
+                    _have = {o.get("tag") for o in outbounds}
+                    for _hop_ob in collect_hop_outbounds([node], _hops_state):
+                        if _hop_ob.get("tag") not in _have:
+                            outbounds.append(_hop_ob)
+                except Exception:
+                    pass
+            else:
+                _so.pop("dialerProxy", None)
 
             patched = True
             break   # патчим только первый подходящий outbound
@@ -810,8 +849,8 @@ def _smart_balancer_run_once() -> None:
     # не зондируются и не могут стать активными. Состав пуст/не задан —
     # все ноды (обратная совместимость).
     try:
-        _chain_st = json.loads(Path("/var/lib/xray-installer/state.json").read_text()) \
-            if Path("/var/lib/xray-installer/state.json").exists() else {}
+        _chain_st = json.loads(_STATE_FILE.read_text()) \
+            if _STATE_FILE.exists() else {}
     except Exception:
         _chain_st = {}
     _lb_sel = _sb_lb_selection(_chain_st)
@@ -965,6 +1004,27 @@ def _smart_balancer_run_once() -> None:
                 else f"selector из {len(_native_sel)} тегов")
         _sb_log("OK: ротацией владеет нативный chain-balancer (" + _who +
                 ") — патч адреса пропущен")
+        return
+
+    # ------------------------------------------------------------------
+    # 1.6 Pinned-режим: нода закреплена вручную (меню «Узлы» → [P]) —
+    # генератор маршрутизирует весь TCP в закреплённый chain-exit-N, патч
+    # chain-exit-1 бессмыслен для основного трафика и при этом ПОДМЕНЯЕТ
+    # слот tproxy-telemt (Telegram-выход: mtproto._xray_get_proxy_tag
+    # хардкодом предпочитает «первый chain-exit»). Живой кейс окт.2026
+    # №5: патч 03:45 подменил креды chain-exit-1 на ee (чужой shortId +
+    # без dialerProxy) → REALITY auth fail «received real certificate» →
+    # Telegram-трафик в retry-цикле при живых нодах ([T]/HM зелёные).
+    # Пробы/скоринг/карантин/TG-алерты продолжают работать
+    # (наблюдаемость); переключение — после снятия pin (Узлы → [P] → 0).
+    # ------------------------------------------------------------------
+    _pin_idx = _chain_st.get("chain_pinned_node_index", -1)
+    if isinstance(_pin_idx, int) and not isinstance(_pin_idx, bool) and _pin_idx >= 0:
+        state["nodes_meta"] = nodes_meta
+        _sb_save(state)
+        _sb_log("OK: pinned-режим (нода #" + str(_pin_idx + 1) +
+                ") — ротация/патч отключены "
+                "(снять pin: меню «Узлы» → [P] → 0)")
         return
 
     # ------------------------------------------------------------------
@@ -1501,7 +1561,26 @@ def do_manage_smart_balancer() -> None:
                 print()
 
                 if ans in ("y", "yes", ""):
-                    if _sb_patch_xray_active_node(best_nd):
+                    # Pinned-режим: патч подменил бы chain-exit-1 (слот
+                    # tproxy-telemt), НЕ влияя на основной трафик (он на
+                    # закреплённой ноде) — сначала снимите pin
+                    # (живой кейс окт.2026 №5 — подмена слота ломала
+                    # Telegram-выход при живых нодах)
+                    _pin = -1
+                    try:
+                        if _STATE_FILE.exists():
+                            _pin = json.loads(
+                                _STATE_FILE.read_text()).get(
+                                    "chain_pinned_node_index", -1)
+                    except Exception:
+                        _pin = -1
+                    if isinstance(_pin, int) and not isinstance(_pin, bool) and _pin >= 0:
+                        _box_top("Результат")
+                        _box_warn(f"Активен pinned-режим (нода #{_pin + 1}) — "
+                                  f"сначала снимите закрепление "
+                                  f"(меню «Узлы» → [P] → 0), затем применяйте ноду")
+                        _box_bottom()
+                    elif _sb_patch_xray_active_node(best_nd):
                         ok = _sb_reload_xray()
                         if ok:
                             state["active_node_idx"] = best_i
