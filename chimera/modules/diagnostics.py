@@ -971,6 +971,41 @@ def _diag_check_routing_live(cfg: dict, counters: list) -> None:
                 except Exception:
                     pass    # fallback на обычную TCP-пробу ниже
 
+            # Прямая REALITY-нода (без dialerProxy): голый TCP-ping пишет
+            # на chimera-нодах-целях в error.log «REALITY: processed
+            # invalid connection» → fail2ban xray-reality + DPI-detector
+            # цели банят мониторящий IP: диагностика собственной рукой
+            # роняет живую ноду в «НЕДОСТУПНА» (живой кейс окт. 2026 №3:
+            # u1nl забанила entry-ноду за зонды HM/балансера/диагностики,
+            # Errno 111 при живом YouTube-траффике). Нода с ключами в
+            # конфиге проверяется ПОЛНЫМ зондом (валидный REALITY-хендшейк
+            # + HTTP-проба): баном не считается и честнее — проверяет
+            # хендшейк+маршрут, а не только SYN/ACK. TCP-проба — fallback
+            # для нод без ключей (чужие host:port) и при сбое зонда.
+            try:
+                from chimera.modules.chain_relay import (
+                    check_node_full_path, node_has_reality_creds)
+                _nd = _fullpath_nd_from_outbound(ob, vn)
+                if _nd and node_has_reality_creds(_nd):
+                    _r = check_node_full_path(_nd, deep_diag=False)
+                    if not _r.get("infra"):
+                        # infra=True (сбой механизма зонда) → TCP-проба ниже;
+                        # иначе — честный вердикт полного зонда
+                        if _r.get("ok"):
+                            _diag_chk(counters, True,
+                                      f"Exit-нода [{tag}] {host}:{port} — full-path OK, "
+                                      f"прямой REALITY-зонд ({_r.get('ms', 0):.0f} мс)",
+                                      "")
+                        else:
+                            _diag_chk(counters, False,
+                                      "",
+                                      f"Exit-нода [{tag}] {host}:{port} — REALITY-зонд FAIL: "
+                                      f"{_r.get('reason', '')} "
+                                      f"({(_r.get('detail') or '')[:100]})")
+                        continue
+            except Exception:
+                pass    # fallback на обычную TCP-пробу ниже
+
             alive, detail, _lat = _diag_tcp_probe(host, port, timeout=10)
             if alive:
                 _diag_chk(counters, True,

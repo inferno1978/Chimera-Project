@@ -1,3 +1,79 @@
+# Changelog new entry — Anti-DPI зонды: ноды Chimera больше не банят друг друга за мониторинг (11 Oct 2026)
+
+## FIX(probes): полный REALITY-зонд вместо голого TCP-ping для exit-нод каскада — Health Monitor / «Пинг Exit Node» / диагностика (шаг 5) / SmartBalancer перестали баниться анти-DPI защитой chimera-нод-целей; fail2ban xray-reality получил ignoreip
+
+**Контекст (11.10.2026, живой кейс окт. 2026 №3):** нода u1nl
+(NL-exit) «падала» во ВСЕХ трёх проверках входной ноды (Health Monitor
+DOWN, «Пинг Exit Node» — `[Errno 111] Connection refused`, «5. Тест
+маршрутизации» — НЕДОСТУПНА) при полностью живом трафике. Диагноз по живым
+уликам: **u1nl забанила IP входной ноды СОБСТВЕННЫМИ
+зондами мониторинга**. Голый TCP connect+close к REALITY-порту пишется на
+цели в error.log как `REALITY: processed invalid connection ... failed to
+read client hello`; эту строку едят ДВЕ защиты chimera-ноды: fail2ban-джейл
+xray-reality (maxretry=5/10 мин, nftables-REJECT → Errno 111) и DPI-detector
+(паттерн «HTTP на TLS-порту» матчится префиксом `failed to read` → вес 3 за
+любую пробу, порог 6 → бан уже за 2 пробы; ufw-DROP). Один раунд
+SmartBalancer = 3 коннекта на ноду (lat + bw×2) = score 9 → DPI-бан за
+ОДИН раунд. Ручные диагностики добивают fail2ban. Итог: любая chimera-нода
+мониторит chimera-ноду → бан → ложный DOWN при живом трафике.
+
+**Что сделано:**
+
+**(1) chain_relay.check_node_full_path(nd)** — полный зонд ПРЯМОЙ (без via)
+exit-ноды: временный xray-клиент (socks 127.0.0.1:<free port>) с ЕДИНСТВЕННЫМ
+REALITY-outbound (ключи из state.json chain_nodes), лестница проб
+(_probe_ladder: http 204 → https 204 → IP-literal) — тот же механизм, что у
+check_via_node_full_path для релейных нод. Валидный REALITY-хендшейк
+легитимен: invalid-логов не пишет, баном не считается и честнее голого TCP —
+проверяет хендшейк+маршрутизацию, а не только SYN/ACK. Флаг `infra=True`
+для сбоев МЕХАНИЗМА зонда (нет xray-бинарня, не стартовал чекер) — такие
+результаты ничего не говорят о ноде, вызывающий код фолбэкится на TCP.
+`node_has_reality_creds(nd)` — гейт применимости (proto=reality + uuid +
+pubkey).
+
+**(2) node_health_monitor.check_nodes_once:** прямая REALITY-нода с ключами
+→ полный зонд (лог «full-path(прямой) up/DOWN»), TCP-ping — только fallback
+(нет ключей / infra-сбой). Существующее поведение via-нод не тронуто.
+
+**(3) chain_nodes «Пинг Exit Node» [t]:** REALITY-ноды с ключами → полный
+зонд («N мс (full-path)»), прочие — TCP. Заголовок меню обновлён.
+
+**(4) diagnostics «5. Тест маршрутизации»:** прямые REALITY-exit-ы (без
+dialerProxy) проверяются полным зондом («full-path OK, прямой
+REALITY-зонд» / «REALITY-зонд FAIL: причина»); TCP-проба — fallback для нод
+без ключей и infra-сбоев. Раньше живая нода с забаненным мониторящим IP
+честно резалась RST'ом.
+
+**(5) smart_balancer:** _probe_node(host, port, nd=None) — при nd с ключами
+полный зонд (_sb_fullpath_direct: alive/lat_ms/bw_ms≈ms×1.5/load), иначе
+классический TCP-зонд. Вызовы: run_once (прямые ноды — nd=node; via-ноды —
+nd=хоп), _sb_hop_probe_metrics (nd=хоп), failover-кандидаты (nd=хоп), меню
+статуса. Хопы — тоже чьи-то REALITY-ноды: голый TCP против хопа банится на
+нём так же. infra-сбой зонда → честный TCP-fallback (None).
+
+**(6) fail2ban_setup.setup_fail2ban:** джейл xray-reality получает
+`ignoreip = 127.0.0.1/8 ::1 <свои IP> <IP нод каскада> <whitelist
+autoban.json>` — единый источник whitelist (autoban.json) теперь защищает и
+от fail2ban, а не только от dpi_detector/autoban. Ручная правка jail-конфа
+больше не нужна (и не потеряется при регенерации).
+
+**Тесты:** +16 (TestNodeFullPathDirect, TestHealthMonitorDirectFullPath в
+test_chain_relay.py; TestSbFullpathDirect в test_smart_balancer.py): креды-
+гейт, infra-маркеры, полный зонд живой ноды, HM-ветка (full-path vs TCP
+fallback vs без-кредов), _sb_fullpath_direct все ветки, _probe_node с nd и
+без. Сигнатуры probe-моков в test_smart_balancer.py обновлены под nd=None.
+Всего по затронутым модулям 268 passed.
+
+**Развёртывание на живом инциденте (11.10.2026):** u1nl — unban (fail2ban +
+ufw), whitelist входной ноды в autoban.json, ignoreip в jail; entry — новый
+код зондов. После фикса HM видит u1nl UP через полный REALITY-зонд без
+invalid-логов на цели. Попутно найдено: u1nl держала в banned-списке
+домашний IP пользователя (без активного ufw-права) и
+забанила собственный публичный IP (xray-autoban) — само-бан вычищен.
+
+**Совместимость:** без nd/без ключей поведение прежнее (TCP-зонд); новый
+код только добавляет ветку полного зонда. state.json/конфиги Xray не меняются.
+
 # Changelog new entry — Secure Install: префлайт OpenSSL >= 3.0, права 600, debug-режим — правки по security/UX-ревью (10 Oct 2026)
 
 ## FIX(bootstrap-security): функциональная проба Ed25519 ДО загрузки (ловит OpenSSL 1.1.1 без -rawin и FIPS-сборки — раньше давало ложное «ПОДПИСЬ НЕ ПРОШЛА» на всех зеркалах); chmod 600 скачанным файлам после каждой успешной загрузки; CHIMERA_INSTALL_DEBUG=1; документация модели доверия и residual risk

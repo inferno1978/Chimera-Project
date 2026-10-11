@@ -982,5 +982,184 @@ class TestFullPathV2(unittest.TestCase):
         self.assertIn("цепочка жива", res["detail"])
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  check_node_full_path / node_has_reality_creds — полный зонд ПРЯМОЙ ноды.
+#  Живой кейс окт. 2026 №3: голый TCP-ping от HM/балансера/диагностики
+#  входной ноды пишется на chimera-exit-ноде как «REALITY: processed invalid
+#  connection» → fail2ban xray-reality + DPI-detector цели банят мониторящий
+#  IP → ложный DOWN живой ноды. Полный зонд (валидный хендшейк с ключами
+#  из state.json) баном не считается.
+# ══════════════════════════════════════════════════════════════════════════════
+class TestNodeFullPathDirect(unittest.TestCase):
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_node_has_reality_creds(self):
+        from chimera.modules.chain_relay import node_has_reality_creds
+        self.assertTrue(node_has_reality_creds(_mk_node()))
+        self.assertFalse(node_has_reality_creds(None))
+        self.assertFalse(node_has_reality_creds({}))
+        nd = _mk_node(); nd["uuid"] = ""
+        self.assertFalse(node_has_reality_creds(nd))
+        nd = _mk_node(); nd["pubkey"] = ""
+        self.assertFalse(node_has_reality_creds(nd))
+        nd = _mk_node(); nd["proto"] = "tcp"
+        self.assertFalse(node_has_reality_creds(nd))
+        nd = _mk_node(); del nd["host"]
+        self.assertFalse(node_has_reality_creds(nd))
+
+    def test_no_host_is_infra(self):
+        from chimera.modules.chain_relay import check_node_full_path
+        res = check_node_full_path({"port": 443})
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["infra"])
+
+    def test_no_xray_binary_is_infra(self):
+        import chimera.modules.chain_relay as cr
+        with patch.object(cr, "_find_xray_bin", return_value=None):
+            res = cr.check_node_full_path(_mk_node())
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["infra"])
+        self.assertEqual(res["reason"], "нет xray")
+
+    def test_direct_node_ok_not_infra(self):
+        """Живая нода: лестница проб прошла → ok=True, infra=False."""
+        import chimera.modules.chain_relay as cr
+
+        class _FakeProc:
+            def poll(self):
+                return None
+            def terminate(self):
+                pass
+            def wait(self, timeout=None):
+                pass
+            def kill(self):
+                pass
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            if "generate_204" in " ".join(map(str, cmd)):
+                return types.SimpleNamespace(returncode=0,
+                                             stdout="204 0.31", stderr="")
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        with patch.object(cr, "_find_xray_bin",
+                          return_value="/usr/local/bin/xray"), \
+             patch.object(cr.subprocess, "Popen", return_value=_FakeProc()), \
+             patch.object(cr.subprocess, "run", side_effect=fake_run), \
+             patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
+             patch.object(cr.tempfile, "mkstemp",
+                          return_value=(99, "/tmp/relaycheck_test.json")), \
+             patch("os.write", lambda *a, **kw: None), \
+             patch("os.close", lambda *a, **kw: None), \
+             patch.object(Path, "unlink", lambda self, **kw: None):
+            res = cr.check_node_full_path(_mk_node())
+        self.assertTrue(res["ok"], res)
+        self.assertFalse(res["infra"])
+        self.assertAlmostEqual(res["ms"], 310.0, delta=1.0)   # 0.31 c → мс
+
+
+class TestHealthMonitorDirectFullPath(unittest.TestCase):
+    """HM: прямая REALITY-нода с ключами → полный зонд, не TCP-пинг
+    (анти-DPI, кейс окт. 2026 №3); сбой механизма → TCP-fallback."""
+
+    def setUp(self):
+        core = _setup_core_in_sysmodules()
+        self._tmp = tempfile.TemporaryDirectory()
+        core.STATE_FILE = Path(self._tmp.name) / "state.json"
+        core.STATE_FILE.write_text(json.dumps({
+            "chain_nodes": [_mk_node("de.example.com")],
+            "relay_hops": [],
+        }))
+        from chimera.modules import node_health_monitor as _nhm
+        self._nhm = _nhm
+        self._orig_paths = (_nhm.STATE_FILE, _nhm.HEALTH_STATE, _nhm.HEALTH_LOG)
+        _nhm.STATE_FILE = core.STATE_FILE
+        _nhm.HEALTH_STATE = Path(self._tmp.name) / "node-health-state.json"
+        _nhm.HEALTH_LOG = Path(self._tmp.name) / "xray-node-health.log"
+
+    def tearDown(self):
+        (self._nhm.STATE_FILE, self._nhm.HEALTH_STATE, self._nhm.HEALTH_LOG) = \
+            self._orig_paths
+        self._tmp.cleanup()
+
+    def test_direct_reality_node_full_path_not_tcp(self):
+        import chimera.modules.chain_relay as cr
+        from chimera.modules import node_health_monitor as nhm
+        calls = []
+
+        def fake_fp(nd, **kw):
+            calls.append("fp:" + nd["host"])
+            return {"ok": True, "ms": 321.0, "detail": "нода жива",
+                    "infra": False}
+
+        orig_fp = cr.check_node_full_path
+        cr.check_node_full_path = fake_fp
+        orig_tcp = nhm._tcp_ping
+        nhm._tcp_ping = lambda h, p: (calls.append("tcp:" + h) or (True, 5.0))
+        try:
+            results = nhm.check_nodes_once()
+        finally:
+            cr.check_node_full_path = orig_fp
+            nhm._tcp_ping = orig_tcp
+
+        by_host = {r["host"]: r for r in results}
+        self.assertTrue(by_host["de.example.com"]["up"])
+        self.assertEqual(by_host["de.example.com"]["ms"], 321.0)
+        self.assertIn("fp:de.example.com", calls)
+        self.assertNotIn("tcp:de.example.com", calls)
+
+    def test_direct_node_infra_falls_back_tcp(self):
+        import chimera.modules.chain_relay as cr
+        from chimera.modules import node_health_monitor as nhm
+        calls = []
+
+        def fake_fp(nd, **kw):
+            calls.append("fp:" + nd["host"])
+            return {"ok": False, "ms": 0.0, "reason": "нет xray",
+                    "infra": True}
+
+        orig_fp = cr.check_node_full_path
+        cr.check_node_full_path = fake_fp
+        orig_tcp = nhm._tcp_ping
+        nhm._tcp_ping = lambda h, p: (calls.append("tcp:" + h) or (True, 7.0))
+        try:
+            results = nhm.check_nodes_once()
+        finally:
+            cr.check_node_full_path = orig_fp
+            nhm._tcp_ping = orig_tcp
+
+        by_host = {r["host"]: r for r in results}
+        self.assertTrue(by_host["de.example.com"]["up"])
+        self.assertEqual(by_host["de.example.com"]["ms"], 7.0)
+        self.assertEqual(calls, ["fp:de.example.com", "tcp:de.example.com"])
+
+    def test_direct_node_without_creds_uses_tcp(self):
+        from chimera.modules import node_health_monitor as nhm
+        import chimera.modules.chain_relay as cr
+        st = json.loads(self._nhm.STATE_FILE.read_text())
+        st["chain_nodes"] = [{k: v for k, v in st["chain_nodes"][0].items()
+                              if k not in ("uuid", "pubkey", "shortid")}]
+        self._nhm.STATE_FILE.write_text(json.dumps(st))
+        calls = []
+        orig_fp = cr.check_node_full_path
+        cr.check_node_full_path = lambda nd, **kw: (
+            calls.append("fp:" + nd["host"]) or
+            {"ok": True, "ms": 1.0, "infra": False})
+        orig_tcp = nhm._tcp_ping
+        nhm._tcp_ping = lambda h, p: (calls.append("tcp:" + h) or (True, 9.0))
+        try:
+            results = nhm.check_nodes_once()
+        finally:
+            cr.check_node_full_path = orig_fp
+            nhm._tcp_ping = orig_tcp
+
+        by_host = {r["host"]: r for r in results}
+        self.assertTrue(by_host["de.example.com"]["up"])
+        self.assertEqual(by_host["de.example.com"]["ms"], 9.0)
+        self.assertEqual(calls, ["tcp:de.example.com"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

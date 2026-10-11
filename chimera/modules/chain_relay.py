@@ -1027,6 +1027,148 @@ def check_via_node_full_path(nd: dict, hops: list[dict],
 
 
 # =============================================================================
+#  FULL-PATH ПРОВЕРКА ПРЯМОЙ (без via) НОДЫ
+# =============================================================================
+def node_has_reality_creds(nd: dict) -> bool:
+    """Есть ли у ноды клиентские REALITY-ключи для полного зонда.
+
+    Форма nd — state.json chain_nodes / relay_hops / парсер vless-ссылки:
+    host, port, uuid, pubkey, shortid, sni, fp, flow, proto.
+    Нодам без ключей (чужие host:port, tcp/xhttp без REALITY) полный
+    зонд неприменим — вызывающий код честно падает на TCP-пробу.
+    """
+    if not nd:
+        return False
+    if str(nd.get("proto", "reality") or "reality") != "reality":
+        return False
+    return bool(nd.get("host") and nd.get("uuid") and nd.get("pubkey"))
+
+
+def check_node_full_path(nd: dict,
+                         curl_timeout: int = 20,
+                         deep_diag: bool = False) -> dict:
+    """Full-path проверка ПРЯМОЙ (без via) exit-ноды: временный xray-клиент + curl.
+
+    Поднимается отдельный xray (socks 127.0.0.1:<free port>) с ЕДИНСТВЕННЫМ
+    REALITY-outbound ноды (ключи из state.json), через него гоняется лестница
+    проб (_probe_ladder): http 204 → https 204 → https на IP-literal.
+
+    ЗАЧЕМ (живой кейс окт. 2026 №3): голый TCP connect+close к REALITY-порту
+    пишется на ноде-цели в error.log как «REALITY: processed invalid
+    connection ... failed to read client hello». На chimera-нодах эта строка
+    кормит ДВЕ защиты цели: fail2ban-джейл xray-reality (maxretry=5/10 мин)
+    и DPI-detector (вес 3 за пробу, порог 6 → бан уже за 2 пробы). Мониторящие
+    зонды Health Monitor / «Пинг Exit Node» / диагностики / SmartBalancer
+    входной ноды ЗАБАНИВАЮТСЯ на собственной exit-ноде: все проверки падают
+    в RST «Connection refused» при полностью живом трафике (u1nl банит
+    entry: один раунд балансера = 3 коннекта = score 9 → DPI-бан).
+
+    Валидный REALITY-хендшейк с ключами легитимен: invalid-логов не пишет,
+    банами не считается и заодно проверяет РЕАЛЬНУЮ работоспособность
+    (хендшейк + маршрутизация пробы), а не только TCP-доступность порта.
+
+    deep_diag — зарезервирован (ног у прямой ноды нет: либо работает, либо
+    нет); параметр сохранён для симметрии с check_via_node_full_path.
+
+    Возвращает dict как check_via_node_full_path:
+        ok      — нода жива (доменная проба доставила ответ)
+        ms      — латентность полного пути (time_total curl)
+        detail  — человекочитаемое описание (для HM-лога/меню)
+        reason  — короткая причина отказа
+        infra   — True = сбой МЕХАНИЗМА зонда (нет xray-бинарня, не
+                  стартовал чекер, ...): такой результат НЕ говорит о
+                  ноде ничего — вызывающий код обязан фолбэкнуться на
+                  TCP-пробу. False = честный вердикт по ноде.
+        xray_tail — хвост stderr xray-чекера (при отказе)
+    """
+    res = {"ok": False, "ms": 0.0, "exit_ip": "", "speed_mbps": 0.0,
+           "detail": "", "reason": "", "legs": {}, "xray_tail": "",
+           "infra": False}
+    if not (nd or {}).get("host"):
+        res["detail"] = "нода без host"
+        res["reason"] = "нет host"
+        res["infra"] = True
+        return res
+
+    xbin = _find_xray_bin()
+    if not xbin:
+        res["detail"] = "xray-бинарь не найден для full-path проверки"
+        res["reason"] = "нет xray"
+        res["infra"] = True
+        return res
+
+    socks_port = _free_local_port()
+    # Конфиг проверки = прод-форма outbound-а (тот же билдер, что у каскада),
+    # без dialerProxy: socks-in → exit-check напрямую.
+    exit_ob = build_hop_outbound({**nd, "tag": "exit-check"})
+    cfg = {
+        "log": {"loglevel": "warning"},
+        "inbounds": [{
+            "tag": "socks-check",
+            "listen": "127.0.0.1",
+            "port": socks_port,
+            "protocol": "socks",
+            "settings": {"auth": "noauth", "udp": False},
+        }],
+        "outbounds": [exit_ob],
+        "routing": {"rules": [
+            {"type": "field",
+             "inboundTag": ["socks-check"],
+             "outboundTag": "exit-check"},
+        ]},
+    }
+
+    try:
+        with _TempXrayClient(cfg, xbin) as client:
+            if client.start_error:
+                res["detail"] = client.start_error
+                res["reason"] = "xray не стартовал"
+                res["infra"] = True
+                return res
+            if not client.alive():
+                err = client.err_tail(200)
+                res["detail"] = f"xray чекера упал: {err or '?'}"
+                res["reason"] = "xray упал"
+                res["infra"] = True
+                return res
+
+            pr = _probe_ladder(socks_port, curl_timeout)
+            if pr["domain_ok"]:
+                res["ok"] = True
+                res["ms"] = pr["ms"] or 0.0
+                res["reason"] = "нода жива"
+                note = ""
+                if pr["port80_blocked"]:
+                    note = " — порт 80 с exit режется, 443 ок"
+                elif pr["code"] != "204":
+                    note = f" — проба отдала HTTP {pr['code']}, не 204"
+                res["detail"] = f"нода жива (прямой REALITY-зонд){note}"
+            elif pr["delivered"]:
+                # IP-проба проходит, доменные — нет: нода доходит, но DNS/
+                # домены на ней не работают → реальный клиентский трафик
+                # (домены) через такую ноду не пойдёт.
+                res["reason"] = "DNS на exit"
+                res["detail"] = ("нода доходит (IP-проба проходит), но домены "
+                                 "с ноды не резолвятся — проверьте DNS/порт 53 "
+                                 "на exit-ноде")
+            else:
+                res["xray_tail"] = client.err_tail()
+                res["reason"] = "нода не отвечает"
+                res["detail"] = ("нода не отвечает (все HTTP-пробы 000): TCP "
+                                 "может принимать, но REALITY/маршрут не "
+                                 "работает")
+                if res["xray_tail"]:
+                    res["detail"] += f"  |  xray: {res['xray_tail'][-120:]}"
+            return res
+
+    except Exception as e:
+        res["detail"] = f"ошибка full-path проверки: {type(e).__name__}: {e}"
+        res["reason"] = "ошибка проверки"
+        res["infra"] = True
+        return res
+
+
+# =============================================================================
 #  ИНТЕРАКТИВНОЕ МЕНЮ (Режим B → E → H)
 # =============================================================================
 def _offer_rebuild() -> None:
