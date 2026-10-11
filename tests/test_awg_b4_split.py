@@ -24,6 +24,7 @@ Unit-тесты для B4-сплита AWG-каскада.
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import sys
 import tempfile
@@ -164,6 +165,98 @@ class TestDnsARecords(unittest.TestCase):
         self.assertEqual(_dns_a_records(b""), set())
         self.assertEqual(_dns_a_records(b"\x01"), set())
         self.assertEqual(_dns_a_records(self._wire([])), set())
+
+
+class TestDnsAAAARecords(unittest.TestCase):
+    """2026-10-11: v6 AAAA-парсер для dual-stack split.
+
+    Без v6-парсера AAAA-записи из querylog AGH не собираются →
+    awg_b4_direct_v6 остаётся пустым → v6-трафик от AWG-клиентов
+    уходит в каскад (реклама на YouTube).
+    """
+    @staticmethod
+    def _wire_v6(ips6, qname=b"\x03www\x07example\x03com\x00"):
+        msg = bytearray()
+        msg += b"\xab\xcd" + b"\x81\x80"
+        msg += (1).to_bytes(2, "big") + len(ips6).to_bytes(2, "big")
+        msg += b"\x00\x00" * 2
+        msg += qname + b"\x00\x1c" + b"\x00\x01"   # type=28 (AAAA), class=IN
+        for ip6 in ips6:
+            msg += b"\xc0\x0c" + b"\x00\x1c" + b"\x00\x01"  # type=28
+            msg += (60).to_bytes(4, "big") + (16).to_bytes(2, "big")
+            import socket as _s
+            msg += _s.inet_pton(_s.AF_INET6, ip6)
+        return bytes(msg)
+
+    def test_extracts_public_aaaa(self):
+        from chimera.modules.awg_b4_split import _dns_aaaa_records
+        ips = _dns_aaaa_records(self._wire_v6([
+            "2001:4860:482d:400::",
+            "2a00:1450:400e:810::200e",
+        ]))
+        self.assertEqual(ips, {
+            "2001:4860:482d:400::",
+            "2a00:1450:400e:810::200e",
+        })
+
+    def test_filters_loopback_and_link_local(self):
+        from chimera.modules.awg_b4_split import _dns_aaaa_records
+        ips = _dns_aaaa_records(self._wire_v6([
+            "::1",                              # loopback — мимо
+            "fe80::1",                          # link-local — мимо
+            "fc00::1",                          # ULA private — мимо
+            "ff00::1",                          # multicast — мимо
+            "2001:4860:482d:400::",             # public — берём
+        ]))
+        self.assertEqual(ips, {"2001:4860:482d:400::"})
+
+    def test_garbage(self):
+        from chimera.modules.awg_b4_split import _dns_aaaa_records
+        self.assertEqual(_dns_aaaa_records(b""), set())
+        self.assertEqual(_dns_aaaa_records(b"\x01"), set())
+        self.assertEqual(_dns_aaaa_records(self._wire_v6([])), set())
+
+
+class TestIp6Ok(unittest.TestCase):
+    """Фильтр публичных v6 для ipset-набора."""
+    def test_filters(self):
+        from chimera.modules.awg_b4_split import _ip6_ok
+        self.assertTrue(_ip6_ok("2001:4860:482d:400::"))
+        self.assertTrue(_ip6_ok("2a00:1450:400e:810::200e"))
+        self.assertFalse(_ip6_ok("::1"))              # loopback
+        self.assertFalse(_ip6_ok("::"))               # unspecified
+        self.assertFalse(_ip6_ok("fe80::1"))          # link-local
+        self.assertFalse(_ip6_ok("fc00::1"))          # ULA private
+        self.assertFalse(_ip6_ok("ff00::1"))          # multicast
+        self.assertFalse(_ip6_ok("garbage"))
+        self.assertFalse(_ip6_ok("142.250.1.1"))      # v4 — мимо v6-фильтра
+
+
+class TestResolveSystemDualStack(unittest.TestCase):
+    """_resolve_system возвращает (set(v4), set(v6)) — dual-stack."""
+    def test_returns_tuple(self):
+        from chimera.modules import awg_b4_split
+        with patch("socket.getaddrinfo") as m_gai:
+            m_gai.return_value = [
+                (socket.AF_INET, 0, 0, "", ("142.250.185.78", 0)),
+                (socket.AF_INET6, 0, 0, "", ("2001:4860:482d:400::", 0, 0, 0)),
+            ]
+            r4, r6 = awg_b4_split._resolve_system("youtube.com")
+            self.assertIn("142.250.185.78", r4)
+            self.assertIn("2001:4860:482d:400::", r6)
+
+    def test_filters_zone_id(self):
+        from chimera.modules import awg_b4_split
+        with patch("socket.getaddrinfo") as m_gai:
+            m_gai.return_value = [
+                (socket.AF_INET6, 0, 0, "", ("2001:4860:482d:400::", 0, 0, 0)),
+                (socket.AF_INET6, 0, 0, "",
+                 ("fe80::1%ens3", 0, 0, 0)),  # zone-id — режется, потом фильтр
+            ]
+            r4, r6 = awg_b4_split._resolve_system("youtube.com")
+            self.assertIn("2001:4860:482d:400::", r6)
+            self.assertNotIn("fe80::1%ens3", r6)
+            self.assertNotIn("fe80::1", r6)
 
 
 class TestQhSuffixMatch(unittest.TestCase):
