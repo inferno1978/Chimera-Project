@@ -356,7 +356,10 @@ class TestStateRoundtrip(unittest.TestCase):
         st = self._m.state_load()
         self.assertFalse(st["enabled"])
         self.assertTrue(st["dns_redirect"])
-        self.assertTrue(st["aaaa_filter"])
+        #  2026-10-11: aaaa_filter по умолчанию False — B4 v2.x+ имеет нативный
+        # v6 DPI-bypass, глобальный AAAA-блок в AGH ломает Xray direct outbound
+        # с domainStrategy=UseIPv6v4 (freedom получает :: и звонит на [::]:443).
+        self.assertFalse(st["aaaa_filter"])
         self.assertEqual(st["refresh_sec"], 60)
 
 

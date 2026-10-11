@@ -407,6 +407,9 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
     success                  = core.success
     warn                     = core.warn
     AWG_EXIT_ENABLED         = getattr(core, "AWG_EXIT_ENABLED", False)
+    #  2026-10-11: domainStrategy адаптивный — UseIPv6v4 при наличии IPv6.
+    # Хардкод UseIPv4 ломал v6 на серверах с IPv6 (B4 v2.x+ поддерживает v6 DPI-bypass).
+    _direct_ds = "UseIPv6v4" if getattr(core, "IS_IPV6_AVAILABLE", False) else "UseIPv4"
     import ipaddress
 
     action = action.lower()
@@ -464,9 +467,10 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
                         outbounds.append({
                             "protocol": "freedom",
                             "tag":      "direct-local",
-                            "settings": {"domainStrategy": "UseIPv4"},
+                            #  2026-10-11: UseIPv6v4 при наличии IPv6 (B4 v6 DPI-bypass работает).
+                            "settings": {"domainStrategy": _direct_ds},
                         })
-                        info("AWG: добавлен outbound direct-local для AS-direct")
+                        info(f"AWG: добавлен outbound direct-local для AS-direct (domainStrategy={_direct_ds})")
                 else:
                     outbound_tag = "direct"
                     if not any(ob.get("tag") == "direct" for ob in outbounds):
