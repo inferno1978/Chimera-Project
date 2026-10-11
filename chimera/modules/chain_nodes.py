@@ -3927,8 +3927,14 @@ def _speed_test_node_latency(host: str, port: int, nd: dict = None) -> str:
                 # развёрнутый диагноз ног (как Тест 5), а не только ok/не-ok
                 r = check_via_node_full_path(nd, _hops, deep_diag=True)
                 if r.get("ok"):
+                    # «(via hop-fi)», НЕ «(full-path via hop-fi)»: длинная
+                    # ee-строка [T] (>78 колонок) рвётся авто-переносом
+                    # _box_row — «RTT 26 / мс» уезжало на вторую строку
+                    # (живой кейс окт.2026 №6: «боксы посъезжали"). Легенда
+                    # шапки [T] и так определяет: via-нода = полный зонд
+                    # через хоп-цепочку.
                     return (f"{GREEN}{r.get('ms', 0):.0f} мс{NC} "
-                            f"{DIM}(full-path via {via}){NC}")
+                            f"{DIM}(via {via}){NC}")
                 if not r.get("infra"):
                     return (f"{RED}недоступна "
                             f"({r.get('reason') or 'full-path FAIL'}){NC}")
