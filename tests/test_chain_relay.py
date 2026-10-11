@@ -1323,5 +1323,213 @@ class TestViaProbeInfraAndViaStrip(unittest.TestCase):
         self.assertEqual(nd.get("via"), "hop-a")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  icmp_rtt / fmt_icmp_rtt — вторая колонка (RTT, чистая сеть) в [T]/HM.
+#  Живой кейс окт. 2026 №6: после перевода мониторинга на полные зонды
+#  (№3) цифры выросли в ~3 раза — юзер увидел «пинг увеличился». RTT-колонка
+#  рядом даёт эталон чистой сети. ICMP — не бан-фуд (не трогает REALITY-порт),
+#  информационная: ok=False (фильтруется) НЕ меняет статус ноды.
+# ══════════════════════════════════════════════════════════════════════════════
+class TestIcmpRtt(unittest.TestCase):
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _run_stdout(self, stdout):
+        """icmp_rtt с замоканным subprocess.run (stdout ping-а)."""
+        import chimera.modules.chain_relay as cr
+        fake = MagicMock()
+        fake.stdout = stdout
+        with patch.object(cr.subprocess, "run", return_value=fake):
+            return cr.icmp_rtt("node.example.com")
+
+    def test_ok_iputils(self):
+        r = self._run_stdout(
+            "PING node (1.2.3.4) 56(84) bytes of data.\n"
+            "64 bytes from 1.2.3.4: icmp_seq=1 ttl=58 time=43.1 ms\n"
+            "4 packets transmitted, 4 received, 0% packet loss, time 704ms\n"
+            "rtt min/avg/max/mdev = 43.159/43.442/43.652/0.246 ms\n")
+        self.assertTrue(r["ok"])
+        self.assertAlmostEqual(r["avg"], 43.442)
+        self.assertAlmostEqual(r["min"], 43.159)
+        self.assertAlmostEqual(r["max"], 43.652)
+        self.assertEqual(r["loss"], 0)
+
+    def test_ok_round_trip_form(self):
+        r = self._run_stdout(
+            "3 packets transmitted, 3 received, 0% packet loss\n"
+            "round-trip min/avg/max/stddev = 27.1/27.4/27.9/0.3 ms\n")
+        self.assertTrue(r["ok"])
+        self.assertAlmostEqual(r["avg"], 27.4)
+
+    def test_ok_busybox_sent_received(self):
+        r = self._run_stdout(
+            "4 sent, 4 received, 0% loss\n"
+            "rtt min/avg/max/mdev = 29.0/29.2/29.5/0.2 ms\n")
+        self.assertTrue(r["ok"])
+        self.assertAlmostEqual(r["avg"], 29.2)
+
+    def test_partial_loss_still_ok(self):
+        r = self._run_stdout(
+            "4 packets transmitted, 2 received, 50% packet loss\n"
+            "rtt min/avg/max/mdev = 43.0/44.0/45.0/1.0 ms\n")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["loss"], 50)
+
+    def test_all_lost_not_ok(self):
+        r = self._run_stdout(
+            "4 packets transmitted, 0 received, 100% packet loss\n")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["err"], "ICMP не отвечает/фильтруется")
+        self.assertEqual(r["loss"], 100)
+
+    def test_received_without_rtt_line_not_ok(self):
+        r = self._run_stdout("3 packets transmitted, 3 received\n")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["err"], "rtt-строка не найдена")
+
+    def test_run_exception_not_ok(self):
+        import chimera.modules.chain_relay as cr
+        with patch.object(cr.subprocess, "run",
+                          side_effect=RuntimeError("sandbox")):
+            r = cr.icmp_rtt("node.example.com")
+        self.assertFalse(r["ok"])
+        self.assertIn("RuntimeError", r["err"])
+
+    def test_ping_missing_not_ok(self):
+        import chimera.modules.chain_relay as cr
+        with patch.object(cr.subprocess, "run",
+                          side_effect=FileNotFoundError("no ping")):
+            r = cr.icmp_rtt("node.example.com")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["err"], "ping не установлен")
+
+    def test_empty_host_not_ok(self):
+        import chimera.modules.chain_relay as cr
+        r = cr.icmp_rtt("")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["err"], "нет host")
+
+    def test_fmt_ok(self):
+        import chimera.modules.chain_relay as cr
+        self.assertEqual(cr.fmt_icmp_rtt({"ok": True, "avg": 43.44}),
+                         "43 мс")
+
+    def test_fmt_not_ok_dash(self):
+        import chimera.modules.chain_relay as cr
+        self.assertEqual(cr.fmt_icmp_rtt({"ok": False}), "—")
+        self.assertEqual(cr.fmt_icmp_rtt({}), "—")
+        self.assertEqual(cr.fmt_icmp_rtt(None), "—")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  HM + RTT: rtt попадает в state/results/лог, НИКОГДА не влияет на up/DOWN
+#  (инфо-колонка; фильтруемый ICMP → None → «—» в UI).
+# ══════════════════════════════════════════════════════════════════════════════
+class TestHealthMonitorRtt(unittest.TestCase):
+    """RTT (ICMP) в check_nodes_once: state/results/лог; DOWN при живом
+    RTT — «сеть жива, туннеля нет»; rtt=None не меняет статус."""
+
+    def setUp(self):
+        core = _setup_core_in_sysmodules()
+        self._tmp = tempfile.TemporaryDirectory()
+        core.STATE_FILE = Path(self._tmp.name) / "state.json"
+        core.STATE_FILE.write_text(json.dumps({
+            "chain_nodes": [_mk_node("de.example.com")],
+            "relay_hops": [],
+        }))
+        from chimera.modules import node_health_monitor as _nhm
+        self._nhm = _nhm
+        self._orig_paths = (_nhm.STATE_FILE, _nhm.HEALTH_STATE, _nhm.HEALTH_LOG)
+        _nhm.STATE_FILE = core.STATE_FILE
+        _nhm.HEALTH_STATE = Path(self._tmp.name) / "node-health-state.json"
+        _nhm.HEALTH_LOG = Path(self._tmp.name) / "xray-node-health.log"
+
+    def tearDown(self):
+        (self._nhm.STATE_FILE, self._nhm.HEALTH_STATE, self._nhm.HEALTH_LOG) = \
+            self._orig_paths
+        self._tmp.cleanup()
+
+    def test_rtt_in_state_results_and_log(self):
+        import chimera.modules.chain_relay as cr
+        from chimera.modules import node_health_monitor as nhm
+        orig_fp, orig_icmp = cr.check_node_full_path, cr.icmp_rtt
+        cr.check_node_full_path = lambda nd, **kw: {
+            "ok": True, "ms": 321.0, "infra": False, "detail": "нода жива"}
+        cr.icmp_rtt = lambda host, **kw: {
+            "ok": True, "avg": 43.2, "min": 43.0, "max": 43.9, "loss": 0}
+        try:
+            results = nhm.check_nodes_once()
+        finally:
+            cr.check_node_full_path, cr.icmp_rtt = orig_fp, orig_icmp
+        self.assertEqual(results[0]["rtt"], 43.2)
+        st = json.loads(self._nhm.HEALTH_STATE.read_text())
+        self.assertEqual(st["de.example.com:443"]["rtt"], 43.2)
+        log = self._nhm.HEALTH_LOG.read_text()
+        self.assertIn("RTT 43ms", log)
+
+    def test_icmp_filtered_rtt_none_up_unchanged(self):
+        import chimera.modules.chain_relay as cr
+        from chimera.modules import node_health_monitor as nhm
+        orig_fp, orig_icmp = cr.check_node_full_path, cr.icmp_rtt
+        cr.check_node_full_path = lambda nd, **kw: {
+            "ok": True, "ms": 321.0, "infra": False}
+        cr.icmp_rtt = lambda host, **kw: {
+            "ok": False, "err": "ICMP не отвечает/фильтруется"}
+        try:
+            results = nhm.check_nodes_once()
+        finally:
+            cr.check_node_full_path, cr.icmp_rtt = orig_fp, orig_icmp
+        self.assertTrue(results[0]["up"])
+        self.assertEqual(results[0]["ms"], 321.0)
+        self.assertIsNone(results[0]["rtt"])
+        st = json.loads(self._nhm.HEALTH_STATE.read_text())
+        self.assertIsNone(st["de.example.com:443"]["rtt"])
+        log = self._nhm.HEALTH_LOG.read_text()
+        self.assertIn("RTT —", log)
+
+    def test_down_with_live_rtt_logged(self):
+        """DOWN при живом RTT — сразу виден класс отказа («сеть есть,
+        туннеля нет»): лог несёт оба числа."""
+        import chimera.modules.chain_relay as cr
+        from chimera.modules import node_health_monitor as nhm
+        orig_fp, orig_icmp = cr.check_node_full_path, cr.icmp_rtt
+        cr.check_node_full_path = lambda nd, **kw: {
+            "ok": False, "ms": 0.0, "infra": False,
+            "reason": "нода не отвечает"}
+        cr.icmp_rtt = lambda host, **kw: {
+            "ok": True, "avg": 27.0, "loss": 0}
+        try:
+            results = nhm.check_nodes_once()
+        finally:
+            cr.check_node_full_path, cr.icmp_rtt = orig_fp, orig_icmp
+        self.assertFalse(results[0]["up"])
+        self.assertEqual(results[0]["rtt"], 27.0)
+        log = self._nhm.HEALTH_LOG.read_text()
+        self.assertIn("DOWN (RTT 27ms)", log)
+
+    def test_via_node_rtt_not_verdict(self):
+        """via-нода (ee через хоп): вердикт по full-path через цепочку;
+        RTT — прямой ICMP до хоста ноды (инфо): при DOWN с живым RTT
+        статус остаётся DOWN — RTT его не перекрывает."""
+        import chimera.modules.chain_relay as cr
+        from chimera.modules import node_health_monitor as nhm
+        st = json.loads(self._nhm.STATE_FILE.read_text())
+        st["chain_nodes"] = [_mk_node("ee.example.com", via="hop-fi")]
+        st["relay_hops"] = [_mk_hop("hop-fi", host="fi.example.com")]
+        self._nhm.STATE_FILE.write_text(json.dumps(st))
+        orig_via, orig_icmp = cr.check_via_node_full_path, cr.icmp_rtt
+        cr.check_via_node_full_path = lambda nd, hops, **kw: {
+            "ok": False, "ms": 0.0, "infra": False,
+            "reason": "нода не отвечает", "detail": "все HTTP-пробы 000"}
+        cr.icmp_rtt = lambda host, **kw: {"ok": True, "avg": 27.0}
+        try:
+            results = nhm.check_nodes_once()
+        finally:
+            cr.check_via_node_full_path, cr.icmp_rtt = orig_via, orig_icmp
+        self.assertFalse(results[0]["up"])
+        self.assertEqual(results[0]["rtt"], 27.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

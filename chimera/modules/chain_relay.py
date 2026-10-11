@@ -1056,6 +1056,84 @@ def node_has_reality_creds(nd: dict) -> bool:
     return bool(nd.get("host") and nd.get("uuid") and nd.get("pubkey"))
 
 
+def icmp_rtt(host: str, count: int = 4, per_packet_wait: int = 2,
+             interval: float = 0.3) -> dict:
+    """Прямой сетевой RTT до хоста (ICMP echo) — вторая колонка в [T]/HM.
+
+    Контекст (живой кейс окт.2026 №6): после перевода мониторинга на
+    полные REALITY-зонды (кейс №3, e7482d31) цифры [T]/HM выросли в ~3
+    раза и выглядели как «пинг увеличился». На деле full-path зонд — это
+    TCP + REALITY-хендшейк + DNS на exit + HTTP-проба через туннель
+    (3-4 RTT + обработка), а не деградация сети. Колонка RTT рядом даёт
+    эталон чистой сети: full-path ≈ 3-4×RTT — норма; DOWN при живом RTT
+    — «сеть жива, туннель/REALITY не строится» (сразу виден класс отказа).
+
+    Почему ICMP, а не голый TCP-connect: TCP к REALITY-порту — бан-фуд
+    (кейс №3: «REALITY: processed invalid connection» в error.log цели
+    кормит fail2ban xray-reality + DPI-detector → цель банит мониторящий
+    IP → ложные DOWN при живом трафике). ICMP echo не трогает REALITY-
+    порт и в xray-логах цели не пишется — баном не считается.
+
+    ИНФОРМАЦИОННАЯ, не вердиктоносная: ICMP может фильтроваться на пути
+    или отключаться на хосте (ok=False) — это НЕ говорит о ноде ничего:
+    туннель может быть жив. Вызывающий код показывает «—» и НЕ меняет
+    статус ноды (DOWN решает только full-path зонд).
+
+    Возвращает {"ok": bool, "avg": float, "min": float, "max": float,
+    "loss": int (0-100), "err": str}. ok=True — есть хотя бы один
+    ответивший пакет и строка rtt min/avg/max (iputils/round-trip).
+    """
+    res = {"ok": False, "avg": 0.0, "min": 0.0, "max": 0.0,
+           "loss": 100, "err": ""}
+    if not host:
+        res["err"] = "нет host"
+        return res
+    try:
+        out = subprocess.run(
+            ["ping", "-c", str(int(count)), "-i", str(interval),
+             "-W", str(int(per_packet_wait)), str(host)],
+            capture_output=True, text=True,
+            timeout=int(count * interval) + int(per_packet_wait) + 3,
+        ).stdout or ""
+    except FileNotFoundError:
+        res["err"] = "ping не установлен"
+        return res
+    except Exception as e:
+        res["err"] = f"{type(e).__name__}: {e}"
+        return res
+    m = re.search(r"(\d+) packets transmitted, (\d+) received", out)
+    if not m:
+        # busybox/иные формулировки: «4 sent, 4 received»
+        m = re.search(r"(\d+) sent, (\d+) received", out)
+    sent = int(m.group(1)) if m else 0
+    got = int(m.group(2)) if m else 0
+    res["loss"] = round((sent - got) * 100 / sent) if sent else 100
+    if got <= 0:
+        res["err"] = "ICMP не отвечает/фильтруется"
+        return res
+    r = re.search(r"(?:rtt|round-trip)[^=]*=\s*"
+                  r"([\d.]+)/([\d.]+)/([\d.]+)/", out)
+    if not r:
+        res["err"] = "rtt-строка не найдена"
+        return res
+    try:
+        res["min"] = float(r.group(1))
+        res["avg"] = float(r.group(2))
+        res["max"] = float(r.group(3))
+    except ValueError:
+        res["err"] = "rtt не спарсился"
+        return res
+    res["ok"] = True
+    return res
+
+
+def fmt_icmp_rtt(r: dict) -> str:
+    """'43 мс' | '—' для UI-колонки RTT (ICMP фильтруется — не вердикт)."""
+    if r and r.get("ok"):
+        return f"{r.get('avg', 0.0):.0f} мс"
+    return "—"
+
+
 def check_node_full_path(nd: dict,
                          curl_timeout: int = 20,
                          deep_diag: bool = False) -> dict:
