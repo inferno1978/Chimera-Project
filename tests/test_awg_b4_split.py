@@ -456,6 +456,85 @@ class TestStateRoundtrip(unittest.TestCase):
         self.assertEqual(st["refresh_sec"], 60)
 
 
+class TestPurgeLegacySplitRules(unittest.TestCase):
+    """2026-10-11: _purge_legacy_split_prerouting_rules — LB-residue fix.
+
+    В LB-режиме cascade_mark_sync→lb_hook_sync не всегда вычищает старую
+    split-форму хука (сравнение по текущему state, не по фактически
+    висящим правилам). Без этой очистки ipset_destroy падает (reference).
+    """
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import awg_b4_split
+        self._m = awg_b4_split
+
+    def test_purges_only_awg_b4_direct_rules(self):
+        """Должен удалить правила с awg_b4_direct, оставить остальные."""
+        # Симулируем iptables -S PREROUTING вывод:
+        # 1. cascade hook БЕЗ split (должен остаться)
+        # 2. cascade hook С split awg_b4_direct (должен удалиться)
+        # 3. v6 RETURN для awg_b4_direct_v6 (должен удалиться)
+        iptables_out = (
+            "-P PREROUTING ACCEPT\n"
+            "-A PREROUTING -i awg0 -m set ! --match-set awg_ru_networks dst -j awg_lb\n"
+            "-A PREROUTING -i awg0 -m set ! --match-set awg_ru_networks dst "
+            "-m set ! --match-set awg_b4_direct dst -j awg_lb\n"
+            "-A PREROUTING -i awg0 -j CONNMARK --save-mark --nfmask 0xffff --ctmask 0xffff\n"
+        )
+        ip6tables_out = (
+            "-P PREROUTING ACCEPT\n"
+            "-A PREROUTING -i awg0 -j awg_lb6\n"
+            "-A PREROUTING -i awg0 -m set --match-set awg_b4_direct_v6 dst -j RETURN\n"
+            "-A PREROUTING -i awg0 -j CONNMARK --save-mark --nfmask 0xffff --ctmask 0xffff\n"
+        )
+        # Мокаем _run: первый вызов (-S) возвращает iptables_out,
+        # последующие (-D) возвращают rc=0 (успешное удаление), потом rc=1.
+        call_count = {"iptables": 0, "ip6tables": 0}
+        deleted = {"iptables": [], "ip6tables": []}
+        def fake_run(cmd, capture=False, check=False, timeout=60, input_text=None):
+            ipt = cmd[0] if isinstance(cmd, list) else "iptables"
+            # -S PREROUTING — вернуть вывод
+            if "-S" in cmd and "PREROUTING" in cmd:
+                out = iptables_out if ipt == "iptables" else ip6tables_out
+                return SimpleNamespace(returncode=0, stdout=out, stderr="")
+            # -D — вернуть rc=0 в первый раз, rc=1 потом (правило удалено)
+            if "-D" in cmd and "PREROUTING" in cmd:
+                key = ipt
+                # определить, какое правило удаляем
+                rule_str = " ".join(cmd)
+                if "awg_b4_direct" in rule_str:
+                    count = call_count[key]
+                    # каждое уникальное правило удаляем один раз успешно
+                    sig = " ".join(cmd[4:])
+                    if sig not in deleted[key]:
+                        deleted[key].append(sig)
+                        call_count[key] += 1
+                        return SimpleNamespace(returncode=0, stdout="", stderr="")
+                    return SimpleNamespace(returncode=1, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(self._m, "_run", side_effect=fake_run):
+            self._m._purge_legacy_split_prerouting_rules()
+        # Проверяем: v4 split rule (с awg_b4_direct) удалён, v4 без-split НЕ тронут
+        v4_deleted = " ".join(deleted["iptables"])
+        self.assertIn("awg_b4_direct", v4_deleted)
+        self.assertNotIn("awg_lb", v4_deleted.split("awg_b4_direct")[0]
+                         if "awg_b4_direct" in v4_deleted else "")
+        # v6 RETURN для awg_b4_direct_v6 удалён
+        v6_deleted = " ".join(deleted["ip6tables"])
+        self.assertIn("awg_b4_direct_v6", v6_deleted)
+
+    def test_no_rules_no_crash(self):
+        """Если правил с awg_b4_direct нет — не падает, не трогает ничего."""
+        def fake_run(cmd, capture=False, check=False, timeout=60, input_text=None):
+            return SimpleNamespace(returncode=0,
+                                   stdout="-P PREROUTING ACCEPT\n"
+                                          "-A PREROUTING -i awg0 -j awg_lb\n",
+                                   stderr="")
+        with patch.object(self._m, "_run", side_effect=fake_run):
+            # Не должно упасть, не должно ничего удалить
+            self._m._purge_legacy_split_prerouting_rules()
+
+
 class TestRoutingScriptSplitAware(unittest.TestCase):
     """Генератор awg-routing.sh: сплит-блоки при сплите вкл/выкл."""
 
