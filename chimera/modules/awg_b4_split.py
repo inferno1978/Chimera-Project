@@ -20,11 +20,33 @@ B4-сплит для AWG-каскада: выбранные домены (сет
                     └── dst ∉ set ──► MARK 0x8200 (b4-exempt) ──► table 2000
                         → awg1 → exit (зарубежный IP) — как раньше
 
-DNS (критично для «глазами RU-ноды» + без AAAA):
-  udp/tcp 53 из awg0 ──► DNAT на public-IP:53 (AGH: dnscrypt DoH) ──► A-ответы
+DNS (критично для «глазами RU-ноды», AAAA-фильтр ОТКЛЮЧЕН по умолчанию):
+  udp/tcp 53 из awg0 ──► DNAT на public-IP:53 (AGH: dnscrypt DoH) ──► A+AAAA
   AGH-ответы из awg0 (sport 53) ──► meta 0x8000 (b4 output не трогает)
-  AAAA split-доменов ──► user_rules AGH «||domain^$dnstype=AAAA» (v6→каскад
-  вернул бы рекламу — фильтр обязателен). v6-DNS из awg0 ──► REJECT (fallback v4).
+  v6-DNS из awg0 ──► REJECT (fallback v4 — анти-DNS-leak по v6 upstream).
+
+AAAA-фильтр (||domain^$dnstype=AAAA в user_rules AGH) — ОТКЛЮЧЕН по умолчанию
+с 2026-10-11. Исторически включался, чтобы избежать v6-leak в каскад для
+AWG-tunnel клиентов с v6: awg_b4_direct был hash:ip (v4-only), и v6-трафик
+от awg0 уходил в каскад (зарубежный IP) → реклама возвращалась.
+
+Почему отключен:
+  1. B4 начиная с v2.x полностью поддерживает IPv6 DPI-bypass: флаг --ipv6,
+     nft-table inet b4_mangle (v4+v6 в одной цепочке), nfq_ipv6.go со всеми
+     стратегиями фрагментации (IP/TLS/OOB/disorder/combo/hybrid).
+  2. AAAA-фильтр в AGH — ГЛОБАЛЬНЫЙ: режет AAAA для ВСЕХ клиентов ноды,
+     включая Xray direct outbound (freedom) и саму ноду. При domainStrategy=
+     UseIPv6v4 в Xray freedom получал подменённый AAAA (::) и звонил на
+     [::]:443 — YouTube по v6 не работал вообще (инцидент 2026-10-11).
+  3. На случай реальной AWG-tunnel+v6 утечки в каскад — B4 имеет СОБСТВЕННЫЙ
+     нативный механизм «Force IPv4 for matched domains» (Settings > Core > DNS),
+     который режет AAAA только для matched SNI и только в DNS-ответах через
+     b4 (nft raw_prerouting/raw_output → NFQUEUE 537-544). Это лучше
+     глобального AGH-фильтра.
+
+Если AAAA-фильтр всё же нужен (legacy AWG-tunnel с v6, нет B4 v6) —
+поставить aaaa_filter=true в /var/lib/xray-installer/awg_b4_split.json
+и запустить refresh_tick_cli() — модуль перепишет user_rules AGH.
 
 ipset awg_b4_direct (iptables-исключение) + nft-сет awg_b4direct в таблице
 awg_b4exempt (условный exempt) — ДВА представления одного списка IP.
@@ -156,7 +178,12 @@ def _state_default() -> dict:
         "set_ids": [],            # выбранные сеты b4 (id из config.json)
         "extra_domains": [],      # ручные домены поверх сетов
         "dns_redirect": True,     # DNAT udp/tcp 53 из awg0 → AGH ноды
-        "aaaa_filter": True,      # ||domain^$dnstype=AAAA в user_rules AGH
+        # AAAA-фильтр по умолчанию ВЫКЛЮЧЕН — B4 v2.x+ имеет нативный v6
+        # DPI-bypass (--ipv6 + nft inet b4_mangle + nfq_ipv6.go). Глобальный
+        # AAAA-блок в AGH ломает Xray direct outbound с domainStrategy=
+        # UseIPv6v4 (freedom получает :: и звонит на [::]:443). См. docstring.
+        # Для legacy AWG-tunnel+v6 без B4 v6 — поставить true вручную.
+        "aaaa_filter": False,
         "refresh_sec": 60,        # интервал таймера
         "last_stats": {},         # метрики последнего тика
         "aaaa_domains": [],       # последний записанный в AGH список (diff-детект)

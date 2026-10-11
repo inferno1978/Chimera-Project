@@ -411,6 +411,11 @@ def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
     info                     = core.info
     success                  = core.success
     warn                     = core.warn
+    #  2026-10-11: domainStrategy для direct/direct-local теперь адаптивный.
+    # Раньше хардкод UseIPv4 ломал v6 на серверах с IPv6 — B4 v2.x+ умеет v6
+    # DPI-bypass (--ipv6 + nft inet b4_mangle + nfq_ipv6.go), резать AAAA
+    # не нужно, а UseIPv4 выключал v6 даже когда она работает.
+    _direct_ds = "UseIPv6v4" if getattr(core, "IS_IPV6_AVAILABLE", False) else "UseIPv4"
 
     # Определяем outboundTag для правила.
     if target_tag is not None:
@@ -464,11 +469,15 @@ def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
                         outbounds.append({
                             "protocol": "freedom",
                             "tag":      "direct-local",
-                            "settings": {"domainStrategy": "UseIPv4"},
+                            #  2026-10-11: UseIPv6v4 при наличии IPv6 — B4 v6 DPI-bypass работает.
+                            "settings": {"domainStrategy": _direct_ds},
                         })
-                        info("AWG: добавлен outbound direct-local для YouTube→RU")
+                        info(f"AWG: добавлен outbound direct-local для YouTube→RU (domainStrategy={_direct_ds})")
                 else:
                     if not any(ob.get("tag") == "direct" for ob in outbounds):
+                        #  прямой direct outbound без domainStrategy — наследует
+                        # значение из главного freedom outbound (UseIPv6v4 по умолчанию
+                        # для серверов с IPv6, см. xray_install.py:1070).
                         outbounds.append({"protocol": "freedom", "tag": "direct"})
 
             # Новое правило. Prepended ПЕРЕД существующими — Xray eval
@@ -614,6 +623,9 @@ def _youtube_apply_fragment_to_xray(
     info                     = core.info
     success                  = core.success
     warn                     = core.warn
+    #  2026-10-11: domainStrategy адаптивный — UseIPv6v4 при наличии IPv6
+    # (B4 v2.x+ поддерживает v6 DPI-bypass). Хардкод UseIPv4 ломал YouTube по v6.
+    _direct_ds = "UseIPv6v4" if getattr(core, "IS_IPV6_AVAILABLE", False) else "UseIPv4"
 
     # В AWG-режиме используем direct-local-fragment (без fwmark → default route),
     # иначе — direct-fragment (с fwmark → awg0).
@@ -654,7 +666,9 @@ def _youtube_apply_fragment_to_xray(
             # «For direct outbounds such as Freedom, the peer is usually any
             # ordinary public network target... only sockopt is available.»
             _fragment_settings = {
-                "domainStrategy": "UseIPv4",
+                #  2026-10-11: UseIPv6v4 при наличии IPv6 — B4 v6 DPI-bypass работает.
+                # Хардкод UseIPv4 ломал YouTube по v6 на серверах с IPv6.
+                "domainStrategy": _direct_ds,
                 "fragment": {
                     "packets":  packets,
                     "length":   length,
