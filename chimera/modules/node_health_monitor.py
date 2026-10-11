@@ -188,45 +188,59 @@ def check_nodes_once() -> list[dict]:
         # Chain Relay (via): прямой TCP к такой ноде может быть перерезан
         # ТСПУ на транзитном пути — это НЕ признак отказа. Проверяем
         # full-path: временный xray-клиент через цепочку hop→exit
-        # (dialerProxy) + HTTP-проба. Fallback на TCP при любой ошибке.
+        # (dialerProxy) + HTTP-проба. Fallback на TCP при сбое механизма.
         via = nd.get("via", "") or ""
+        _via_verdict = False      # True = вердикт уже вынесен выше
         if via:
             try:
                 from chimera.modules.chain_relay import (
                     check_via_node_full_path, load_relay_hops,
                     hop_via_tag_for)
                 _hops = load_relay_hops()
-                if not hop_via_tag_for(nd, _hops):
-                    # Хоп выключен/удалён: генератор прод-конфига в этом
-                    # случае НЕ ставит dialerProxy — нода ходит НАПРЯМУЮ.
-                    # Проверяем как прямую (TCP), иначе ложный DOWN +
-                    # TG-тревога при живой ноде (зеркалит fallback
-                    # генератора chain_nodes: test_disabled_hop_falls_
-                    # back_direct).
-                    up, ms = _tcp_ping(host, port)
-                    _log(f"[{host}:{port}] via:{via} неактивен "
-                         f"(хоп выключен/удалён) — проверена как прямая")
-                else:
+                if hop_via_tag_for(nd, _hops):
                     # deep_diag=False: HM работает по cron, его интересует
                     # ok/не-ok; развёрнутую диагностику ног дают меню [T]/шаг 11
                     _r = check_via_node_full_path(nd, _hops, deep_diag=False)
-                    up, ms = bool(_r.get("ok")), float(_r.get("ms", 0.0) or 0.0)
-                    _log(f"[{host}:{port}] via:{via} full-path "
-                         f"{'up' if up else 'DOWN'}"
-                         f"{' ' + _r.get('detail', '')[:120] if _r.get('detail') else ''}")
+                    if _r.get("infra"):
+                        # сбой МЕХАНИЗМА зонда (нет xray-бинарня, битая
+                        # via и т.п.) — о ноде ничего не говорит: честный
+                        # TCP-fallback (зеркалит прямую ветку ниже)
+                        _log(f"[{host}:{port}] full-path зонд недоступен "
+                             f"({_r.get('reason', '')}) — TCP-fallback")
+                        up, ms = _tcp_ping(host, port)
+                    else:
+                        up, ms = bool(_r.get("ok")), float(_r.get("ms", 0.0) or 0.0)
+                        _log(f"[{host}:{port}] via:{via} full-path "
+                             f"{'up' if up else 'DOWN'}"
+                             f"{' ' + _r.get('detail', '')[:120] if _r.get('detail') else ''}")
+                    _via_verdict = True
+                else:
+                    # Хоп выключен/удалён: генератор прод-конфига в этом
+                    # случае НЕ ставит dialerProxy — нода ходит НАПРЯМУЮ.
+                    # Проверяем как прямую — но НЕ голым TCP: REALITY-нода
+                    # с ключами зондируется полным зондом (голый TCP на
+                    # REALITY-порт chimera-ноды — бан-фуд, живой кейс
+                    # окт.2026 №3), прямая ветка ниже сама выберет зонд
+                    # (зеркалит fallback генератора chain_nodes:
+                    # test_disabled_hop_falls_back_direct).
+                    _log(f"[{host}:{port}] via:{via} неактивен "
+                         f"(хоп выключен/удалён) — проверена как прямая")
             except Exception:
                 up, ms = _tcp_ping(host, port)
-        else:
-            # Прямая нода (без via). Голый TCP-ping к REALITY-порту пишется
-            # на ноде-цели в error.log как «REALITY: processed invalid
-            # connection ... failed to read client hello» → fail2ban-джейл
-            # xray-reality и DPI-detector ЦЕЛИ банят мониторящий IP:
-            # HM собственной рукой роняет ноду в DOWN при живом трафике
-            # (живой кейс окт. 2026 №3: u1nl забанила entry-ноду за зонды
-            # HM/балансера/диагностики). Нода с клиентскими REALITY-ключами
-            # (state.json chain_nodes) проверяется ПОЛНЫМ зондом — валидный
-            # REALITY-хендшейк легитимен, invalid-логов не пишет и проверяет
-            # реальную работоспособность, а не только TCP-порт. TCP-ping —
+                _via_verdict = True
+        if not _via_verdict:
+            # Прямая нода (без via ИЛИ via-нода с выключенным хопом —
+            # в проде обе ходят напрямую). Голый TCP-ping к REALITY-порту
+            # пишется на ноде-цели в error.log как «REALITY: processed
+            # invalid connection ... failed to read client hello» →
+            # fail2ban-джейл xray-reality и DPI-detector ЦЕЛИ банят
+            # мониторящий IP: HM собственной рукой роняет ноду в DOWN
+            # при живом трафике (живой кейс окт. 2026 №3: u1nl забанила
+            # entry-ноду за зонды HM/балансера/диагностики). Нода с
+            # клиентскими REALITY-ключами (state.json chain_nodes)
+            # проверяется ПОЛНЫМ зондом — валидный REALITY-хендшейк
+            # легитимен, invalid-логов не пишет и проверяет реальную
+            # работоспособность, а не только TCP-порт. TCP-ping —
             # fallback для нод без ключей и при сбое механизма зонда.
             up = None
             try:

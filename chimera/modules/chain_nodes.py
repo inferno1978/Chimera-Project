@@ -3069,8 +3069,8 @@ def do_manage_nodes() -> None:
         elif ch == "t" and CHAIN_NODES:
             print()
             _box_top("Пинг Exit Node")
-            _box_row(f"  {DIM}Латентность нод: REALITY — полный зонд (хендшейк+проба),")
-            _box_row(f"  прочие — TCP. Полный зонд не палит нас анти-DPI защитой{NC}")
+            _box_row(f"  {DIM}Латентность нод: REALITY — полный зонд (хендшейк+проба; via —")
+            _box_row(f"  через хоп-цепочку), прочие — TCP. Зонд не палит нас анти-DPI{NC}")
             _box_sep()
             for i, nd in enumerate(CHAIN_NODES):
                 host, port = nd["host"], nd["port"]
@@ -3876,6 +3876,15 @@ def _speed_test_node_latency(host: str, port: int, nd: dict = None) -> str:
     трафике (живой кейс окт. 2026 №3). Полный зонд баном не считается
     и честнее: проверяет хендшейк+маршрут, а не только SYN/ACK.
 
+    Релейная нода (via=<tag>, хоп активен) зондируется ПОЛНЫМ зондом
+    ЧЕРЕЗ ЦЕПОЧКУ (check_via_node_full_path: hop-1 → … → exit), как HM
+    и Тест 5: прямой путь до via-ноды транзитно перерезан (ради этого
+    хоп и поставлен) — прямой зонд бессмыслен, а outbound с
+    sockopt.dialerProxy=via во временном конфиге без хоп-outbound не
+    работает вовсе (живой кейс окт.2026 №4: ee via hop-fi вечно «нода
+    не отвечает» в [T] при живой цепочке 171 мс). Хоп выключен/удалён —
+    генератор подключает ноду напрямую, зондируем как прямую с пометкой.
+
     Ноды без ключей (nd=None, чужие host:port, не-REALITY) — TCP-пинг
     через _resolve_host_fresh (DoH + fallback), как раньше.
     Возвращает строку с результатом.
@@ -3885,7 +3894,35 @@ def _speed_test_node_latency(host: str, port: int, nd: dict = None) -> str:
     RED = core.RED
     NC = core.NC
     DIM = core.DIM
-    # 1) Полный зонд для REALITY-нод с ключами
+    via = str((nd or {}).get("via") or "").strip()
+    note = ""
+    # 1) Релейная нода (via) с АКТИВНЫМ хопом → полный зонд ЧЕРЕЗ ЦЕПОЧКУ
+    if nd is not None and via:
+        try:
+            from chimera.modules.chain_relay import (
+                check_via_node_full_path, load_relay_hops, hop_via_tag_for)
+            _hops = load_relay_hops()
+            if hop_via_tag_for(nd, _hops):
+                # deep_diag=True: [T] интерактивный — при отказе даём
+                # развёрнутый диагноз ног (как Тест 5), а не только ok/не-ok
+                r = check_via_node_full_path(nd, _hops, deep_diag=True)
+                if r.get("ok"):
+                    return (f"{GREEN}{r.get('ms', 0):.0f} мс{NC} "
+                            f"{DIM}(full-path via {via}){NC}")
+                if not r.get("infra"):
+                    return (f"{RED}недоступна "
+                            f"({r.get('reason') or 'full-path FAIL'}){NC}")
+                # сбой механизма зонда (нет xray и т.п.) → TCP-пинг ниже
+            else:
+                # Хоп выключен/удалён: генератор прод-конфига в этом
+                # случае НЕ ставит dialerProxy — нода ходит НАПРЯМУЮ.
+                # Зондим как прямую (ветка 2 ниже) с пометкой (зеркало
+                # семантики HM: test_disabled_hop_falls_back_direct).
+                note = f" {DIM}(via {via} выключен — напрямую){NC}"
+        except Exception:
+            pass    # сбой механизма → честный TCP-пинг ниже
+    # 2) Полный зонд для ПРЯМЫХ REALITY-нод с ключами (в т.ч. via-нод
+    #    с выключенным хопом — в проде они подключаются напрямую)
     if nd is not None:
         try:
             from chimera.modules.chain_relay import (
@@ -3896,26 +3933,26 @@ def _speed_test_node_latency(host: str, port: int, nd: dict = None) -> str:
                     pass    # сбой механизма зонда → TCP-пинг ниже
                 elif r.get("ok"):
                     return (f"{GREEN}{r.get('ms', 0):.0f} мс{NC} "
-                            f"{DIM}(full-path){NC}")
+                            f"{DIM}(full-path){NC}" + note)
                 else:
                     return (f"{RED}недоступна "
-                            f"({r.get('reason') or 'full-path FAIL'}){NC}")
+                            f"({r.get('reason') or 'full-path FAIL'}){NC}" + note)
         except Exception:
             pass    # сбой механизма зонда → честный TCP-пинг ниже
-    # 2) TCP-пинг (ноды без ключей / сбой полного зонда)
+    # 3) TCP-пинг (ноды без ключей / сбой полного зонда)
     try:
         start = time.time()
         ip = _resolve_host_fresh(host)
         if not ip:
-            return f"{RED}ошибка (DNS: не удалось резолвить {host}){NC}"
+            return f"{RED}ошибка (DNS: не удалось резолвить {host}){NC}" + note
         s = socket.create_connection((ip, port), timeout=5)
         s.close()
         ms = (time.time() - start) * 1000
-        return f"{GREEN}{ms:.0f} мс{NC}"
+        return f"{GREEN}{ms:.0f} мс{NC}" + note
     except socket.timeout:
-        return f"{RED}таймаут{NC}"
+        return f"{RED}таймаут{NC}" + note
     except Exception as e:
-        return f"{RED}ошибка ({e}){NC}"
+        return f"{RED}ошибка ({e}){NC}" + note
 
 
 def _speed_test_node_geo(host: str) -> tuple[str, str, str, str, str]:

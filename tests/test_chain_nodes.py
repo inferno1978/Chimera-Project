@@ -387,6 +387,136 @@ class TestSpeedTestNodeLatency(unittest.TestCase):
             result = chain_nodes._speed_test_node_latency("nonexistent.invalid", 443)
         self.assertIn("ошибка", result)
 
+    # ── via-ноды: полный зонд ЧЕРЕЗ ЦЕПОЧКУ (живой кейс окт.2026 №4:
+    #    ee via hop-fi вечно «нода не отвечает» в [T] при живой цепи) ────
+
+    _ND_VIA = {"host": "ee.example.com", "port": 443, "uuid": "uuid-x",
+               "pubkey": "pbk-x", "shortid": "sid", "sni": "ee.example.com",
+               "fp": "firefox", "proto": "reality", "via": "hop-fi"}
+
+    def _patch_relay(self, **attrs):
+        import chimera.modules.chain_relay as cr
+        saved = {}
+        for k, v in attrs.items():
+            saved[k] = getattr(cr, k)
+            setattr(cr, k, v)
+        return saved
+
+    def _restore_relay(self, saved):
+        import chimera.modules.chain_relay as cr
+        for k, v in saved.items():
+            setattr(cr, k, v)
+
+    def test_via_node_active_hop_chain_ok(self):
+        """via-нода с активным хопом → зонд через цепочку, метка
+        (full-path via hop-fi) — НЕ прямой зонд (кейс №4)."""
+        from chimera.modules import chain_nodes
+        calls = []
+
+        def fake_via(nd, hops, **kw):
+            calls.append("via")
+            return {"ok": True, "ms": 171.5, "reason": "цепь жива",
+                    "detail": "цепочка жива (hop-fi → exit)",
+                    "infra": False}
+
+        saved = self._patch_relay(
+            check_via_node_full_path=fake_via,
+            load_relay_hops=lambda: [],
+            hop_via_tag_for=lambda nd, hops: "hop-fi")
+        try:
+            result = chain_nodes._speed_test_node_latency(
+                "ee.example.com", 443, dict(self._ND_VIA))
+        finally:
+            self._restore_relay(saved)
+        self.assertIn("full-path via hop-fi", result)
+        self.assertIn("мс", result)
+        self.assertEqual(calls, ["via"])
+
+    def test_via_node_active_hop_chain_fail_honest(self):
+        """Честный отказ цепочки → «недоступна (причина)», не TCP-маскировка."""
+        from chimera.modules import chain_nodes
+        saved = self._patch_relay(
+            check_via_node_full_path=lambda nd, hops, **kw: {
+                "ok": False, "ms": 0.0, "reason": "хоп→нода не доставляет",
+                "infra": False},
+            load_relay_hops=lambda: [],
+            hop_via_tag_for=lambda nd, hops: "hop-fi")
+        try:
+            result = chain_nodes._speed_test_node_latency(
+                "ee.example.com", 443, dict(self._ND_VIA))
+        finally:
+            self._restore_relay(saved)
+        self.assertIn("недоступна", result)
+        self.assertIn("хоп→нода не доставляет", result)
+
+    def test_via_node_infra_falls_back_tcp(self):
+        """Сбой МЕХАНИЗМА via-зонда → честный TCP-пинг (не ложный DOWN)."""
+        from chimera.modules import chain_nodes
+        fake_sock = MagicMock()
+        saved = self._patch_relay(
+            check_via_node_full_path=lambda nd, hops, **kw: {
+                "ok": False, "ms": 0.0, "reason": "нет xray",
+                "infra": True},
+            load_relay_hops=lambda: [],
+            hop_via_tag_for=lambda nd, hops: "hop-fi",
+            check_node_full_path=lambda nd, **kw: {
+                "ok": False, "ms": 0.0, "reason": "нет xray",
+                "infra": True},
+            node_has_reality_creds=lambda nd: True)
+        try:
+            with patch("socket.gethostbyname", return_value="1.2.3.4"), \
+                 patch("socket.create_connection", return_value=fake_sock):
+                result = chain_nodes._speed_test_node_latency(
+                    "ee.example.com", 443, dict(self._ND_VIA))
+        finally:
+            self._restore_relay(saved)
+        self.assertIn("мс", result)
+        self.assertNotIn("full-path", result)
+        self.assertNotIn("недоступна", result)
+
+    def test_via_node_disabled_hop_direct_probe_with_note(self):
+        """Хоп выключен → нода в проде прямая: прямой полный зонд
+        + пометка «(via hop-fi выключен — напрямую)»."""
+        from chimera.modules import chain_nodes
+        calls = []
+
+        def fake_fp(nd, **kw):
+            calls.append("fp")
+            return {"ok": True, "ms": 120.0, "infra": False}
+
+        saved = self._patch_relay(
+            load_relay_hops=lambda: [],
+            hop_via_tag_for=lambda nd, hops: None,
+            check_node_full_path=fake_fp,
+            node_has_reality_creds=lambda nd: True)
+        try:
+            result = chain_nodes._speed_test_node_latency(
+                "ee.example.com", 443, dict(self._ND_VIA))
+        finally:
+            self._restore_relay(saved)
+        self.assertIn("full-path", result)
+        self.assertIn("(via hop-fi выключен — напрямую)", result)
+        self.assertEqual(calls, ["fp"])
+
+    def test_via_node_disabled_hop_no_creds_tcp_with_note(self):
+        """Хоп выключен, ключей нет → TCP-пинг с той же пометкой."""
+        from chimera.modules import chain_nodes
+        fake_sock = MagicMock()
+        saved = self._patch_relay(
+            load_relay_hops=lambda: [],
+            hop_via_tag_for=lambda nd, hops: None,
+            node_has_reality_creds=lambda nd: False)
+        try:
+            with patch("socket.gethostbyname", return_value="1.2.3.4"), \
+                 patch("socket.create_connection", return_value=fake_sock):
+                result = chain_nodes._speed_test_node_latency(
+                    "ee.example.com", 443, dict(self._ND_VIA))
+        finally:
+            self._restore_relay(saved)
+        self.assertIn("мс", result)
+        self.assertIn("(via hop-fi выключен — напрямую)", result)
+        self.assertNotIn("full-path", result)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  _speed_test_node_geo — парсинг ip-api.com (mocked _run)
