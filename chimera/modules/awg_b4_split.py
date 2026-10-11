@@ -1018,7 +1018,14 @@ def cascade_mark_sync(excl: bool) -> bool:
     LB-режим: каскадного mark-правила НЕТ (трафик идёт через диспетчер
     awg_lb) — исключение сплита живёт в ХУКЕ диспетчера; синхронизируем
     хук (lb_hook_sync, add-first-then-delete тех же двух форм).
+
+    2026-10-11: добавлен v6 аналог (cascade_mark_sync_v6) — без него
+    v6-трафик от awg0 к YouTube уходил в каскад (awg_lb6 ставит mark
+    0x8200 без исключения awg_b4_direct_v6).
     """
+    # v6 split: INSERT RETURN rule для awg_b4_direct_v6 BEFORE awg_lb6 jump
+    cascade_mark_sync_v6(excl)
+
     # LB: исключение переезжает в хук диспетчера
     try:
         from .awg_state import awgs_state_load
@@ -1041,6 +1048,44 @@ def cascade_mark_sync(excl: bool) -> bool:
                    "--set-mark", hex(AWGS_CASCADE_FWMARK & ~AWGS_B4_EXEMPT_BIT)]):
         while _run(["iptables", "-t", "mangle", "-D", "PREROUTING"] + other,
                    capture=True).returncode == 0:
+            pass
+    return True
+
+
+def cascade_mark_sync_v6(excl: bool) -> bool:
+    """v6 аналог cascade_mark_sync — ip6tables mangle PREROUTING.
+
+    awg_cascade ставит ВСЕМУ v6 из awg0 mark 0x8200 (cascade) — без
+    исключения для B4-split. Без этой функции v6-трафик к YouTube
+    уходит в каскад даже при активном сплите.
+
+    Решение: INSERT RETURN rule at position 1 — BEFORE awg_lb6 jump.
+    RETURN из PREROUTING = stop chain → awg_lb6 не вызывается → mark
+    не ставится → main route → ens3 → B4 DPI-bypass.
+
+    При excl=False (split выключен): удалить RETURN-правило.
+    """
+    if excl:
+        # INSERT RETURN для awg_b4_direct_v6 (идемпотентно)
+        chk = ["ip6tables", "-t", "mangle", "-C", "PREROUTING",
+               "-i", "awg0", "-m", "set", "--match-set", _IPSET_V6, "dst",
+               "-j", "RETURN"]
+        ins = ["ip6tables", "-t", "mangle", "-I", "PREROUTING", "1",
+               "-i", "awg0", "-m", "set", "--match-set", _IPSET_V6, "dst",
+               "-j", "RETURN"]
+        if _run(chk, capture=True).returncode != 0:
+            r = _run(ins, capture=True)
+            if r.returncode == 0:
+                _info(f"cascade_mark_sync_v6: INSERT RETURN awg_b4_direct_v6 "
+                      f"at PREROUTING pos 1 (v6 split active)")
+            else:
+                _warn(f"cascade_mark_sync_v6: INSERT failed: "
+                      f"{getattr(r, 'stderr', '')[:200]}")
+    else:
+        # DELETE RETURN для awg_b4_direct_v6
+        while _run(["ip6tables", "-t", "mangle", "-D", "PREROUTING",
+                    "-i", "awg0", "-m", "set", "--match-set", _IPSET_V6, "dst",
+                    "-j", "RETURN"], capture=True).returncode == 0:
             pass
     return True
 
@@ -1306,8 +1351,10 @@ def refresh_tick(verbose: bool = False) -> dict:
         out["skipped"] = "disabled"
         return out
 
-    # 0. self-heal: nft-сплит-форма (другие пути могут вернуть blanket)
+    # 0. self-heal: nft-сплит-форма + v6 cascade mark (другие пути могут
+    #    вернуть blanket или пересоздать ip6tables без v6-exclusion)
     nft_ok = nft_apply_split()
+    cascade_mark_sync_v6(excl=True)   # v6 RETURN rule для awg_b4_direct_v6
 
     # 1. b4 жив? (без b4 direct-плечо беззащитно перед ТСПУ — только warn)
     b4_active = (_run(["systemctl", "is-active", "b4"],
