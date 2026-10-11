@@ -1,4 +1,82 @@
-# Changelog new entry — Релейные exit-ноды: полный зонд через хоп-цепочку в «Пинге Exit Node» + infra-флаг via-зонда (11 Oct 2026)
+# Changelog new entry — SmartBalancer патч с чужим shortId ломал chain-exit-1 (слот tproxy-telemt): ключ short_id≠shortid + via без dialerProxy + pin-guard (11 Oct 2026)
+
+## FIX(balancer/diagnostics): живой кейс окт.2026 №5 — «Диагностика одной кнопкой», шаг 5 показывал chain-exit-1 (ee.total-shadows.online) «REALITY-зонд FAIL: нода не отвечает (все HTTP-пробы 000)» при живных нодах ([T]/HM 6/6 UP): прод-конфиг Xray был рассинхронизирован с state.json патчем балансера — outbound «франкенштейн» с address/uuid/publicKey от ee, но shortId от total-shadows.ru и БЕЗ dialerProxy
+
+**Контекст (11.10.2026, 03:45:14):** SmartBalancer (cron */15, strategy=smart)
+переключился fi→ee и патчнул ПЕРВЫЙ chain-exit-outbound вживую
+(_sb_patch_xray_active_node). Три бага встретились:
+
+1. **Ключ-баг shortId (главный):** патч читал `node.get("short_id")`, а
+   ноды в state.json хранят `shortid` (без подчёркивания — форма
+   chain_nodes/node_has_reality_creds/_fullpath_nd_from_outbound; источник
+   заблуждения — докстринг _sb_get_nodes_from_state, утверждал short_id).
+   → shortId НИКОГДА не патчился и оставался от ПРЕДЫДУЩЕЙ ноды в слоте
+   (b6cb7d… = total-shadows.ru). REALITY-цель с чужим shortId → auth fail →
+   сервер проксирует на decoy → клиент получает «real certificate» → все
+   HTTP-пробы 000. На ee.total-shadows.online это видно в error.log entry
+   сплошными «REALITY: received real certificate (potential MITM or
+   redirection)» + retry-циклами с 03:45.
+2. **via без dialerProxy:** целевая нода ee — via hop-fi (прямой путь
+   entry→ee транзитно перерезан, ради этого хоп и стоит). Патч не ставил
+   sockopt.dialerProxy → outbound ходил бы напрямую даже с верными ключами.
+3. **Патч при живом pin:** chain_pinned_node_index=5 (pin #6 u1nl) —
+   основной TCP идёт в chain-exit-6 (генератор), патч chain-exit-1
+   бессмыслен для основного трафика, НО chain-exit-1 — слот tproxy-telemt
+   (Telegram MTProto: mtproto._xray_get_proxy_tag хардкодом предпочитает
+   «первый chain-exit»). Итог: каждый свитч балансера подменял
+   Telegram-выход creds-миксом → MTProto-трафик в retry-цикле при живых
+   нодах. Основной трафик не страдал (pin), поэтому [T]/HM были зелёные —
+   и только «Тест маршрутизации» честно светил битый прод-outbound.
+
+**Что сделано:**
+
+**(1) smart_balancer._sb_patch_xray_active_node:** shortId читается по
+каноническому ключу `shortid` (legacy-форма short_id принята как фолбэк);
+via-ноде ставится sockopt.dialerProxy=<активный хоп> + добавляются
+отсутствующие hop-outbound-ы цепочки (collect_hop_outbounds — иначе
+dialerProxy укажет в никуда, кейс №4); прямой ноде dialerProxy снимается
+(зеркало генератора); хоп выключен/удалён → нода напрямую; streamSettings
+через setdefault (get отдал бы отколотый dict).
+
+**(2) smart_balancer._smart_balancer_run_once — pin-guard (секция 1.6):**
+при chain_pinned_node_index>=0 ротация/патч отключены (ротацией владеет
+pin — семантика меню «Узлы» → [P]: «балансировщик выключен»); пробы/
+скоринг/карантин/TG-алерты продолжают работать (наблюдаемость). Также
+_state.json теперь читается через _STATE_FILE (был хардкод пути — мимо
+тестов), докстринг _sb_get_nodes_from_state исправлен на shortid.
+
+**(3) smart_balancer (меню «Применить ноду»):** при живом pin применение
+заблокировано с подсказкой «сначала снимите закрепление (Узлы → [P] → 0)»
+— ручной патч подменял бы тот же слот tproxy-telemt.
+
+**(4) diagnostics «5. Тест маршрутизации»:** при FAIL прямого REALITY-
+зонда креды outbound сравниваются с state.json chain_nodes (по host:port);
+расхождение (или outbound без ноды в БД) → подсказка «⚠ креды outbound ≠
+state.json — конфиг патчен без пересборки (SmartBalancer?) — пересоберите
+конфиг Xray». Дедуплицировано сообщение «нода не отвечает (нода не
+отвечает (все HTTP-пробы 000)…)» (reason уже вложен в detail).
+
+**Операционно (живой инцидент):** прод-конфиг на entry восстановлен
+канонической пересборкой из state.json (chain-exit-1 = total-shadows.ru,
+креды из БД; tproxy-telemt снова на живой ноде; hop-outbound-ы на месте;
+   pin #6 сохранён). До пересборки error.log рос на ~десятках retry-
+коннектов/мин к ee (каждый — «received real certificate»).
+
+**Тесты:** +11 (TestSbPatchXrayActiveNode: shortid-ключ/legacy-форма/
+dialerProxy+hop-outbound/без-дубля/снятие-stale/выключенный-хоп;
+TestRunOncePinnedGuard: патч не вызывается, наблюдаемость жива;
+TestDiagRoutingDesyncHint: чужой shortId → подсказка/креды совпадают —
+тишина/без ноды в БД → подсказка/OK без подсказки). Полный сьют:
+7944 passed, 9 skipped (286 тест-файлов, 4 чанка).
+
+**Совместимость:** прямой патч в одно-нодовом режиме (без pin/без
+натив-балансера) — как работал, так и работает, но теперь с корректным
+shortId и dialerProxy; нативный chain-balancer-гвард без изменений;
+_probe_node/зонды/HM — не тронуты.
+
+---
+
+
 
 ## FIX(probes/via): регрессия кейса №3 для релейных нод — «Пинг Exit Node» [t] ронял ЖИВУЮ via-ноду («нода не отвечает» при живой цепочке ~171 мс): прямой зонд строил outbound с sockopt.dialerProxy=via во временном конфиге БЕЗ хоп-outbound; HM/диагностика via-ветку уже имели, [t] — забыл; + via-нода с выключенным хопом больше не проверяется голым TCP (бан-фуд кейса №3)
 

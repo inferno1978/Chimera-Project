@@ -748,5 +748,111 @@ class TestDiagRoutingLiveViaHop(unittest.TestCase):
         self.assertEqual(counters, [1, 0, 0, 1])
 
 
+class TestDiagRoutingDesyncHint(unittest.TestCase):
+    """Шаг 5, прямой REALITY-зонд FAIL + рассинхрон outbound ↔ БД нод.
+
+    Живой кейс окт.2026 №5: SmartBalancer патчнул chain-exit-1 вживую
+    (shortId не обновился, via-ноде не поставился dialerProxy) → зонд
+    честно FAIL на битом outbound, но сообщение «нода не отвечает»
+    сбивало с толку при живой ноде ([T]/HM зелёные). Теперь при
+    несовпадении кредов outbound со state.json chain_nodes добавляется
+    подсказка «конфиг патчен без пересборки — пересоберите».
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    @staticmethod
+    def _direct_ob(short_id="SID-DB"):
+        """Прямой (без dialerProxy) REALITY-outbound chain-exit-1."""
+        return {
+            "tag": "chain-exit-1", "protocol": "vless",
+            "settings": {"vnext": [{
+                "address": "ee.example", "port": 443,
+                "users": [{"id": "UUID-DB", "encryption": "none",
+                           "flow": "xtls-rprx-vision"}],
+            }]},
+            "streamSettings": {
+                "network": "tcp", "security": "reality",
+                "sockopt": {},
+                "realitySettings": {
+                    "serverName": "ee.example", "publicKey": "PBK-DB",
+                    "shortId": short_id, "fingerprint": "firefox"},
+            },
+        }
+
+    _DB_NODE = {"host": "ee.example", "port": 443, "uuid": "UUID-DB",
+                "pubkey": "PBK-DB", "shortid": "SID-DB",
+                "sni": "ee.example"}
+
+    def _run(self, ob, db_nodes):
+        import chimera.modules.diagnostics as dg
+        import chimera.modules.chain_relay as cr
+        counters = dg._diag_make_counters()
+        _fail = {"ok": False, "ms": 0.0, "exit_ip": "", "speed_mbps": 0.0,
+                 "detail": "нода не отвечает (все HTTP-пробы 000): TCP "
+                           "может принимать, но REALITY/маршрут не работает",
+                 "reason": "нода не отвечает", "legs": {}, "xray_tail": ""}
+        out = io.StringIO()
+        with redirect_stdout(out), \
+             patch.object(cr, "check_node_full_path",
+                          lambda nd, **kw: dict(_fail)), \
+             patch.object(cr, "_chain_nodes_from_state",
+                          lambda: db_nodes):
+            dg._diag_check_routing_live({"outbounds": [ob]}, counters)
+        return out.getvalue(), counters
+
+    def test_desync_shortid_hint(self):
+        """Чужой shortId в outbound (патч балансера, кейс №5) →
+        подсказка «креды ≠ state.json — пересоберите конфиг»."""
+        ob = self._direct_ob(short_id="SID-OTHER")   # ← чужой shortId
+        out, counters = self._run(ob, [self._DB_NODE])
+        self.assertIn("REALITY-зонд FAIL", out)
+        self.assertIn("≠ state.json", out)
+        self.assertIn("пересоберите конфиг Xray", out)
+        # reason уже вложен в detail — не дублируется
+        self.assertNotIn("нода не отвечает (нода не отвечает", out)
+        self.assertEqual(counters, [1, 0, 0, 1])
+
+    def test_no_hint_when_creds_match(self):
+        """Креды outbound = БД → честный FAIL БЕЗ подсказки (не шумим)."""
+        ob = self._direct_ob()                        # shortId = SID-DB
+        out, counters = self._run(ob, [self._DB_NODE])
+        self.assertIn("REALITY-зонд FAIL", out)
+        self.assertNotIn("state.json", out)
+        self.assertEqual(counters, [1, 0, 0, 1])
+
+    def test_no_db_node_for_outbound_hint(self):
+        """Outbound не соответствует ни одной ноде БД (stale/патченый
+        слот) → подсказка «не соответствует ни одной ноде»."""
+        ob = self._direct_ob()
+        out, counters = self._run(
+            ob, [dict(self._DB_NODE, host="other.example")])
+        self.assertIn("не соответствует ни одной ноде", out)
+        self.assertIn("без пересборки", out)
+        self.assertEqual(counters, [1, 0, 0, 1])
+
+    def test_desync_hint_not_triggered_on_ok(self):
+        """Зонд OK → без подсказки даже при рассинхроне (OK не шумим)."""
+        import chimera.modules.diagnostics as dg
+        import chimera.modules.chain_relay as cr
+        counters = dg._diag_make_counters()
+        _ok = {"ok": True, "ms": 150.0, "exit_ip": "", "speed_mbps": 0.0,
+               "detail": "нода жива", "reason": "нода жива",
+               "legs": {}, "xray_tail": ""}
+        out = io.StringIO()
+        with redirect_stdout(out), \
+             patch.object(cr, "check_node_full_path",
+                          lambda nd, **kw: dict(_ok)), \
+             patch.object(cr, "_chain_nodes_from_state",
+                          lambda: [self._DB_NODE]):
+            dg._diag_check_routing_live(
+                {"outbounds": [self._direct_ob(short_id="SID-OTHER")]},
+                counters)
+        self.assertIn("REALITY-зонд", out.getvalue())   # OK-ветка сработала
+        self.assertNotIn("state.json", out.getvalue())  # подсказки нет на OK
+        self.assertEqual(counters, [1, 1, 0, 0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
