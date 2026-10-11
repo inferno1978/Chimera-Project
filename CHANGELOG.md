@@ -1,3 +1,49 @@
+# Changelog new entry — RTT-колонка (чистая сеть, ICMP) рядом с full-path в [T]/HM (11 Oct 2026)
+
+## FEAT(probes/UX): живой кейс окт.2026 №6 — после перевода мониторинга на полные REALITY-зонды (№3, e7482d31) цифры [T]/HM выросли в ~3 раза и выглядели как «пинг до всех нод увеличился» (анализ Task 49: сеть чистая — ICMP 27-44 мс стабилен, full-path/ICMP ratio 3.3-3.8x у прямых и 5.2x у via = арифметика этапов TCP+REALITY-хендшейк+DNS+HTTP). Решение: вторая колонка RTT (прямой сетевой ICMP до хоста ноды) рядом с full-path в «Пинг Exit Node» [T] и Health Monitor, чтобы оба числа были видны и сравнимы
+
+**Что добавлено:**
+
+1. **`icmp_rtt(host)` + `fmt_icmp_rtt()` (chain_relay):** прямой сетевой
+   RTT (ICMP echo, 4 пакета). Почему ICMP, а не голый TCP-connect: TCP к
+   REALITY-порту — бан-фуд (кейс №3: «REALITY: processed invalid
+   connection» в error.log цели кормит fail2ban xray-reality +
+   DPI-detector → цель банит мониторящий IP → ложные DOWN при живом
+   трафике); ICMP не трогает REALITY-порт и в xray-логах цели не пишется.
+   Парсит iputils («packets transmitted/received», rtt min/avg/max),
+   round-trip-форму и busybox («sent/received»); частичные потери —
+   ок=True с loss%; всё потеряно/фильтруется — ок=False (err).
+2. **[T] «Пинг Exit Node» (chain_nodes):** строка результата теперь
+   «→ <full-path-вердикт> · RTT <чистая сеть>» — RTT живой при DOWN
+   сразу показывает класс отказа («сеть есть, туннеля нет»); при UP —
+   эталон для «full-path ≈ 3-4×RTT — норма». Легенда переписана:
+   full-path = TCP + REALITY-хендшейк + DNS на exit + HTTP-проба через
+   туннель (via-ноды — через хоп-цепочку); RTT = прямой сетевой ICMP до
+   хоста ноды; вердикт (UP/DOWN) решает только full-path.
+3. **HM (node_health_monitor):** check_nodes_once замеряет ICMP и кладёт
+   rtt в results + node-health-state.json; лог-строки «up (165ms /
+   RTT 43ms)» / «DOWN (RTT 27ms)»; TG «восстановлена» — «160 мс
+   (full-path), RTT 27 мс». Таблица меню: колонка «RTT» переименована в
+   «Full-path» (раньше показывала full-path мс под именем RTT — вводила
+   в заблуждение), добавлена настоящая «RTT»; «Проверить сейчас» [C] —
+   «165 мс (full-path) · RTT 43 мс». Колонки паддятся по ГОЛОМУ тексту —
+   ANSI-коды не рвут выравнивание, рамка не съезжает.
+4. **RTT — ИНФОРМАЦИОННАЯ, не вердиктоносная:** ICMP может фильтроваться
+   на пути/хосте (ok=False → «—») — это ничего не говорит о ноде: статус
+   решает только full-path зонд. Для via-нод RTT — прямой ICMP до хоста
+   ноды, full-path идёт через хоп-цепочку (расхождение закономерно и
+   отражено в легенде). Ложных DOWN новый замер дать не может по
+   построению (не влияет на вердикт и не пишет в xray-логи цели).
+
+**Тесты:** +15 (TestIcmpRtt 11: iputils/round-trip/busybox-парсинг,
+частичные потери, всё потеряно, rtt-строки нет, исключение/ping нет/
+пустой host, fmt; TestHealthMonitorRtt 4: rtt в state/results/лог,
+фильтруемый ICMP → None и up не тронут, DOWN при живом RTT в логе,
+via-нода RTT не перекрывает DOWN). Полный сьют 4 чанками:
+7959 passed, 9 skipped (286 файлов).
+
+---
+
 # Changelog new entry — SmartBalancer патч с чужим shortId ломал chain-exit-1 (слот tproxy-telemt): ключ short_id≠shortid + via без dialerProxy + pin-guard (11 Oct 2026)
 
 ## FIX(balancer/diagnostics): живой кейс окт.2026 №5 — «Диагностика одной кнопкой», шаг 5 показывал chain-exit-1 (ee.total-shadows.online) «REALITY-зонд FAIL: нода не отвечает (все HTTP-пробы 000)» при живных нодах ([T]/HM 6/6 UP): прод-конфиг Xray был рассинхронизирован с state.json патчем балансера — outbound «франкенштейн» с address/uuid/publicKey от ee, но shortId от total-shadows.ru и БЕЗ dialerProxy

@@ -3069,12 +3069,29 @@ def do_manage_nodes() -> None:
         elif ch == "t" and CHAIN_NODES:
             print()
             _box_top("Пинг Exit Node")
-            _box_row(f"  {DIM}Латентность нод: REALITY — полный зонд (хендшейк+проба; via —")
-            _box_row(f"  через хоп-цепочку), прочие — TCP. Зонд не палит нас анти-DPI{NC}")
+            _box_row(f"  {DIM}full-path — полный зонд: TCP + REALITY-хендшейк +{NC}")
+            _box_row(f"  {DIM}DNS на exit + HTTP-проба через туннель (via-ноды —{NC}")
+            _box_row(f"  {DIM}через хоп-цепочку); RTT — прямой сетевой ICMP до{NC}")
+            _box_row(f"  {DIM}хоста ноды. Вердикт (UP/DOWN) решает full-path;{NC}")
+            _box_row(f"  {DIM}RTT — эталон чистой сети: full-path ≈ 3-4×RTT —{NC}")
+            _box_row(f"  {DIM}норма, DOWN при живом RTT — «сеть есть, туннеля нет».{NC}")
+            _box_row(f"  {DIM}Зонды не палит нас анти-DPI, ноды без ключей — TCP.{NC}")
             _box_sep()
+            try:
+                from chimera.modules.chain_relay import icmp_rtt, fmt_icmp_rtt
+            except Exception:
+                icmp_rtt = fmt_icmp_rtt = None
             for i, nd in enumerate(CHAIN_NODES):
                 host, port = nd["host"], nd["port"]
                 _box_row(f"  {CYAN}[{i+1}]{NC} {host}:{port}  →  измеряю...")
+                # RTT (ICMP): инфо-контекст к full-path, НЕ вердикт:
+                # фильтруемый ICMP → «—», статус ноды не трогаем.
+                rtt_txt = "—"
+                if icmp_rtt is not None:
+                    try:
+                        rtt_txt = fmt_icmp_rtt(icmp_rtt(host))
+                    except Exception:
+                        rtt_txt = "—"
                 lat = _speed_test_node_latency(host, port, nd)
                 flag_str = ""
                 try:
@@ -3093,8 +3110,11 @@ def do_manage_nodes() -> None:
                                 flag_str = f"  {country_flag_emoji(cc)}"
                 except Exception:
                     pass
-                # Перерисовываем строку с результатом
-                _box_row(f"  {CYAN}[{i+1}]{NC} {host}:{port}{flag_str}  →  {lat}")
+                # Перерисовываем строку с результатом:
+                # «→ <full-path-вердикт> · RTT <чистая сеть>» — RTT живой
+                # при DOWN сразу показывает класс отказа (сеть/туннель).
+                _box_row(f"  {CYAN}[{i+1}]{NC} {host}:{port}{flag_str}  →  {lat}"
+                         f"{DIM}  ·  RTT {rtt_txt}{NC}")
             _box_bottom()
             input(f"{BLUE}Нажмите Enter...{NC}")
 
