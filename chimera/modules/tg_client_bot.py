@@ -591,8 +591,10 @@ def _generate_client_bot_script(bot_cfg: dict) -> str:
     Скрипт запускается как systemd-сервис xray-tg-client. Не требует
     chimera.* на PYTHONPATH — все пути захардкожены.
 
-    Bot API вызывается через urllib.request. QR-генерация — через subprocess
-    к qrencode / python3 -c 'import qrcode'.
+    Bot API вызывается через http.client по персистентному keep-alive
+    соединению (фикс 13.10.2026: медленный /menu — urllib открывал новое
+    TCP+CONNECT+TLS на каждый вызов и вис по 30 с при флапе mieru).
+    QR-генерация — через subprocess к qrencode / python3 -c 'import qrcode'.
     """
     token        = json.dumps(bot_cfg.get("token", ""), ensure_ascii=False)
     admin_id     = json.dumps(str(bot_cfg.get("admin_id", "")), ensure_ascii=False)
@@ -645,6 +647,7 @@ def _generate_client_bot_script(bot_cfg: dict) -> str:
 # /status -> трафик + TTL.
 
 import json, os, sys, time, re, subprocess, urllib.request, urllib.parse, urllib.error, base64, hashlib, hmac, secrets
+import http.client
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -1231,39 +1234,83 @@ def _generate_qr_png(text, out_path):
     except Exception:
         return False
 
-# ── Telegram Bot API ─────────────────────────────────────────────────────────
-def api(method, **params):
-    """Вызов Telegram Bot API через urllib.
+# ── Telegram Bot API: персистентное keep-alive соединение ─────────────────────
+# Было (жалоба на медленный /menu, 13.10.2026): urllib + ProxyHandler
+# открывал НОВОЕ TCP-соединение к прокси + CONNECT-туннель + полный
+# TLS-хендшейк на КАЖДЫЙ вызов (замер RU-3: ~230 мс/вызов), а при флапе
+# mieru — вис до 30 с на попытку, 3 попытки подряд. Замер keep-alive: ~56 мс.
+_API_CONN = {{"conn": None}}
 
-    Прокси: необязательный ключ "proxy" в telegram.json — urllib
-    ProxyHandler (CONNECT для https), как в админ-боте (фикс 4e645199
-    пропустил клиентский шаблон — инцидент 08.10.2026, RU-2: клиентский
-    бот продолжал ходить напрямую и умирал на мёртвом IPv6).
-    Ключа нет → напрямую. Ретраи: до 3 попыток с паузой 2с — транзиентные
-    разрывы mieru-прокси не должны стоить потерянного сообщения.
-    """
-    url = f"https://api.telegram.org/bot{{TOKEN}}/{{method}}"
-    data = urllib.parse.urlencode(params).encode()
+def _api_connect(sock_timeout):
+    """Новое соединение: HTTP-прокси туннель (если задан) + TLS + TCP_NODELAY."""
     try:
         _tgp = Path("/var/lib/xray-installer/telegram.json")
         _pc = json.loads(_tgp.read_text()) if _tgp.exists() else {{}}
         _px = str(_pc.get("proxy") or "").strip()
     except Exception:
         _px = ""
+    if _px:
+        _p = _px[len("http://"):] if _px.startswith("http://") else _px
+        _ph, _, _ppt = _p.rpartition(":")
+        conn = http.client.HTTPSConnection(_ph or _p, int(_ppt or 8080),
+                                           timeout=sock_timeout)
+        conn.set_tunnel("api.telegram.org", 443)
+    else:
+        conn = http.client.HTTPSConnection("api.telegram.org", 443,
+                                           timeout=sock_timeout)
+    conn.connect()
+    try:
+        conn.sock.settimeout(sock_timeout)
+        conn.sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
+    return conn
+
+def api(method, **params):
+    """Вызов Telegram Bot API по keep-alive соединению (http.client).
+
+    Прокси: ключ "proxy" в telegram.json — HTTP CONNECT-туннель через
+    mieru (фикс 4e645199/инцидент 08.10.2026 сохранены — прокси обязателен
+    на нодах с блокировкой прямого TG). Ключа нет → напрямую.
+    Сокет-таймауты: getUpdates (long-poll 25 с на сервере) — 35 с,
+    остальные вызовы — 15 с (быстрый отказ вместо 30-секундного висa).
+    Ретраи: до 3 попыток с паузой 1 с; при обрыве соединение пересоздаётся
+    мгновенно (~200 мс), а не после полного таймаута. Разрывы mieru-прокси
+    не должны стоить потерянного сообщения.
+    """
+    data = urllib.parse.urlencode(params).encode()
+    sock_timeout = 35 if method == "getUpdates" else 15
     for _att in range(1, 4):
         try:
-            req = urllib.request.Request(url, data=data)
-            if _px:
-                opener = urllib.request.build_opener(
-                    urllib.request.ProxyHandler({{"https": _px, "http": _px}}))
-                resp = opener.open(req, timeout=30)
-            else:
-                resp = urllib.request.urlopen(req, timeout=30)
-            return json.loads(resp.read())
+            if _API_CONN["conn"] is None:
+                _API_CONN["conn"] = _api_connect(sock_timeout)
+            conn = _API_CONN["conn"]
+            try:
+                conn.sock.settimeout(sock_timeout)
+            except Exception:
+                pass
+            conn.request("POST", f"/bot{{TOKEN}}/{{method}}", data,
+                        {{"Content-Type": "application/x-www-form-urlencoded",
+                          "Connection": "keep-alive"}})
+            resp = conn.getresponse()
+            raw = resp.read()
+            if resp.will_close:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                _API_CONN["conn"] = None
+            return json.loads(raw)
         except Exception as e:
+            try:
+                if _API_CONN["conn"] is not None:
+                    _API_CONN["conn"].close()
+            except Exception:
+                pass
+            _API_CONN["conn"] = None
             _log(f"API error {{method}} (попытка {{_att}}/3): {{e}}")
             if _att < 3:
-                time.sleep(2)
+                time.sleep(1)
     return {{}}
 
 def send(chat_id, text, parse_mode="HTML", reply_markup=None):

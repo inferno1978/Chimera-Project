@@ -527,6 +527,7 @@ def _generate_bot_script(bot_cfg: dict, notif_cfg: dict) -> str:
 # НЕ РЕДАКТИРОВАТЬ ВРУЧНУЮ — перегенерируется из меню установщика
 
 import json, os, sys, time, re, subprocess, urllib.request, urllib.parse, urllib.error
+import http.client
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -578,37 +579,76 @@ def _state():
     except Exception:
         return {{}}
 
-def api(method, **params):
-    """Вызов Telegram Bot API через urllib (нет зависимостей).
-
-    Прокси: необязательный ключ "proxy" в telegram.json — urllib
-    ProxyHandler (CONNECT для https). Ключа нет → напрямую.
-    """
-    url = f"https://api.telegram.org/bot{{TOKEN}}/{{method}}"
-    data = urllib.parse.urlencode(params).encode()
+def _api_connect(sock_timeout):
+    """Новое соединение: HTTP-прокси туннель (если задан) + TLS + TCP_NODELAY."""
     try:
         _tgp = Path("/var/lib/xray-installer/telegram.json")
         _pc = json.loads(_tgp.read_text()) if _tgp.exists() else {{}}
         _px = str(_pc.get("proxy") or "").strip()
     except Exception:
         _px = ""
-    # Ретраи: локальный mieru-прокси транзиентно рвёт отдельные запросы
-    # (замер 08.10.2026, RU-2: ~1 разрыв на 2-3 мин поллинга) — один
-    # разрыв не должен стоить потерянного сообщения/команды.
+    if _px:
+        _p = _px[len("http://"):] if _px.startswith("http://") else _px
+        _ph, _, _ppt = _p.rpartition(":")
+        conn = http.client.HTTPSConnection(_ph or _p, int(_ppt or 8080),
+                                           timeout=sock_timeout)
+        conn.set_tunnel("api.telegram.org", 443)
+    else:
+        conn = http.client.HTTPSConnection("api.telegram.org", 443,
+                                           timeout=sock_timeout)
+    conn.connect()
+    try:
+        conn.sock.settimeout(sock_timeout)
+        conn.sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
+    return conn
+
+# Персистентное keep-alive соединение (фикс 13.10.2026, медленные ответы
+# ботов): urllib открывал новое TCP+CONNECT+TLS на каждый вызов (~230 мс,
+# замер RU-3), при флапе mieru — вис до 30 с на попытку. Keep-alive: ~56 мс.
+_API_CONN = {{"conn": None}}
+
+def api(method, **params):
+    """Вызов Telegram Bot API по keep-alive соединению (http.client).
+
+    Прокси: ключ "proxy" в telegram.json — HTTP CONNECT-туннель через
+    mieru. Ключа нет → напрямую. Сокет-таймауты: getUpdates (long-poll
+    25 с на сервере) — 35 с, остальные вызовы — 15 с (быстрый отказ).
+    """
+    data = urllib.parse.urlencode(params).encode()
+    sock_timeout = 35 if method == "getUpdates" else 15
     for _att in range(1, 4):
         try:
-            req = urllib.request.Request(url, data=data)
-            if _px:
-                opener = urllib.request.build_opener(
-                    urllib.request.ProxyHandler({{"https": _px, "http": _px}}))
-                resp = opener.open(req, timeout=30)
-            else:
-                resp = urllib.request.urlopen(req, timeout=30)
-            return json.loads(resp.read())
+            if _API_CONN["conn"] is None:
+                _API_CONN["conn"] = _api_connect(sock_timeout)
+            conn = _API_CONN["conn"]
+            try:
+                conn.sock.settimeout(sock_timeout)
+            except Exception:
+                pass
+            conn.request("POST", f"/bot{{TOKEN}}/{{method}}", data,
+                        {{"Content-Type": "application/x-www-form-urlencoded",
+                          "Connection": "keep-alive"}})
+            resp = conn.getresponse()
+            raw = resp.read()
+            if resp.will_close:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                _API_CONN["conn"] = None
+            return json.loads(raw)
         except Exception as e:
+            try:
+                if _API_CONN["conn"] is not None:
+                    _API_CONN["conn"].close()
+            except Exception:
+                pass
+            _API_CONN["conn"] = None
             _log(f"API error {{method}} (попытка {{_att}}/3): {{e}}")
             if _att < 3:
-                time.sleep(2)
+                time.sleep(1)
     return {{}}
 
 def send(chat_id, text, parse_mode="HTML"):
