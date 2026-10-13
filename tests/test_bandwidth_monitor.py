@@ -313,24 +313,27 @@ class TestTgConfig(unittest.TestCase):
 
     def test_load_from_telegram_json(self):
         (self._tmp / "telegram.json").write_text(json.dumps({
-            "token": "abc:123", "chat_id": "999"
+            "token": "abc:123", "chat_id": "999", "proxy": "http://127.0.0.1:25181"
         }))
-        token, chat = self._m._load_tg_config()
+        token, chat, proxy = self._m._load_tg_config()
         self.assertEqual(token, "abc:123")
         self.assertEqual(chat, "999")
+        self.assertEqual(proxy, "http://127.0.0.1:25181")
 
     def test_load_from_tg_bot_json(self):
         (self._tmp / "tg_bot.json").write_text(json.dumps({
             "token": "xyz:456", "admin_id": "888"
         }))
-        token, chat = self._m._load_tg_config()
+        token, chat, proxy = self._m._load_tg_config()
         self.assertEqual(token, "xyz:456")
         self.assertEqual(chat, "888")
+        self.assertEqual(proxy, "")  # tg_bot.json не имеет proxy
 
     def test_no_config_returns_empty(self):
-        token, chat = self._m._load_tg_config()
+        token, chat, proxy = self._m._load_tg_config()
         self.assertEqual(token, "")
         self.assertEqual(chat, "")
+        self.assertEqual(proxy, "")
 
 
 if __name__ == "__main__":
