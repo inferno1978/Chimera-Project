@@ -85,6 +85,10 @@ def awg_peer_rebuild_conf(apply: bool = True, params_override: dict = None) -> b
     Перестраивает awg0.conf из state (все пиры) и применяет через syncconf.
     Вызывается после любого изменения набора пиров.
 
+    Cascade-пир (legacy-зеркало cascade_peer_*) в конфиг НЕ рендерится —
+    связь с exit обеспечивает отдельный интерфейс awg1+ (awg_cascade),
+    см. LB-residue guard перед вызовом awgs_build_server_conf.
+
     params_override: если передан (не None), используется вместо
         state.get("params", ...) при построении конфига. Состояние state
         на диске при этом НЕ меняется — только конфиг строится с этими
@@ -111,6 +115,17 @@ def awg_peer_rebuild_conf(apply: bool = True, params_override: dict = None) -> b
     # параметрами ДО того, как они записаны в state.
     params = params_override if params_override is not None \
         else state.get("params", AWGS_DEFAULT_PARAMS)
+    # LB-residue guard (13.10.2026): legacy-зеркало cascade_peer_* БОЛЬШЕ НЕ
+    # рендерится в awg0.conf. В текущей архитектуре каскада leg к каждому
+    # exit живёт в ОТДЕЛЬНЫХ интерфейсах awg1/awg2/awg3 (awg_cascade: multiexit
+    # + LB), и на стороне exit известен только ключ awg1-клиента — поэтому
+    # [Peer] "# cascade exit peer" в awg0 никогда не хендшейкался (0 B rx,
+    # вечные retry-пакеты в пустоту; инцидент: мёртвый пир 31.77.168.49:52831
+    # в awg0.conf на всех трёх нодах RU-каскада, вычищен вручную 13.10).
+    # Зеркальные поля в state НЕ трогаем — их читают cascade_role-потребители
+    # (b4_split / REST / uninstall) — но в конфиг они не попадают ни при каком
+    # rebuild. Регрессия закрыта тестом TestPeerRebuildNoCascadeResidue
+    # (tests/test_awg_peers.py).
     conf_content = awgs_build_server_conf(
         server_privkey=_server_privkey,
         port=state.get("port", 51820),
@@ -120,13 +135,6 @@ def awg_peer_rebuild_conf(apply: bool = True, params_override: dict = None) -> b
         params=params,
         peers=state.get("peers", []),
         endpoint_host=state.get("endpoint_host", ""),
-        cascade_role=state.get("cascade_role", ""),
-        cascade_peer={
-            "pubkey":         state.get("cascade_peer_pubkey", ""),
-            "subnet":         state.get("cascade_subnet", ""),
-            "endpoint":       f"{state.get('cascade_peer_host', '')}:{state.get('cascade_peer_port', 0)}",
-            "preshared_key":  "",
-        } if state.get("cascade_role") == "entry" else None,
         # версия протокола из state — 3.1-установки получают
         # awg0.conf с 9 транспортными директивами; отсутствие ключа
         # (старые state) = "2.0" = байт-в-байт прежнее поведение.
