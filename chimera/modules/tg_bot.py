@@ -1091,16 +1091,135 @@ def handle_config(msg):
     if not is_allowed(uid):
         send(uid, "⛔ Нет доступа. Запросите invite-ссылку у администратора.")
         return
-    link = get_vless_link()
-    if not link:
-        send(uid, "⚠️ Сервер ещё не настроен или конфиг недоступен.")
-        return
-    send(uid, (
-        f"🔗 <b>Ваша VLESS-ссылка:</b>\\n\\n"
-        f"<code>{{link}}</code>\\n\\n"
-        f"Скопируйте и импортируйте в NekoBox / v2rayNG / Happ."
-    ))
+    # Multi-node: если cascade_peers задан — показать конфиги со всех нод
+    if CASCADE_PEERS:
+        send(uid, get_config_all())
+    else:
+        link = get_vless_link()
+        if not link:
+            send(uid, "⚠️ Сервер ещё не настроен или конфиг недоступен.")
+            return
+        send(uid, (
+            f"🔗 <b>Ваша VLESS-ссылка:</b>\\n\\n"
+            f"<code>{{link}}</code>\\n\\n"
+            f"Скопируйте и импортируйте в NekoBox / v2rayNG / Happ."
+        ))
     _log(f"Config sent to user {{uid}}")
+
+
+def get_config_all():
+    """Агрегированные конфиги: локальный + все cascade_peers через SSH.
+
+    Для каждого сервера показывает: hostname, IP, VLESS-ссылку, AWG endpoint,
+    Mieru endpoint. Локальный — из state.json, remote — через
+    chimera-remote-cmd.py config (SSH).
+    """
+    def _safe_html(s):
+        return (str(s or "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    from concurrent.futures import ThreadPoolExecutor
+    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+    lines = [f"🔗 <b>Конфиги всех нод ({{ts}})</b>\\n"]
+
+    # Локальная нода
+    local_name = LOCAL_NAME or "primary"
+    local_link = get_vless_link()
+    lines.append(f"📡 <b>{{local_name}}</b>")
+    if local_link:
+        lines.append(f"   VLESS: <code>{{_safe_html(local_link)}}</code>")
+    else:
+        lines.append("   VLESS: ⚠️ недоступен")
+    # Локальный AWG
+    try:
+        import subprocess as _sp
+        r = _sp.run(["awg", "show", "awg0", "public-key"],
+                    capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            awg_pub = r.stdout.strip()
+            awg_conf = Path("/etc/amnezia/amneziawg/awg0.conf")
+            awg_port = ""
+            if awg_conf.exists():
+                for ln in awg_conf.read_text().splitlines():
+                    if ln.startswith("ListenPort"):
+                        awg_port = ln.split("=")[1].strip()
+            local_ip = LOCAL_IP or ""
+            lines.append(f"   AWG: <code>{{_safe_html(awg_pub)}} @ {{_safe_html(local_ip)}}:{{_safe_html(awg_port)}}</code>")
+    except Exception:
+        pass
+    lines.append("")
+
+    # Remote peers — параллельно
+    if CASCADE_PEERS:
+        try:
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                results = list(ex.map(_fetch_remote_config, CASCADE_PEERS))
+        except Exception:
+            results = [_fetch_remote_config(p) for p in CASCADE_PEERS]
+        for peer, result in zip(CASCADE_PEERS, results):
+            peer_name = peer.get("name", peer.get("host", "?"))
+            if "error" in result:
+                lines.append(f"📡 <b>{{_safe_html(peer_name)}}</b>")
+                lines.append(f"   ❌ {{_safe_html(result['error'])}}")
+                lines.append("")
+                continue
+            lines.append(f"📡 <b>{{_safe_html(peer_name)}}</b>")
+            vless = result.get("vless", "")
+            if vless:
+                lines.append(f"   VLESS: <code>{{_safe_html(vless)}}</code>")
+            else:
+                lines.append("   VLESS: ⚠️ недоступен")
+            awg = result.get("awg", {{}})
+            if awg.get("public_key") and awg.get("port"):
+                peer_ip = result.get("ip", peer.get("host", ""))
+                lines.append(f"   AWG: <code>{{_safe_html(awg['public_key'])}} @ {{_safe_html(peer_ip)}}:{{_safe_html(awg['port'])}}</code>")
+            mieru = result.get("mieru", {{}})
+            if mieru.get("username"):
+                peer_ip = result.get("ip", peer.get("host", ""))
+                lines.append(f"   Mieru: <code>{{_safe_html(mieru['username'])}}:{{_safe_html(mieru['password'])}} @ {{_safe_html(peer_ip)}}:{{_safe_html(str(mieru.get('port_start','')))}}-{{_safe_html(str(mieru.get('port_end','')))}}</code>")
+            lines.append("")
+    return "\\n".join(lines)
+
+
+def _fetch_remote_config(peer):
+    """Получает конфиг с удалённого сервера через SSH (chimera-remote-cmd.py config).
+
+    Возвращает dict (при успехе) или dict с ключом 'error' (при ошибке).
+    """
+    host = peer.get("host", "")
+    user = peer.get("user", "root")
+    port = peer.get("port", 22)
+    name = peer.get("name", host)
+    use_sudo = peer.get("sudo", False)
+    ssh_target = f"{{user}}@{{host}}" if user != "root" else host
+
+    ssh_cmd = [
+        "ssh", "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        "-p", str(port), ssh_target,
+    ]
+    if use_sudo:
+        ssh_cmd.extend(["sudo", "-n", "/usr/local/bin/chimera-remote-cmd.py", "config"])
+    else:
+        ssh_cmd.extend(["/usr/local/bin/chimera-remote-cmd.py", "config"])
+
+    try:
+        r = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            return {{"error": f"SSH exit={{r.returncode}}: {{r.stderr.strip()[:80]}}"}}
+        out = r.stdout.strip()
+        # Output is JSON: wrapper with ok+output keys
+        try:
+            wrapper = json.loads(out.split("\\n")[-1])
+            if wrapper.get("ok"):
+                inner = json.loads(wrapper["output"])
+                return inner
+            else:
+                return {{"error": wrapper.get("output", "unknown error")[:80]}}
+        except Exception:
+            return {{"error": f"parse fail: {{out[:80]}}"}}
+    except subprocess.TimeoutExpired:
+        return {{"error": "timeout (>20s)"}}
+    except Exception as e:
+        return {{"error": str(e)[:80]}}
 
 def handle_status(msg):
     uid = msg["from"]["id"]
