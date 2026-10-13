@@ -419,7 +419,14 @@ def _cleanup_old_samples(retention_days: int) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _load_tg_config() -> tuple:
-    """Загрузить token + chat_id из telegram.json или tg_bot.json."""
+    """Загрузить (token, chat_id, proxy) из telegram.json или tg_bot.json.
+
+    2026-10-13: добавлен proxy — на части нод (138.x) прямой доступ к
+    api.telegram.org заблокирован TLS-ресетом, нужен mieru-прокси
+    (127.0.0.1:25181). proxy берётся из telegram.json→"proxy"; в
+    tg_bot.json поля proxy нет (там только token/admin_id/allowed_users).
+    Паттерн тот же, что в steal_monitor._tg_send().
+    """
     for path in (TG_CONFIG, TG_BOT_CFG):
         if not path.exists():
             continue
@@ -427,11 +434,12 @@ def _load_tg_config() -> tuple:
             cfg = json.loads(path.read_text(encoding="utf-8"))
             token = cfg.get("token", "")
             chat = cfg.get("chat_id") or cfg.get("admin_id", "")
+            proxy = str(cfg.get("proxy") or "").strip()
             if token and chat:
-                return token, str(chat)
+                return token, str(chat), proxy
         except Exception:
             pass
-    return "", ""
+    return "", "", ""
 
 
 def _split_tg_chunks(msg: str, limit: int = TG_CHUNK_LIMIT) -> list:
@@ -450,9 +458,14 @@ def _split_tg_chunks(msg: str, limit: int = TG_CHUNK_LIMIT) -> list:
 
 
 def _tg_send(msg: str, event: str = "") -> bool:
-    """Отправка в TG с ретраями (DPI-ресет 1-го соединения)."""
+    """Отправка в TG с ретраями + опциональным прокси.
+
+    Прокси: ключ "proxy" в telegram.json (напр. http://127.0.0.1:25181 —
+    локальный mieru-HTTP-прокси). Нужен на нодах, откуда api.telegram.org
+    недоступен напрямую (TLS-ресет). Без ключа — прямое подключение.
+    """
     try:
-        token, chat = _load_tg_config()
+        token, chat, proxy = _load_tg_config()
         if not token or not chat:
             _log("tg_send: нет token/chat в telegram.json или tg_bot.json")
             return False
@@ -463,18 +476,23 @@ def _tg_send(msg: str, event: str = "") -> bool:
         for chunk in chunks:
             ok_chunk = False
             for attempt in range(1, retries + 1):
-                r = _run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                          "-m", str(TG_TIMEOUT),
-                          f"https://api.telegram.org/bot{token}/sendMessage",
-                          "-d", f"chat_id={chat}",
-                          "-d", "parse_mode=HTML",
-                          "--data-urlencode", f"text={chunk}"],
-                         capture=True, timeout=TG_TIMEOUT + 5)
+                cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                       "-m", str(TG_TIMEOUT)]
+                if proxy:
+                    cmd += ["-x", proxy]
+                cmd += [
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    "-d", f"chat_id={chat}",
+                    "-d", "parse_mode=HTML",
+                    "--data-urlencode", f"text={chunk}",
+                ]
+                r = _run(cmd, capture=True, timeout=TG_TIMEOUT + 5)
                 code = (r.stdout or "").strip()
                 if code == "200":
                     ok_chunk = True
                     break
-                _log(f"tg send: попытка {attempt}/{retries} — код {code}")
+                _log(f"tg send: попытка {attempt}/{retries} — код {code} "
+                     f"{'(via proxy ' + proxy + ')' if proxy else '(direct)'}")
                 if attempt < retries:
                     time.sleep(TG_RETRY_PAUSE)
             all_ok = all_ok and ok_chunk
