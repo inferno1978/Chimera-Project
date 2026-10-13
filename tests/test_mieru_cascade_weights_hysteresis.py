@@ -129,6 +129,80 @@ def test_tick_material_drift_rebuilds(monkeypatch, tmp_path):
     assert result["rebalanced"] is True
 
 
+# ── Гейт ресолв-фазы b4-exempt (кейс RU-1 2026-10-14) ────────────────────
+# Пачка DoH-curl каждый тик → пики CPU >100% на 2-ядерной entry.
+# Фикс: _b4set_refresh из тика — не чаще _B4_REFRESH_MIN_INTERVAL_S
+# по st['b4_refresh_ts']; ручной apply зовёт напрямую — без гейта.
+
+def _mock_tick_b4(monkeypatch, tmp_path, *, state=None):
+    refreshed = []
+    saved = []
+
+    st = state if state is not None else _st()
+
+    monkeypatch.setattr(mc, "state_load", lambda: st)
+    monkeypatch.setattr(mc, "state_save", lambda s: saved.append(dict(s)))
+    monkeypatch.setattr(
+        mc, "_mieru",
+        lambda: types.SimpleNamespace(YELLOW="", NC="", GREEN="", RED=""))
+    monkeypatch.setattr(mc, "_ensure_local_services", lambda st: [])
+    monkeypatch.setattr(mc, "_probe_exit_tcp", lambda e: 12.0)
+    monkeypatch.setattr(mc, "_probe_exit_e2e", lambda e: True)
+    monkeypatch.setattr(mc, "_active_exits", lambda st: st["exits"])
+    monkeypatch.setattr(mc, "_balance_shares",
+                        lambda st, act: _bal(BASE))
+    monkeypatch.setattr(mc, "_rule_specs",
+                        lambda st, bal=None: [{"spec": "applied"}])
+    monkeypatch.setattr(mc, "_rules_in_sync", lambda st: True)
+    monkeypatch.setattr(mc, "_rules_apply", lambda st: True)
+    monkeypatch.setattr(mc, "_routing_sh_text", lambda st: "# routing.sh (test)")
+    monkeypatch.setattr(mc, "_b4_exempt_active", lambda st: True)
+    monkeypatch.setattr(mc, "_b4set_refresh",
+                        lambda st, verbose=False: refreshed.append(True))
+    monkeypatch.setattr(mc, "_ROUTING_SH", tmp_path / "routing.sh")
+    return refreshed, saved
+
+
+def test_b4_refresh_first_tick_runs(monkeypatch, tmp_path):
+    """Первый тик (нет b4_refresh_ts) — ресолв-фаза выполняется."""
+    refreshed, _ = _mock_tick_b4(monkeypatch, tmp_path)
+    mc._health_tick_locked(verbose=False)
+    assert refreshed == [True]
+
+
+def test_b4_refresh_gated_within_interval(monkeypatch, tmp_path):
+    """Тик сразу после свежего ресолва — фаза ПРОПУСКАЕТСЯ."""
+    st = _st()
+    st["b4_refresh_ts"] = time.time() - 60        # минуту назад — < 5 мин
+    refreshed, saved = _mock_tick_b4(monkeypatch, tmp_path, state=st)
+    mc._health_tick_locked(verbose=False)
+    assert refreshed == []                        # гейт сработал
+    # метка не переписывалась зря
+    assert all(s.get("b4_refresh_ts") == st["b4_refresh_ts"]
+               for s in saved)
+
+
+def test_b4_refresh_runs_after_interval(monkeypatch, tmp_path):
+    """Прошло больше _B4_REFRESH_MIN_INTERVAL_S — фаза выполняется,
+    метка обновляется и попадает в state_save."""
+    st = _st()
+    st["b4_refresh_ts"] = time.time() - mc._B4_REFRESH_MIN_INTERVAL_S - 1
+    t_before = st["b4_refresh_ts"]   # снимок: тик мутирует st in-place
+    refreshed, saved = _mock_tick_b4(monkeypatch, tmp_path, state=st)
+    mc._health_tick_locked(verbose=False)
+    assert refreshed == [True]
+    assert saved and saved[-1]["b4_refresh_ts"] > t_before
+
+
+def test_b4_refresh_inactive_exempt_never_runs(monkeypatch, tmp_path):
+    """b4-exempt выключен — фаза не выполняется, метка не пишется."""
+    refreshed, saved = _mock_tick_b4(monkeypatch, tmp_path)
+    monkeypatch.setattr(mc, "_b4_exempt_active", lambda st: False)
+    mc._health_tick_locked(verbose=False)
+    assert refreshed == []
+    assert all("b4_refresh_ts" not in s for s in saved)
+
+
 # ── EMA-сглаживание метрик ───────────────────────────────────────────────
 
 def test_ema_no_history_returns_fresh():
