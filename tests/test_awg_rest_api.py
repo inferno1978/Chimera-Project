@@ -1252,5 +1252,55 @@ class TestAWGQREndToEndChmod(unittest.TestCase):
                              f"AWGS_KEYS_DIR должен иметь права 0o700, имеет {oct(dir_mode)}")
 
 
+class TestJointRunModuleSplitIsolation(unittest.TestCase):
+    """Регрессия изоляции совместных прогонов (module split).
+
+    Кейс из боевого прогона: тесты, реимпортирующие
+    chimera.modules.awg_peers внутри patch.dict(sys.modules, {фейки})
+    (test_identity_guard.test_awg_rebuild_conf_guards_empty_privkey до
+    фикса), оставляли модуль «расщеплённым»: import machinery делал
+    setattr(chimera.modules, "awg_peers", <копия>), а patch.dict по выходе
+    восстанавливал sys.modules-запись → sys.modules и атрибут пакета
+    указывали на РАЗНЫЕ объекты. Строчные patch("chimera.modules.awg_peers.*")
+    в этом файле патчат sys.modules-объект, а ленивый импорт
+    "from . import awg_peers" (awg_rest_api._awg_peers()) получает атрибут
+    пакета → моки не действовали → 6 ложных падений
+    (TestAWGPeerAddOwnerEmail ×2, TestAWGPeerModifyOwnerEmail ×2,
+    TestUserCannotRegenOthersPeer ×2) при совместном прогоне
+    awg_peers → identity_guard → rest_api.
+
+    Инвариант: sys.modules-запись, атрибут пакета и объект, который видит
+    прод-код awg_rest_api, — один и тот же объект.
+    """
+
+    def _assert_not_split(self, modname: str, lazy_getter_name: str):
+        import importlib
+        import chimera.modules as _cm
+        _mod = importlib.import_module(modname)
+        _attr = getattr(_cm, modname.rsplit(".", 1)[1], None)
+        self.assertIsNotNone(
+            _attr,
+            f"{modname} должен быть доступен как атрибут пакета chimera.modules")
+        self.assertIs(
+            sys.modules.get(modname), _attr,
+            f"{modname} «расщеплён»: sys.modules-запись и атрибут пакета "
+            f"указывают на разные объекты. Строчные patch(\"{modname}.*\") "
+            f"не будут действовать на ленивые импорты awg_rest_api "
+            f"(изоляция совместного прогона нарушена)")
+        from chimera.modules import awg_rest_api
+        _lazy = getattr(awg_rest_api, lazy_getter_name)()
+        self.assertIs(
+            _lazy, _mod,
+            f"awg_rest_api.{lazy_getter_name}() видит другой объект {modname}")
+
+    def test_awg_peers_module_not_split(self):
+        _setup_core_in_sysmodules()
+        self._assert_not_split("chimera.modules.awg_peers", "_awg_peers")
+
+    def test_awg_state_module_not_split(self):
+        _setup_core_in_sysmodules()
+        self._assert_not_split("chimera.modules.awg_state", "_awg_state")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

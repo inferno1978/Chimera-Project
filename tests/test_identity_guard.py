@@ -383,7 +383,7 @@ class TestMiniFixes(unittest.TestCase):
         fake_core = _setup_core_in_sysmodules()
         fake_core.warn = lambda *a, **kw: None
 
-        import importlib
+        import importlib.util
         with patch.dict(sys.modules, {
                 "chimera.modules.awg_state": awg_state,
                 "chimera.modules.awg_constants": awg_const,
@@ -392,11 +392,30 @@ class TestMiniFixes(unittest.TestCase):
                 "chimera.modules.awg_qr": qr_mod,
                 "chimera.modules.awg_expires": expires_mod,
                 "chimera._core": fake_core}):
-            # перезагружаем модуль с чистыми зависимостями
-            for m in list(sys.modules):
-                if m == "chimera.modules.awg_peers":
-                    del sys.modules[m]
-            import chimera.modules.awg_peers as awg_peers
+            # Загружаем приватную копию awg_peers с чистыми зависимостями:
+            # топ-левел импорты awg_peers (from .awg_state import ...) при
+            # exec копии резолвятся через sys.modules → подхватывают фейки выше.
+            #
+            # ИЗОЛЯЦИЯ (фикс расщепления модуля): раньше здесь было
+            #   del sys.modules["chimera.modules.awg_peers"]
+            #   import chimera.modules.awg_peers
+            # и это оставляло модуль «расщеплённым» после выхода из
+            # patch.dict: import machinery делал setattr(chimera.modules,
+            # "awg_peers", <копия>), а patch.dict восстанавливал
+            # sys.modules-запись → sys.modules и атрибут пакета указывали
+            # на РАЗНЫЕ объекты. Строчные patch("chimera.modules.awg_peers.*")
+            # в других тестах (test_awg_rest_api) били по sys.modules-объекту,
+            # а ленивые импорты "from . import awg_peers"
+            # (awg_rest_api._awg_peers()) получали копию → моки не действовали
+            # → 6 ложных падений test_awg_rest_api (Add/Modify/Regen
+            # owner_email) при совместном прогоне peers → identity_guard →
+            # rest_api. spec_from_file_location не трогает ни sys.modules,
+            # ни атрибуты пакета — расщепление невозможно по построению.
+            _spec = importlib.util.spec_from_file_location(
+                "chimera.modules.awg_peers_testcopy",
+                _PROJECT_ROOT / "chimera" / "modules" / "awg_peers.py")
+            awg_peers = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(awg_peers)
             ok = awg_peers.awg_peer_rebuild_conf(apply=False)
         self.assertFalse(ok, "пустой server_privkey должен давать False")
         self.assertNotIn("write", wrote,
