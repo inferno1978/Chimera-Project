@@ -1702,18 +1702,28 @@ def handle_menu(msg):
 def handle_help(msg):
     chat_id = msg["chat"]["id"]
     send(chat_id,
-        "📖 <b>Справка</b>\\n\\n"
-        "<b>Доступные команды:</b>\\n"
+        "📖 <b>Справка клиентского бота</b>\\n\\n"
+        "<b>Доступные команды:</b>\\n\\n"
+        "<b>📋 Подключение</b>\\n"
         "/start [token] — привязка аккаунта (один раз)\\n"
-        "/config — список ссылок + кнопки для QR\\n"
-        "/qr &lt;протокол&gt; — QR-код конкретного протокола\\n"
-        "/status — трафик, TTL, лимит\\n"
-        "/protocols — описание протоколов + клиенты по платформам\\n"
-        "/guide — краткое руководство по подключению\\n"
+        "/config — конфиги ВСЕХ нод: локальная (полные ссылки) + удалённые (VLESS+AWG+Mieru)\\n"
+        "/qr &lt;протокол&gt; — QR-код конкретного протокола (только локальная нода)\\n"
+        "         доступные: vless, awg, hysteria2, mieru, naive, singbox\\n\\n"
+        "<b>📊 Статус</b>\\n"
+        "/status — ваш трафик, TTL, лимит (только локальная нода)\\n"
+        "/traffic — алиас /status\\n\\n"
+        "<b>ℹ️ Информация</b>\\n"
+        "/protocols — описание протоколов + рекомендуемые клиенты по платформам\\n"
+        "/guide — краткое пошаговое руководство по подключению\\n"
         "/menu — inline-клавиатура с кнопками\\n"
         "/help — эта справка\\n\\n"
-        "<b>Протоколы</b>: vless (REALITY), vless-xhttp, awg, hysteria2, mieru, naive, singbox\\n\\n"
-        "<b>Алиасы</b>: /traffic = /status\\n\\n"
+        "<b>📱 Рекомендуемые клиенты:</b>\\n"
+        "  Android: NekoBox, v2rayNG, Hiddify\\n"
+        "  iOS: V2Ray Tun, Streisand, FoXray\\n"
+        "  Desktop: NekoRay, v2rayN, Hiddify\\n\\n"
+        "<b>🔗 Протоколы</b>: VLESS/REALITY, xHTTP, AmneziaWG, Hysteria2, Mieru, NaiveProxy, sing-box\\n\\n"
+        "<i>Локальная нода — полные ссылки (все протоколы).\\n"
+        "Удалённые ноды — VLESS+AWG+Mieru (базовый набор через SSH).</i>\\n\\n"
         "По всем вопросам обращайтесь к администратору сервера.")
 
 def handle_callback(update):
