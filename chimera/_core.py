@@ -166,6 +166,7 @@ from chimera.modules.fw_guard           import do_manage_fw_guard
 from chimera.modules.node_health_monitor import do_health_monitor_menu
 # ── CPU Steal монитор (оверселл гипервизора: замер + дневной отчёт в TG) ────────
 from chimera.modules.steal_monitor        import do_steal_monitor_menu
+from chimera.modules.bandwidth_monitor    import do_bandwidth_monitor_menu
 # ── Новые модули (DPI-цензура снаружи + бенчмарк сервера) ────────────────────
 from chimera.modules.dpi_censor_check    import do_dpi_censor_check_menu
 from chimera.modules.network_bench       import do_network_bench_menu
@@ -8873,6 +8874,7 @@ def _menu_diagnostics() -> None:
         _box_item("9", f"💻 Системный дашборд  {DIM}(CPU / RAM / Disk){NC}")
         _box_item("NB", f"🚀 Бенчмарк сервера  {DIM}(CPU/RAM/Disk + iperf3 RU/EU/NA/APAC){NC}")
         _box_item("ST", f"🧟 CPU Steal-монитор  {DIM}(оверселл: замер + дневной отчёт в TG){NC}")
+        _box_item("BW", f"📊 Bandwidth-монитор  {DIM}(обрез канала: замер + алерты в TG){NC}")
         _box_sep()
         _box_item("M", f"🗺️   Матрица exit-нод / туннель{_matrix_note}")
         _box_item("B", f"🔌 Проверка порта снаружи  {DIM}(заблокирован ли провайдером){NC}")
@@ -8930,6 +8932,8 @@ def _menu_diagnostics() -> None:
             do_network_bench_menu()
         elif ch.lower() == "st":
             do_steal_monitor_menu()
+        elif ch.lower() == "bw":
+            do_bandwidth_monitor_menu()
         elif ch.lower() == "s":
             print()
             print(f"{BOLD}Статус сервисов:{NC}")
