@@ -191,5 +191,102 @@ class TestFormatHandshake(unittest.TestCase):
         self.assertIsInstance(result, str)
 
 
+_PARAMS_20 = {
+    "jc": 5, "jmin": 86, "jmax": 287,
+    "s1": 75, "s2": 125, "s3": 54, "s4": 25,
+    "h1": 1106297626, "h2": 888479848,
+    "h3": 125665432, "h4": 1802677046,
+}
+
+
+class TestPeerRebuildNoCascadeResidue(unittest.TestCase):
+    """awg_peer_rebuild_conf — LB-residue guard (регрессия 13.10.2026).
+
+    При cascade_role='entry' + legacy-зеркале cascade_peer_* в state
+    rebuild НЕ должен рендерить [Peer] "# cascade exit peer" в awg0.conf:
+    связь с exit обеспечивают отдельные интерфейсы awg1/awg2/awg3
+    (awg_cascade multiexit/LB), а пир в awg0 никогда не хендшейкался
+    (0 B rx, вечные retry в пустоту — инцидент с мёртвым пиром
+    198.51.100.49:52831 на awg0 всех трёх нод RU-каскада).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _state(self):
+        return {
+            "installed": True,
+            "server_privkey": "PRIV",
+            "server_pubkey": "PUB",
+            "port": 45915,
+            "subnet": "172.16.82.0/24",
+            "subnet_v6": "fd66:66:82::/64",
+            "mtu": 1280,
+            "params": dict(_PARAMS_20),
+            "peers": [
+                {
+                    "name": "user-main",
+                    "client_pubkey": "CLIENT_PUBKEY",
+                    "client_ip": "172.16.82.2",
+                    "client_ipv6": "fd66:66:82::2",
+                },
+            ],
+            "endpoint_host": "203.0.113.238",
+            "protocol_version": "2.0",
+            # legacy-зеркало каскада — присутствует в state, читается
+            # role-потребителями, но в awg0.conf рендериться НЕ должно
+            "cascade_role": "entry",
+            "cascade_peer_host": "198.51.100.49",
+            "cascade_peer_port": 52831,
+            "cascade_peer_pubkey": "DEAD_PEER_PUBKEY",
+            "cascade_peer_privkey": "DEAD_PEER_PRIVKEY",
+            "cascade_subnet": "172.16.91.0/24",
+            "cascade_active_exit": "de",
+        }
+
+    def test_rebuild_no_cascade_peer_in_conf(self):
+        from chimera.modules import awg_peers
+        state = self._state()
+        with patch.object(awg_peers, "awgs_state_load",
+                          return_value=state), \
+             patch.object(awg_peers, "awgs_write_server_conf",
+                          return_value=True) as mock_write, \
+             patch.object(awg_peers, "awgs_apply", return_value=True):
+            ok = awg_peers.awg_peer_rebuild_conf(apply=True)
+            self.assertTrue(ok)
+        written = mock_write.call_args.args[0]
+        # LB-residue: каскадное зеркало НЕ попало в awg0.conf
+        self.assertNotIn("# cascade exit peer", written)
+        self.assertNotIn("DEAD_PEER_PUBKEY", written)
+        self.assertNotIn("198.51.100.49", written)
+        self.assertNotIn("172.16.91.0/24", written)
+        self.assertNotIn("PersistentKeepalive = 25", written)
+        # клиентские пиры — на месте, конфиг не оголён
+        self.assertIn("# user-main", written)
+        self.assertIn("CLIENT_PUBKEY", written)
+        self.assertIn("172.16.82.2/32", written)
+        self.assertIn("fd66:66:82::2/128", written)
+
+    def test_rebuild_standalone_state_unchanged(self):
+        """cascade_role='' (standalone без каскада) — rebuild работает как раньше."""
+        from chimera.modules import awg_peers
+        state = self._state()
+        state["cascade_role"] = ""
+        for k in ("cascade_peer_host", "cascade_peer_port",
+                  "cascade_peer_pubkey", "cascade_peer_privkey",
+                  "cascade_subnet", "cascade_active_exit"):
+            state[k] = ""
+        with patch.object(awg_peers, "awgs_state_load",
+                          return_value=state), \
+             patch.object(awg_peers, "awgs_write_server_conf",
+                          return_value=True) as mock_write, \
+             patch.object(awg_peers, "awgs_apply", return_value=True):
+            ok = awg_peers.awg_peer_rebuild_conf(apply=True)
+            self.assertTrue(ok)
+        written = mock_write.call_args.args[0]
+        self.assertIn("# user-main", written)
+        self.assertIn("CLIENT_PUBKEY", written)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
