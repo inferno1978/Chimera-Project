@@ -597,6 +597,9 @@ def _generate_client_bot_script(bot_cfg: dict) -> str:
     token        = json.dumps(bot_cfg.get("token", ""), ensure_ascii=False)
     admin_id     = json.dumps(str(bot_cfg.get("admin_id", "")), ensure_ascii=False)
     rate_limit_s = int(bot_cfg.get("rate_limit_seconds", 2))
+    cascade_peers = repr(bot_cfg.get("cascade_peers", []))
+    local_name   = repr(bot_cfg.get("local_name", ""))
+    local_ip     = repr(bot_cfg.get("local_ip", ""))
     bot_file     = str(_CLIENT_BOT_FILE)
     map_file     = str(_CLIENT_MAP_FILE)
     users_file   = str(_USERS_FILE)
@@ -662,6 +665,9 @@ _socket.getaddrinfo = _gai_ipv4_first
 TOKEN        = {token}
 ADMIN_ID     = {admin_id}
 RATE_LIMIT_S = {rate_limit_s}
+CASCADE_PEERS = {cascade_peers}
+LOCAL_NAME = {local_name}
+LOCAL_IP   = {local_ip}
 # Корень проекта — вычислен В МОМЕНТ ГЕНЕРАЦИИ скрипта (а не во время
 # выполнения) через Path(__file__).resolve().parents[2] от расположения
 # chimera/modules/tg_client_bot.py. Гарантированно указывает на
@@ -1337,6 +1343,103 @@ def handle_start(msg, args):
             f"<code>/start &lt;token&gt;</code>\\n\\n"
             f"Ваш Telegram ID: <code>{{uid}}</code>")
 
+def _fetch_remote_config_client(peer):
+    """Получает конфиг с удалённого сервера через SSH (chimera-remote-cmd.py config).
+
+    Возвращает dict (при успехе) или dict с ключом 'error' (при ошибке).
+    """
+    host = peer.get("host", "")
+    user = peer.get("user", "root")
+    port = peer.get("port", 22)
+    use_sudo = peer.get("sudo", False)
+    ssh_target = f"{{user}}@{{host}}" if user != "root" else host
+    ssh_cmd = [
+        "ssh", "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        "-p", str(port), ssh_target,
+    ]
+    if use_sudo:
+        ssh_cmd.extend(["sudo", "-n", "/usr/local/bin/chimera-remote-cmd.py", "config"])
+    else:
+        ssh_cmd.extend(["/usr/local/bin/chimera-remote-cmd.py", "config"])
+    try:
+        r = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            return {{"error": f"SSH: {{r.stderr.strip()[:60]}}"}}
+        out = r.stdout.strip()
+        wrapper = json.loads(out.split("\\n")[-1])
+        if wrapper.get("ok"):
+            return json.loads(wrapper["output"])
+        return {{"error": wrapper.get("output", "error")[:60]}}
+    except subprocess.TimeoutExpired:
+        return {{"error": "timeout"}}
+    except Exception as e:
+        return {{"error": str(e)[:60]}}
+
+
+def _get_config_all_client(user):
+    """Multi-node /config для клиентского бота.
+
+    Локальная нода — полные ссылки через _build_all_links (вкл. AWG/Mieru/etc).
+    Remote peers — VLESS+AWG+Mieru через SSH (chimera-remote-cmd.py config).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    def _sh(s):
+        return (str(s or "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+    lines = [f"📋 <b>Конфиги всех нод ({{ts}})</b>\\n"]
+
+    # Локальная нода — полные ссылки
+    local_name = LOCAL_NAME or "primary"
+    links, errors = _build_all_links(user)
+    proto_labels = {{
+        "vless": "VLESS / REALITY", "awg": "AmneziaWG",
+        "hysteria2": "Hysteria2", "mieru": "Mieru",
+        "naive": "NaiveProxy", "subscription": "Subscription",
+    }}
+    lines.append(f"📡 <b>{{_sh(local_name)}}</b>")
+    if links:
+        for key in links:
+            label = proto_labels.get(key, key)
+            lines.append(f"   <b>{{_sh(label)}}</b>: <code>{{_sh(links[key])}}</code>")
+    else:
+        lines.append("   ⚠️ Нет активных протоколов")
+    if errors:
+        for err in errors:
+            lines.append(f"   ⚠️ {{_sh(err)}}")
+    lines.append("")
+
+    # Remote peers — параллельно
+    if CASCADE_PEERS:
+        try:
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                results = list(ex.map(_fetch_remote_config_client, CASCADE_PEERS))
+        except Exception:
+            results = [_fetch_remote_config_client(p) for p in CASCADE_PEERS]
+        for peer, result in zip(CASCADE_PEERS, results):
+            peer_name = peer.get("name", peer.get("host", "?"))
+            if "error" in result:
+                lines.append(f"📡 <b>{{_sh(peer_name)}}</b>")
+                lines.append(f"   ❌ {{_sh(result['error'])}}")
+                lines.append("")
+                continue
+            lines.append(f"📡 <b>{{_sh(peer_name)}}</b>")
+            vless = result.get("vless", "")
+            if vless:
+                lines.append(f"   VLESS: <code>{{_sh(vless)}}</code>")
+            awg = result.get("awg", {{}})
+            if awg.get("public_key") and awg.get("port"):
+                peer_ip = result.get("ip", peer.get("host", ""))
+                lines.append(f"   AWG: <code>{{_sh(awg['public_key'])}} @ {{_sh(peer_ip)}}:{{_sh(awg['port'])}}</code>")
+            mieru = result.get("mieru", {{}})
+            if mieru.get("username"):
+                peer_ip = result.get("ip", peer.get("host", ""))
+                lines.append(f"   Mieru: <code>{{_sh(mieru['username'])}}:{{_sh(mieru['password'])}} @ {{_sh(peer_ip)}}:{{_sh(str(mieru.get('port_start','')))}}-{{_sh(str(mieru.get('port_end','')))}}</code>")
+            lines.append("")
+    lines.append("<i>Локальная нода — полные ссылки. Удалённые — VLESS+AWG+Mieru.</i>")
+    return "\\n".join(lines)
+
+
 def handle_config(msg):
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
@@ -1351,6 +1454,10 @@ def handle_config(msg):
     blocked, reason = _is_user_blocked(email)
     if blocked:
         send(chat_id, _format_blocked_msg(email, reason))
+        return
+    # Multi-node: если CASCADE_PEERS задан — показать конфиги со всех нод
+    if CASCADE_PEERS:
+        send(chat_id, _get_config_all_client(user))
         return
     links, errors = _build_all_links(user)
     if not links and not errors:
