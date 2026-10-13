@@ -376,6 +376,130 @@ def cmd_version():
     return True, f"Git: {commit}\nHost: {host}"
 
 
+def cmd_config():
+    """Возвращает VLESS-ссылку + метаданные ноды как JSON.
+
+    Используется cascade-админ-ботом и клиентским ботом для multi-node /config.
+    Строит VLESS-ссылку из state.json (без linkqr_lib — базовая ссылка).
+    """
+    st = _load_state()
+    domain    = st.get("domain", "")
+    port      = st.get("server_port", 443)
+    uuid_val  = st.get("uuid", "")
+    proto     = st.get("protocol_mode", "reality")
+    pub_key   = st.get("public_key", "")
+    short_id  = st.get("short_id", "")
+    fp        = st.get("fingerprint", "chrome") or "chrome"
+    xtls_flow = st.get("xtls_flow", "xtls-rprx-vision") or ""
+    xhttp_path = st.get("xhttp_path", "/")
+    xhttp_mode = st.get("xhttp_mode", "stream-up")
+    install_mode = st.get("install_mode", "A")
+    awg_exit  = st.get("awg_exit_enabled", False)
+    sni = domain
+    if proto in ("reality", "xhttp_reality") and awg_exit and install_mode == "B":
+        sni = (st.get("reality_dest", domain) or domain).split(":")[0]
+
+    vless_link = ""
+    if domain and uuid_val:
+        if proto == "xhttp_reality":
+            import urllib.parse as _up
+            path_enc = _up.quote(xhttp_path, safe="/")
+            vless_link = (f"vless://{uuid_val}@{domain}:{port}"
+                          f"?encryption=none&security=reality&sni={sni}"
+                          f"&fp={fp}&pbk={pub_key}&sid={short_id}"
+                          f"&type=xhttp&path={path_enc}&mode={xhttp_mode}#VLESS-xHTTP-REALITY")
+        elif proto == "xhttp":
+            vless_link = (f"vless://{uuid_val}@{domain}:{port}"
+                          f"?type=xhttp&security=tls&path={xhttp_path}"
+                          f"&sni={sni}&fp={fp}#VLESS-xHTTP")
+        else:
+            flow_part = f"&flow={xtls_flow}" if xtls_flow else ""
+            vless_link = (f"vless://{uuid_val}@{domain}:{port}"
+                          f"?type=tcp&security=reality"
+                          f"&pbk={pub_key}&sid={short_id}&sni={sni}&fp={fp}"
+                          f"{flow_part}#VLESS-REALITY")
+
+    # Public IP
+    try:
+        import socket as _sock
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        pub_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pub_ip = ""
+
+    # IPv6
+    try:
+        import socket as _sock
+        info = _sock.getaddrinfo(hostname_ref(), 80, _sock.AF_INET6)
+        pub_v6 = info[0][4][0] if info else ""
+    except Exception:
+        pub_v6 = ""
+
+    # AWG basic info (from awg0.conf)
+    awg_info = {}
+    awg_conf = Path("/etc/amnezia/amneziawg/awg0.conf")
+    if awg_conf.exists():
+        try:
+            for line in awg_conf.read_text().splitlines():
+                if line.startswith("ListenPort"):
+                    awg_info["port"] = line.split("=")[1].strip()
+                elif line.startswith("PrivateKey"):
+                    pass  # don't expose private key
+            # Get public key via awg
+            r = subprocess.run(["awg", "show", "awg0", "public-key"],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                awg_info["public_key"] = r.stdout.strip()
+        except Exception:
+            pass
+
+    # Mieru info
+    mieru_info = {}
+    mieru_state = Path("/var/lib/xray-installer/mieru.json")
+    if mieru_state.exists():
+        try:
+            m = json.loads(mieru_state.read_text())
+            mieru_info = {
+                "port_start": m.get("port_start", ""),
+                "port_end": m.get("port_end", ""),
+            }
+            for u in m.get("users", []):
+                if u.get("username") == "user":
+                    mieru_info["username"] = "user"
+                    mieru_info["password"] = u.get("password", "")
+                    break
+        except Exception:
+            pass
+
+    try:
+        host = subprocess.check_output(["hostname", "-s"], text=True, timeout=5).strip()
+    except Exception:
+        host = "?"
+
+    result = {
+        "host": host,
+        "ip": pub_ip,
+        "ipv6": pub_v6,
+        "vless": vless_link,
+        "proto": proto,
+        "port": port,
+        "domain": domain,
+        "awg": awg_info,
+        "mieru": mieru_info,
+    }
+    return True, json.dumps(result)
+
+
+def hostname_ref():
+    """Return short hostname (used by cmd_config for IPv6 lookup)."""
+    try:
+        return subprocess.check_output(["hostname", "-s"], text=True, timeout=5).strip()
+    except Exception:
+        return "localhost"
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 
 COMMANDS = {
@@ -396,6 +520,7 @@ COMMANDS = {
     "traffic":      (cmd_traffic,     1, "[n]"),  # n optional
     "status":       (cmd_status,      0, ""),
     "version":      (cmd_version,     0, ""),
+    "config":       (cmd_config,      0, ""),
 }
 
 
