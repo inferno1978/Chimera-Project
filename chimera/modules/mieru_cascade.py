@@ -159,9 +159,22 @@ _MITA_CGROUP = "system.slice/mita.service"
 # остальное — как раньше, в Exit-ы через redsocks.
 _B4_IPSET     = "mieru_b4_direct"
 _B4_IPSET_TMP = _B4_IPSET + "_new"
-_B4_RESOLVE_MAX_WORKERS = 16
+# 2026-10-14, живой кейс RU-1 (2 ядра, entry): ежеминутная пачка ~15
+# параллельных DoH-curl (16 работников) давала пики CPU >100%
+# (load 2.3+ на 2 ядрах, user 65-78% в бурстах). 16 -> 4: та же
+# фаза растягивается на ~4 короткие волны — данные те же, CPU ровный.
+# Сети хватает с запасом: потолок фазы _B4_RESOLVE_OVERALL_S=25с,
+# один curl — до 4с, реальный DoH-ответ через hop-socks <1с.
+_B4_RESOLVE_MAX_WORKERS = 4
 _B4_RESOLVE_OVERALL_S   = 25      # потолок фазы резолва (все виды, сек)
 _B4_CURL_TIMEOUT_S      = 4       # один DoH-запрос через hop-socks
+# Ресолв-фаза — не каждый тик, а не чаще раза в 5 мин: гейт по
+# st['b4_refresh_ts'] в _health_tick_locked (кейс RU-1 выше). TTL CDN
+# 60-300с — 5 мин свежести достаточно; новый GGC-IP до попадания в
+# set едет через каскад (медленнее, но работает). Пробы живости
+# Exit-ов (TCP+E2E) остаются ежеминутными — failover НЕ зависит от
+# этой фазы.
+_B4_REFRESH_MIN_INTERVAL_S = 300
 # querylog-harvest (клиентский вид, живой кейс 02.10.2026): AGH
 # ставится chimera-ой в /opt/AdGuardHome (aghome_setup.AGH_WORK_DIR);
 # /var/lib — фолбэк для ручных установок. Читаем ХВОСТ файла (90-дневный
@@ -1943,6 +1956,11 @@ def _write_units() -> None:
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
+        "# 2026-10-14: тик приглушён nice=10 — на 2-ядерных entry (RU-1)\n"
+        "# пачки DoH-curl и E2E-пробы конкурировали с прод-трафиком\n"
+        "# (load >100% в пиках). Наследуется всеми детьми (curl,\n"
+        "# mieru test) — привилегий (ipset/iptables) не отнимает.\n"
+        "Nice=10\n"
         f"ExecStart={_HEALTH_WRAPPER}\n"
     )
     _UNIT_HEALTH_T.write_text(
@@ -2835,11 +2853,21 @@ def _health_tick_locked(verbose: bool = False) -> dict:
                                    if pin_pre[0] else "—")
                         print(f"  {m.GREEN}📌{m.NC} пиннинг: {pin_lbl} "
                               f"восстановлен → возврат с {pre_lbl}")
-    state_save(st)
     # b4-exempt: освежить ipset блок-листа (RU-вид + вид каждого живого
     # Exit; TTL CDN 60-300с — см. секцию B4-EXEMPT). Под локом тика:
     # ~10-25с сети, TUI-меню в это время честно ждёт (wait_hint).
-    if _b4_exempt_active(st):
+    # 2026-10-14: НЕ каждый тик — гейт _B4_REFRESH_MIN_INTERVAL_S
+    # (кейс RU-1: пачка DoH-curl каждую минуту → пики CPU >100% на
+    # 2-ядерной entry). b4_refresh_ts пишем ДО state_save, чтобы
+    # метка пережила рестарт; ручной apply/TUI зовёт _b4set_refresh
+    # напрямую — без гейта (всегда свежо).
+    do_b4_refresh = (_b4_exempt_active(st)
+                     and time.time() - float(st.get("b4_refresh_ts") or 0)
+                     >= _B4_REFRESH_MIN_INTERVAL_S)
+    if do_b4_refresh:
+        st["b4_refresh_ts"] = time.time()
+    state_save(st)
+    if do_b4_refresh:
         _b4set_refresh(st, verbose=verbose)
     return result
 

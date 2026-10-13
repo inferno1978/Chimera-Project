@@ -87,6 +87,14 @@ class TestHealthServiceUnit(_UnitsTmpBase):
         self.assertIn("ExecStart=", service)
         self.assertNotIn("User=", service)
 
+    def test_service_niced(self):
+        """Тик приглушён Nice=10: спайки CPU тика не конкурируют с
+        прод-трафиком (кейс RU-1 2026-10-14: load >100% на 2 ядрах,
+        пачки DoH-curl + E2E-пробы каждую минуту)."""
+        self._write_units()
+        service = self.unit_health.read_text()
+        self.assertIn("Nice=10", service)
+
     def test_wrapper_written_executable(self):
         """Wrapper пишется и получает +x (иначе таймер умрёт на EACCES)."""
         self._write_units()
