@@ -44,6 +44,11 @@ CRON_FILE    = Path("/etc/cron.d/telemt-stats")
 # экспорит PYTHONPATH перед вызовом python3 (тот же паттерн, что в
 # node_health_monitor.py::install_health_monitor и geo_files.py).
 LIMITS_CHECK_SCRIPT = Path("/usr/local/sbin/telemt-limits-check.sh")
+# Периодический сбор статистики в /var/lib/telemt/stats.json для headless-серверов
+# (без TUI). Без него stats.json обновлялся только при открытии меню статистики
+# в TUI, а юзер-портал (protocol split) и traffic_history (mtproto:: ключи)
+# читали вечные нули.
+STATS_COLLECT_SCRIPT = Path("/usr/local/sbin/telemt-stats-collect.sh")
 CHAIN_IN     = "TELEMT_STATS_IN"
 CHAIN_OUT    = "TELEMT_STATS_OUT"
 SERVICE_NAME = "telemt"
@@ -413,13 +418,35 @@ def setup_iptables_accounting(port: int) -> bool:
     except Exception:
         pass
 
+    # Wrapper периодического сбора статистики (headless): читает iptables-счётчики
+    # + journalctl-сессии, сохраняет /var/lib/telemt/stats.json. Тот же
+    # PYTHONPATH-safe паттерн, что и limits-check.
+    try:
+        collect_content = (
+            "#!/bin/bash\n"
+            f"# Telemt stats collect (wrapper для cron; PYTHONPATH-safe).\n"
+            f"export PYTHONPATH=\"{installer_path}:$PYTHONPATH\"\n"
+            f"/usr/bin/python3 -c \"\n"
+            f"import sys\n"
+            f"sys.path.insert(0, '{installer_path}')\n"
+            f"from chimera.modules.mtproto_stats import collect_stats_once\n"
+            f"collect_stats_once()\n"
+            f"\" # telemt-stats-collect\n"
+        )
+        STATS_COLLECT_SCRIPT.write_text(collect_content)
+        STATS_COLLECT_SCRIPT.chmod(0o755)
+    except Exception:
+        pass
+
     # Cron-файл: сброс iptables-счётчиков в 00:00 (pure shell, без python)
-    # + проверка лимитов каждые 5 мин (через wrapper-скрипт).
+    # + проверка лимитов каждые 5 мин (через wrapper-скрипт)
+    # + сбор статистики каждые 5 мин (headless: stats.json для порталов).
     try:
         CRON_FILE.write_text(
             f"0 0 * * * root iptables -Z {CHAIN_IN} && iptables -Z {CHAIN_OUT}"
             f"  # telemt-stats\n"
             f"*/5 * * * * root {LIMITS_CHECK_SCRIPT} # telemt-limits-check\n"
+            f"*/5 * * * * root {STATS_COLLECT_SCRIPT} # telemt-stats-collect\n"
         )
         CRON_FILE.chmod(0o644)
     except Exception:
@@ -1032,6 +1059,32 @@ def _collect(d: dict, max_days: int = 1) -> dict:
 
     d["total"]["updated"] = _now_str()
     return d
+
+
+def collect_stats_once() -> dict:
+    """Headless-сбор статистики для cron (wrapper telemt-stats-collect.sh).
+
+    Атомарная связка «прочитать → обновить → сохранить»: без периодического
+    вызова stats.json обновлялся только из TUI-меню статистики, а все
+    читатели вне TUI (юзер-портал protocol split в wpp_portal/rest_api,
+    traffic_history mtproto:: ключи) видели устаревшие нули.
+
+    Использует файловую блокировку (flock) чтобы параллельные запуски
+    cron-а и TUI-меню не теряли данные (последний-победил был бы ок для
+    счётчиков-максимумов, но users/daily секции перезаписываются целиком).
+    """
+    import fcntl
+    STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = STATS_FILE.parent / "telemt_stats.lock"
+    with open(lock_path, "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            d = _load_stats()
+            _collect(d)
+            _save_stats(d)
+            return d
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ОТОБРАЖЕНИЕ СТАТИСТИКИ
