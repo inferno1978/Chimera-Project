@@ -229,6 +229,68 @@ class TestScanAllSatellites(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]["login"], "alice")
 
+    def test_scan_mieru_mita_fallback(self):
+        """_scan_mieru без mieru.json, но с mita server.json (cascade-ноды).
+
+        На нодах с mieru-cascade state-файл модуля mieru отсутствует,
+        но живые клиенты подключаются к mita (users[].name из server.json).
+        Сканер обязан их видеть."""
+        mieru_state = self._tmpdir / "no_mieru_state.json"
+        mita_cfg = self._tmpdir / "server.json"
+        mita_cfg.write_text(json.dumps({
+            "portBindings": [{"portRange": "2012-2022", "protocol": "TCP"}],
+            "users": [
+                {"name": "admin", "password": "x"},
+                {"name": "user", "password": "y"},
+            ],
+        }))
+        with patch.object(self._sb, "_MIERU_STATE", mieru_state), \
+             patch.object(self._sb, "_MITA_CONFIG", mita_cfg):
+            result = self._sb._scan_mieru()
+        self.assertEqual([r["login"] for r in result], ["admin", "user"])
+        self.assertTrue(all(r["satellite"] == "mieru" for r in result))
+
+    def test_scan_mieru_merge_dedup(self):
+        """Оба источника есть: дедуп по login, порядок — state, потом mita."""
+        mieru_state = self._tmpdir / "mieru_both.json"
+        mieru_state.write_text(json.dumps({
+            "users": [{"username": "user", "password": "p"},
+                      {"username": "carol", "password": "p"}]
+        }))
+        mita_cfg = self._tmpdir / "server2.json"
+        mita_cfg.write_text(json.dumps({
+            "users": [{"name": "user", "password": "x"},
+                      {"name": "admin", "password": "x"}]
+        }))
+        with patch.object(self._sb, "_MIERU_STATE", mieru_state), \
+             patch.object(self._sb, "_MITA_CONFIG", mita_cfg):
+            result = self._sb._scan_mieru()
+        self.assertEqual([r["login"] for r in result],
+                         ["user", "carol", "admin"])
+
+    def test_scan_mieru_none_present(self):
+        """Ни одного источника — пустой список (не исключение)."""
+        missing1 = self._tmpdir / "missing_a.json"
+        missing2 = self._tmpdir / "missing_b.json"
+        with patch.object(self._sb, "_MIERU_STATE", missing1), \
+             patch.object(self._sb, "_MITA_CONFIG", missing2):
+            result = self._sb._scan_mieru()
+        self.assertEqual(result, [])
+
+    def test_scan_mieru_broken_mita_still_reads_state(self):
+        """Битый mita-конфиг не должен ронять скан целиком."""
+        mieru_state = self._tmpdir / "mieru_ok.json"
+        mieru_state.write_text(json.dumps({
+            "users": [{"username": "alice", "password": "p"}]
+        }))
+        broken_mita = self._tmpdir / "broken_mita.json"
+        broken_mita.write_text("{not json")
+        with patch.object(self._sb, "_MIERU_STATE", mieru_state), \
+             patch.object(self._sb, "_MITA_CONFIG", broken_mita):
+            result = self._sb._scan_mieru()
+        self.assertEqual([r["login"] for r in result], ["alice"])
+
+
     def test_scan_telemt_toml_parsing(self):
         """Тест парсинга TOML через прямую функцию."""
         telemt_path = self._tmpdir / "telemt.toml"

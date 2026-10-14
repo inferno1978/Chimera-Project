@@ -66,6 +66,15 @@ SATELLITE_LABELS = {
     "openflux":    "OpenFlux (carrier-канал через Яндекс.Документы)",
 }
 
+# Источники для _scan_mieru: state chimera-модуля mieru (пользовательские
+# профили из TUI/панели) и конфиг mita (Mieru Proxy Server). Второй источник
+# нужен для нод, где mieru развёрнут как инфраструктура mieru-cascade:
+# state-файл модуля mieru.json там отсутствует, но живые клиенты подключаются
+# к mita с users[].name из /etc/mita/server.json — без этого сканер не видел
+# таких пользователей и вкладка «Сателлиты» в портале оставалась пустой.
+_MIERU_STATE = Path("/var/lib/xray-installer/mieru.json")
+_MITA_CONFIG = Path("/etc/mita/server.json")
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -279,19 +288,38 @@ def remove_user(owner_uuid: str) -> int:
 # ══════════════════════════════════════════════════════════════════════════
 
 def _scan_mieru() -> list[dict]:
-    """[{"login": "alice", "satellite": "mieru"}, ...]"""
-    path = Path("/var/lib/xray-installer/mieru.json")
-    out = []
-    if not path.exists():
-        return out
+    """[{"login": "alice", "satellite": "mieru"}, ...]
+
+    Два источника, объединяются с дедупом по login:
+      1. _MIERU_STATE — state chimera-модуля mieru (users[].username).
+      2. _MITA_CONFIG — конфиг mita, Mieru Proxy Server (users[].name).
+         Покрывает ноды с mieru-cascade: там mieru.json нет, но mita
+         обслуживает клиентов с логинами из server.json.
+    """
+    out: list[dict] = []
+    seen: set = set()
+
+    def _add(login) -> None:
+        if login and login not in seen:
+            seen.add(login)
+            out.append({"satellite": "mieru", "login": login})
+
     try:
-        st = json.loads(path.read_text())
-        for u in st.get("users", []):
-            login = u.get("username")
-            if login:
-                out.append({"satellite": "mieru", "login": login})
+        if _MIERU_STATE.exists():
+            st = json.loads(_MIERU_STATE.read_text())
+            for u in st.get("users", []):
+                _add(u.get("username"))
     except Exception as e:
         _log("WARN", f"scan mieru: {e}")
+
+    try:
+        if _MITA_CONFIG.exists():
+            st = json.loads(_MITA_CONFIG.read_text())
+            for u in st.get("users", []):
+                _add(u.get("name"))
+    except Exception as e:
+        _log("WARN", f"scan mita: {e}")
+
     return out
 
 
