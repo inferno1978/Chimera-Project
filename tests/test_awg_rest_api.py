@@ -546,6 +546,74 @@ class TestAWGRestAPIUserEndpoints(unittest.TestCase):
             self.assertEqual(peer.get("name"), "alice")
             self.assertEqual(peer.get("client_pubkey"), "pubkey123")
 
+    def test_my_peer_qr_falls_back_to_conf_png(self):
+        """my-peer/qr: если {name}_qr.png нет (vpn:// URI длиннее QR-лимита —
+        типично для AWG 3.1 с богатой маскировкой), эндпоинт отдаёт
+        {name}_qr_conf.png вместо 500."""
+        import tempfile
+        from chimera.modules import awg_rest_api
+        from chimera.modules.awg_constants import AWGS_KEYS_DIR
+        fake_peer = {
+            "name": "alice",
+            "client_pubkey": "pubkey123",
+            "owner_email": "alice@example.com",
+            "expires_at": "",
+        }
+        tmpdir = tempfile.mkdtemp()
+        conf_png = Path(tmpdir) / "alice_qr_conf.png"
+        conf_png.write_bytes(b"\x89PNG-fallback-bytes")
+
+        def fake_export(peer, show_terminal=True):
+            # Имитируем awg_qr: uri-QR не создан (None), conf-QR создан.
+            return {"png_path": None,
+                    "png_conf_path": conf_png}
+
+        # Подменяем пути: AWGS_KEYS_DIR -> tmpdir, export -> fake
+        import chimera.modules.awg_constants as consts
+        with patch("chimera.modules.awg_state.awgs_state_find_peer_by_owner",
+                   return_value=fake_peer), \
+             patch.object(consts, "AWGS_KEYS_DIR", Path(tmpdir)), \
+             patch("chimera.modules.awg_qr.awgs_qr_export_peer",
+                   side_effect=fake_export), \
+             patch("chimera.modules.awg_rest_api._awg_qr",
+                   return_value=type("M", (), {"awgs_qr_export_peer": staticmethod(fake_export)})):
+            h = _MockHandler(user={"email": "alice@example.com"})
+            awg_rest_api.awg_handle_get(h, "/api/awg/my-peer/qr", {})
+            self.assertEqual(h.status, 200,
+                             "ожидался 200 с conf-QR фолбэком, не 500")
+            self.assertEqual(h.headers.get("Content-Type"), "image/png")
+            self.assertTrue(h.body.startswith(b"\x89PNG"))
+
+    def test_admin_peer_qr_falls_back_to_conf_png(self):
+        """peers/{name}/qr: тот же фолбэк для админского эндпоинта."""
+        import tempfile
+        from chimera.modules import awg_rest_api
+        from chimera.modules.awg_constants import AWGS_KEYS_DIR
+        fake_peer = {
+            "name": "bob",
+            "client_pubkey": "pubkey456",
+            "owner_email": "",
+            "expires_at": "",
+        }
+        tmpdir = tempfile.mkdtemp()
+        conf_png = Path(tmpdir) / "bob_qr_conf.png"
+        conf_png.write_bytes(b"\x89PNG-admin-fallback")
+
+        def fake_export(peer, show_terminal=True):
+            return {"png_path": None, "png_conf_path": conf_png}
+
+        import chimera.modules.awg_constants as consts
+        with patch("chimera.modules.awg_state.awgs_state_peer_find",
+                   return_value=fake_peer), \
+             patch.object(consts, "AWGS_KEYS_DIR", Path(tmpdir)), \
+             patch("chimera.modules.awg_rest_api._awg_qr",
+                   return_value=type("M", (), {"awgs_qr_export_peer": staticmethod(fake_export)})):
+            h = _MockHandler(admin_authed=True)
+            awg_rest_api.awg_handle_get(h, "/api/awg/peers/bob/qr", {})
+            self.assertEqual(h.status, 200)
+            self.assertEqual(h.headers.get("Content-Type"), "image/png")
+            self.assertTrue(h.body.startswith(b"\x89PNG"))
+
 
 class TestAWGRestAPISafePeerForJson(unittest.TestCase):
     """_safe_peer_for_json убирает приватные ключи и PSK."""

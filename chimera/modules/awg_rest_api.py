@@ -317,6 +317,10 @@ def awg_handle_get(handler, path: str, query: dict) -> bool:
             # на каждый GET-запрос QR.
             _awg_qr().awgs_qr_export_peer(peer, show_terminal=False)
             if not png_path.exists():
+                # Fallback на QR из .conf — vpn:// URI у AWG 3.1 может быть
+                # длиннее QR-лимита (см. комментарий в /api/awg/my-peer/qr).
+                png_path = AWGS_KEYS_DIR / f"{name}_qr_conf.png"
+            if not png_path.exists():
                 handler._send_json({"error": "QR PNG not generated"}, 500)
                 return True
             body = png_path.read_bytes()
@@ -403,6 +407,12 @@ def awg_handle_get(handler, path: str, query: dict) -> bool:
             # утекает в systemd journal на каждый просмотр QR юзером.
             _awg_qr().awgs_qr_export_peer(peer, show_terminal=False)
             png_path = AWGS_KEYS_DIR / f"{name}_qr.png"
+            if not png_path.exists():
+                # Fallback: QR из vpn:// URI может не влезть (AWG 3.1 с богатой
+                # маскировкой даёт URI длиннее лимита QR даже на -l L) — тогда
+                # export_peer пишет QR из .conf ({name}_qr_conf.png), который
+                # помещается всегда. Отдаём его, а не 500.
+                png_path = AWGS_KEYS_DIR / f"{name}_qr_conf.png"
             if not png_path.exists():
                 handler._send_json({"error": "QR PNG not generated"}, 500)
                 return True
