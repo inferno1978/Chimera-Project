@@ -60,6 +60,41 @@ def _require_admin(handler) -> bool:
     return False
 
 
+def _ensure_awg_adapters(handler) -> None:
+    """Attach rest_api-style auth adapters to the WPP handler (idempotent).
+
+    awg_rest_api expects handler._require_admin() / handler._require_user()
+    / handler._send_json() / handler._check_admin_auth() (methods of
+    rest_api's Handler). When AWG endpoints are delegated from the WPP
+    panel, the handler is WPP's — without them every /api/awg/* call
+    crashed with AttributeError (500), so the portal's AWG tab never
+    appeared even for a correctly owned peer.
+
+    Adapters delegate to the WPP equivalents:
+      _require_admin(realm)   -> handler.auth() + 401 JSON
+      _require_user()         -> wpp_portal._require_user(handler) (401 itself)
+      _send_json(data,status) -> handler.send_json(data,status)
+      _check_admin_auth()     -> handler.auth()
+    """
+    if not hasattr(handler, "_require_admin"):
+        def _require_admin_adapter(realm: str = "Admin") -> bool:
+            return _require_admin(handler)
+        handler._require_admin = _require_admin_adapter
+    if not hasattr(handler, "_require_user"):
+        def _require_user_adapter(realm: str = "User Portal"):
+            from chimera.modules import wpp_portal
+            return wpp_portal._require_user(handler)
+        handler._require_user = _require_user_adapter
+    if not hasattr(handler, "_send_json"):
+        def _send_json_adapter(data, status: int = 200):
+            handler.send_json(data, status)
+        handler._send_json = _send_json_adapter
+    if not hasattr(handler, "_check_admin_auth"):
+        def _check_admin_auth_adapter() -> bool:
+            return bool(handler.auth())
+        handler._check_admin_auth = _check_admin_auth_adapter
+
+
 def _read_json_body(handler, maximum: int = 65536) -> dict | None:
     try:
         length = int(handler.headers.get("Content-Length", "0"))
@@ -161,6 +196,7 @@ def handle_get(handler, path: str, query: dict) -> None:
     if path.startswith("/api/awg/"):
         try:
             from chimera.modules import awg_rest_api
+            _ensure_awg_adapters(handler)
             awg_rest_api.awg_handle_get(handler, path, query)
         except Exception as e:
             _send_json(handler, {"error": str(e)}, 500)
@@ -474,6 +510,7 @@ def handle_post(handler, path: str) -> None:
             if body is None:
                 _send_json(handler, {"error": "Invalid JSON body"}, 400)
                 return
+            _ensure_awg_adapters(handler)
             awg_rest_api.awg_handle_post(handler, path, body)
         except Exception as e:
             _send_json(handler, {"error": str(e)}, 500)
