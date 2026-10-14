@@ -307,6 +307,379 @@ def _geo_lookup(ip):
         return {}
 
 
+# ============================================================================
+#  PROTOCOL BUILDERS (Mieru / MTProto / AWG) — for «Подключение» + Mieru tab
+#
+#  Один источник правды для страницы «Подключение» (все активные протоколы)
+#  и отдельной вкладки «Mieru»: mierus://-ссылки строятся генераторами
+#  mieru.py (те же, что в TUI-выдаче mieru_cascade._show_client_links),
+#  tg://proxy — парсером telemt.toml из subscription.py.
+# ============================================================================
+
+_MIERU_STATE_FILE = "/var/lib/xray-installer/mieru.json"
+_MITA_CONFIG_FILE = "/etc/mita/server.json"
+_MITA_BIN = "/usr/local/bin/mita"
+
+# Кэш traffic-pattern blob от `mita export traffic-pattern`: вызов дорогой
+# (spawn процесса), а паттерн меняется только при реapply конфига mita.
+_MIERU_BLOB_CACHE = {"ts": 0.0, "blob": ""}
+_MIERU_BLOB_TTL = 600  # секунд
+
+
+def _panel_domain() -> str:
+    """Домен сервера из state.json (для клиентских ссылок)."""
+    try:
+        from chimera.modules.rest_api import _get_state
+        return (_get_state().get("domain") or "").strip()
+    except Exception:
+        return ""
+
+
+def _server_ip() -> str:
+    """Публичный IP сервера (fallback, если домен не задан)."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return ""
+
+
+def _load_mieru_state() -> dict:
+    """Читает mieru.json (state standalone-модуля). {} если нет/битый."""
+    from pathlib import Path
+    try:
+        p = Path(_MIERU_STATE_FILE)
+        if p.exists():
+            data = json.loads(p.read_text())
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _load_mita_config() -> dict:
+    """Читает /etc/mita/server.json (конфиг mita Proxy Server). {} если нет."""
+    from pathlib import Path
+    try:
+        p = Path(_MITA_CONFIG_FILE)
+        if p.exists():
+            data = json.loads(p.read_text())
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _mita_service_active() -> bool:
+    """Active ли mita.service (быстрый systemctl-пробер)."""
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", "mita"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        return (r.stdout or "").strip().lower() == "active"
+    except Exception:
+        return False
+
+
+def _mita_pattern_blob(mst: dict | None = None) -> str:
+    """base64-protobuf traffic-pattern РЕАЛЬНОГО сервера mita.
+
+    Приоритет — как в клиентской выдаче mieru_cascade._show_client_links:
+      1. `mita export traffic-pattern` (кэш 10 мин) — blob живого mita;
+      2. get_preset_base64(traffic_preset) из mieru.json — fallback на
+         нодах без mita-бинаря (state standalone).
+    '' — паттерн не задан (ссылки будут без traffic-pattern)."""
+    now = time.time()
+    cached = _MIERU_BLOB_CACHE
+    if cached["blob"] and (now - cached["ts"]) < _MIERU_BLOB_TTL:
+        return cached["blob"]
+    blob = ""
+    try:
+        from pathlib import Path
+        if Path(_MITA_BIN).exists():
+            r = subprocess.run(
+                [_MITA_BIN, "export", "traffic-pattern"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if r.returncode == 0:
+                blob = (r.stdout or "").strip()
+    except Exception:
+        blob = ""
+    if not blob:
+        # Fallback: preset из state (совпадает с blob mita на живых нодах:
+        # mita apply пишет trafficPattern пресета в server.json).
+        try:
+            preset = (mst or _load_mieru_state()).get("traffic_preset", "")
+            if preset:
+                from chimera.modules.mieru_traffic_presets import get_preset_base64
+                blob = get_preset_base64(preset) or ""
+        except Exception:
+            blob = ""
+    if blob:
+        cached["ts"] = now
+        cached["blob"] = blob
+    return blob
+
+
+def _resolve_mieru_login(user: dict, pool_logins) -> str:
+    """Логин mieru для юзера: bindings → эвристика имени (как в подписке).
+
+    pool_logins — доступные логины (объединение mieru.json + mita
+    server.json). Возвращает '' если логин не найден."""
+    if not pool_logins:
+        return ""
+    uuid_str = user.get("uuid", "")
+    # 1. satellite_bindings (канонический путь).
+    if uuid_str:
+        try:
+            from chimera.modules.satellite_bindings import find_login
+            bound = find_login(uuid_str, "mieru")
+            if bound and bound in pool_logins:
+                return bound
+        except Exception:
+            pass
+    # 2. Эвристика по имени (device_label / name / email-local-part).
+    candidates = {
+        (user.get("device_label") or "").strip().lower(),
+        (user.get("name") or "").strip().lower(),
+        (user.get("email") or "").strip().lower(),
+        (user.get("email") or "").split("@")[0].strip().lower(),
+    }
+    candidates.discard("")
+    for login in pool_logins:
+        if str(login).strip().lower() in candidates:
+            return login
+    return ""
+
+
+def _get_user_mieru_info(user: dict) -> dict | None:
+    """Полная клиентская сводка Mieru для юзера (вкладка «Mieru»).
+
+    Возвращает None, если mieru не установлен ИЛИ у юзера нет логина.
+    Иначе — dict с метой (сервер/порты/протокол/DNS/паттерн), ссылками
+    Karing + NekoBox (по транспорту на каждую при BOTH) и sing-box
+    outbound'ами для /api/portal/mieru-config."""
+    mst = _load_mieru_state()
+    mita_cfg = _load_mita_config()
+
+    # Пул логинов: users[].username (standalone) + users[].name (mita).
+    users_by_login: dict[str, str] = {}
+    for u in mst.get("users", []) or []:
+        login = (u.get("username") or "").strip()
+        if login:
+            users_by_login.setdefault(login, u.get("password") or "")
+    for u in mita_cfg.get("users", []) or []:
+        login = (u.get("name") or "").strip()
+        if login:
+            users_by_login.setdefault(login, u.get("password") or "")
+
+    installed = bool(mst.get("installed")) or bool(mita_cfg.get("users"))
+    if not installed or not users_by_login:
+        return None
+
+    login = _resolve_mieru_login(user, users_by_login.keys())
+    if not login:
+        return None
+    password = users_by_login.get(login, "")
+
+    # Геометрия сервера: mieru.json каноничен; mita server.json — для
+    # нод, где mieru.json отсутствует (чистый mita-cascade).
+    port_start = int(mst.get("port_start") or 0)
+    port_end = int(mst.get("port_end") or 0)
+    if not port_start and mita_cfg:
+        # portBindings[0].portRange = "2012-2022"
+        try:
+            rng = str((mita_cfg.get("portBindings") or [{}])[0]
+                      .get("portRange", ""))
+            parts = rng.split("-")
+            port_start = int(parts[0])
+            port_end = int(parts[-1]) if len(parts) > 1 else port_start
+        except Exception:
+            port_start = port_end = 0
+    if not port_end:
+        port_end = port_start
+
+    protocol = (mst.get("protocol") or "TCP").upper()
+    protos = ("TCP", "UDP") if protocol == "BOTH" else (protocol,)
+
+    # Адрес для клиентов: домен из state важнее (переживает смену IP).
+    addr = (mst.get("client_server_addr") or "").strip()
+    if not addr:
+        addr = _panel_domain() or _server_ip()
+
+    client_dns = (mst.get("client_dns") or "").strip()
+    blob = _mita_pattern_blob(mst)
+    service_active = _mita_service_active()
+
+    try:
+        from chimera.modules.mieru import (
+            _gen_client_share_link,
+            _gen_client_share_link_nekobox,
+            _gen_singbox_outbound,
+        )
+    except ImportError:
+        return None
+
+    links = []
+    outbounds = []
+    for p in protos:
+        karing = _gen_client_share_link(
+            addr, port_start, port_end, p, login, password,
+            traffic_preset="" if blob else "basic")
+        if blob:
+            # Karing: паттерн ДЕФИСОМ (живьём подтверждено, см.
+            # mieru_cascade._show_client_links); NekoBox — генератор сам
+            # кладёт ПОДЧЁРКИВАНИЕ traffic_pattern (парсер MieruBean.cpp).
+            import urllib.parse as _up
+            karing += "&traffic-pattern=" + _up.quote(blob, safe="")
+        neko = _gen_client_share_link_nekobox(
+            addr, port_start, p, login, password,
+            traffic_pattern=blob or "", port_end=port_end or None)
+        links.append({"app": "Karing", "transport": p, "link": karing})
+        links.append({"app": "NekoBox", "transport": p, "link": neko})
+        ob = _gen_singbox_outbound(addr, port_start, port_end, p,
+                                    login, password)
+        if blob:
+            ob["traffic_pattern"] = blob
+        if len(protos) > 1:
+            ob["tag"] = f"{ob['tag']}-{p.lower()}"
+        outbounds.append(ob)
+
+    return {
+        "login": login,
+        "server": addr,
+        "port_start": port_start,
+        "port_end": port_end,
+        "ports": (str(port_start) if port_start == port_end
+                  else f"{port_start}-{port_end}"),
+        "protocol": "+".join(protos),
+        "client_dns": client_dns,
+        "traffic_preset": mst.get("traffic_preset", ""),
+        "has_traffic_pattern": bool(blob),
+        "service_active": service_active,
+        "installed": True,
+        "links": links,
+        "outbounds": outbounds,
+    }
+
+
+def _get_user_mtproto_info(user: dict) -> dict | None:
+    """Сводка MTProto (telemt) для юзера: tg:// + t.me-ссылки.
+
+    Переиспользует парсер telemt.toml и secret-формулу из subscription
+    (единый источник правды). None — telemt не установлен или у юзера
+    нет совпадающего имени в [access.users]."""
+    try:
+        from chimera.modules.subscription import (
+            _parse_telemt_toml, _make_tls_secret, _match_by_name,
+        )
+    except ImportError:
+        return None
+    tcfg = _parse_telemt_toml()
+    if not tcfg or not tcfg.get("users"):
+        return None
+    users = tcfg["users"]
+    login = _match_by_name(user, "telemt", users.keys())
+    if not login:
+        return None
+    sec = _make_tls_secret(users[login], tcfg["tls_domain"])
+    server = _panel_domain() or _server_ip()
+    port = tcfg.get("port")
+    tg_link = f"tg://proxy?server={server}&port={port}&secret={sec}"
+    web_link = (f"https://t.me/proxy?server={server}"
+                f"&port={port}&secret={sec}")
+    return {
+        "login": login,
+        "server": server,
+        "port": port,
+        "tls_domain": tcfg.get("tls_domain", ""),
+        "links": [
+            {"app": "Telegram (tg://)", "link": tg_link},
+            {"app": "Браузер (t.me)", "link": web_link},
+        ],
+    }
+
+
+def _get_user_awg_summary(user: dict) -> dict | None:
+    """Лёгкое резюме AWG-пира юзера для «Подключения» (без ключей).
+
+    None — пира нет. Полные данные/QR — на вкладке AmneziaWG
+    (/api/awg/my-peer/*), здесь только факт наличия + имя + статус."""
+    try:
+        from chimera.modules import awg_state
+        peer = awg_state.awgs_state_find_peer_by_owner(
+            user.get("email", ""))
+    except Exception:
+        return None
+    if not peer:
+        return None
+    status = "active"
+    expires = peer.get("expires_at", "")
+    if expires:
+        try:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            status = "expired" if now > expires else "active"
+        except Exception:
+            status = "active"
+    return {
+        "name": peer.get("name", ""),
+        "status": status,
+        "qr_url": "/api/awg/my-peer/qr",
+        "conf_url": "/api/awg/my-peer/config",
+        "tab": "awg",
+    }
+
+
+def _get_connect_all(user: dict) -> dict:
+    """Агрегат всех активных протоколов юзера — страница «Подключение».
+
+    Структура ответа (см. JS loadLinks в wpp_ui.py):
+      vless    — список ссылок (совместим с /api/portal/links)
+      awg      — резюме пира или null
+      mieru    — сводка mieru (без outbounds) или null
+      mtproto  — сводка telemt или null
+      other_satellites — прочие привязанные сателлиты (подсказка-чип)
+    """
+    vless = _generate_vless_links(user)
+    awg = _get_user_awg_summary(user)
+    mieru = _get_user_mieru_info(user)
+    if mieru is not None:
+        mieru.pop("outbounds", None)  # тяжесть: JSON-конфиг отдельно
+    mtproto = _get_user_mtproto_info(user)
+
+    other = []
+    try:
+        from chimera.modules.satellite_bindings import get_user_satellites_info
+        for s in get_user_satellites_info(user):
+            if s.get("satellite") == "mieru":
+                continue
+            other.append({
+                "satellite": s.get("satellite"),
+                "label": s.get("label"),
+                "active": bool(s.get("active")),
+            })
+    except Exception:
+        pass
+
+    return {
+        "vless": {"links": vless, "count": len(vless)},
+        "awg": awg,
+        "mieru": mieru,
+        "mtproto": mtproto,
+        "other_satellites": other,
+        "domain": _panel_domain(),
+    }
+
+
 
 
 # ============================================================================
@@ -469,6 +842,58 @@ def handle_get(handler, path: str, query: dict) -> None:
             return
         links = _generate_vless_links(user)
         _send_json(handler, {"links": links, "count": len(links)})
+        return
+
+    if path == "/api/portal/connect-all":
+        user = _require_user(handler)
+        if user is None:
+            return
+        _send_json(handler, _get_connect_all(user))
+        return
+
+    if path == "/api/portal/mieru-info":
+        user = _require_user(handler)
+        if user is None:
+            return
+        info = _get_user_mieru_info(user)
+        _send_json(handler, {"mieru": info})
+        return
+
+    if path == "/api/portal/mieru-config":
+        # sing-box/Karing JSON для mieru-подключения юзера (download).
+        user = _require_user(handler)
+        if user is None:
+            return
+        info = _get_user_mieru_info(user)
+        if info is None:
+            _send_json(handler, {"error": "mieru not available"}, 404)
+            return
+        outbounds = info.get("outbounds") or []
+        if not outbounds:
+            _send_json(handler, {"error": "mieru outbounds unavailable"}, 503)
+            return
+        try:
+            from chimera.modules.mieru import (
+                _build_karing_full_config,
+                _build_karing_multi_config,
+                _dns_host_is_domain,
+            )
+            server_domain = (info["server"]
+                             if _dns_host_is_domain(info["server"]) else "")
+            if len(outbounds) > 1:
+                full = _build_karing_multi_config(
+                    outbounds, info.get("client_dns", ""), server_domain)
+            else:
+                full = _build_karing_full_config(
+                    outbounds[0], info.get("client_dns", ""), server_domain)
+            _send_raw(
+                handler,
+                json.dumps(full, indent=2, ensure_ascii=False),
+                "application/json; charset=utf-8",
+                "karing-mieru-{0}.json".format(info.get("login", "user")),
+            )
+        except Exception as e:
+            _send_json(handler, {"error": str(e)}, 500)
         return
 
     if path == "/api/portal/traffic":

@@ -1373,11 +1373,48 @@ function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'
 function pBadge(on,yes,no){return '<span class="portal-chip '+(on?'on':'off')+'">'+(on?(yes||'да'):(no||'нет'))+'</span>';}
 function pStat(label,val,cls){return '<div class="portal-stat '+(cls||'')+'"><span>'+esc(label)+'</span><b>'+esc(val==null||val===''?'—':String(val))+'</b></div>';}
 
-/* === 1. Подключение === */
+/* === 1. Подключение — ВСЕ активные протоколы === */
+let _plinkSeq=0;
+function seqNext(){return _plinkSeq++;}
+function tileLink(i,chip,title,link,extra){
+const qr='/api/portal/qr?data='+encodeURIComponent(link);
+return '<div class="portal-tile" style="display:flex;flex-direction:column">'+
+'<div class="portal-tile-head"><span class="portal-chip accent">'+esc(chip)+'</span>'+
+'<div class="portal-tile-title">'+esc(title||'Подключение')+'</div></div>'+
+'<div class="portal-qr-frame"><img src="'+qr+'" alt="QR" loading="lazy"></div>'+
+'<div class="portal-code-box" id="link-'+i+'" title="Нажмите чтобы скопировать" onclick="copyLink('+i+')">'+esc(link)+'</div>'+
+'<div class="portal-btn-row"><button class="btn ghost sm" onclick="copyLink('+i+')">📋 Копировать</button>'+
+'<span class="portal-cpy-ok" id="cpy-'+i+'">✓ скопировано</span></div>'+(extra||'')+
+'</div>';
+}
+function tileCompact(i,chip,title,link){
+return '<div class="portal-tile" style="display:flex;flex-direction:column">'+
+'<div class="portal-tile-head"><span class="portal-chip">'+esc(chip)+'</span>'+
+'<div class="portal-tile-title">'+esc(title||'')+'</div></div>'+
+'<div class="portal-code-box" id="link-'+i+'" title="Нажмите чтобы скопировать" onclick="copyLink('+i+')">'+esc(link)+'</div>'+
+'<div class="portal-btn-row"><button class="btn ghost sm" onclick="copyLink('+i+')">📋 Копировать</button>'+
+'<span class="portal-cpy-ok" id="cpy-'+i+'">✓ скопировано</span></div>'+
+'</div>';
+}
+function tileQrButtons(chip,title,qrUrl,buttonsHtml){
+return '<div class="portal-tile" style="display:flex;flex-direction:column">'+
+'<div class="portal-tile-head"><span class="portal-chip accent">'+esc(chip)+'</span>'+
+'<div class="portal-tile-title">'+esc(title||'')+'</div></div>'+
+'<div class="portal-qr-frame"><img src="'+esc(qrUrl)+'" alt="QR" loading="lazy"></div>'+
+'<div class="portal-btn-row" style="flex-direction:column;align-items:stretch">'+(buttonsHtml||'')+'</div>'+
+'</div>';
+}
 async function loadLinks(){
-const d=await api('/api/portal/links');if(!d||!d.links)return;
 const c=document.getElementById('links-container');
-const links=d.links||[];
+let d=null;
+try{d=await api('/api/portal/connect-all');}catch(e){d=null;}
+if(d&&d.vless&&d.vless.links&&d.vless.links.length){renderConnectAll(c,d);return;}
+/* fallback: старый эндпоинт (только VLESS, для панелей без connect-all) */
+const old=await api('/api/portal/links');
+if(!old||!old.links){c.innerHTML='<div class="portal-empty"><span class="ico">📭</span>Ссылки подключения недоступны.</div>';return;}
+renderVlessTiles(c,old.links);
+}
+function renderVlessTiles(c,links){
 const proto=links[0]&&links[0].protocol?links[0].protocol:'VLESS';
 const plLabel=links.length===1?'ссылка':(links.length<5?'ссылки':'ссылок');
 let h='<div class="portal-hero"><div class="portal-hero-top"><div>'+
@@ -1386,20 +1423,72 @@ let h='<div class="portal-hero"><div class="portal-hero-top"><div>'+
 '<div class="portal-hero-sub">Скопируйте ссылку, отсканируйте QR или откройте в приложении</div></div>'+
 '<span class="portal-proto-badge">'+esc(proto)+'</span></div></div>';
 h+='<div class="portal-grid">';
-links.forEach(function(item,i){
-const qr='/api/portal/qr?data='+encodeURIComponent(item.link);
+links.forEach(function(item){
 const isVlessLink=new RegExp('^vless://','i').test(item.link||'');
-h+='<div class="portal-tile" style="display:flex;flex-direction:column">'+
-'<div class="portal-tile-head"><span class="portal-chip accent">'+esc(item.protocol||'LINK')+'</span>'+
-'<div class="portal-tile-title">'+esc(item.label||'Подключение')+'</div></div>'+
-'<div class="portal-qr-frame"><img src="'+qr+'" alt="QR" loading="lazy"></div>'+
-'<div class="portal-code-box" id="link-'+i+'" title="Нажмите чтобы скопировать" onclick="copyLink('+i+')">'+esc(item.link)+'</div>'+
-'<div class="portal-btn-row"><button class="btn ghost sm" onclick="copyLink('+i+')">📋 Копировать</button>'+
-'<span class="portal-cpy-ok" id="cpy-'+i+'">✓ скопировано</span></div>'+
-(isVlessLink?'<a class="btn sm" href="'+esc(item.link)+'" style="margin-top:8px;width:100%;justify-content:center">🚀 Открыть в приложении</a>':'')+
-'</div>';
+const i=seqNext();
+h+=tileLink(i,(item.protocol||'LINK').toUpperCase(),item.label||'Подключение',item.link,
+(isVlessLink?'<a class="btn sm" href="'+esc(item.link)+'" style="margin-top:8px;width:100%;justify-content:center">🚀 Открыть в приложении</a>':''));
 });
 h+='</div>';
+c.innerHTML=h;
+}
+function renderConnectAll(c,d){
+const vl=(d.vless&&d.vless.links)||[];
+let protocols=[];
+if(vl.length)protocols.push('VLESS');
+if(d.awg)protocols.push('AmneziaWG');
+if(d.mieru)protocols.push('Mieru');
+if(d.mtproto)protocols.push('MTProto');
+let h='<div class="portal-hero"><div class="portal-hero-top"><div>'+
+'<div class="portal-hero-label">Подключение</div>'+
+'<div class="portal-hero-title">🔗 Все протоколы · '+protocols.length+'</div>'+
+'<div class="portal-hero-sub">Скопируйте ссылку, отсканируйте QR или откройте в приложении</div></div>'+
+(d.domain?'<span class="portal-proto-badge">'+esc(d.domain)+'</span>':'')+
+'</div></div>';
+h+='<div class="portal-stats" style="flex-wrap:wrap;gap:8px">'+
+protocols.map(function(p){return '<span class="portal-chip on">● '+esc(p)+'</span>';}).join('')+
+'</div>';
+h+='<div class="portal-grid">';
+vl.forEach(function(item){
+const isVlessLink=new RegExp('^vless://','i').test(item.link||'');
+const i=seqNext();
+h+=tileLink(i,(item.protocol||'VLESS').toUpperCase(),item.label||'Подключение',item.link,
+(isVlessLink?'<a class="btn sm" href="'+esc(item.link)+'" style="margin-top:8px;width:100%;justify-content:center">🚀 Открыть в приложении</a>':''));
+});
+if(d.awg){
+h+=tileQrButtons('AWG','🛡 AmneziaWG · '+(d.awg.name||'peer'),d.awg.qr_url,
+'<a class="btn ghost sm" href="'+esc(d.awg.conf_url)+'" download style="width:100%;justify-content:center">⬇ Скачать .conf</a>'+
+'<button class="btn sm" onclick="switchTab(\'awg\')" style="margin-top:6px;width:100%;justify-content:center">🛡 Вкладка AmneziaWG</button>');
+}
+if(d.mieru&&d.mieru.links&&d.mieru.links.length){
+/* первая ссылка (Karing) — с QR; остальные форматы — компактными плитками */
+d.mieru.links.forEach(function(ml,idx){
+const i=seqNext();
+const ttl='Mieru · '+(ml.app||'')+(ml.transport?' ('+ml.transport+')':'');
+if(idx===0){
+h+=tileLink(i,'MIERU',ttl,ml.link,
+'<button class="btn sm" onclick="switchTab(\'mieru\')" style="margin-top:8px;width:100%;justify-content:center">🟣 Вкладка Mieru</button>');
+}else{
+h+=tileCompact(i,'MIERU',ttl,ml.link);
+}
+});
+}
+if(d.mtproto&&d.mtproto.links&&d.mtproto.links.length){
+const tg=d.mtproto.links[0];
+const web=(d.mtproto.links[1]||{}).link||'';
+const i=seqNext();
+h+=tileLink(i,'MTPROTO','MTProto · Telegram',tg.link,
+(web?'<a class="btn sm" href="'+esc(web)+'" target="_blank" rel="noopener" style="margin-top:8px;width:100%;justify-content:center">✈️ Открыть через t.me</a>':''));
+}
+h+='</div>';
+if(d.other_satellites&&d.other_satellites.length){
+h+='<div class="portal-tile" style="margin-top:12px"><div class="portal-tile-head"><span class="portal-chip">Сателлиты</span><div class="portal-tile-title">Другие привязанные протоколы</div></div>'+
+d.other_satellites.map(function(s){
+return '<div class="portal-tile-row"><span class="val">🛰 '+esc(s.label||s.satellite)+'</span>'+
+(s.active?'<span class="portal-chip on">● активен</span>':'<span class="portal-chip off">○ не активен</span>')+'</div>';
+}).join('')+
+'<div class="portal-hero-sub" style="margin-top:6px">Конфигурация — во вкладке «🛰 Сателлиты»</div></div>';
+}
 c.innerHTML=h;
 }
 function copyLink(i){const el=document.getElementById('link-'+i);if(!el)return;
@@ -1751,6 +1840,52 @@ if(box){box.textContent=t||'Конфиг недоступен';}
 function fmtAWG(b){b=b||0;if(b>=1024*1024*1024)return (b/1024/1024/1024).toFixed(2)+' ГБ';if(b>=1024*1024)return (b/1024/1024).toFixed(1)+' МБ';if(b>=1024)return Math.round(b/1024)+' КБ';return b+' Б';}
 function copyAWG(){const el=document.getElementById('awg-conf-box');if(!el)return;
 navigator.clipboard.writeText(el.textContent).then(function(){showToast('Конфиг скопирован');}).catch(function(){showToast('Ошибка копирования','error');});}
+
+/* === 10. Mieru === */
+async function loadMieru(){
+let d=null;
+try{const r=await api('/api/portal/mieru-info');d=(r&&r.mieru)?r.mieru:null;}catch(e){d=null;}
+if(!d){return;}  // hide tab when no mieru binding for this user
+document.getElementById('tab-mieru').style.display='';
+document.getElementById('mieru-card').style.display='';
+const c=document.getElementById('mieru-container');
+const active=!!d.service_active;
+let h='<div class="portal-hero"><div class="portal-hero-top"><div>'+
+'<div class="portal-hero-label">Mieru</div>'+
+'<div class="portal-hero-title">🟣 Mieru</div>'+
+'<div class="portal-hero-sub">Обфусцированный прокси-протокол с маскировкой под обычный трафик</div></div>'+
+(active?'<span class="portal-chip on">● активен</span>':'<span class="portal-chip off">○ сервис не активен</span>')+
+'</div></div>';
+h+='<div class="portal-stats">'+
+pStat('Сервер',d.server||'—','accent')+
+pStat('Порт(ы)',d.ports||'—','')+
+pStat('Протокол',d.protocol||'—','')+
+pStat('Логин',d.login||'—','')+
+pStat('Обфускация',d.traffic_preset?d.traffic_preset:'—',d.has_traffic_pattern?'green':'')+
+'</div>';
+h+='<div class="portal-grid" style="grid-template-columns:1fr 1fr;align-items:start">';
+(d.links||[]).forEach(function(ml){
+const i=seqNext();
+h+=tileLink(i,'MIERU','Mieru · '+(ml.app||'')+(ml.transport?' ('+ml.transport+')':''),ml.link,'');
+});
+h+='</div>';
+h+='<div class="portal-grid" style="grid-template-columns:1fr 1fr">'+
+'<div class="portal-tile" style="text-align:center">'+
+'<div class="portal-tile-head"><span class="portal-chip accent">JSON</span><div class="portal-tile-title">sing-box / Karing</div></div>'+
+'<a class="btn ghost" href="/api/portal/mieru-config" download style="width:100%;justify-content:center">⬇ Скачать JSON</a>'+
+'</div>'+
+'<div class="portal-tile">'+
+'<div class="portal-tile-head"><span class="portal-chip accent">DNS</span><div class="portal-tile-title">DNS через туннель</div></div>'+
+'<div class="portal-code-box" style="word-break:break-all">'+esc(d.client_dns||'—')+'</div>'+
+'</div></div>';
+h+='<div class="portal-info" style="margin-top:14px"><b>ℹ️ Как подключиться:</b><br>'+
+'• <b>Karing</b> — отсканируйте QR (слева) или вставьте ссылку при добавлении профиля. Ядро sing-box; время на устройстве ±30 сек!<br>'+
+'• <b>NekoBox / Nyamebox</b> — QR или ссылка, ядро sing-box.<br>'+
+'• <b>sing-box CLI</b> — скачайте JSON и подключите как outbound.<br>'+
+(d.has_traffic_pattern?'• Обфускация (traffic-pattern) уже вшита в ссылки — синхронизирована с сервером автоматически.<br>':'')+
+'</div>';
+c.innerHTML=h;
+}
 """
 
 # ─── Portal visual polish (CSS + JS constants, same plain-string trick) ───────
@@ -1900,7 +2035,7 @@ function detectRecommendedClient(){
     pulling=false;
     if(hint.classList.contains('visible')){
       hint.classList.remove('visible');
-      loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();loadConnStatus();
+      loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();loadMieru();loadConnStatus();
     }
   },{passive:true});
 })();
@@ -2025,6 +2160,7 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <button class="tab" data-tab="b4" id="tab-b4" style="display:none" onclick="switchTab('b4')">📺 YouTube DPI</button>
 <button class="tab" data-tab="server" onclick="switchTab('server')">🖥 Сервер</button>
 <button class="tab" data-tab="awg" id="tab-awg" style="display:none" onclick="switchTab('awg')">🛡 AmneziaWG</button>
+<button class="tab" data-tab="mieru" id="tab-mieru" style="display:none" onclick="switchTab('mieru')">🟣 Mieru</button>
 </div>
 </div>
 
@@ -2170,7 +2306,9 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 1. Скачайте конфиг с сервера (раздел «Скачать конфиги») в формате вашего клиента.<br>
 2. Установите клиентское приложение (раздел «Клиентские приложения»).<br>
 3. Импортируйте конфиг в клиент: вставьте VLESS-ссылку, откройте JSON/YAML файл или отсканируйте QR-код из вкладки «🔗 Подключение».<br>
-<b>AmneziaWG</b> — конфиг берётся во вкладке «🛡 AmneziaWG» (если у вас есть AWG-пир).
+<b>AmneziaWG</b> — конфиг берётся во вкладке «🛡 AmneziaWG» (если у вас есть AWG-пир).<br>
+<b>Mieru</b> — ссылки, QR и JSON-конфиг во вкладке «🟣 Mieru» (если вам выдан mieru-доступ).<br>
+<b>MTProto</b> — tg://-ссылка для Telegram на странице «🔗 Подключение».
 </div></div>
 </div>
 
@@ -2269,6 +2407,11 @@ font-size:12px;color:var(--muted);line-height:1.7}}
 <div id="awg-container"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></div>
 </div>
 
+<div class="tab-panel" id="panel-mieru">
+<div class="card" id="mieru-card" style="display:none"><div class="card-title">🟣 Mieru</div>
+<div id="mieru-container"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div></div>
+</div>
+
 </div>
 <div class="toast" id="toast"></div>
 <script>
@@ -2294,7 +2437,7 @@ async function api(p){{const r=await fetch(p,{{credentials:'same-origin'}});if(r
 
 {PORTAL_POLISH_JS}
 
-loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();
+loadLinks();loadSubscription();loadTraffic();loadHealth();loadIPs();loadSatellites();loadB4();loadAWG();loadMieru();
 loadPasswordInfo();loadConnStatus();detectRecommendedClient();
 </script>
 </body></html>'''
