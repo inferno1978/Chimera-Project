@@ -506,6 +506,44 @@ class TestUiMarkup(unittest.TestCase):
         html = self._portal_html()
         self.assertIn("🟣 Mieru", html)
 
+    def test_inline_onclick_quotes_escaped(self):
+        """Регрессия b8ff5f6: switchTab(\\'awg\\') с ОДНИМ бэкслешем на уровне
+        Python «схлопывался» в switchTab('awg') и разрывал JS-строку
+        (Uncaught SyntaxError: missing ) after argument list → весь
+        скрипт-блок портала умирал: кнопки/вкладки/pwStrength).
+        В отдаваемом JS внутри JS-строк кавычки должны быть экранированы."""
+        js = self._ui.PORTAL_TABS_JS
+        # валидные (экранированные) формы
+        self.assertIn("switchTab(\\'awg\\')", js)
+        self.assertIn("switchTab(\\'mieru\\')", js)
+        # битые (неэкранированные) формы внутри JS-строк
+        self.assertNotIn("switchTab('awg')", js)
+        self.assertNotIn("switchTab('mieru')", js)
+
+    def test_portal_js_syntax(self):
+        """Полный синтакс-чек инлайн-JS страницы портала через node --check."""
+        import re as _re
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node недоступен — синтакс-чек пропущен")
+        html = self._portal_html()
+        blocks = _re.findall(r"<script[^>]*>(.*?)</script>", html, _re.S)
+        self.assertGreaterEqual(len(blocks), 1, "на странице нет JS-блоков")
+        import tempfile
+        for i, block in enumerate(blocks):
+            with tempfile.NamedTemporaryFile(
+                    "w", suffix=".js", delete=False,
+                    encoding="utf-8") as fh:
+                fh.write(block)
+                path = fh.name
+            proc = subprocess.run([node, "--check", path],
+                                  capture_output=True, text=True)
+            self.assertEqual(
+                proc.returncode, 0,
+                f"JS-блок {i} не проходит node --check:\n{proc.stderr[:600]}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

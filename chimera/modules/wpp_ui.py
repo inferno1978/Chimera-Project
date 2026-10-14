@@ -1458,7 +1458,7 @@ h+=tileLink(i,(item.protocol||'VLESS').toUpperCase(),item.label||'Подключ
 if(d.awg){
 h+=tileQrButtons('AWG','🛡 AmneziaWG · '+(d.awg.name||'peer'),d.awg.qr_url,
 '<a class="btn ghost sm" href="'+esc(d.awg.conf_url)+'" download style="width:100%;justify-content:center">⬇ Скачать .conf</a>'+
-'<button class="btn sm" onclick="switchTab(\'awg\')" style="margin-top:6px;width:100%;justify-content:center">🛡 Вкладка AmneziaWG</button>');
+'<button class="btn sm" onclick="switchTab(\\'awg\\')" style="margin-top:6px;width:100%;justify-content:center">🛡 Вкладка AmneziaWG</button>');
 }
 if(d.mieru&&d.mieru.links&&d.mieru.links.length){
 /* первая ссылка (Karing) — с QR; остальные форматы — компактными плитками */
@@ -1467,7 +1467,7 @@ const i=seqNext();
 const ttl='Mieru · '+(ml.app||'')+(ml.transport?' ('+ml.transport+')':'');
 if(idx===0){
 h+=tileLink(i,'MIERU',ttl,ml.link,
-'<button class="btn sm" onclick="switchTab(\'mieru\')" style="margin-top:8px;width:100%;justify-content:center">🟣 Вкладка Mieru</button>');
+'<button class="btn sm" onclick="switchTab(\\'mieru\\')" style="margin-top:8px;width:100%;justify-content:center">🟣 Вкладка Mieru</button>');
 }else{
 h+=tileCompact(i,'MIERU',ttl,ml.link);
 }
