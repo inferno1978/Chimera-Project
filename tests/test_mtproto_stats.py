@@ -1346,5 +1346,126 @@ class TestDiagnoseTelemtApiForPanel(unittest.TestCase):
                         f"expected upstream recommendation, got: {diag['recommendations']}")
 
 
+# =============================================================================
+#  Headless-сбор статистики: cron-wrapper + collect_stats_once
+# =============================================================================
+class TestHeadlessStatsCollect(unittest.TestCase):
+    """setup_iptables_accounting теперь ставит cron-сбор статистики
+    (telemt-stats-collect), а collect_stats_once — атомарная связка
+    load→collect→save под flock. Раньше stats.json обновлялся только
+    из TUI-меню, поэтому юзер-портал и traffic_history (mtproto:: ключи)
+    читали вечные нули на headless-серверах."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_paths(self):
+        from chimera.modules import mtproto_stats
+        return [
+            patch.object(mtproto_stats, "CRON_FILE",
+                         self._tmpdir / "telemt-stats"),
+            patch.object(mtproto_stats, "LIMITS_CHECK_SCRIPT",
+                         self._tmpdir / "telemt-limits-check.sh"),
+            patch.object(mtproto_stats, "STATS_COLLECT_SCRIPT",
+                         self._tmpdir / "telemt-stats-collect.sh"),
+            patch.object(mtproto_stats, "_persist_accounting_rules",
+                         return_value=None),
+        ]
+
+    def test_setup_writes_collect_wrapper_and_cron_line(self):
+        """Cron-файл содержит строку telemt-stats-collect, wrapper
+        существует и вызывает collect_stats_once (PYTHONPATH-safe)."""
+        from contextlib import ExitStack
+        from chimera.modules import mtproto_stats
+        fake_run, _chains, _jumps = self._make_run_mock_safe()
+        with patch.object(mtproto_stats, "_run", fake_run):
+            with ExitStack() as stack:
+                for p in self._patch_paths():
+                    stack.enter_context(p)
+                result = mtproto_stats.setup_iptables_accounting(8443)
+        self.assertTrue(result)
+        cron_text = (self._tmpdir / "telemt-stats").read_text()
+        self.assertIn("telemt-stats-collect", cron_text)
+        self.assertIn("telemt-limits-check", cron_text)
+        wrapper = self._tmpdir / "telemt-stats-collect.sh"
+        self.assertTrue(wrapper.exists(), "collect wrapper must be written")
+        wrapper_text = wrapper.read_text()
+        self.assertIn("collect_stats_once", wrapper_text)
+        self.assertIn("PYTHONPATH", wrapper_text)
+
+    def test_collect_stats_once_load_collect_save_chain(self):
+        """collect_stats_once: load → collect → save, всё под flock."""
+        from chimera.modules import mtproto_stats
+        fresh = {"total": {"rx": 0, "tx": 0, "updated": "", "since": "x"},
+                 "daily": {}, "users": {}, "ipt_ok": False}
+        calls = []
+        with patch.object(mtproto_stats, "_load_stats",
+                          side_effect=lambda: fresh) as m_load, \
+             patch.object(mtproto_stats, "_collect",
+                          side_effect=lambda d: calls.append("collect")
+                          or d.update({"ipt_ok": True}) or d) as m_collect, \
+             patch.object(mtproto_stats, "_save_stats",
+                          side_effect=lambda d: calls.append("save")) as m_save, \
+             patch.object(mtproto_stats, "STATS_FILE",
+                          self._tmpdir / "telemt" / "stats.json"):
+            out = mtproto_stats.collect_stats_once()
+        self.assertEqual(calls, ["collect", "save"])
+        self.assertTrue(out.get("ipt_ok"))
+        m_load.assert_called_once()
+        m_collect.assert_called_once()
+        m_save.assert_called_once()
+
+    def _make_run_mock_safe(self):
+        """Stateful _run mock (как в TestSetupIptablesAccountingVerification,
+        но self-contained): -N создаёт цепочку, -I создаёт jump."""
+        from unittest.mock import MagicMock
+        chains_exist = set()
+        jumps = {}
+
+        def fake_run(cmd, capture=False, check=False, **kw):
+            cmd = list(cmd)
+            if len(cmd) >= 3 and cmd[0] == "iptables" and cmd[1] == "-L":
+                if "-v" in cmd and "-n" in cmd:
+                    chain = cmd[2]
+                    rules = []
+                    for (parent, ch, port, direction), n in jumps.items():
+                        if parent == chain:
+                            opt = "dpt" if direction == "dport" else "spt"
+                            rules.append(
+                                f"    0     0 {ch}  tcp  --  *  *  "
+                                f"0.0.0.0/0  0.0.0.0/0  tcp {opt}:{port}")
+                    return MagicMock(returncode=0,
+                                     stdout=f"Chain {chain} (policy ACCEPT)\n"
+                                            "  pkts bytes target prot opt in out source destination\n"
+                                            + "\n".join(rules) + "\n",
+                                     stderr="")
+                if "-n" in cmd:
+                    return MagicMock(returncode=0 if cmd[2] in chains_exist else 1,
+                                     stdout="", stderr="")
+            if len(cmd) >= 3 and cmd[0] == "iptables" and cmd[1] == "-N":
+                chains_exist.add(cmd[2])
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if len(cmd) >= 3 and cmd[0] == "iptables" and cmd[1] == "-I":
+                # -I INPUT 1 -p tcp --dport N -j CHAIN
+                parent, chain = cmd[2], cmd[-1]
+                port = next((x for x in cmd if x.startswith(("dport", "sport"))), None)
+                direction = "dport" if "--dport" in cmd else "sport"
+                pnum = cmd[cmd.index("--dport") + 1] if "--dport" in cmd else \
+                    cmd[cmd.index("--sport") + 1]
+                key = (parent, chain, int(pnum), direction)
+                jumps[key] = jumps.get(key, 0) + 1
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if len(cmd) >= 2 and cmd[0] == "iptables" and cmd[1] == "-D":
+                return MagicMock(returncode=1, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return fake_run, chains_exist, jumps
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
