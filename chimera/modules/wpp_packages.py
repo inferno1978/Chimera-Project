@@ -55,7 +55,9 @@ STAGING_DIR  = STATE_DIR / "wpp_panel_staging"  # atomic-swap staging
 
 # Версия порта (фронт+контракт синхронизированы — см. changelog).
 # bump при изменениях API-контракта между wpp_panel.py и wpp_panel_web.py.
-WPP_FRONT_VERSION = "2.4.2"
+# 2.4.3: синхронизация с ожившим апстримом (POLESNIESOVETI12/web-panel-proxy
+# v2.4.3, MIT) — 3-way merge с сохранением всех chimera-твиков.
+WPP_FRONT_VERSION = "2.4.3"
 
 # Минимальный размер тарбола (v2.4.2 ~ 500 KB; с локализацией ~ 1 MB).
 # Меньше 200 KB — почти наверняка HTML-редирект CDN или 404 страница.
@@ -210,17 +212,17 @@ if __name__ == "__main__":
     spec = WPP_FRONT_SPEC
     info = {
         "name": spec.name,
-        "filename": spec.filename_builder(version="2.4.2"),
+        "filename": spec.filename_builder(version="2.4.3"),
         "install_dests": [str(d) for d in spec.install_dests],
         "manual_incoming_dir": str(spec.manual_incoming_dir),
         "min_size": spec.min_size,
         "first_mirror": spec.mirror_urls_builder(
-            filename=spec.filename_builder(version="2.4.2"),
-            version="2.4.2",
+            filename=spec.filename_builder(version="2.4.3"),
+            version="2.4.3",
         )[0],
         "total_mirrors": len(spec.mirror_urls_builder(
-            filename=spec.filename_builder(version="2.4.2"),
-            version="2.4.2",
+            filename=spec.filename_builder(version="2.4.3"),
+            version="2.4.3",
         )),
         "has_post_install": spec.post_install is not None,
     }

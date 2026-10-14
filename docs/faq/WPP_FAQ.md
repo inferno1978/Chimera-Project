@@ -5,7 +5,7 @@
 панель WPP, все возможности, доступы и архитектуру.
 
 > **WPP** — веб-панель управления VPN-подключениями (VLESS/Hysteria2/AWG/
-> MTProto/OpenFlux). Порт проекта POLESNIESOVETI12/web-panel-proxy v2.4.2
+> MTProto/OpenFlux). Порт проекта POLESNIESOVETI12/web-panel-proxy v2.4.3
 > (MIT), расширенный для Chimera. Работает на порту 9745 через nginx
 > reverse-proxy с TLS (Let's Encrypt). Не путать с b4 Web UI (порт 9743) —
 > это отдельная панель для DPI-bypass, см. [DPI_BYPASS_FAQ.md](DPI_BYPASS_FAQ.md).
@@ -252,21 +252,51 @@ curl -sk -b portal_cookie.txt https://<домен>:9745/api/portal/links
 
 ## 8. Авто-обновление и защита твиков
 
-**Авто-обновление WPP отключено** (`auto_update.enabled = false`).
+**Синхронизация с апстримом (2026-10-14): upstream воскрес и доведён до
+v2.4.3** (коммит `feat(wpp): sync with resurrected upstream v2.4.3`).
+Синхронизация выполнена 3-way merge (base = v2.4.2 vendored tarball,
+наши правки + апстримные) — **все chimera-твики сохранены**:
 
-Причина: upstream `POLESNIESOVETI12/web-panel-proxy` удалён с GitHub (404).
-Cron `/etc/cron.d/wpp-autoupdate` остаётся установленным, но
-`wpp_autoupdate_cron()` сразу return'ит при `enabled=false`.
+- Fast-forward (файлы были идентичны v2.4.2): `wpp_nodes.py`,
+  `wpp_firewall.py`, `wpp_openflux.py`, `wpp_panel_extras.py`.
+- 3-way merge (наши правки + апстримные): `wpp_ui.py`, `wpp_metrics.py`,
+  `wpp_components.py`, `wpp_update.py` (1 конфликт в ui — VERSION+
+  FINGERPRINTS, 1 в metrics — atomic_json, оба разрешены в пользу
+  объединения).
+- Не тронуты (апстрим не менял): `wpp_awg.py` (наш I2-I5 твик на месте),
+  `wpp_subscriptions.py`.
+- Интеграционные правки `wpp_panel_web.py` (аддитивные): import
+  `openflux_import_uri` для QR OpenFlux (deep-link вместо ссылки на
+  документ), передача MAX-полей формы (`max_server_token`,
+  `max_client_token`, `max_uid`) в `create_profile`.
+- Vendored tarball: `vendor/wpp-front/web-panel-proxy-v2.4.3.tar.gz`
+  (v2.4.2 удалён — остаётся в git-истории для rollback).
+
+Что принес апстрим v2.4.3: транспорт MAX (`oneme`, WebRTC) для OpenFlux;
+QR/ссылка импорта профиля OpenFlux (`openflux://import?data=…`);
+multi-source геолокация ноды (ipify IPv4 → RDAP + голосование ipapi/
+ipwho.is, регистр доминирует); hardening `atomic_json` (mkstemp, очистка
+при сбое); файловый lock + учёт фаз в менеджере компонентов; устойчивые
+таймстампы в wpp_update; идемпотентные UFW-удаления; устойчивость
+запуска OpenFlux (стабильность 12 сэмплов вместо 4).
+
+**Авто-обновление WPP по-прежнему отключено** (`auto_update.enabled =
+false`) — версии синхронизируются через git репозитория chimera (наши
+репо остаются primary-источником). Cron `/etc/cron.d/wpp-autoupdate`
+остаётся установленным, но `wpp_autoupdate_cron()` сразу return'ит при
+`enabled=false`.
 
 **Python-модули** (`wpp_ui.py`, `wpp_panel_web.py`, `wpp_portal.py`,
-`wpp_admin_extras.py`) обновляются через `git pull` chimera-репозитория,
-а НЕ через WPP auto-update. Все твики (fingerprint dropdown, VLESS URL
-auto-fill, cascade node form, User Portal, admin gap UI) — в chimera git
-и не затираются auto-update.
+`wpp_admin_extras.py` и др.) обновляются через `git pull`
+chimera-репозитория, а НЕ через WPP auto-update. Все твики (fingerprint
+dropdown, VLESS URL auto-fill, cascade node form, User Portal, admin gap
+UI, hourly pattern/heatmap dashboard) — в chimera git и не затираются.
 
-Если upstream воскреснет — включить авто-обновление:
-`state.auto_update.enabled = true` через TUI или MCP. Но: auto-update
-обновляет только `wpp_panel_www/` (статический кеш), а НЕ chimera-модули.
+Mirror ladder `wpp_mirrors.py` (после воскрешения апстрима):
+1. Наш GitLab raw (`vendor/wpp-front/…` из chimera-v5) — primary;
+2. Upstream codeload `POLESNIESOVETI12/web-panel-proxy` (жив, canonical);
+3. Наш GitHub raw / release / jsDelivr (мёртвые — shadow-ban аккаунта);
+4. gh-proxy зеркала апстрима + прямой archive endpoint.
 
 ---
 
@@ -275,7 +305,7 @@ auto-fill, cascade node form, User Portal, admin gap UI) — в chimera git
 ### Общие вопросы
 
 **Q: Что такое WPP?**
-A: WPP (Web Panel Proxy) — веб-панель управления VPN-подключениями. Порт проекта `POLESNIESOVETI12/web-panel-proxy` v2.4.2 (MIT), адаптированный для Chimera. Работает на порту 9745 через nginx reverse-proxy с TLS. Управляет пользователями VLESS/Hysteria2/AWG/MTProto/OpenFlux, трафиком, подписками, нодами и компонентами.
+A: WPP (Web Panel Proxy) — веб-панель управления VPN-подключениями. Порт проекта `POLESNIESOVETI12/web-panel-proxy` v2.4.3 (MIT), адаптированный для Chimera. Работает на порту 9745 через nginx reverse-proxy с TLS. Управляет пользователями VLESS/Hysteria2/AWG/MTProto/OpenFlux (вкл. транспорт MAX), трафиком, подписками, нодами и компонентами.
 
 **Q: Зачем объединять Admin Panel и User Portal в WPP?**
 A: Раньше было два сервиса на двух портах (8443 + 9745) — два процесса, две точки отказа, две конфигурации nginx. Объединение упрощает: один порт, один процесс, одна конфигурация. Администратор и пользователи заходят на один URL, но в разные разделы (`/panel/` для админа, `/portal/` для юзера).
@@ -347,24 +377,41 @@ A: Два отдельных механизма:
 A: Нет. User Portal работает на том же порту 9745 что и Admin Panel. nginx front `chimera-wpp-nginx` проксирует всё на backend 9744. Отдельный `nginx_front_portal` не нужен.
 
 **Q: Что с авто-обновлением WPP?**
-A: Авто-обновление отключено (`auto_update.enabled = false`). Причина: upstream `POLESNIESOVETI12/web-panel-proxy` удалён с GitHub (404). Cron остаётся установленным, но `wpp_autoupdate_cron()` сразу return'ит при `enabled=false`.
+A: Авто-обновление отключено (`auto_update.enabled = false`). Апстрим
+воскрес (v2.4.3, 2026-10-14) и синхронизирован вручную через 3-way merge
+в chimera git. Cron остаётся установленным, но `wpp_autoupdate_cron()`
+сразу return'ит при `enabled=false`.
 
 **Q: Что если upstream воскреснет?**
-A: Включить авто-обновление: `state.auto_update.enabled = true`. Но: auto-update обновляет только `wpp_panel_www/` (статический кеш), а НЕ chimera-модули. Python-твики (fingerprint dropdown, VLESS URL, cascade form, User Portal, admin gap UI) — в chimera git, не затираются auto-update.
+A: Уже воскрес (2026-10-14, тег v2.4.3). Синхронизация выполнена:
+наши модификации + апстримные изменения (см. раздел 8). Дальнейшие
+версии апстрима можно синхронизировать тем же паттерном: vendored
+tarball нового тега → 3-way merge общих модулей → интеграционные
+правки при изменении API → smoke → deploy. При желании можно включить
+авто-обновление (`state.auto_update.enabled = true`), но оно обновляет
+только `wpp_panel_www/` (статический кеш), а НЕ chimera-модули.
 
 **Q: Как обновить WPP после изменений в chimera?**
-A: `git pull origin chimera-v5` на сервере → `systemctl restart wpp-web`. Python-модули обновляются через git, а не через WPP auto-update.
+A: `git pull` на сервере (ветка `main`) → `systemctl restart wpp-web`. Python-модули обновляются через git, а не через WPP auto-update.
 
 **Q: Затрут ли мои твики при обновлении?**
-A: Нет. Твики в `chimera/modules/wpp_ui.py`, `wpp_panel_web.py`, `wpp_portal.py`, `wpp_admin_extras.py` — в chimera git. WPP auto-update (даже если включён) обновляет только `wpp_panel_www/` (статический кеш), а НЕ Python-модули.
+A: Нет. Твики в `chimera/modules/wpp_ui.py`, `wpp_panel_web.py`,
+`wpp_portal.py`, `wpp_admin_extras.py` — в chimera git. Синхронизация с
+апстримом выполняется 3-way merge с явным сохранением всех твиков (см.
+раздел 8). WPP auto-update (даже если включён) обновляет только
+`wpp_panel_www/` (статический кеш), а НЕ Python-модули.
 
 **Q: На каких серверах установлен WPP?**
-A: WPP устанавливается через chimera TUI: `1 → W → 9 → Install`. На текущий момент установлен только на server 1. На server 2 и 3 WPP не установлен.
+A: WPP устанавливается через chimera TUI: `1 → W → 9 → Install`. На
+текущий момент установлен **только на RU-2** (192.0.2.204,
+`wpp-web.service` + `wpp-metrics.timer`, nginx 9745). На RU-1 и RU-3
+WPP не установлен (нет юнитов/www/nginx vhost).
 
 **Q: Можно ли использовать WPP без chimera?**
 A: Нет. WPP в chimera интегрирован с state.json, users.json, xray config, chimera modules (subscription, satellite_bindings, backup_rollback, etc.). Standalone WPP (из upstream) — отдельный проект с другой архитектурой.
 
 ---
 
-*Документ составлен 27 сентября 2026. Актуально для коммитов `016119f`,
-`fdaf436`, `561a034`, `04e1ca8` на ветке `chimera-v5`.*
+*Документ составлен 27 сентября 2026 (v2.4.2), обновлён 14 октября
+2026 — синхронизация с ожившим апстримом v2.4.3. Ветка `main`,
+репозиторий chimera.*

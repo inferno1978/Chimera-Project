@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -81,15 +82,22 @@ def read_state(path: Path | None = None) -> dict:
 
 
 def atomic_json(path: Path, value: dict) -> None:
-    """Атомарная запись JSON через tmp + os.replace (как в оригинале)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(value, f, ensure_ascii=True, separators=(",", ":"))
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    """Атомарная запись JSON (upstream v2.4.3: mkstemp — уникальное tmp-имя,
+    очистка при сбое, parent mode 0o700)."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(value, f, ensure_ascii=True, separators=(',', ':'))
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 # ─── /proc READING ───────────────────────────────────────────────────────────
