@@ -403,9 +403,11 @@ A: Нет. Твики в `chimera/modules/wpp_ui.py`, `wpp_panel_web.py`,
 
 **Q: На каких серверах установлен WPP?**
 A: WPP устанавливается через chimera TUI: `1 → W → 9 → Install`. На
-текущий момент установлен **только на RU-2** (192.0.2.204,
-`wpp-web.service` + `wpp-metrics.timer`, nginx 9745). На RU-1 и RU-3
-WPP не установлен (нет юнитов/www/nginx vhost).
+текущий момент установлен **только на RU-3** (203.0.113.238,
+`wpp-web.service` + nginx 9745; админка и портал проверены 14.10.2026).
+RU-2 списан в октябре 2026 (хостинг не продлён, нода выведена из
+эксплуатации) — его инсталляция WPP не обслуживалась. На RU-1 WPP не
+установлен (нет юнитов/www/nginx vhost).
 
 **Q: Можно ли использовать WPP без chimera?**
 A: Нет. WPP в chimera интегрирован с state.json, users.json, xray config, chimera modules (subscription, satellite_bindings, backup_rollback, etc.). Standalone WPP (из upstream) — отдельный проект с другой архитектурой.
