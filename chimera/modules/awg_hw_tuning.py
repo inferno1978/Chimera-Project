@@ -46,8 +46,12 @@ def awgs_sysctl_set(key: str, value) -> bool:
     conf = Path("/etc/sysctl.d/99-awg-standalone.conf")
     try:
         existing = conf.read_text() if conf.exists() else ""
-        # Удаляем старую строку с этим ключом
-        new_lines = [l for l in existing.splitlines() if not l.startswith(f"{key}=")]
+        # Удаляем старые строки с этим ключом. ВАЖНО: сам writer пишет
+        # «key = value» (с пробелами вокруг =), а исторические строки могли
+        # быть и в формате «key=value» — матчим оба варианта, иначе в файле
+        # плодятся дубли (поймано на RU-1: rmem_default дважды в файле).
+        _pat = re.compile(rf"^\s*{re.escape(key)}\s*=")
+        new_lines = [l for l in existing.splitlines() if not _pat.match(l)]
         new_lines.append(f"{key} = {value}")
         conf.write_text("\n".join(new_lines) + "\n")
     except Exception as e:

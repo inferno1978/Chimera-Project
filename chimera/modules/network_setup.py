@@ -298,8 +298,14 @@ def apply_network_optimizations() -> None:
         {congestion_lines}net.ipv4.tcp_fastopen = 3
         net.core.rmem_max = 134217728
         net.core.wmem_max = 134217728
-        net.core.rmem_default = 1048576
-        net.core.wmem_default = 1048576
+        # Выровнено с AWG standalone (AWGS_SYSCTL_TARGETS): TCP-буферы растёт
+        # автотюнинг через tcp_rmem/tcp_wmem и от *_default не зависят,
+        # а UDP-сокеты (WireGuard/AWG) получают SO_RCVBUF по умолчанию отсюда.
+        # 1048576 ломало AWG-диагностику после ребута: этот файл применяется
+        # ПОСЛЕДНИМ в /etc/sysctl.d (lexicographic: awg < csqtt < telemt <
+        # vless) и перезаписывал 7500000 из 99-awg-standalone.conf.
+        net.core.rmem_default = 7500000
+        net.core.wmem_default = 7500000
         net.ipv4.tcp_rmem = 4096 1048576 134217728
         net.ipv4.tcp_wmem = 4096 1048576 134217728
         net.ipv4.tcp_mem = 786432 1048576 26777216
