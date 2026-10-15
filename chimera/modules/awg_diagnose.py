@@ -18,7 +18,8 @@ from pathlib import Path
 
 from .awg_constants import (
     AWGS_BIN, AWGS_QUICK_BIN, AWGS_INTERFACE, AWGS_SYSTEMD_AWG_QUICK,
-    AWGS_SERVER_CONF, AWGS_SYSCTL_TARGETS, AWGS_DEFAULT_PORT,
+    AWGS_SERVER_CONF, AWGS_SYSCTL_TARGETS, AWGS_SYSCTL_MIN_KEYS,
+    AWGS_DEFAULT_PORT,
 )
 from .awg_state import awgs_state_load, awgs_state_is_installed
 from .awg_presets import awgs_presets_compare_with_carrier, awgs_presets_list
@@ -52,7 +53,14 @@ def _diag_kernel_module() -> dict:
 
 
 def _diag_sysctl() -> list:
-    """Проверка sysctl-настроек."""
+    """Проверка sysctl-настроек.
+
+    Семантика сравнения:
+      • AWGS_SYSCTL_MIN_KEYS (буферы BBR) — «минимум»: current >= target → OK;
+        значение выше рекомендованного — это норма (например 128МБ при цели 7.5МБ),
+        а не повод для предупреждения;
+      • остальные ключи (fq, bbr, forwarding-флаги) — точное соответствие.
+    """
     core = _core_module()
     results = []
     for key, target in AWGS_SYSCTL_TARGETS.items():
@@ -69,11 +77,20 @@ def _diag_sysctl() -> list:
                 })
                 continue
         current = awgs_sysctl_get(key)
-        ok = str(current) == str(target)
+        if key in AWGS_SYSCTL_MIN_KEYS:
+            # Буферы: достаточно current >= target; выше — только лучше.
+            # Нечисловое/пустое значение (sysctl недоступен) → WARN, не падаем.
+            try:
+                ok = int(str(current).strip()) >= int(target)
+            except (TypeError, ValueError):
+                ok = False
+        else:
+            ok = str(current) == str(target)
         results.append({
             "key":     key,
             "current": current or "(не задано)",
             "target":  str(target),
+            "mode":    "min" if key in AWGS_SYSCTL_MIN_KEYS else "exact",
             "status":  "OK" if ok else "WARN",
         })
     return results
@@ -403,7 +420,9 @@ def do_awg_diagnose_menu() -> None:
         else:
             icon = "⏭️"
             color = DIM
-        _box_row(f"    {icon} {s['key']}: {color}{s['current']}{NC} (target: {s['target']})")
+        # Буферы показываем как минимум (min), остальные — точная цель (target)
+        tgt = f"min: {s['target']}" if s.get("mode") == "min" else f"target: {s['target']}"
+        _box_row(f"    {icon} {s['key']}: {color}{s['current']}{NC} ({tgt})")
     _box_sep()
 
     # UFW

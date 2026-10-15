@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .awg_constants import AWGS_SYSCTL_TARGETS
+from .awg_constants import AWGS_SYSCTL_TARGETS, AWGS_SYSCTL_MIN_KEYS
 
 
 def _core_module():
@@ -72,7 +72,17 @@ def awgs_sysctl_apply_idempotent() -> dict:
                 results[key] = {"old": current, "new": current, "changed": False,
                                 "skipped": "IPv6 disabled on host"}
                 continue
-        if str(current) == str(target):
+        # Буферы (AWGS_SYSCTL_MIN_KEYS): current >= target уже достаточно —
+        # НЕ понижаем поднятые значения (например 128МБ при цели 7.5МБ).
+        # Синхронно с семантикой диагностики (_diag_sysctl).
+        if key in AWGS_SYSCTL_MIN_KEYS:
+            try:
+                already_ok = int(str(current).strip()) >= int(target)
+            except (TypeError, ValueError):
+                already_ok = False
+        else:
+            already_ok = str(current) == str(target)
+        if already_ok:
             results[key] = {"old": current, "new": current, "changed": False}
             continue
         ok = awgs_sysctl_set(key, target)

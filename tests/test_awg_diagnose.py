@@ -115,6 +115,96 @@ class TestDiagSysctl(unittest.TestCase):
             ipv6_entries = [r for r in results if "ipv6" in r["key"]]
             self.assertTrue(all(r["status"] == "SKIP" for r in ipv6_entries))
 
+    def _sysctl_env(self, mock_get, mock_run, fake_values=None):
+        """Общий мок-сетап: IPv6 включён + значения по ключам."""
+        from chimera.modules.awg_constants import AWGS_SYSCTL_TARGETS
+        mock_run.return_value = MagicMock(returncode=0, stdout="0\n", stderr="")
+
+        def _get(key):
+            if fake_values and key in fake_values:
+                return fake_values[key]
+            return str(AWGS_SYSCTL_TARGETS.get(key, ""))
+
+        mock_get.side_effect = _get
+
+    def test_buffers_above_target_are_ok(self):
+        """MIN-ключи (буферы BBR): current >= target → OK, не WARN.
+
+        Кейс со 138.х: rmem_max/wmem_max = 134217728 при цели 7500000 —
+        это норма (больше — только лучше), должно быть зелёным.
+        """
+        from chimera.modules import awg_diagnose
+        from chimera.modules.awg_constants import AWGS_SYSCTL_MIN_KEYS
+        fake = {k: "134217728" for k in AWGS_SYSCTL_MIN_KEYS}
+        with patch.object(awg_diagnose, "awgs_sysctl_get") as mock_get, \
+             patch("chimera._core._run") as mock_run:
+            self._sysctl_env(mock_get, mock_run, fake)
+            results = awg_diagnose._diag_sysctl()
+            by_key = {r["key"]: r for r in results}
+            for k in AWGS_SYSCTL_MIN_KEYS:
+                self.assertEqual(by_key[k]["status"], "OK", k)
+                self.assertEqual(by_key[k]["mode"], "min", k)
+            # отображение цели — «min», не «target»
+            self.assertIn("min", by_key["net.core.rmem_max"]["mode"])
+
+    def test_buffers_below_target_are_warn(self):
+        """MIN-ключи: current < target → WARN (как на скрине со 138.х:
+        rmem_default/wmem_default = 1048576 при цели 7500000)."""
+        from chimera.modules import awg_diagnose
+        from chimera.modules.awg_constants import AWGS_SYSCTL_MIN_KEYS
+        fake = {"net.core.rmem_default": "1048576",
+                "net.core.wmem_default": "1048576"}
+        with patch.object(awg_diagnose, "awgs_sysctl_get") as mock_get, \
+             patch("chimera._core._run") as mock_run:
+            self._sysctl_env(mock_get, mock_run, fake)
+            results = awg_diagnose._diag_sysctl()
+            by_key = {r["key"]: r for r in results}
+            self.assertEqual(by_key["net.core.rmem_default"]["status"], "WARN")
+            self.assertEqual(by_key["net.core.wmem_default"]["status"], "WARN")
+            # остальные буферы на цели — OK
+            for k in AWGS_SYSCTL_MIN_KEYS - set(fake):
+                self.assertEqual(by_key[k]["status"], "OK", k)
+
+    def test_buffer_equal_target_is_ok(self):
+        """MIN-ключи: ровно target → OK (граница включительно)."""
+        from chimera.modules import awg_diagnose
+        from chimera.modules.awg_constants import AWGS_SYSCTL_MIN_KEYS
+        fake = {k: "7500000" for k in AWGS_SYSCTL_MIN_KEYS}
+        with patch.object(awg_diagnose, "awgs_sysctl_get") as mock_get, \
+             patch("chimera._core._run") as mock_run:
+            self._sysctl_env(mock_get, mock_run, fake)
+            results = awg_diagnose._diag_sysctl()
+            by_key = {r["key"]: r for r in results}
+            for k in AWGS_SYSCTL_MIN_KEYS:
+                self.assertEqual(by_key[k]["status"], "OK", k)
+
+    def test_buffer_non_numeric_value_no_crash(self):
+        """MIN-ключи: нечисловое/пустое значение → WARN, без исключения."""
+        from chimera.modules import awg_diagnose
+        with patch.object(awg_diagnose, "awgs_sysctl_get") as mock_get, \
+             patch("chimera._core._run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="0\n", stderr="")
+            mock_get.return_value = ""  # sysctl недоступен
+            results = awg_diagnose._diag_sysctl()
+            self.assertTrue(all(r["status"] in ("OK", "WARN", "SKIP") for r in results))
+            buffers = [r for r in results if r.get("mode") == "min"]
+            self.assertTrue(buffers, "MIN-ключи должны быть в отчёте")
+            self.assertTrue(all(r["status"] == "WARN" for r in buffers))
+
+    def test_exact_keys_still_strict(self):
+        """Немонотонные ключи (fq/bbr/флаги) — по-прежнему точное соответствие."""
+        from chimera.modules import awg_diagnose
+        fake = {"net.core.default_qdisc": "fq_codel",
+                "net.ipv4.tcp_congestion_control": "cubic"}
+        with patch.object(awg_diagnose, "awgs_sysctl_get") as mock_get, \
+             patch("chimera._core._run") as mock_run:
+            self._sysctl_env(mock_get, mock_run, fake)
+            results = awg_diagnose._diag_sysctl()
+            by_key = {r["key"]: r for r in results}
+            self.assertEqual(by_key["net.core.default_qdisc"]["status"], "WARN")
+            self.assertEqual(by_key["net.ipv4.tcp_congestion_control"]["status"], "WARN")
+            self.assertEqual(by_key["net.core.default_qdisc"]["mode"], "exact")
+
 
 class TestDiagUfw(unittest.TestCase):
     """_diag_ufw."""
