@@ -195,6 +195,18 @@ AWGS_SYSCTL_TARGETS: dict = {
     "net.core.wmem_default":            7500000,
 }
 
+# Ключи-«минимумы»: соответствие = текущее ЗНАЧЕНИЕ >= цели (буферы BBR:
+# больше — только лучше; 134217728 при цели 7500000 — это ОК, не WARN).
+# Остальные ключи требуют точного соответствия (fq, bbr, forwarding-флаги).
+# Используется и в диагностике (_diag_sysctl), и в применителе
+# (awgs_sysctl_apply_idempotent — не понижает уже поднятые буферы).
+AWGS_SYSCTL_MIN_KEYS: frozenset = frozenset({
+    "net.core.rmem_max",
+    "net.core.wmem_max",
+    "net.core.rmem_default",
+    "net.core.wmem_default",
+})
+
 # ── IP-аллокация для пиров ──────────────────────────────────────────────────
 # В /24 доступно 254 клиента (.1 = сервер, .2..254 = клиенты)
 AWGS_PEER_IP_START: int = 2
