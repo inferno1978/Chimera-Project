@@ -57,7 +57,7 @@ TG_CONFIG    = Path("/var/lib/xray-installer/telegram.json")
 # Переиспользуем пути соседних модулей (без импорта тяжёлого _core).
 INSTALLED_STATE = Path("/var/lib/xray-installer/state.json")
 PORT_REGISTRY   = Path("/var/lib/xray-installer/port_registry.json")
-INGRESS_STATE   = Path("/var/lib/xray-installer/ingress.json")
+INGRESS_STATE   = Path("/var/lib/xray-installer/ingress_geoip.json")
 CLIENTS_WL_CRON = Path("/etc/cron.d/chimera-clients-wl")
 RU_SUBNETS_FILE = Path("/etc/xray/ru_subnets_ripe.txt")
 
