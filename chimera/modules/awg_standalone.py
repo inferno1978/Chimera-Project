@@ -42,7 +42,9 @@ from .awg_presets import (
     awgs_presets_validate_params,
 )
 from .awg_hw_tuning import awgs_hw_tune_all
-from .awg_apply import awgs_apply, awgs_service_status
+from .awg_apply import (
+    awgs_apply, awgs_service_status, awgs_interface_address,
+)
 from .awg_net_common import (
     iptables_ensure,
     ip6tables_ensure,
@@ -1806,7 +1808,15 @@ def awgs_setup_nat_and_routing(subnet: str, wan_iface: str = "",
 def awgs_setup_systemd() -> bool:
     """
     Включает и запускает awg-quick@awg0.service.
+
     Юнит предоставляется пакетом amneziawg-tools — отдельный юнит не нужен.
+
+    Контракт v2 (2026-10-16, инцидент AWG 3.1 у тестировщика): «active»
+    недостаточно — oneshot-юнит с RemainAfterExit держит «active» даже
+    у мёртвого туннеля (userspace-стаб awg-quick поднимает link, но НЕ
+    назначает адрес → нет ни адреса, ни маршрута, клиенты без интернета,
+    а диагностика честно ругалась «Route awg0 ОТСУТСТВУЕТ» при активном
+    сервисе). Успех = адрес реально сел на интерфейс awg0.
     """
     core = _core_module()
     core._run(["systemctl", "daemon-reload"], check=False, quiet=True)
@@ -1822,7 +1832,19 @@ def awgs_setup_systemd() -> bool:
     if not status["active"]:
         core.warn(f"awg-quick@awg0 не активен — проверьте лог: journalctl -u {AWGS_SYSTEMD_AWG_QUICK}")
         return False
-    core.success("awg-quick@awg0.service запущен")
+    addr = awgs_interface_address(AWGS_INTERFACE, attempts=3)
+    if not addr:
+        core.warn(
+            f"awg-quick@awg0 «active», но на {AWGS_INTERFACE} нет адреса — "
+            f"туннель без адреса (userspace/стаб awg-quick?). "
+            f"Дебаг: journalctl -u {AWGS_SYSTEMD_AWG_QUICK}; "
+            f"ip -4 address show {AWGS_INTERFACE}")
+        core.log_to_file(
+            "ERROR",
+            f"awgs_setup_systemd: no IPv4 address on {AWGS_INTERFACE} "
+            f"despite active service (userspace stub?)")
+        return False
+    core.success(f"awg-quick@awg0.service запущен ({addr} на {AWGS_INTERFACE})")
     return True
 
 
@@ -2032,6 +2054,10 @@ def awgs_install(
         # мёртвом awg0 (systemctl not-found), каскад получал бокс
         # данных от неработающего exit. Конфиг сохранён в
         # /etc/amnezia/amneziawg/awg0.conf — дебаг: journalctl -u awg-quick@awg0.
+        # (v2, 2026-10-16): контракт усилен — проверяется не только
+        # systemctl is-active, но и адрес на awg0: oneshot-юнит с
+        # RemainAfterExit держит «active» даже у стаба, который не
+        # назначает адрес (инцидент тестировщика AWG 3.1).
         warn("Не удалось запустить awg-quick@awg0 — установка НЕ завершена. "
              "Конфиг сохранён для дебага: journalctl -u awg-quick@awg0")
         return False

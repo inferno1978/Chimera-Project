@@ -10,6 +10,10 @@ tests/test_awg_install_fixes.py
      30 мин) завершается TERM→KILL; свежий/чужой процесс не трогается.
   3. _awgs_install_userspace_unit: юнит awg-quick@.service создаётся
      только при его отсутствии; при наличии пакетного — не перекрывает.
+  4. awgs_setup_systemd: контракт v2 (2026-10-16, инцидент AWG 3.1) —
+     после старта сервиса адрес обязан сесть на awg0: oneshot-юнит с
+     RemainAfterExit держит «active» даже у userspace-стаба, который
+     не назначает адрес.
 """
 from __future__ import annotations
 
@@ -66,6 +70,85 @@ class TestInstallHonestContract(unittest.TestCase):
             self.assertFalse(ok)
             # NAT/state НЕ настраиваем — установка честно прервана
             mock_nat.assert_not_called()
+
+
+class TestSetupSystemdAddressContract(unittest.TestCase):
+    """Контракт v2 (2026-10-16): «active» недостаточно — адрес
+    должен реально сесть на awg0 (userspace-стаб: oneshot-юнит с
+    RemainAfterExit держит «active» у туннеля без адреса)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _core(self):
+        core = _mock_core()
+        core._run = MagicMock(
+            return_value=MagicMock(returncode=0, stdout="", stderr=""))
+        return core
+
+    def test_success_when_active_with_address(self):
+        from chimera.modules import awg_standalone
+        core = self._core()
+        with patch.object(awg_standalone, "_core_module",
+                          return_value=core), \
+             patch.object(awg_standalone, "time"), \
+             patch.object(awg_standalone, "awgs_service_status",
+                          return_value={"active": True, "enabled": True}), \
+             patch.object(awg_standalone, "awgs_interface_address",
+                          return_value="10.66.66.1") as mock_addr:
+            ok = awg_standalone.awgs_setup_systemd()
+        self.assertTrue(ok)
+        mock_addr.assert_called_once_with(
+            awg_standalone.AWGS_INTERFACE, attempts=3)
+        succ_msg = " ".join(str(c.args[0])
+                            for c in core.success.call_args_list)
+        self.assertIn("10.66.66.1", succ_msg)
+        self.assertIn("awg0", succ_msg)
+
+    def test_fails_when_active_but_no_address(self):
+        """Кейс тестировщика AWG 3.1: юнит «active», но стаб не
+        назначил адрес → контракт честно провален."""
+        from chimera.modules import awg_standalone
+        core = self._core()
+        with patch.object(awg_standalone, "_core_module",
+                          return_value=core), \
+             patch.object(awg_standalone, "time"), \
+             patch.object(awg_standalone, "awgs_service_status",
+                          return_value={"active": True, "enabled": True}), \
+             patch.object(awg_standalone, "awgs_interface_address",
+                          return_value=""):
+            ok = awg_standalone.awgs_setup_systemd()
+        self.assertFalse(ok)
+        # ERROR в лог + warn с state-aware подсказкой
+        self.assertEqual(core.log_to_file.call_args[0][0], "ERROR")
+        warn_msg = " ".join(str(c.args[0])
+                            for c in core.warn.call_args_list)
+        self.assertIn("туннель без адреса", warn_msg)
+        self.assertIn("journalctl -u awg-quick@awg0", warn_msg)
+
+    def test_fails_when_start_command_fails(self):
+        from chimera.modules import awg_standalone
+        core = _mock_core()
+        core._run = MagicMock(
+            return_value=MagicMock(returncode=1, stdout="", stderr="boom"))
+        with patch.object(awg_standalone, "_core_module",
+                          return_value=core):
+            ok = awg_standalone.awgs_setup_systemd()
+        self.assertFalse(ok)
+
+    def test_fails_when_service_inactive(self):
+        from chimera.modules import awg_standalone
+        core = self._core()
+        with patch.object(awg_standalone, "_core_module",
+                          return_value=core), \
+             patch.object(awg_standalone, "time"), \
+             patch.object(awg_standalone, "awgs_service_status",
+                          return_value={"active": False, "enabled": False}), \
+             patch.object(awg_standalone, "awgs_interface_address") as mock_addr:
+            ok = awg_standalone.awgs_setup_systemd()
+        self.assertFalse(ok)
+        # is-active уже провален → адрес не проверяем
+        mock_addr.assert_not_called()
 
 
 class TestAptLockHeal(unittest.TestCase):

@@ -20,6 +20,7 @@ restart, без требования от пользователя запуст�
 from __future__ import annotations
 
 import tempfile
+import time
 from pathlib import Path
 
 from .awg_constants import (
@@ -343,6 +344,41 @@ def awgs_service_status() -> dict:
         "enabled": enabled,
         "raw":     r.stdout.strip(),
     }
+
+
+def awgs_interface_address(interface: str = AWGS_INTERFACE,
+                           attempts: int = 1) -> str:
+    """IPv4-адрес туннельного интерфейса ('' — если адреса нет).
+
+    Единственный честный признак живого туннеля: systemd-статус
+    «active» ничего не гарантирует. Userspace-стаб awg-quick
+    (awg_transport._awg_create_userspace_stubs: amneziawg-go +
+    `ip link set up` + setconf) поднимает link, но НЕ назначает
+    адрес — интерфейс без адреса и маршрута, а oneshot-юнит с
+    RemainAfterExit при этом держит «active» (инцидент AWG 3.1
+    2026-10-16: диагностика «Route awg0 ОТСУТСТВУЕТ» при активном
+    сервисе). В kernel-режиме awg-quick ставит адрес синхронно,
+    до возврата из ExecStart — поэтому attempts>1 нужен только как
+    страховка от медленных систем.
+
+    Возвращает адрес без префикса (например '10.66.66.1');
+    '' — интерфейса нет или адрес так и не появился.
+    """
+    core = _core_module()
+    for attempt in range(attempts):
+        r = core._run(["ip", "-4", "-o", "address", "show", "dev", interface],
+                      capture=True, check=False)
+        for line in r.stdout.splitlines():
+            # '5:    awg0    inet 10.66.66.1/24 scope global awg0\ ...'
+            tokens = line.split()
+            if "inet" in tokens:
+                try:
+                    return tokens[tokens.index("inet") + 1].split("/")[0]
+                except (ValueError, IndexError):
+                    continue
+        if attempt + 1 < attempts:
+            time.sleep(1.0)
+    return ""
 
 
 def awgs_show_handshakes() -> str:

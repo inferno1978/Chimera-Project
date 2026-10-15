@@ -22,7 +22,9 @@ from .awg_constants import (
 )
 from .awg_state import awgs_state_load, awgs_state_is_installed
 from .awg_presets import awgs_presets_compare_with_carrier, awgs_presets_list
-from .awg_apply import awgs_service_status, awgs_show_handshakes
+from .awg_apply import (
+    awgs_service_status, awgs_show_handshakes, awgs_interface_address,
+)
 from .awg_hw_tuning import awgs_sysctl_get
 
 
@@ -168,11 +170,28 @@ def _diag_nat_routing() -> dict:
     # 4. Маршрут к подсети awg0
     r = core._run(["ip", "route", "show"], capture=True, check=False)
     has_route = subnet in r.stdout or AWGS_INTERFACE in r.stdout
+    if has_route:
+        route_hint = "есть"
+    else:
+        # state-aware подсказка (2026-10-16, кейс тестировщика AWG 3.1):
+        # у мёртвого туннеля нет ни маршрута, ни адреса — легаси-подсказка
+        # «должен быть /24 не /32» сбивала с толку (баг /32 починен ещё
+        # 09.07, 1621f7f; свежая установка всегда пишет /24). Если адрес
+        # на awg0 отсутствует — это userspace-стаб awg-quick, который
+        # поднимает link, но не назначает адрес.
+        addr = awgs_interface_address(AWGS_INTERFACE)
+        if addr:
+            route_hint = (f"ОТСУТСТВУЕТ при адресе {addr} на интерфейсе — "
+                          f"ip route show; journalctl -u {AWGS_SYSTEMD_AWG_QUICK}")
+        else:
+            route_hint = (f"ОТСУТСТВУЕТ — туннель без адреса "
+                          f"(userspace/стаб awg-quick?) — "
+                          f"journalctl -u {AWGS_SYSTEMD_AWG_QUICK}")
     checks.append({
         "name":    "Route awg0",
         "ok":      has_route,
         "status":  "OK" if has_route else "FAIL",
-        "msg":     f"Маршрут {subnet} dev {AWGS_INTERFACE}: {'есть' if has_route else 'ОТСУТСТВУЕТ — проверьте Address в awg0.conf (должен быть /24 не /32)'}",
+        "msg":     f"Маршрут {subnet} dev {AWGS_INTERFACE}: {route_hint}",
     })
 
     # 5. rp_filter (предупреждение, не блок)

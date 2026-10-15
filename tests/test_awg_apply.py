@@ -548,6 +548,61 @@ class TestServiceStatus(unittest.TestCase):
             self.assertFalse(status["enabled"])
 
 
+class TestInterfaceAddress(unittest.TestCase):
+    """awgs_interface_address — IPv4-адрес туннеля (контракт v2, 2026-10-16)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_parses_address_from_ip_o_output(self):
+        from chimera.modules import awg_apply
+        with patch("chimera._core._run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="5:    awg0    inet 10.66.66.1/24 scope global awg0\\"
+                       "       valid_lft forever preferred_lft forever\n",
+                stderr="",
+            )
+            addr = awg_apply.awgs_interface_address()
+            self.assertEqual(addr, "10.66.66.1")
+
+    def test_empty_when_no_address_userspace_stub(self):
+        """Кейс тестировщика AWG 3.1: link поднят, адреса нет (стаб)."""
+        from chimera.modules import awg_apply
+        with patch("chimera._core._run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="", stderr="",
+            )
+            addr = awg_apply.awgs_interface_address()
+            self.assertEqual(addr, "")
+
+    def test_empty_when_device_missing(self):
+        from chimera.modules import awg_apply
+        with patch("chimera._core._run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1, stdout="",
+                stderr='Device "awg0" does not exist.\n',
+            )
+            addr = awg_apply.awgs_interface_address()
+            self.assertEqual(addr, "")
+
+    def test_retries_until_address_appears(self):
+        from chimera.modules import awg_apply
+        with patch("chimera._core._run") as mock_run, \
+             patch("chimera.modules.awg_apply.time.sleep") as mock_sleep:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="", stderr=""),
+                MagicMock(
+                    returncode=0,
+                    stdout="5:    awg0    inet 172.16.82.1/24 scope global awg0\n",
+                    stderr="",
+                ),
+            ]
+            addr = awg_apply.awgs_interface_address(attempts=3)
+            self.assertEqual(addr, "172.16.82.1")
+            mock_sleep.assert_called_once()
+
+
 class TestShowHandshakes(unittest.TestCase):
     """awgs_show_handshakes."""
 

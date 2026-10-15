@@ -267,6 +267,80 @@ class TestDiagNatRouting(unittest.TestCase):
             # MASQUERADE-fail → FAIL
             self.assertEqual(r["status"], "FAIL")
 
+    # ── state-aware подсказка Route awg0 (инцидент AWG 3.1, 2026-10-16) ──
+
+    def _route_check(self, r):
+        return next(c for c in r["checks"] if c["name"] == "Route awg0")
+
+    def test_route_hint_no_address_userspace_stub(self):
+        """Route нет + адреса нет → «туннель без адреса (userspace/стаб
+        awg-quick?) — journalctl …», а НЕ легаси-подсказка про /32."""
+        from chimera.modules import awg_diagnose
+        with self._patch_state(), \
+             patch("chimera._core._run") as mock_run:
+            # ip_forward, MASQUERADE, FORWARD, route (без awg0),
+            # ip -4 addr (пусто — стаб), rp_filter
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="1\n", stderr=""),
+                MagicMock(returncode=0, stdout="MASQUERADE 10.66.66.0/24\n", stderr=""),
+                MagicMock(returncode=0, stdout="ACCEPT awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="default via 1.2.3.4 dev ens3\n", stderr=""),
+                MagicMock(returncode=0, stdout="", stderr=""),
+                MagicMock(returncode=0, stdout="0\n", stderr=""),
+            ]
+            r = awg_diagnose._diag_nat_routing()
+            route = self._route_check(r)
+            self.assertEqual(route["status"], "FAIL")
+            self.assertFalse(route["ok"])
+            self.assertIn("туннель без адреса", route["msg"])
+            self.assertIn("userspace", route["msg"])
+            self.assertIn("journalctl -u awg-quick@awg0", route["msg"])
+            self.assertNotIn("/32", route["msg"])
+
+    def test_route_hint_address_present_but_route_missing(self):
+        """Route нет, но адрес на awg0 есть → подсказка про ip route show."""
+        from chimera.modules import awg_diagnose
+        with self._patch_state(), \
+             patch("chimera._core._run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="1\n", stderr=""),
+                MagicMock(returncode=0, stdout="MASQUERADE 10.66.66.0/24\n", stderr=""),
+                MagicMock(returncode=0, stdout="ACCEPT awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="default via 1.2.3.4 dev ens3\n", stderr=""),
+                MagicMock(
+                    returncode=0,
+                    stdout="5:    awg0    inet 10.66.66.1/24 scope global awg0\n",
+                    stderr="",
+                ),
+                MagicMock(returncode=0, stdout="0\n", stderr=""),
+            ]
+            r = awg_diagnose._diag_nat_routing()
+            route = self._route_check(r)
+            self.assertEqual(route["status"], "FAIL")
+            self.assertIn("10.66.66.1", route["msg"])
+            self.assertIn("ip route show", route["msg"])
+            self.assertNotIn("/32", route["msg"])
+
+    def test_route_present_skips_address_probe(self):
+        """Маршрут есть → адрес на интерфейс не проверяем (лишний exec)."""
+        from chimera.modules import awg_diagnose
+        with self._patch_state(), \
+             patch("chimera._core._run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="1\n", stderr=""),
+                MagicMock(returncode=0, stdout="MASQUERADE 10.66.66.0/24\n", stderr=""),
+                MagicMock(returncode=0, stdout="ACCEPT awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="10.66.66.0/24 dev awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="0\n", stderr=""),
+            ]
+            with patch.object(awg_diagnose, "awgs_interface_address") as mock_addr:
+                r = awg_diagnose._diag_nat_routing()
+                route = self._route_check(r)
+                self.assertEqual(route["status"], "OK")
+                self.assertEqual(route["msg"],
+                                 "Маршрут 10.66.66.0/24 dev awg0: есть")
+                mock_addr.assert_not_called()
+
 
 class TestDiagCarrierCompare(unittest.TestCase):
     """_diag_carrier_compare."""
