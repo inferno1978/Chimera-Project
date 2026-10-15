@@ -116,6 +116,72 @@ class TestSysctlApplyIdempotent(unittest.TestCase):
             self.assertFalse(r["changed"])
         self.assertEqual(mock_set.call_count, 0)
 
+
+class TestSysctlSetDedup(unittest.TestCase):
+    """awgs_sysctl_set — дедуп строк в /etc/sysctl.d/99-awg-standalone.conf.
+
+    Баг (пойман на RU-1): writer пишет «key = value» (с пробелами вокруг =),
+    а фильтр удаления матчил только «key=» (без пробелов) → при повторном
+    применении того же ключа в файле плодились дубли.
+    """
+
+    def setUp(self): _setup_core()
+
+    def _write_with(self, existing, key, value):
+        from chimera.modules import awg_hw_tuning
+        written = {}
+
+        def _capture_write(self_path, content, *a, **kw):
+            written["content"] = content
+
+        with patch("chimera._core._run") as mock_run, \
+             patch.object(Path, "exists", return_value=True), \
+             patch.object(Path, "read_text", return_value=existing), \
+             patch.object(Path, "write_text", _capture_write):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            ok = awg_hw_tuning.awgs_sysctl_set(key, value)
+        return ok, written.get("content", "")
+
+    def test_no_duplicate_lines_on_rewrite(self):
+        """Повторная запись ключа заменяет старые строки (включая spaced)."""
+        existing = (
+            "net.core.rmem_max = 7500000\n"
+            "net.core.rmem_default = 7500000\n"
+            "net.core.rmem_default = 7500000\n"   # дубль от старого writer
+            "net.ipv4.ip_forward = 1\n"
+        )
+        ok, content = self._write_with(existing, "net.core.rmem_default", 7500000)
+        self.assertTrue(ok)
+        self.assertEqual(content.count("net.core.rmem_default"), 1)
+        # прочие ключи не тронуты
+        self.assertIn("net.core.rmem_max = 7500000", content)
+        self.assertIn("net.ipv4.ip_forward = 1", content)
+
+    def test_no_space_format_replaced_too(self):
+        """Строки легаси-формата «key=value» (без пробелов) тоже заменяются."""
+        existing = (
+            "net.core.wmem_default=1048576\n"
+            "net.core.rmem_default = 7500000\n"
+        )
+        ok, content = self._write_with(existing, "net.core.wmem_default", 1048576)
+        self.assertTrue(ok)
+        self.assertEqual(content.count("net.core.wmem_default"), 1)
+        self.assertIn("net.core.wmem_default = 1048576", content)
+        self.assertNotIn("net.core.wmem_default=1048576", content)
+
+    def test_prefix_key_not_clobbered(self):
+        """Запись ip_forward НЕ трогает ip_forward_use_pmtu (префикс-ключ)."""
+        existing = (
+            "net.ipv4.ip_forward = 1\n"
+            "net.ipv4.ip_forward_use_pmtu = 0\n"
+        )
+        ok, content = self._write_with(existing, "net.ipv4.ip_forward", 1)
+        self.assertTrue(ok)
+        self.assertIn("net.ipv4.ip_forward_use_pmtu = 0", content)
+        self.assertEqual(content.count("net.ipv4.ip_forward ="), 1)
+        # use_pmtu не превратился в дубль ip_forward
+        self.assertEqual(content.count("ip_forward_use_pmtu"), 1)
+
 # ── xray_safe_apply ────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

@@ -100,5 +100,31 @@ class TestConfigureFirewallRegistersExistingRules(unittest.TestCase):
         self.assertTrue(getattr(self._core, "STAGE_UFW_DONE", False))
 
 
+class TestSysctlBufferAlignment(unittest.TestCase):
+    """99-vless-performance.conf применяется ПОСЛЕДНИМ в /etc/sysctl.d
+    (lexicographic: awg-standalone < csqtt < sysctl < telemt < vless).
+
+    Раньше шаблон писал rmem/wmem_default = 1048576 и после ребута
+    перезаписывал 7500000 из 99-awg-standalone.conf → AWG-диагностика
+    показывала WARN на нодах с xray+AWG. Значения выровнены с
+    AWGS_SYSCTL_TARGETS (см. также awg_constants.py).
+    """
+
+    def test_vless_conf_defaults_aligned_with_awg_target(self):
+        src = (_PROJECT_ROOT / "chimera" / "modules" /
+               "network_setup.py").read_text()
+        self.assertIn("net.core.rmem_default = 7500000", src)
+        self.assertIn("net.core.wmem_default = 7500000", src)
+        # легаси-значение не должно возвращаться
+        self.assertNotIn("net.core.rmem_default = 1048576", src)
+        self.assertNotIn("net.core.wmem_default = 1048576", src)
+
+    def test_awg_target_constants_match(self):
+        """Синхрон: vless-шаблон = цели AWG (7500000) — сверка констант."""
+        from chimera.modules.awg_constants import AWGS_SYSCTL_TARGETS
+        self.assertEqual(AWGS_SYSCTL_TARGETS["net.core.rmem_default"], 7500000)
+        self.assertEqual(AWGS_SYSCTL_TARGETS["net.core.wmem_default"], 7500000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
