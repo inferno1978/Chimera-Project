@@ -713,6 +713,20 @@ def destroy_ipset() -> None:
 
 # ── Cron ─────────────────────────────────────────────────────────────────────
 
+def _installer_path() -> str:
+    """Каталог установки chimera (для sys.path в cron-врапперах).
+
+    Как в fw_guard: cron-скрипт запускается из произвольного cwd —
+    без sys.path.insert импорт chimera не резолвится (кейс с prod-ноды
+    omen: `python3 -c 'from chimera…'` из cron = ModuleNotFoundError).
+    """
+    try:
+        from chimera.modules.cold_boot_restore import _find_installer_path
+        return _find_installer_path()
+    except Exception:
+        return "/opt/chimera"
+
+
 def install_cron() -> bool:
     """Устанавливает cron для пересборки ipset каждые 5 минут.
     Cron-скрипт вызывает rebuild_clients_ipset() — если IP не изменились,
@@ -723,16 +737,19 @@ def install_cron() -> bool:
     except Exception:
         return False
 
-    # Cron-скрипт — простой bash-wrapper, вызывающий Python.
-    # Использует тот же Python, что и Chimera (sys.executable).
+    # Cron-скрипт — bash-wrapper с явным sys.path (cwd у cron произвольный,
+    # поэтому импорт chimera обязан получать путь установки явно — как в fw_guard).
     python_bin = sys.executable or "/usr/bin/python3"
     CRON_SCRIPT.write_text(
         f"#!/bin/bash\n"
         f"# Авто-пересборка clients_wl ipset из users.json.\n"
         f"# Вызывается cron каждые {CRON_INTERVAL_MIN} минут.\n"
-        f"{python_bin} -c '"
-        f"from chimera.modules.user_ip_whitelist import rebuild_clients_ipset; "
-        f"rebuild_clients_ipset()' >/dev/null 2>&1\n"
+        f"{python_bin} -c '\n"
+        f"import sys\n"
+        f"sys.path.insert(0, \"{_installer_path()}\")\n"
+        f"from chimera.modules.user_ip_whitelist import rebuild_clients_ipset\n"
+        f"rebuild_clients_ipset()\n"
+        f"' >/dev/null 2>&1\n"
     )
     CRON_SCRIPT.chmod(0o755)
 
@@ -876,9 +893,12 @@ def install_cleanup_cron() -> bool:
         f"# Chimera — age-based cleanup для IP whitelist.\n"
         f"# Запускается cron раз в сутки в 04:00.\n"
         f"# Удаляет незакреплённые IP старше retention_days.\n"
-        f"{python_bin} -c '"
-        f"from chimera.modules.user_ip_whitelist import cleanup_old_ips; "
-        f"cleanup_old_ips()' >/dev/null 2>&1\n"
+        f"{python_bin} -c '\n"
+        f"import sys\n"
+        f"sys.path.insert(0, \"{_installer_path()}\")\n"
+        f"from chimera.modules.user_ip_whitelist import cleanup_old_ips\n"
+        f"cleanup_old_ips()\n"
+        f"' >/dev/null 2>&1\n"
     )
     CLEANUP_CRON_SCRIPT.chmod(0o755)
 
