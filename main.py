@@ -340,6 +340,18 @@ if "--nginx-watchdog-run" in sys.argv:
     _nginx_watchdog_run()
     sys.exit(0)
 
+# --- users: watchdog целостности clients (из systemd-timer или вручную) ---
+# Сверяет clients в config.json с users.json (и снапшотами прочих
+# инбаундов): пропавшие/артефактные/битые-UUID клиенты → бэкап →
+# атомарная замена → xray -test → restart → автооткат при неудаче.
+# Конфиг: /var/lib/xray-installer/users-watchdog.json (интервал,
+# действие, cooldown, лимиты — см. TUI: Безопасность → Users Watchdog).
+if "--users-watchdog-run" in sys.argv:
+    if os.geteuid() != 0:
+        sys.exit(1)
+    from chimera.modules.users_watchdog import users_watchdog_run
+    sys.exit(users_watchdog_run())
+
 # --- Hysteria2: автообновление (из cron ежесуточно) ---
 if "--h2-autoupdate" in sys.argv:
     if os.geteuid() != 0:
