@@ -788,6 +788,12 @@ class TestWiring(unittest.TestCase):
                 self.assertFalse((node.module or "").startswith("chimera"),
                                  f"top-level from-import {node.module}")
 
+    def test_users_file_path_matches_core(self):
+        # users.json живёт в /etc/xray/users.json (как USERS_FILE в _core:
+        # CONFIG_DIR / "users.json") — НЕ в /var/lib/xray-installer.
+        # Проверено на проде: /etc/xray/users.json существует на entry-нодах.
+        self.assertEqual(uw._USERS_FILE, Path("/etc/xray/users.json"))
+
     def test_ts_epoch_and_iso(self):
         self.assertGreater(uw._ts(1760000000), 1.7e9)  # epoch-секунды
         t = uw._ts("2026-10-16 09:00:00")

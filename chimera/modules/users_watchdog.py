@@ -84,7 +84,9 @@ RED, GREEN, YELLOW, CYAN, BOLD, DIM, NC = (
 _CFG_DIR        = Path("/etc/xray")
 _CFG_ALT_DIR    = Path("/usr/local/etc/xray")
 _STATE_DIR      = Path("/var/lib/xray-installer")
-_USERS_FILE     = _STATE_DIR / "users.json"
+# users.json — в CONFIG_DIR (= /etc/xray/users.json), как USERS_FILE в _core:
+# это источник истины юзеров entry-ноды
+_USERS_FILE     = _CFG_DIR / "users.json"
 _XRAY_STATE     = _STATE_DIR / "state.json"
 _WD_CONFIG      = _STATE_DIR / "users-watchdog.json"
 _WD_STATE       = _STATE_DIR / "users-watchdog-state.json"
