@@ -368,6 +368,14 @@ def _classify_inbounds(cfg: dict, users: list, server_port: int) -> list:
         settings = inb.get("settings") or {}
         if "clients" not in settings:
             continue
+        clients = settings.get("clients") or []
+        # Подпись chain-exit инбаунда (генератор _make_exit_node_config):
+        # клиенты с email «entry@chain» — креды приходят с entry-ноды,
+        # users.json тут ни при чём → снапшот-защита в любом случае
+        if clients and all(isinstance(c, dict)
+                           and c.get("email") == "entry@chain" for c in clients):
+            out.append((inb, "other"))
+            continue
         if (inb.get("protocol") == "vless" and users_enabled
                 and _inbound_port(inb) == server_port):
             out.append((inb, "main"))
