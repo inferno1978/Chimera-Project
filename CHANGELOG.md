@@ -1,6 +1,6 @@
 # Changelog new entry — Users Watchdog: целостность clients ↔ users.json (16 Oct 2026)
 
-## FEAT(security): users_watchdog — авто-восстановление clients в config.json при расхождении с users.json. Живой кейс 16.10.2026 (RU-3): диагностический прогон TUI на живой entry-ноде перезаписал inbound-vless clients артефактом [u1/a@x]; ночной рестарт xray загрузил битый inbound → «invalid request user id», VLESS-каскад 138.x лежал часы; users.json был корректен, но никто не сверял его с конфигом.
+## FEAT(security): users_watchdog — авто-восстановление clients в config.json при расхождении с users.json. Живой кейс 16.10.2026: диагностический прогон TUI на живой entry-ноде перезаписал inbound-vless clients артефактом [u1/a@x]; ночной рестарт xray загрузил битый inbound → «invalid request user id», VLESS-каскад лежал часы; users.json был корректен, но никто не сверял его с конфигом.
 
 **Что сделано:**
 
