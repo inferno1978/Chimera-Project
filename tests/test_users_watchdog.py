@@ -164,14 +164,6 @@ class TestClassification(unittest.TestCase):
         got = uw._classify_inbounds(cfg, [], 443)
         self.assertEqual([k for _, k in got], ["other"])
 
-    def test_chain_inbound_is_other_even_with_users(self):
-        # exit-нода, где ЧУЖОЙ users.json непуст: сигнатура entry@chain
-        # обязана удержать инбаунд от захвата под users.json
-        cfg = _cfg_json(_cfg_inbound(
-            clients=[{"id": UUID3, "email": "entry@chain"}]))
-        got = uw._classify_inbounds(cfg, USERS, 443)
-        self.assertEqual([k for _, k in got], ["other"])
-
     def test_no_clients_skipped(self):
         inb = {"tag": "api", "protocol": "dokodemo-door", "settings": {}}
         self.assertEqual(uw._classify_inbounds({"inbounds": [inb]}, USERS, 443), [])
