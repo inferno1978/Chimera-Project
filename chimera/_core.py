@@ -67,6 +67,9 @@ from chimera.modules.xray_safe_apply import xray_apply_with_smoke
 from chimera.modules.nginx_watchdog  import (
     nginx_watchdog_install, nginx_watchdog_remove, do_manage_nginx_watchdog,
 )
+from chimera.modules.users_watchdog import (
+    users_watchdog_install, users_watchdog_remove, do_manage_users_watchdog,
+)
 from chimera.modules.ipset_persist   import (
     ipset_save, ipset_restore_unit_install, ipset_restore_unit_remove,
     do_manage_ipset_persist,
@@ -9305,6 +9308,7 @@ def _menu_security() -> None:
         _box_item("7", f"🔀 Авто-фолбэк в Режим A{_awg_na7}")
         _box_item("8",  "🐕 Watchdog авторестарт Xray")
         _box_item("NW", f"🔁 nginx Watchdog  {DIM}(перезапуск nginx при падении){NC}")
+        _box_item("UW", f"👥 Users Watchdog  {DIM}(clients ↔ users.json, авто-восстановление){NC}")
         _box_item("W",  f"🔌 AWG Tunnel Watchdog  {DIM}(fallback при падении awg0){NC}")
         _box_item("N",  f"🌐 AWG Multi-Node  {DIM}(ноды, failover, SSH-защита){NC}")
         _box_item("IP", f"📦 ipset Persist  {DIM}(восстановление ipset при reboot){NC}")
@@ -9364,6 +9368,8 @@ def _menu_security() -> None:
             do_manage_watchdog()
         elif ch.lower() == "nw":
             do_manage_nginx_watchdog()
+        elif ch.lower() == "uw":
+            do_manage_users_watchdog()
         elif ch.lower() == "w":
             do_manage_awg_watchdog()
         elif ch.lower() == "ip":
