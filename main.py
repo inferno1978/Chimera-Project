@@ -137,6 +137,18 @@ if "--smart-balance" in sys.argv:
         _smart_balancer_run_once()
     sys.exit(0)
 
+# --- Наблюдатель переключений exit-нод (из cron / вручную) ---
+# Кейс окт.2026 №8: ротация ушла нативному chain-balancer Xray —
+# уведы о переключениях пропали; наблюдатель возвращает их.
+if "--exit-watcher" in sys.argv:
+    if os.geteuid() != 0:
+        print("ERROR: требуются права root", file=sys.stderr)
+        sys.exit(1)
+    from chimera.modules.exit_switch_watcher import run_once as _ew_run_once
+    force = "--force" in sys.argv
+    _ew_run_once(force=force)
+    sys.exit(0)
+
 # --- Pinned-нода: проверка доступности и авто-fallback (из cron) ---
 if "--pinned-fallback-check" in sys.argv:
     if os.geteuid() != 0:

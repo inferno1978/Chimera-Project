@@ -167,6 +167,7 @@ from chimera.modules.config_backup       import backup_xray_config, do_backup_me
 from chimera.modules.cold_boot_restore   import do_cold_boot_menu
 from chimera.modules.fw_guard           import do_manage_fw_guard
 from chimera.modules.node_health_monitor import do_health_monitor_menu
+from chimera.modules.exit_switch_watcher import do_exit_watcher_menu
 # ── CPU Steal монитор (оверселл гипервизора: замер + дневной отчёт в TG) ────────
 from chimera.modules.steal_monitor        import do_steal_monitor_menu
 from chimera.modules.bandwidth_monitor    import do_bandwidth_monitor_menu
@@ -9338,6 +9339,7 @@ def _menu_security() -> None:
         _box_item("BK", f"💾 Бэкапы конфига Xray  {DIM}(история конфигов, откат){NC}")
         _box_item("CB", f"🔄 Cold Boot Restore  {DIM}(авто-восстановление после reboot){NC}")
         _box_item("HM", f"📡 Health Monitor нод  {DIM}(проверка exit-нод по расписанию){NC}")
+        _box_item("EW", f"🔀 Наблюдатель переключений exit-нод  {DIM}(уведы о ротации/составе/стратегии){NC}")
         _box_back()
         _box_bottom()
         try:
@@ -9410,6 +9412,10 @@ def _menu_security() -> None:
             do_cold_boot_menu()
         elif ch.lower() == "hm":
             do_health_monitor_menu()
+        elif ch.lower() == "ew":
+            # Наблюдатель переключений exit-нод (кейс окт.2026 №8):
+            # единая точка наблюдения ротации + TG-уведы
+            do_exit_watcher_menu()
         elif ch.lower() == "q" or ch == "":
             break
         else:
