@@ -252,6 +252,22 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "port_blocked":  "🚫",
         "autoban":       "🚫",  # FIX-2 (2026-09-25): было 🛡️ — пользователь просил «перечёркнутый красный кружок»
         "port_hopping":  "⚡",
+        # события переключений exit-нод/каскадов (до окт.2026 не имели
+        # иконок — fallback ℹ️; кейс №8: уведы о переключениях пропали из
+        # виду после перехода ротации на нативный chain-balancer)
+        "node_connect":    "🔀",   # SmartBalancer: смена активной ноды
+        "relay_failover":  "🔁",   # SmartBalancer: failover via-релея
+        "cascade_lb_change": "⚖️",  # VLESS-каскад: состав LB изменён вручную
+        "awg_failover":    "🔁",   # AWG-каскад: failover
+        "exit_set_change": "🔄",   # exit_switch_watcher: состав ротации
+        "exit_switch":     "🔀",   # exit_switch_watcher: режимное переключение
+        "exit_ip_change":  "🌐",   # exit_switch_watcher: смена exit-IP
+        "exit_snapshot":   "📊",   # exit_switch_watcher: дайджест ротации
+        "ttl_expiring":    "⏳",   # TTL-пользователи: скоро истекает
+        "ttl_expired":     "⌛",   # TTL-пользователи: истёк
+        "port_knocking":   "🚪",   # port knocking: события
+        "ingress_geoip":   "🛡️",   # ingress-блокировка: события
+        "install_complete": "🏁",  # honeypot: установка завершена
     }
     icon = icons.get(event, "ℹ️")
     text = f"{icon} <b>{header}</b> {detail}\n<i>{ts}</i>"
@@ -2299,6 +2315,25 @@ def do_manage_telegram() -> None:
             # CPU Steal монитор (steal_monitor.py; отсутствующий ключ = ВКЛ)
             "steal_report":   "Steal: дневной отчёт (оверселл)",
             "steal_alert":    "Steal: критический всплеск",
+            # переключения exit-нод/каскадов (кейс окт.2026 №8: события
+            # существовали в коде, но не были видны в меню — управлять
+            # ими было невозможно; отсутствующий ключ = ВКЛ)
+            "node_connect":   "SmartBalancer: смена активной exit-ноды",
+            "relay_failover": "SmartBalancer: failover via-релея (объезд)",
+            "cascade_lb_change": "VLESS-каскад: изменён состав балансировки",
+            "awg_failover":   "AWG-каскад: failover ноды",
+            # наблюдатель переключений exit-нод (exit_switch_watcher.py)
+            "exit_set_change": "Наблюдатель: состав ротации exit-нод изменён",
+            "exit_switch":    "Наблюдатель: режимное переключение (нода/стратегия/pin)",
+            "exit_ip_change": "Наблюдатель: смена exit-IP ноды",
+            "exit_snapshot":  "Наблюдатель: дайджест ротации exit-нод",
+            # TTL-пользователи (user_lifecycle / ttl_users)
+            "ttl_expiring":   "TTL-пользователь: срок истекает (<24ч)",
+            "ttl_expired":    "TTL-пользователь: срок истёк (удалён)",
+            # прочие модули
+            "port_knocking":   "Port Knocking: события (открытие/блок)",
+            "ingress_geoip":   "Блокировка входящих из РФ: события",
+            "install_complete": "Установка компонента завершена",
         }
 
         print()
@@ -2317,6 +2352,8 @@ def do_manage_telegram() -> None:
         _box_item("2", "Тест — отправить тестовое сообщение")
         _box_item("3", "Включить/выключить отдельные события")
         _box_item("4", "Установить cron-мониторинг Xray")
+        _box_item("6", "🔀 Наблюдатель переключений exit-нод  "
+                     f"{DIM}(состав ротации / стратегии / IP){NC}")
         _box_item("5", f"{RED}Отключить уведомления{NC} (удалить конфиг)")
         _box_back()
         _box_bottom()
@@ -2362,7 +2399,13 @@ def do_manage_telegram() -> None:
                        "b4_down","b4_up","b4_degraded","b4_recovered",
                        "b4_stalled","b4_restarted","b4_discovery",
                        "b4_preset","b4_exempt_empty","b4_exempt_ok",
-                       "steal_report","steal_alert"]
+                       "steal_report","steal_alert",
+                       # переключения exit-нод/каскадов (кейс окт.2026 №8)
+                       "node_connect","relay_failover","cascade_lb_change",
+                       "awg_failover","exit_set_change","exit_switch",
+                       "exit_ip_change","exit_snapshot",
+                       "ttl_expiring","ttl_expired","port_knocking",
+                       "ingress_geoip","install_complete"]
             ev_labels = [
                 "Xray упал","Xray восстановился","Сертификат истекает",
                 "Лимит трафика","Daily health-отчёт","Exit-нода недоступна",
@@ -2376,6 +2419,17 @@ def do_manage_telegram() -> None:
                 "B4: запущен Discovery (ремедия)","B4: ротация пресета (ремедия)",
                 "B4: ipset exempt пуст","B4: ipset exempt заполнен",
                 "Steal: дневной отчёт (оверселл)","Steal: критический всплеск",
+                "SmartBalancer: смена активной exit-ноды",
+                "SmartBalancer: failover via-релея",
+                "VLESS-каскад: состав балансировки изменён",
+                "AWG-каскад: failover ноды",
+                "Наблюдатель: состав ротации изменён",
+                "Наблюдатель: режимное переключение",
+                "Наблюдатель: смена exit-IP ноды",
+                "Наблюдатель: дайджест ротации",
+                "TTL: срок истекает","TTL: срок истёк",
+                "Port Knocking: события","Блокировка входящих: события",
+                "Установка завершена",
             ]
             events = cfg.get("events", {k: True for k in ev_keys})
             print()
@@ -2397,6 +2451,18 @@ def do_manage_telegram() -> None:
         elif ch == "4":
             _install_monitor_cron()
             input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "6":
+            # Наблюдатель переключений exit-нод (кейс окт.2026 №8):
+            # уведы о ротации пропали после перехода на нативный
+            # chain-balancer — модуль-наблюдатель возвращает их.
+            try:
+                from chimera.modules.exit_switch_watcher import (
+                    do_exit_watcher_menu)
+                do_exit_watcher_menu()
+            except Exception as _e:
+                _warn(f"Наблюдатель недоступен: {_e}")
+                time.sleep(1)
 
         elif ch == "5":
             try:
