@@ -462,6 +462,78 @@ def _shorten(items: list, n: int = 3) -> str:
     return ", ".join(items[:n]) + f" (+{len(items) - n})"
 
 
+# ── Человекочитаемые TG-тексты (кейс окт.2026 №9) ─────────────────────────────
+# Сырой дамп «missing=[—] unknown=[…] mismatch=[—] insane=[—] empty=False»
+# в Telegram читался как абракадабра (скрин от админа RU: пользователь не
+# понял, что нода нашла посторонний UUID). Технический формат остаётся в
+# /var/log/users-watchdog.log (компактный, полный UUID — для grep), в TG
+# уходит человекочитаемое описание.
+def _client_label(cid: str, clients: list) -> str:
+    """Метка клиента для TG: «email (e6d10d3d…)» или «e6d10d3d-2a41…»."""
+    cid = str(cid or "?")
+    email = ""
+    for c in clients or []:
+        if isinstance(c, dict) and c.get("id") == cid and c.get("email"):
+            email = str(c["email"])
+            break
+    short = cid if len(cid) <= 13 else cid[:13] + "…"
+    return f"{email} ({short})" if email else short
+
+
+def _label_ids(ids: list, clients: list, n: int = 3) -> str:
+    """Список меток клиентов (макс. n, дальше «(+N)»)."""
+    items = [_client_label(i, clients) for i in ids or []]
+    if len(items) <= n:
+        return ", ".join(items) or "—"
+    return ", ".join(items[:n]) + f" (+{len(items) - n})"
+
+
+def _human_drift_note(tag: str, diff: dict, current: list,
+                      expected: list, source: str) -> str:
+    """Человекочитаемое описание дрейфа для TG-уведомления."""
+    if source == "users.json":
+        head = f"{tag}: список клиентов в конфиге Xray расходится с users.json"
+    else:
+        head = f"{tag}: список клиентов повреждён (расходится с сохранённым эталоном)"
+    lines = []
+    if diff.get("empty"):
+        lines.append("• список клиентов ПУСТ — подключиться никто не сможет")
+    if diff.get("insane"):
+        lines.append("• битые записи (id не является UUID): "
+                     + _shorten(diff["insane"]))
+    if diff.get("missing"):
+        lines.append("• пропали из конфига: "
+                     + _label_ids(diff["missing"], expected))
+    if diff.get("unknown"):
+        lines.append("• посторонние клиенты (нет в эталоне): "
+                     + _label_ids(diff["unknown"], current))
+    if diff.get("mismatch"):
+        lines.append("• email не совпадает с эталоном: "
+                     + _label_ids(diff["mismatch"], current))
+    return head + "\n" + "\n".join(lines)
+
+
+def _tg_drift_text(tg_notes: list, suffix: str = "", limit: int = 800) -> str:
+    """Склейка human-заметок для TG: обрезка целыми блоками (не посередине
+    строки), суффикс-пояснение действия watchdog."""
+    parts = [p for p in (tg_notes or []) if p]
+    text = "\n".join(parts)
+    if len(text) > limit:
+        keep, total = [], 0
+        for p in parts:
+            if total + len(p) + 1 > limit - 120:
+                break
+            keep.append(p)
+            total += len(p) + 1
+        cut = len(parts) - len(keep)
+        text = "\n".join(keep)
+        if cut > 0:
+            text += f"\n… (ещё по {cut} инбаунд(ам) — см. users-watchdog.log)"
+    if suffix:
+        text += f"\n{suffix}"
+    return text[:1000]
+
+
 # ── Last resort: свежий валидный .bak ─────────────────────────────────────────
 def _clients_from_bak(tag: str, server_port: int) -> list:
     """Ищет clients того же инбаунда в свежих бэкапах config.json.
@@ -653,7 +725,8 @@ def _cycle_inner(force: bool) -> int:
     # ── Сбор расхождений по всем конфигам/инбаундам ──────────────────────
     # restore_jobs: {cfg_path: {tag: (new_clients, source)}}
     restore_jobs: dict = {}
-    drift_notes: list = []
+    drift_notes: list = []   # технические (лог)
+    tg_notes: list = []      # человекочитаемые (TG; кейс окт.2026 №9)
     confirmed: dict = {}
 
     for path in paths:
@@ -679,6 +752,9 @@ def _cycle_inner(force: bool) -> int:
                                    f"— конфиг не тронут")
                     drift_notes.append(f"{tag}: users.json не дал ни одного "
                                        f"валидного клиента")
+                    tg_notes.append(f"{tag}: users.json пуст или без валидных "
+                                    f"пользователей — конфиг не тронут "
+                                    f"(min-clients guard)")
                     continue
             else:
                 # 'other'-инбаунды (chain «entry@chain», exit и пр.):
@@ -703,6 +779,10 @@ def _cycle_inner(force: bool) -> int:
                                    f"восстановления не найден — уведомление")
                     drift_notes.append(f"{tag}: повреждён, источник "
                                        f"восстановления отсутствует")
+                    tg_notes.append(f"{tag}: клиенты повреждены, "
+                                    f"авто-восстановление невозможно (нет "
+                                    f"снапшота и свежего бэкапа) — требуется "
+                                    f"вмешательство администратора")
                     continue
 
             diff = _diff_clients(current, expected, cfg.get("remove_unknown_clients",
@@ -720,6 +800,8 @@ def _cycle_inner(force: bool) -> int:
                     f"insane=[{_shorten(diff['insane'])}] empty={diff['empty']}")
             drift_notes.append(note)
             _log("WARN", note)
+            tg_notes.append(_human_drift_note(tag, diff, current, expected,
+                                               source))
 
             if action == "none":
                 continue
@@ -751,7 +833,9 @@ def _cycle_inner(force: bool) -> int:
     if drift_notes and action != "restore":
         st["last_status"] = "notify_only"
         if action == "notify":
-            _tg_event("users_drift", "; ".join(drift_notes)[:800], cfg)
+            _tg_event("users_drift",
+                      _tg_drift_text(tg_notes, "конфиг не менялся "
+                                       "(режим: только уведомления)"), cfg)
         _log("WARN", f"действие={action}: дрейф не устранялся")
         st["last_check"] = _now_iso()
         _save_wd_state(st)
@@ -761,7 +845,10 @@ def _cycle_inner(force: bool) -> int:
         # дрейф есть, но восстановление отложено (подтверждение/cooldown/
         # бюджет) — информируем одним событием
         if drift_notes:
-            _tg_event("users_drift", "; ".join(drift_notes)[:800], cfg)
+            _tg_event("users_drift",
+                      _tg_drift_text(tg_notes, "конфиг пока не менялся — дрейф "
+                                       "подтверждается перед "
+                                       "авто-восстановлением"), cfg)
             st["last_status"] = "drift_pending"
         else:
             st["last_status"] = "ok"
@@ -809,11 +896,13 @@ def _cycle_inner(force: bool) -> int:
             for tag, (cl, src) in patches.items():
                 st.setdefault("snapshots", {})[tag] = cl
                 _tg_event("users_restored",
-                          f"{tag}: clients восстановлены (источник: {src})", cfg)
+                          f"{tag}: список клиентов восстановлен автоматически "
+                          f"(источник: {src}), Xray перезапущен", cfg)
         else:
             failed_any = True
             _tg_event("users_restore_failed",
-                      f"{path.name}: восстановление не удалось, применён откат", cfg)
+                      f"восстановление не удалось ({path.name}), применён откат "
+                      f"к исходному конфигу", cfg)
 
     if restored_any:
         st["last_restore_ts"] = _now()

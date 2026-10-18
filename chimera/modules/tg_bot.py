@@ -268,6 +268,12 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "port_knocking":   "🚪",   # port knocking: события
         "ingress_geoip":   "🛡️",   # ingress-блокировка: события
         "install_complete": "🏁",  # honeypot: установка завершена
+        # users-watchdog (целостность клиентов в конфиге Xray; кейс
+        # окт.2026 №9: события существовали в коде, но шлёт дамп без иконок)
+        "users_drift":     "🧩",   # дрейф клиентов (расхождение с users.json)
+        "users_restored":  "🛠️",   # клиенты восстановлены автоматически
+        "users_restore_failed": "❌",  # авто-восстановление не удалось
+        "users_watchdog_budget": "⛔",  # лимит восстановлений исчерпан
     }
     icon = icons.get(event, "ℹ️")
     text = f"{icon} <b>{header}</b> {detail}\n<i>{ts}</i>"
@@ -2334,6 +2340,11 @@ def do_manage_telegram() -> None:
             "port_knocking":   "Port Knocking: события (открытие/блок)",
             "ingress_geoip":   "Блокировка входящих из РФ: события",
             "install_complete": "Установка компонента завершена",
+            # users-watchdog (целостность клиентов; кейс окт.2026 №9)
+            "users_drift": "Users Watchdog: клиенты в конфиге разошлись с users.json",
+            "users_restored": "Users Watchdog: клиенты восстановлены автоматически",
+            "users_restore_failed": "Users Watchdog: авто-восстановление не удалось",
+            "users_watchdog_budget": "Users Watchdog: лимит восстановлений исчерпан",
         }
 
         print()
@@ -2405,7 +2416,9 @@ def do_manage_telegram() -> None:
                        "awg_failover","exit_set_change","exit_switch",
                        "exit_ip_change","exit_snapshot",
                        "ttl_expiring","ttl_expired","port_knocking",
-                       "ingress_geoip","install_complete"]
+                       "ingress_geoip","install_complete",
+                       "users_drift","users_restored","users_restore_failed",
+                       "users_watchdog_budget"]
             ev_labels = [
                 "Xray упал","Xray восстановился","Сертификат истекает",
                 "Лимит трафика","Daily health-отчёт","Exit-нода недоступна",
@@ -2430,6 +2443,10 @@ def do_manage_telegram() -> None:
                 "TTL: срок истекает","TTL: срок истёк",
                 "Port Knocking: события","Блокировка входящих: события",
                 "Установка завершена",
+                "Users Watchdog: дрейф клиентов",
+                "Users Watchdog: клиенты восстановлены",
+                "Users Watchdog: восстановление не удалось",
+                "Users Watchdog: лимит восстановлений",
             ]
             events = cfg.get("events", {k: True for k in ev_keys})
             print()
