@@ -1130,6 +1130,77 @@ class TestNodeFullPathDirect(unittest.TestCase):
         self.assertFalse(res["infra"])
         self.assertAlmostEqual(res["ms"], 310.0, delta=1.0)   # 0.31 c → мс
 
+    def test_want_ip_kwarg_and_exit_ip(self):
+        """want_ip=True → ipify-проба через временный socks, IP в exit_ip.
+
+        Регрессия кейса окт.2026 №8: exit_switch_watcher звал прямой зонд
+        с want_ip=True, которого у check_node_full_path не было (был
+        только у via-варианта) → TypeError «unexpected keyword argument»
+        на живой ноде, exit_ip_change не работал.
+        """
+        import types as _types
+        import chimera.modules.chain_relay as cr
+
+        class _FakeProc:
+            def poll(self):
+                return None
+            def terminate(self):
+                pass
+            def wait(self, timeout=None):
+                pass
+            def kill(self):
+                pass
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            joined = " ".join(map(str, cmd))
+            if "generate_204" in joined:
+                return _types.SimpleNamespace(returncode=0,
+                                              stdout="204 0.29", stderr="")
+            if "api.ipify.org" in joined:
+                return _types.SimpleNamespace(returncode=0,
+                                              stdout="203.0.113.77\n", stderr="")
+            return _types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        with patch.object(cr, "_find_xray_bin",
+                          return_value="/usr/local/bin/xray"), \
+             patch.object(cr.subprocess, "Popen", return_value=_FakeProc()), \
+             patch.object(cr.subprocess, "run", side_effect=fake_run), \
+             patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
+             patch.object(cr.tempfile, "mkstemp",
+                          return_value=(99, "/tmp/relaycheck_test.json")), \
+             patch("os.write", lambda *a, **kw: None), \
+             patch("os.close", lambda *a, **kw: None), \
+             patch.object(Path, "unlink", lambda self, **kw: None):
+            res = cr.check_node_full_path(_mk_node(), want_ip=True)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["exit_ip"], "203.0.113.77")
+
+        # want_ip=False (дефолт) → ipify-проба не выполняется, exit_ip пуст
+        def fake_run_no_ipify(cmd, **kwargs):
+            joined = " ".join(map(str, cmd))
+            assert "api.ipify.org" not in joined, \
+                "ipify-проба не должна выполняться без want_ip"
+            if "generate_204" in joined:
+                return _types.SimpleNamespace(returncode=0,
+                                              stdout="204 0.29", stderr="")
+            return _types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        with patch.object(cr, "_find_xray_bin",
+                          return_value="/usr/local/bin/xray"), \
+             patch.object(cr.subprocess, "Popen", return_value=_FakeProc()), \
+             patch.object(cr.subprocess, "run",
+                          side_effect=fake_run_no_ipify), \
+             patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
+             patch.object(cr.tempfile, "mkstemp",
+                          return_value=(99, "/tmp/relaycheck_test.json")), \
+             patch("os.write", lambda *a, **kw: None), \
+             patch("os.close", lambda *a, **kw: None), \
+             patch.object(Path, "unlink", lambda self, **kw: None):
+            res2 = cr.check_node_full_path(_mk_node())
+        self.assertTrue(res2["ok"], res2)
+        self.assertEqual(res2["exit_ip"], "")
+
 
 class TestHealthMonitorDirectFullPath(unittest.TestCase):
     """HM: прямая REALITY-нода с ключами → полный зонд, не TCP-пинг

@@ -1139,8 +1139,14 @@ def fmt_icmp_rtt(r: dict) -> str:
 
 def check_node_full_path(nd: dict,
                          curl_timeout: int = 20,
+                         want_ip: bool = False,
                          deep_diag: bool = False) -> dict:
     """Full-path проверка ПРЯМОЙ (без via) exit-ноды: временный xray-клиент + curl.
+
+    want_ip=True — после успешной лестницы проб дополнительно спрашивает
+    внешний IP (https://api.ipify.org через тот же временный socks) и
+    кладёт его в res["exit_ip"] (зеркалит check_via_node_full_path;
+    нужно exit_switch_watcher для детекта смены exit-IP).
 
     Поднимается отдельный xray (socks 127.0.0.1:<free port>) с ЕДИНСТВЕННЫМ
     REALITY-outbound ноды (ключи из state.json), через него гоняется лестница
@@ -1260,6 +1266,20 @@ def check_node_full_path(nd: dict,
                                  "работает")
                 if res["xray_tail"]:
                     res["detail"] += f"  |  xray: {res['xray_tail'][-120:]}"
+
+            # exit-IP (опционально; зеркалит check_via_node_full_path —
+            # живой кейс окт.2026 №8: exit_switch_watcher следит за сменой
+            # внешнего IP прямых нод, раньше параметр был только у via-зонда)
+            if res["ok"] and want_ip:
+                r2 = subprocess.run(
+                    ["curl", "-s", "-m", str(curl_timeout),
+                     "-x", f"socks5h://127.0.0.1:{socks_port}",
+                     "https://api.ipify.org"],
+                    capture_output=True, text=True,
+                    timeout=curl_timeout + 10)
+                ip = (r2.stdout or "").strip()
+                if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', ip):
+                    res["exit_ip"] = ip
             return res
 
     except Exception as e:
