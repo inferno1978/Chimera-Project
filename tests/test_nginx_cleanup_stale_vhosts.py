@@ -22,6 +22,25 @@ from unittest.mock import MagicMock, patch
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+# Анти-загрязнение сьюта (окт.2026, кейс №8): _setup_core_in_sysmodules()
+# ниже регистрирует фейковые chimera / chimera.modules / chimera._core,
+# если их ещё нет в sys.modules. Без восстановления фейки доживали до
+# конца pytest-процесса и ломали последующие тесты (test_core_dynamic_
+# version: import chimera → фейк-пакет без __version__ → _get_version()
+# → "unknown"). Снапшот до первой установки, восстановление — в
+# tearDownModule (паттерн — как в test_certmon_v2.py / test_b4_monitor.py).
+_CHIMERA_SNAPSHOT = {k: sys.modules.get(k) for k in
+                     ("chimera", "chimera.modules", "chimera._core")}
+
+
+def tearDownModule():
+    """Снять фейки sys.modules после модуля (анти-загрязнение сьюта)."""
+    for k, v in _CHIMERA_SNAPSHOT.items():
+        if v is not None:
+            sys.modules[k] = v
+        else:
+            sys.modules.pop(k, None)
+
 
 def _setup_core_in_sysmodules():
     """Создаёт фейковый chimera._core и регистрирует chimera.modules.

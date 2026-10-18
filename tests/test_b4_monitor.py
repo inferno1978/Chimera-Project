@@ -54,6 +54,25 @@ if "chimera" not in sys.modules:
     sys.modules["chimera"] = pkg
 sys.modules["chimera._core"] = fake_core
 
+
+def tearDownModule():
+    """Снять фейки sys.modules после модуля (анти-загрязнение сьюта).
+
+    До фикса (окт.2026, кейс №8) фейковые chimera (пакет без __version__)
+    и chimera._core оставались в sys.modules до конца pytest-процесса:
+    последующие в том же прогоне test_core_dynamic_version (import chimera
+    → фейк без __version__ → _get_version()="unknown", 6 тестов) и
+    test_cron_subprocess_integration (import awg_standalone с фейковым
+    _core, 1 тест) краснели при чанковом прогоне, хотя поодиночке зелёные.
+    Паттерн восстановления — как в test_certmon_v2.py.
+    """
+    for k, v in _saved.items():
+        if v is not None:
+            sys.modules[k] = v
+        else:
+            sys.modules.pop(k, None)
+
+
 from chimera.modules import b4_monitor as bm   # noqa: E402
 
 

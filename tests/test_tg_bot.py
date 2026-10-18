@@ -729,10 +729,18 @@ class TestGeneratedBotHardening(unittest.TestCase):
         self.assertIn('f"API error {method} (попытка {_att}/3): {e}"', script)
 
     def test_api_proxy_support_present(self):
-        """api() читает proxy-ключ из telegram.json при каждом вызове (фикс 4e645199)."""
+        """Прокси из telegram.json (фикс 4e645199, рефактор 13.10.2026).
+
+        Было: urllib + ProxyHandler. Стало: http.client keep-alive,
+        _api_connect() открывает HTTP CONNECT-туннель при новом
+        соединении; proxy-ключ по-прежнему читается из telegram.json.
+        Тест актуализирован под новую реализацию (маркер ProxyHandler
+        исчез вместе с urllib — функционал сохранён).
+        """
         script = self._script()
-        self.assertIn("ProxyHandler", script)
         self.assertIn('str(_pc.get("proxy") or "").strip()', script)
+        self.assertIn("_api_connect", script)
+        self.assertIn('conn.set_tunnel("api.telegram.org", 443)', script)
 
     def test_send_routes_via_api(self):
         """send() идёт через api() — наследует прокси и ретраи, не дублирует логику."""
