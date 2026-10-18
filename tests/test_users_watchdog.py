@@ -21,6 +21,9 @@ Unit-тесты для chimera/modules/users_watchdog.py.
   G. Systemd-юниты: wrapper-скрипт (лёгкий запуск без _core), сервис,
      таймер с интервалом, install/remove, reapply.
   H. Проводка: main.py CLI, пункт меню UW в _core.py, stdlib-only импорт.
+  I. Человекочитаемые TG-тексты (кейс окт.2026 №9): вместо сырого дампа
+     «missing=[—] unknown=[…] mismatch=[—] insane=[—] empty=False» —
+     русские буллеты, email-метки, умная обрезка; иконки/подписи в tg_bot.
 ───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -807,6 +810,171 @@ class TestWiring(unittest.TestCase):
             uw._diff_clients([{"id": "u1"}], GOOD_CLIENTS, True)))
         self.assertNotEqual(uw._diff_fingerprint(d), uw._diff_fingerprint(
             uw._diff_clients([], GOOD_CLIENTS, True)))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  I. Человекочитаемые TG-тексты (кейс окт.2026 №9: «абракадабра» в TG)
+# ─────────────────────────────────────────────────────────────────────────────
+class TestHumanDriftText(unittest.TestCase):
+    """Форматирование дрейфа для TG: русские буллеты вместо сырого дампа."""
+
+    def test_client_label_with_email(self):
+        clients = [{"id": UUID1, "email": "user@site.online"}]
+        self.assertEqual(uw._client_label(UUID1, clients),
+                         f"user@site.online ({UUID1[:13]}…)")
+
+    def test_client_label_without_email(self):
+        self.assertEqual(uw._client_label(UUID1, []), f"{UUID1[:13]}…")
+
+    def test_client_label_artifact_id_not_cut(self):
+        # короткий артефактный id (инцидент u1/a@x) не обрезается и без «…»
+        self.assertEqual(uw._client_label("u1", []), "u1")
+
+    def test_label_ids_limit(self):
+        ids = [UUID1, UUID2, UUID3, "1-2-3-4-5-6-7-8-9-0-a-b"]
+        out = uw._label_ids(ids, [], n=3)
+        self.assertIn("(+1)", out)
+        self.assertNotIn("1-2-3-4-5-6-7-8-9-0-a-b", out)
+
+    def test_human_note_unknown_screenshot_case(self):
+        """Точный кейс скрина от админа: посторонний UUID в inbound-vless.
+        В тексте НЕ должно быть сырого дампа."""
+        current = GOOD_CLIENTS + [{"id": UUID3, "email": "intruder@evil"}]
+        diff = uw._diff_clients(current, GOOD_CLIENTS, True)
+        text = uw._human_drift_note("inbound-vless", diff, current,
+                                    GOOD_CLIENTS, "users.json")
+        self.assertIn("расходится с users.json", text)
+        self.assertIn("посторонние клиенты", text)
+        self.assertIn("intruder@evil", text)
+        # никакой «абракадабры»:
+        for raw in ("missing=[", "unknown=[", "mismatch=[", "insane=[",
+                    "empty=False"):
+            self.assertNotIn(raw, text, f"сырой дамп {raw} просочился в TG")
+
+    def test_human_note_full_drift(self):
+        current = [{"id": "u1", "email": "a@x"},
+                   {"id": UUID1, "email": "wrong@site"}]
+        expected = [GOOD_CLIENTS[0], GOOD_CLIENTS[1]]
+        diff = uw._diff_clients(current, expected, True)
+        text = uw._human_drift_note("inbound-vless", diff, current,
+                                    expected, "users.json")
+        self.assertIn("битые записи", text)
+        self.assertIn("u1", text)
+        self.assertIn("пропали из конфига", text)
+        self.assertIn("email не совпадает", text)
+        self.assertIn("wrong@site", text)
+
+    def test_human_note_empty_clients(self):
+        diff = uw._diff_clients([], GOOD_CLIENTS, True)
+        self.assertTrue(diff["empty"])
+        text = uw._human_drift_note("inbound-vless", diff, [],
+                                    GOOD_CLIENTS, "users.json")
+        self.assertIn("ПУСТ", text)
+
+    def test_human_note_other_inbound_source(self):
+        # other-инбаунды (chain-exit): эталон — снапшот, не users.json
+        current = [{"id": "u1", "email": "a@x"}]
+        expected = [{"id": UUID1, "email": "entry@chain"}]
+        diff = uw._diff_clients(current, expected, True)
+        text = uw._human_drift_note("chain-exit-1", diff, current,
+                                    expected, "snapshot")
+        self.assertIn("повреждён", text)
+        self.assertNotIn("users.json", text)
+
+    def test_tg_drift_text_suffix(self):
+        out = uw._tg_drift_text(["нота-1", "нота-2"],
+                                suffix="конфиг не менялся")
+        self.assertEqual(out, "нота-1\nнота-2\nконфиг не менялся")
+
+    def test_tg_drift_text_trim_whole_blocks(self):
+        # 5 нот по ~300 символов не влезают в лимит — обрезка целыми
+        # блоками, без обрыва посередине строки
+        notes = [f"нота-{i} " + "x" * 290 for i in range(5)]
+        out = uw._tg_drift_text(notes, suffix="суффикс")
+        self.assertLessEqual(len(out), 1000)
+        self.assertIn("ещё по", out)
+        self.assertIn("суффикс", out)
+        self.assertNotIn(notes[-1], out)      # последняя нота отброшена целиком
+        self.assertIn(notes[0], out)          # первая сохранена целиком
+
+
+class TestTgEventHumanCycle(unittest.TestCase):
+    """e2e: _cycle в notify-режиме шлёт users_drift человекочитаемым
+    текстом (сырой дамп больше не уходит в Telegram)."""
+
+    def test_notify_cycle_sends_human_text(self):
+        env = _Env()
+        sent = []
+        with patch.object(uw, "_tg_event",
+                          side_effect=lambda ev, detail="", cfg=None:
+                          sent.append((ev, detail))):
+            try:
+                # посторонний клиент в главном инбаунде (кейс со скрина)
+                cfg = env.read_cfg()
+                cfg["inbounds"][0]["settings"]["clients"] = \
+                    GOOD_CLIENTS + [{"id": UUID3, "email": "intruder@evil"}]
+                env.cfg_path.write_text(json.dumps(cfg))
+                wd = json.loads(
+                    (env.state_dir / "users-watchdog.json").read_text())
+                wd["action_on_mismatch"] = "notify"
+                (env.state_dir / "users-watchdog.json").write_text(
+                    json.dumps(wd))
+
+                rc = env.cycle()
+                self.assertEqual(rc, 0)
+                self.assertTrue(sent, "users_drift не отправлен")
+                ev, detail = sent[0]
+                self.assertEqual(ev, "users_drift")
+                self.assertIn("посторонние клиенты", detail)
+                self.assertIn("intruder@evil", detail)
+                self.assertIn("конфиг не менялся", detail)
+                for raw in ("missing=[", "unknown=[", "mismatch=[",
+                            "insane=[", "empty=False"):
+                    self.assertNotIn(raw, detail,
+                                     f"сырой дамп {raw} уходит в TG")
+            finally:
+                env.close()
+
+
+class TestTgWiringUsersWatchdog(unittest.TestCase):
+    """Иконки и подписи событий users-* в tg_bot (по паттерну кейса №8)."""
+
+    _EV = ("users_drift", "users_restored",
+           "users_restore_failed", "users_watchdog_budget")
+
+    def test_icons_in_tg_notify_event(self):
+        from chimera.modules import tg_bot
+        import inspect
+        src = inspect.getsource(tg_bot.tg_notify_event)
+        for ev in self._EV:
+            self.assertIn(f'"{ev}"', src, f"нет иконки для {ev}")
+
+    def test_labels_in_manage_menu(self):
+        from chimera.modules import tg_bot
+        import inspect, re
+        src = inspect.getsource(tg_bot.do_manage_telegram)
+        body = re.search(r"event_labels = \{(.*?)\}", src, re.S)
+        self.assertIsNotNone(body, "event_labels не найден")
+        for ev in self._EV:
+            self.assertIn(f'"{ev}"', body.group(1),
+                          f"{ev} отсутствует в event_labels")
+
+    def test_toggle_lists_contain_events(self):
+        from chimera.modules import tg_bot
+        import inspect, re
+        src = inspect.getsource(tg_bot.do_manage_telegram)
+        keys_block = re.search(r"ev_keys = \[(.*?)\]", src, re.S).group(1)
+        keys = re.findall(r'"([a-z_0-9]+)"', keys_block)
+        labels_block = re.search(r"ev_labels = \[(.*?)\]\n\s+events",
+                                  src, re.S).group(1)
+        labels = re.findall(r'"([^"]+)"', labels_block)
+        self.assertEqual(len(keys), len(labels),
+                         "ev_keys и ev_labels разъехались")
+        for ev in self._EV:
+            self.assertIn(ev, keys)
+            # подпись для каждого ключа существует (паритет позиций)
+        idx = keys.index("users_drift")
+        self.assertIn("Users Watchdog", labels[idx])
 
 
 if __name__ == "__main__":
