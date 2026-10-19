@@ -273,6 +273,23 @@ def _ufw_delete_range(range_start: int, range_end: int, proto: str) -> None:
         ], quiet=True)
 
 
+def _rc_local_ensure_guard(content: str) -> str:
+    """Гарантирует ipset-guard ПЕРЕД iptables-restore в rc.local (кейс №10).
+
+    Дамп rules.v4 ссылается на ipset-ы — без существующих сетов
+    iptables-restore падает на первом же --match-set. Guard-строка
+    восстанавливает /etc/iptables/ipset-boot.conf (синхронизируется
+    persist-точками, см. ipset_boot_sync). Идемпотентно: guard уже
+    есть — содержимое не меняется.
+    """
+    from chimera.modules.ipset_boot_sync import IPSET_RESTORE_CMD_SHELL
+    restore_cmd = "iptables-restore < /etc/iptables/rules.v4"
+    if restore_cmd in content and IPSET_RESTORE_CMD_SHELL not in content:
+        content = content.replace(
+            restore_cmd, IPSET_RESTORE_CMD_SHELL + "\n" + restore_cmd, 1)
+    return content
+
+
 def _persist_iptables() -> None:
     """Сохраняет правила iptables для восстановления после перезагрузки."""
     # Метод 1: iptables-persistent / netfilter-persistent
@@ -283,6 +300,14 @@ def _persist_iptables() -> None:
                 Path("/etc/iptables/rules.v4").write_text(r.stdout)
         except Exception:
             pass
+
+    # Кейс окт.2026 №10: синхронизируем ipset-boot.conf — дамп ссылается
+    # на ipset-ы, ранний restore без них падает (см. ipset_boot_sync).
+    try:
+        from chimera.modules.ipset_boot_sync import sync_ipset_boot_conf
+        sync_ipset_boot_conf()
+    except Exception:
+        pass
 
     # Метод 2: rc.local как fallback
     rc_local = Path("/etc/rc.local")
@@ -296,14 +321,18 @@ def _persist_iptables() -> None:
                 lines.insert(-1, restore_cmd)
             else:
                 lines.append(restore_cmd)
-            rc_local.write_text("\n".join(lines) + "\n")
+            content = "\n".join(lines) + "\n"
+        content = _rc_local_ensure_guard(content)
+        rc_local.write_text(content)
     else:
-        rc_local.write_text(
+        content = (
             "#!/bin/sh -e\n"
             f"# Restored by vless-installer port-hopping\n"
             f"{restore_cmd}\n"
             "exit 0\n"
         )
+        content = _rc_local_ensure_guard(content)
+        rc_local.write_text(content)
         rc_local.chmod(0o755)
 
     # Метод 3: systemd oneshot service (наиболее надёжный)

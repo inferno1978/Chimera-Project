@@ -475,16 +475,14 @@ def _pk_persist() -> None:
     except Exception:
         pass
     # ipset (both IPv4 + IPv6)
+    # Кейс окт.2026 №10: вместо legacy-аппенда в /etc/iptables/ipsets (файл
+    # никто не читал при загрузке, а повторные аппенды дублировали
+    # create-строки) — синхронизация /etc/iptables/ipset-boot.conf: его
+    # восстанавливает telemt-iptables.service ПЕРВЫМ ExecStart, до
+    # iptables-restore (иначе restore падает на --match-set по xray_knocked).
     try:
-        ipset_save_path = Path("/etc/iptables/ipsets")
-        if ipset_save_path.parent.exists():
-            for set_name in (_PK_KNOCKED_SET, _PK_KNOCKED_SET_V6):
-                if _pk_ipset_exists(set_name):
-                    r = _run(["ipset", "save", set_name], capture=True)
-                    if r.returncode == 0 and r.stdout:
-                        # append (both sets in same file)
-                        with ipset_save_path.open("a") as f:
-                            f.write(r.stdout)
+        from chimera.modules.ipset_boot_sync import sync_ipset_boot_conf
+        sync_ipset_boot_conf()
     except Exception:
         pass
 

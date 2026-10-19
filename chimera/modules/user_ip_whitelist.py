@@ -739,17 +739,20 @@ def install_cron() -> bool:
 
     # Cron-скрипт — bash-wrapper с явным sys.path (cwd у cron произвольный,
     # поэтому импорт chimera обязан получать путь установки явно — как в fw_guard).
+    # Ошибки — в лог, а не в /dev/null (кейс окт.2026 №10: битый враппер
+    # 5 недель молча падал с ModuleNotFoundError и никто не замечал).
     python_bin = sys.executable or "/usr/bin/python3"
     CRON_SCRIPT.write_text(
         f"#!/bin/bash\n"
         f"# Авто-пересборка clients_wl ipset из users.json.\n"
         f"# Вызывается cron каждые {CRON_INTERVAL_MIN} минут.\n"
+        f"# Ошибки пишутся в /var/log/chimera-clients-wl.log.\n"
         f"{python_bin} -c '\n"
         f"import sys\n"
         f"sys.path.insert(0, \"{_installer_path()}\")\n"
         f"from chimera.modules.user_ip_whitelist import rebuild_clients_ipset\n"
         f"rebuild_clients_ipset()\n"
-        f"' >/dev/null 2>&1\n"
+        f"' >/dev/null 2>>/var/log/chimera-clients-wl.log\n"
     )
     CRON_SCRIPT.chmod(0o755)
 
@@ -893,12 +896,13 @@ def install_cleanup_cron() -> bool:
         f"# Chimera — age-based cleanup для IP whitelist.\n"
         f"# Запускается cron раз в сутки в 04:00.\n"
         f"# Удаляет незакреплённые IP старше retention_days.\n"
+        f"# Ошибки пишутся в /var/log/chimera-clients-wl.log (кейс №10).\n"
         f"{python_bin} -c '\n"
         f"import sys\n"
         f"sys.path.insert(0, \"{_installer_path()}\")\n"
         f"from chimera.modules.user_ip_whitelist import cleanup_old_ips\n"
         f"cleanup_old_ips()\n"
-        f"' >/dev/null 2>&1\n"
+        f"' >/dev/null 2>>/var/log/chimera-clients-wl.log\n"
     )
     CLEANUP_CRON_SCRIPT.chmod(0o755)
 

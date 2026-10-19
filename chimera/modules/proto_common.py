@@ -157,6 +157,21 @@ def proto_gen_password(length: int = 16) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 #  IPTABLES PERSISTENCE
 # ══════════════════════════════════════════════════════════════════════════════
+def _ipset_boot_sync_best_effort() -> None:
+    """Синхронизация /etc/iptables/ipset-boot.conf (кейс окт.2026 №10).
+
+    Дамп rules.v4 может ссылаться на ipset-ы (--match-set) — без boot-файла
+    ранний iptables-restore (telemt-iptables/rc.local) падает на первом же
+    --match-set. Общий persist-хелпер обязан держать boot-файл свежим.
+    Никогда не роняет вызывающий код (persist — косметика).
+    """
+    try:
+        from chimera.modules.ipset_boot_sync import sync_ipset_boot_conf
+        sync_ipset_boot_conf()
+    except Exception:
+        pass
+
+
 def proto_ipt_persist() -> None:
     """Persist current iptables rules so they survive a reboot.
 
@@ -171,11 +186,16 @@ def proto_ipt_persist() -> None:
     мог блокировать удаление модуля неограниченно долго. Теперь
     ждём не дольше 120с; таймаут НЕ роняет вызывающий код (persist —
     косметика, правила в живом iptables уже применены).
+
+    Кейс окт.2026 №10: в обоих путях — синхронизация ipset-boot.conf:
+    boot-файл с определениями сетов обязан соответствовать свежему
+    дампу правил (восстанавливается при загрузке до iptables-restore).
     """
     try:
         if shutil.which("netfilter-persistent"):
             subprocess.run(["netfilter-persistent", "save"],
                            capture_output=True, text=True, timeout=120)
+            _ipset_boot_sync_best_effort()
             return
         rules_dir = Path("/etc/iptables")
         rules_dir.mkdir(parents=True, exist_ok=True)
@@ -183,6 +203,7 @@ def proto_ipt_persist() -> None:
                            timeout=60)
         if r.returncode == 0 and r.stdout:
             (rules_dir / "rules.v4").write_text(r.stdout)
+        _ipset_boot_sync_best_effort()
     except subprocess.TimeoutExpired:
         pass
 

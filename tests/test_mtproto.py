@@ -1959,5 +1959,78 @@ class TestMtprotoCloseAllPorts(unittest.TestCase):
         self.assertEqual(_mca.call_args.kwargs.get("extra_port"), 9443)
 
 
+class TestEnsureIptRestoreService(unittest.TestCase):
+    """_ensure_ipt_restore_service — юнит бут-восстановления (кейс №10).
+
+    telemt-iptables.service обязан восстанавливать /etc/iptables/ipset-boot.conf
+    ПЕРВЫМ ExecStart — до iptables-restore: дамп правил ссылается на ipset-ы,
+    которых при раннем старте (Before=network-pre) ещё не существует.
+    """
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._svc = self._tmp / "telemt-iptables.service"
+        self._v4 = self._tmp / "rules.v4"
+        self._v6 = self._tmp / "rules.v6"
+        self._v4.write_text("*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n")
+        self._v6.write_text("*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _ensure(self):
+        """Вызвать _ensure_ipt_restore_service с перенаправленными путями."""
+        from chimera.modules import mtproto
+        real_path = Path
+        mapping = {
+            "/etc/systemd/system/telemt-iptables.service": self._svc,
+            "/etc/iptables/rules.v4": self._v4,
+            "/etc/iptables/rules.v6": self._v6,
+        }
+
+        def fake_path(p, *a, **kw):
+            if isinstance(p, str) and p in mapping:
+                return mapping[p]
+            return real_path(p, *a, **kw)
+
+        with patch.object(mtproto, "Path", fake_path), \
+             patch.object(mtproto, "_run") as mock_run:
+            mtproto._ensure_ipt_restore_service()
+        return mock_run
+
+    def test_ipset_restore_execstart_goes_first(self):
+        mock_run = self._ensure()
+        text = self._svc.read_text()
+        self.assertIn("ipset restore -! -f /etc/iptables/ipset-boot.conf", text)
+        self.assertLess(text.index("ipset restore"),
+                        text.index("iptables-restore"),
+                        "ipset-restore обязан идти ПЕРВЫМ ExecStart")
+        self.assertIn("Before=network-pre.target", text)
+        self.assertIn("Type=oneshot", text)
+        self.assertIn("RemainAfterExit=yes", text)
+        # systemctl daemon-reload + enable
+        cmds = [c.args[0] for c in mock_run.call_args_list if c.args]
+        self.assertTrue(any("daemon-reload" in c for c in cmds),
+                        f"daemon-reload не вызван: {cmds}")
+
+    def test_both_rules_restored_after_ipset(self):
+        self._ensure()
+        text = self._svc.read_text()
+        self.assertIn(f"iptables-restore < {self._v4}", text)
+        self.assertIn(f"ip6tables-restore < {self._v6}", text)
+        self.assertLess(text.index("ipset restore"), text.index(f"iptables-restore < {self._v4}"))
+        self.assertLess(text.index("ipset restore"), text.index(f"ip6tables-restore < {self._v6}"))
+
+    def test_unit_written_even_without_rules_files(self):
+        """Нет rules.v4/v6 — юнит всё равно пишет ipset-guard (не пустой)."""
+        self._v4.unlink()
+        self._v6.unlink()
+        self._ensure()
+        text = self._svc.read_text()
+        self.assertIn("ipset restore -! -f /etc/iptables/ipset-boot.conf", text)
+        self.assertNotIn("iptables-restore", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -186,5 +186,40 @@ class TestLog(unittest.TestCase):
         self.assertIn("red text", content)
 
 
+class TestRcLocalEnsureGuard(unittest.TestCase):
+    """_rc_local_ensure_guard — ipset-guard перед iptables-restore (кейс №10).
+
+    Дамп rules.v4 ссылается на ipset-ы: без существующих сетов
+    iptables-restore в rc.local падает на первом же --match-set.
+    """
+
+    def test_guard_inserted_before_restore(self):
+        from chimera.modules import port_hopping as ph
+        from chimera.modules.ipset_boot_sync import IPSET_RESTORE_CMD_SHELL
+        content = ("#!/bin/sh -e\n"
+                   "# Restored by vless-installer port-hopping\n"
+                   "iptables-restore < /etc/iptables/rules.v4\n"
+                   "exit 0\n")
+        out = ph._rc_local_ensure_guard(content)
+        self.assertIn(IPSET_RESTORE_CMD_SHELL, out)
+        self.assertIn("iptables-restore", out)
+        self.assertLess(out.index("ipset restore"),
+                        out.index("iptables-restore"),
+                        "guard обязан идти ПЕРЕД iptables-restore")
+        self.assertIn("|| true", out, "guard не должен ронять rc.local (-e)")
+
+    def test_already_guarded_unchanged(self):
+        from chimera.modules import port_hopping as ph
+        from chimera.modules.ipset_boot_sync import IPSET_RESTORE_CMD_SHELL
+        content = (IPSET_RESTORE_CMD_SHELL + "\n"
+                   "iptables-restore < /etc/iptables/rules.v4\n")
+        self.assertEqual(ph._rc_local_ensure_guard(content), content)
+
+    def test_no_restore_cmd_untouched(self):
+        from chimera.modules import port_hopping as ph
+        content = "#!/bin/sh -e\nexit 0\n"
+        self.assertEqual(ph._rc_local_ensure_guard(content), content)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
