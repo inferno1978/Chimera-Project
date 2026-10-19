@@ -30,6 +30,14 @@ Unit-тесты модуля самообновления Chimera (chimera/modul
  11. start_background_check — выключенная проверка не создаёт тред;
      включённая делает fetch и не падает на ошибках.
  12. _write_cache — атомарная запись, tmp-файл не остаётся.
+ 13. upstream-aware fetch (кейс окт.2026 №11: локальная ветка
+     chimera-v5 с upstream origin/main): upstream_branch (merge → имя,
+     чужой remote игнорируется), remote_default_branch (symref-парсинг),
+     _fetch_err_is_missing_ref, _fetch_origin_branch (порядок целей +
+     фолбэк на дефолтную ветку только при «ветки нет», без лишнего
+     ls-remote при сетевых ошибках); update_info фетчит upstream-ветку и
+     пишет remote_branch/fetch_err в инфо и кэш; cron_tick тянет
+     origin/<upstream> вместо локального имени.
 """
 from __future__ import annotations
 
@@ -543,6 +551,207 @@ class TestWriteCache(UpdaterTempBase):
     def test_unicode_roundtrip(self):
         _write_cache({"branch": "chimera-v5", "note": "ночной апдейт ✓"})
         self.assertEqual(_read_cache()["note"], "ночной апдейт ✓")
+
+
+# ── 13. upstream-aware fetch (кейс окт.2026 №11: chimera-v5 → origin/main) ──
+class TestUpstreamBranch(UpdaterTempBase):
+    """upstream_branch: branch.<B>.merge → имя ветки на origin."""
+
+    def _cfg(self, remote=None, merge=None):
+        def fake_git(args, repo, timeout=updater.GIT_TIMEOUT):
+            a = list(args)
+            if a[:3] == ["config", "--get", "branch.chimera-v5.remote"]:
+                return _cp(0, remote + "\n") if remote else _cp(1)
+            if a[:3] == ["config", "--get", "branch.chimera-v5.merge"]:
+                return _cp(0, merge + "\n") if merge else _cp(1)
+            return _cp(0, "")
+        return patch.object(updater, "_git", side_effect=fake_git)
+
+    def test_origin_upstream_stripped(self):
+        # refs/heads/main → main
+        with self._cfg(remote="origin", merge="refs/heads/main"):
+            self.assertEqual(updater.upstream_branch(self.repo, "chimera-v5"),
+                             "main")
+
+    def test_upstream_in_other_remote_ignored(self):
+        # upstream смотрит в github-зеркало → для origin-фетча не используется
+        with self._cfg(remote="github", merge="refs/heads/chimera-v5"):
+            self.assertIsNone(updater.upstream_branch(self.repo, "chimera-v5"))
+
+    def test_no_upstream_config(self):
+        with self._cfg():
+            self.assertIsNone(updater.upstream_branch(self.repo, "chimera-v5"))
+
+    def test_merge_without_refprefix(self):
+        with self._cfg(remote="origin", merge="main"):
+            self.assertEqual(updater.upstream_branch(self.repo, "chimera-v5"),
+                             "main")
+
+
+class TestRemoteDefaultBranch(UpdaterTempBase):
+    """remote_default_branch: ls-remote --symref origin HEAD → main."""
+
+    def test_parse_symref_line(self):
+        cp = _cp(0, "ref: refs/heads/main\tHEAD\n"
+                    "c15473d6ba39043be1cdbafc59c17b6e5cc9c581\tHEAD\n")
+        with patch.object(updater, "_git", return_value=cp):
+            self.assertEqual(updater.remote_default_branch(self.repo), "main")
+
+    def test_no_symref_line(self):
+        with patch.object(updater, "_git", return_value=_cp(0, "sha\tHEAD\n")):
+            self.assertIsNone(updater.remote_default_branch(self.repo))
+
+    def test_git_error(self):
+        with patch.object(updater, "_git", return_value=_cp(128, "", "fatal")):
+            self.assertIsNone(updater.remote_default_branch(self.repo))
+
+
+class TestMissingRefErr(UpdaterTempBase):
+
+    def test_missing_ref_variants(self):
+        self.assertTrue(updater._fetch_err_is_missing_ref(
+            "fatal: couldn't find remote ref chimera-v5"))
+        self.assertTrue(updater._fetch_err_is_missing_ref(
+            "fatal: could not find remote branch chimera-v5"))
+
+    def test_network_and_empty_not_missing(self):
+        self.assertFalse(updater._fetch_err_is_missing_ref(
+            "error: RPC failed; HTTP 403 curl 22"))
+        self.assertFalse(updater._fetch_err_is_missing_ref(
+            "Failed to connect: timed out"))
+        self.assertFalse(updater._fetch_err_is_missing_ref(""))
+
+
+class TestFetchOriginBranch(UpdaterTempBase):
+
+    def test_fetches_upstream_branch(self):
+        # локальная chimera-v5 → фетчим origin/main, а не локальное имя
+        with patch.object(updater, "upstream_branch", return_value="main"), \
+             patch.object(updater, "_git_retry", return_value=_cp(0)) as m:
+            r, name = updater._fetch_origin_branch(self.repo, "chimera-v5")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(name, "main")
+        m.assert_called_once_with(["fetch", "--quiet", "origin", "main"],
+                                  self.repo, timeout=updater.FETCH_TIMEOUT)
+
+    def test_fallback_to_default_branch(self):
+        # локального имени на origin нет → ls-remote HEAD → фетчим main
+        fetches = [_cp(1, "", "fatal: couldn't find remote ref chimera-v5"),
+                   _cp(0)]
+
+        def fake_retry(args, repo, timeout=None, **kw):
+            return fetches.pop(0)
+
+        with patch.object(updater, "upstream_branch", return_value=None), \
+             patch.object(updater, "_git_retry", side_effect=fake_retry), \
+             patch.object(updater, "remote_default_branch",
+                          return_value="main") as dflt:
+            r, name = updater._fetch_origin_branch(self.repo, "chimera-v5")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(name, "main")
+        dflt.assert_called_once_with(self.repo)
+
+    def test_network_error_no_fallback(self):
+        # сетевая ошибка — ls-remote не дёргается (фолбэк не для сети)
+        with patch.object(updater, "upstream_branch", return_value=None), \
+             patch.object(updater, "_git_retry",
+                          return_value=_cp(1, "", "HTTP 403")) as m, \
+             patch.object(updater, "remote_default_branch") as dflt:
+            r, name = updater._fetch_origin_branch(self.repo, "chimera-v5")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(name, "chimera-v5")
+        self.assertEqual(m.call_count, 1)
+        dflt.assert_not_called()
+
+    def test_fallback_skipped_when_default_equals_local(self):
+        # дефолтная ветка совпала с локальным именем — второй fetch не нужен
+        with patch.object(updater, "upstream_branch", return_value=None), \
+             patch.object(updater, "_git_retry",
+                          return_value=_cp(1, "",
+                                           "fatal: couldn't find remote ref v9")) as m, \
+             patch.object(updater, "remote_default_branch", return_value="v9"):
+            r, name = updater._fetch_origin_branch(self.repo, "v9")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(m.call_count, 1)
+
+
+class TestUpstreamAwareUpdateInfo(UpdaterTempBase):
+    """Живой кейс окт.2026 №11: ветка chimera-v5, upstream — origin/main."""
+
+    def test_update_info_uses_upstream(self):
+        with patch.object(updater, "find_repo_root", return_value=self.repo), \
+             patch.object(updater, "current_branch", return_value="chimera-v5"), \
+             patch.object(updater, "upstream_branch", return_value="main"), \
+             patch.object(updater, "_git_retry", return_value=_cp(0)) as m, \
+             patch.object(updater, "_head",
+                          side_effect=["aaa111", "bbb222"]), \
+             patch.object(updater, "_count_between", side_effect=[2, 0]), \
+             patch.object(updater, "_log_subjects", return_value=[]):
+            info = update_info(refresh=True)
+        self.assertIsNone(info["error"])
+        self.assertEqual(info["remote_branch"], "main")
+        self.assertEqual(m.call_args[0][0],
+                         ["fetch", "--quiet", "origin", "main"])
+        self.assertEqual(info["behind"], 2)
+        self.assertEqual(_read_cache().get("remote_branch"), "main")
+
+    def test_fetch_err_recorded(self):
+        # при падении fetch текст ошибки git попадает в инфо и кэш —
+        # меню показывает его вместо дезинформирующего «сеть/CF»
+        with patch.object(updater, "find_repo_root", return_value=self.repo), \
+             patch.object(updater, "current_branch", return_value="chimera-v5"), \
+             patch.object(updater, "upstream_branch", return_value="main"), \
+             patch.object(updater, "_git_retry",
+                          return_value=_cp(1, "", "error: HTTP 403")):
+            info = update_info(refresh=True)
+        self.assertEqual(info["error"], "fetch-failed")
+        self.assertEqual(info["fetch_err"], "error: HTTP 403")
+        self.assertEqual(_read_cache().get("fetch_err"), "error: HTTP 403")
+
+    def test_fallback_when_local_name_absent_on_origin(self):
+        # upstream не настроен, локального имени на origin нет → main по HEAD
+        def fake_retry(args, repo, timeout=None, **kw):
+            if args[-1] == "chimera-v5":
+                return _cp(1, "", "fatal: couldn't find remote ref chimera-v5")
+            return _cp(0)
+
+        with patch.object(updater, "find_repo_root", return_value=self.repo), \
+             patch.object(updater, "current_branch", return_value="chimera-v5"), \
+             patch.object(updater, "upstream_branch", return_value=None), \
+             patch.object(updater, "_git_retry", side_effect=fake_retry), \
+             patch.object(updater, "remote_default_branch", return_value="main"), \
+             patch.object(updater, "_head",
+                          side_effect=["aaa111", "bbb222"]), \
+             patch.object(updater, "_count_between", side_effect=[0, 0]):
+            info = update_info(refresh=True)
+        self.assertIsNone(info["error"])
+        self.assertEqual(info["remote_branch"], "main")
+        self.assertEqual(info["behind"], 0)
+
+
+class TestCronUpstreamAware(UpdaterTempBase):
+
+    def test_cron_pulls_upstream_branch(self):
+        calls = []
+
+        def fake_retry(args, repo, timeout=None, **kw):
+            calls.append(list(args))
+            return _cp(0)
+
+        with patch.object(updater, "find_repo_root", return_value=self.repo), \
+             patch.object(updater, "current_branch", return_value="chimera-v5"), \
+             patch.object(updater, "upstream_branch", return_value="main"), \
+             patch.object(updater, "_git_retry", side_effect=fake_retry), \
+             patch.object(updater, "_head",
+                          side_effect=["bbb222", "aaa111", "ccc333"]), \
+             patch.object(updater, "_count_between", side_effect=[1, 0]), \
+             patch.object(updater, "tree_state", return_value={"dirty": False}):
+            rc = cron_tick()
+        self.assertEqual(rc, 0)
+        self.assertIn(["fetch", "--quiet", "origin", "main"], calls)
+        self.assertIn(["pull", "--ff-only", "--quiet", "origin", "main"], calls)
+        self.assertIn("OK: обновлён", self.log_file.read_text(encoding="utf-8"))
+        self.assertEqual(_read_cache().get("remote_branch"), "main")
 
 
 if __name__ == "__main__":
