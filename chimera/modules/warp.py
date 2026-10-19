@@ -9,7 +9,10 @@ Cloudflare WARP — нативная связка WireGuard + wgcf (без оф�
     wg-quick (интерфейс поднимается один раз, конфиг использует Table = off,
     поэтому wg-quick никогда не трогает основную таблицу маршрутизации сам).
   • SSH-сессия пользователя и сам Cloudflare-эндпоинт всегда вне туннеля
-    (защита через явные маршруты к реальному, захваченному до WARP, шлюзу).
+    (защита через явные маршруты к реальному, захваченному до WARP, шлюзу;
+    перед FULL набор защищаемых IP пересобирается по ЖИВЫМ SSH-сессиям
+    — ss/who/env, см. _refresh_ssh_protection_set; on-link дефолтный
+    маршрут без via тоже поддерживается — см. _capture_original_route).
   • Фоновый ререзолв доменов в режиме selective — cron */5 мин,
     атомарная синхронизация state.json через fcntl.flock с перечитыванием
     файла перед записью (не затирает UUID пользователей Xray и прочие ключи
@@ -503,38 +506,83 @@ def _inject_table_off(raw_conf: str) -> str:
 # применения режима FULL результат такого пересчёта неотличим от случая,
 # когда WARP уже перехватил маршрутизацию, и "защита" начнёт сама
 # маршрутизировать защищаемый трафик обратно в туннель.
-def _capture_original_route() -> Optional[tuple[str, str]]:
+def _capture_original_route() -> Optional[tuple[Optional[str], str]]:
+    """Захватывает реальный (не-WARP) дефолтный маршрут ДО подъёма туннеля.
+
+    Поддерживает два вида дефолта (живой кейс окт.2026 №12):
+      • `default via GW dev IF ...` — шлюз известен, в файл уходит MAIN_GW=GW;
+      • `default dev IF ...` (on-link, БЕЗ via — так отдают часть провайдеров)
+        — шлюз не выделен, пакеты уходят напрямую в линк; сохраняется только
+        интерфейс (MAIN_GW пустой), защитные маршруты строятся как
+        `ip route add X dev IF` без via (см. _protective_route_cmd).
+
+    Строки с wg-warp ПРОПУСКАЮТСЯ, а не прерывают разбор: при нескольких
+    дефолтных маршрутах (метрики) живой via-default может стоять после
+    wg-warp-строки. Файл ORIG_ROUTE_FILE перезаписывается ТОЛЬКО при
+    успешном захвате — чтобы не затирать ранее сохранённый маршрут
+    показанием `ip route` из состояния, уже проглоченного туннелем.
+    Возвращает (gw, dev), (None, dev) для on-link или None, если годного
+    дефолта нет вовсе."""
     r = _run(["ip", "route", "show", "default"], capture=True, check=False)
     if r.returncode != 0 or not (r.stdout or "").strip():
         return None
     for line in r.stdout.splitlines():
         if WG_INTERFACE in line.lower():
-            return None
+            continue
         parts = line.split()
-        if "via" in parts and "dev" in parts:
+        if "dev" not in parts or parts.index("dev") + 1 >= len(parts):
+            continue
+        dev = parts[parts.index("dev") + 1]
+        if "via" in parts and parts.index("via") + 1 < len(parts):
             gw = parts[parts.index("via") + 1]
-            dev = parts[parts.index("dev") + 1]
             ORIG_ROUTE_FILE.write_text(f"MAIN_GW={gw}\nMAIN_IF={dev}\n")
             return gw, dev
+        # on-link default: шлюза нет, но интерфейс известен — этого достаточно
+        ORIG_ROUTE_FILE.write_text(f"MAIN_GW=\nMAIN_IF={dev}\n")
+        return None, dev
     return None
 
 
-def _load_original_route() -> Optional[tuple[str, str]]:
+def _load_original_route() -> Optional[tuple[Optional[str], str]]:
+    """Читает сохранённый маршрут. gw=None — on-link дефолт (MAIN_GW пустой);
+    файлы старого формата (оба ключа заполнены) читаются как раньше."""
     if not ORIG_ROUTE_FILE.exists():
         return None
-    gw = dev = None
+    gw: Optional[str] = None
+    dev: Optional[str] = None
     for line in ORIG_ROUTE_FILE.read_text().splitlines():
         if line.startswith("MAIN_GW="):
-            gw = line.split("=", 1)[1].strip()
+            gw = line.split("=", 1)[1].strip() or None
         elif line.startswith("MAIN_IF="):
             dev = line.split("=", 1)[1].strip()
-    return (gw, dev) if gw and dev else None
+    return (gw, dev) if dev else None
 
 
-def _ensure_original_route() -> Optional[tuple[str, str]]:
-    """Сначала пробует захватить шлюз заново (первый запуск / смена сети
+def _protective_route_cmd(cidr: str, orig_gw: Optional[str], orig_if: str) -> list[str]:
+    """argv для `ip route add` защитного маршрута: через реальный шлюз
+    (с onlink — почему флаг безусловен, см. докстринг _warp_apply_full_mode)
+    либо, для on-link дефолта без via, напрямую в интерфейс
+    (`ip route add X dev IF` — воспроизводит семантику исходного дефолта,
+    просто более конкретным префиксом, поэтому гарантированно выигрывает
+    у split-default через wg-warp по longest-prefix-match)."""
+    if orig_gw:
+        return ["ip", "route", "add", cidr, "via", orig_gw, "dev", orig_if, "onlink"]
+    return ["ip", "route", "add", cidr, "dev", orig_if]
+
+
+def _route_get(ip: str) -> str:
+    """Текущее решение ядра о маршруте к IP (stdout `ip route get`, пустая
+    строка при ошибке — вызывающий код трактует это как «не подтверждено»)."""
+    r = _run(["ip", "route", "get", ip], capture=True, quiet=True, check=False)
+    return r.stdout or ""
+
+
+def _ensure_original_route() -> Optional[tuple[Optional[str], str]]:
+    """Сначала пробует захватить маршрут заново (первый запуск / смена сети
     провайдера), иначе откатывается на ранее сохранённое значение —
-    актуально, когда вызов происходит уже ПОСЛЕ подъёма wg-warp."""
+    актуально, когда вызов происходит уже ПОСЛЕ подъёма wg-warp.
+    gw=None в кортеже — валидный on-link вариант (защита строится через
+    `dev IF` без via)."""
     fresh = _capture_original_route()
     return fresh if fresh else _load_original_route()
 
@@ -610,11 +658,12 @@ def _ensure_endpoint_route() -> None:
         return
 
     orig = _ensure_original_route()
-    if not orig or not orig[0] or not orig[1]:
-        warn(f"Не удалось определить реальный шлюз сервера — защитный "
-             f"маршрут к эндпоинту WARP ({endpoint_ip}) не добавлен.")
+    if not orig or not orig[1]:
+        warn(f"Не удалось определить реальный маршрут сервера (ни via-default, "
+             f"ни on-link default) — защитный маршрут к эндпоинту WARP "
+             f"({endpoint_ip}) не добавлен.")
         return
-    orig_gw, orig_if = orig
+    orig_gw, orig_if = orig  # orig_gw может быть None (on-link) — это валидно
 
     def _current_route_via_kernel() -> str:
         r = _run(["ip", "route", "get", endpoint_ip], capture=True, quiet=True, check=False)
@@ -627,8 +676,8 @@ def _ensure_endpoint_route() -> None:
         _run(["ip", "route", "del", f"{endpoint_ip}/32"], capture=True, quiet=True, check=False)
 
     def _try_add() -> tuple[bool, str]:
-        r = _run(["ip", "route", "add", f"{endpoint_ip}/32", "via", orig_gw,
-                   "dev", orig_if, "onlink"], capture=True, quiet=True, check=False)
+        r = _run(_protective_route_cmd(f"{endpoint_ip}/32", orig_gw, orig_if),
+                 capture=True, quiet=True, check=False)
         ok = r.returncode == 0 or "File exists" in (r.stderr or "")
         return ok, (r.stderr or "").strip()
 
@@ -644,11 +693,154 @@ def _ensure_endpoint_route() -> None:
         route_ok = add_ok and orig_if in check and WG_INTERFACE not in check
 
     if not route_ok:
+        via_str = f"{orig_if}/{orig_gw}" if orig_gw else f"{orig_if} (on-link)"
         warn(f"Не удалось гарантировать защитный маршрут к эндпоинту WARP "
              f"({endpoint_ip}, в конфиге задан как {endpoint_raw or '?'}) "
-             f"через {orig_if}/{orig_gw}. ip route add: "
+             f"через {via_str}. ip route add: "
              f"{'ok' if add_ok else (add_err or 'ошибка')}; "
              f"ip route get сейчас: {check.strip()[:200] or 'пусто'}.")
+
+
+# =============================================================================
+#  ЗАЩИТА SSH: ЖИВОЕ ОПРЕДЕЛЕНИЕ IP СЕССИЙ (env → ss → who)
+# =============================================================================
+# Живой кейс окт.2026 №12: FULL-режим стабильно обрывал SSH-сессию юзера.
+# Причина — сохранённый в state.json SSH IP к моменту запуска FULL уже не
+# совпадал с реальным адресом клиента (динамический IP / CGNAT / вход из
+# другой сети; автоопределение $SSH_CLIENT под sudo/su не работает, а IP
+# вводился руками при установке), а обновить его можно было только полным
+# циклом удаления/установки WARP. Теперь перед каждым применением FULL
+# набор защищаемых IP пересобирается по ЖИВЫМ SSH-сессиям, state
+# обновляется сам, плюс пункт меню [10] меняет IP руками без переустановки.
+def _is_valid_ipv4(s: str) -> bool:
+    """Строгая валидация IPv4-литерала (без CIDR-суффикса): не loopback
+    (127/8 — ssh через localhost-проброс защиты не требует) и не
+    unspecified (0.0.0.0 из LISTEN-подобных строк ss)."""
+    import ipaddress
+    try:
+        addr = ipaddress.IPv4Address(s)
+    except ValueError:
+        return False
+    return not (addr.is_loopback or addr.is_unspecified)
+
+
+def _live_ssh_peer_ips() -> list[str]:
+    """IPv4-адреса пиров всех живых SSH-сессий сервера, в порядке
+    приоритета источника: env текущего процесса → ss → who.
+
+    • env ($SSH_CLIENT/$SSH_CONNECTION) — работает без root, но не
+      наследуется под sudo/su (см. commit-confirm блок ниже) — поэтому
+      только первый источник, не единственный;
+    • `ss -tnp state established` — установленные соединения, принадлежащие
+      процессу sshd: кастомные порты sshd покрыты по имени процесса, а не
+      по :22. Колонка Process видна только под root — без неё строки без
+      sshd-маркера молча пропускаются (штатный фолбэк на env/who);
+    • `who` — root не нужен, показывает IP в скобках у удалённых сессий.
+
+    Только IPv4 — осознанно: split-default FULL (0.0.0.0/1 + 128.0.0.0/1)
+    не затрагивает IPv6-маршрутизацию, SSH-сессии по v6 туннель не глотает
+    и в защите не нуждаются. Дедуп с сохранением порядка; loopback и
+    unspecified отбрасываются (0.0.0.0 попадает в парсинг LISTEN-строк)."""
+    found: list[str] = []
+
+    def _add(candidate: str) -> None:
+        if candidate and _is_valid_ipv4(candidate) and candidate not in found:
+            found.append(candidate)
+
+    env_ip = _detect_ssh_client_ip()
+    if env_ip:
+        _add(env_ip)
+
+    r = _run(["ss", "-tnp", "state", "established"], capture=True, check=False)
+    if r.returncode == 0:
+        for line in (r.stdout or "").splitlines():
+            if "sshd" not in line:
+                continue
+            # Пир — последняя пара addr:port ПЕРЕД колонкой Process
+            # (users:...). IPv6-пиры [v6]:port тоже распарсятся, но
+            # отфильтруются _is_valid_ipv4 ниже.
+            peer = ""
+            for tok in line.split():
+                if tok.startswith("users:"):
+                    break
+                if ":" in tok:
+                    peer = tok
+            if peer:
+                _add(peer.rsplit(":", 1)[0].strip("[]"))
+
+    r = _run(["who"], capture=True, check=False)
+    if r.returncode == 0:
+        for line in (r.stdout or "").splitlines():
+            # 'user pts/0 2026-10-20 10:00 (203.0.113.9)' / '(1.2.3.4:0)';
+            # локальные/X-сессии '(:0)' матчемся не должны.
+            m = re.search(r"\(([\d.]+)(?::[\d.]+)?\)\s*$", line)
+            if m:
+                _add(m.group(1))
+
+    return found
+
+
+def _refresh_ssh_protection_set(ssh_client_ip: str) -> list[str]:
+    """Пересобирает набор IP для защиты перед применением FULL (а также в
+    диагностике и меню смены IP).
+
+    Источники: переданный/state IP (защищаем всегда — вдруг это вторая
+    живая сессия админа с другого адреса) + все живые SSH-сессии. Если
+    живая сессия найдена и её IP отличается от сохранённого в state —
+    state обновляется на месте (кейс: IP введён руками при установке и с
+    тех пор протух). Возвращает уникальный список голых IPv4 (без /32)."""
+    live = _live_ssh_peer_ips()
+    current = (ssh_client_ip or "").strip()
+    if "/" in current:
+        current = current.split("/", 1)[0].strip()
+
+    protect: list[str] = []
+    if current:
+        if _is_valid_ipv4(current):
+            protect.append(current)
+        else:
+            warn(f"Сохранённый SSH IP ({current!r}) не похож на IPv4 — "
+                 f"защитный маршрут для него не строится.")
+
+    for ip in live:
+        if ip not in protect:
+            protect.append(ip)
+
+    if live and live[0] != current:
+        info(f"SSH IP обновлён из живой сессии: "
+             f"{current or 'не задано'} → {live[0]}"
+             + (f" (живые сессии: {', '.join(live)})" if len(live) > 1 else ""))
+        _state_set("WARP_SSH_CLIENT_IP", live[0])
+        _warp_state_save_autonomously()
+    elif live:
+        info(f"SSH IP подтверждён живой сессией: {live[0]}")
+    elif not protect:
+        warn("SSH client IP не задан (state пуст, живые сессии ss/who/env "
+             "не найдены) — защитный маршрут к SSH не создаётся.")
+
+    return protect
+
+
+def _ensure_ssh_route(ip: str, orig_gw: Optional[str], orig_if: str) -> bool:
+    """Гарантирует защитный /32-маршрут до IP SSH-клиента мимо wg-warp.
+
+    Зеркалит _ensure_endpoint_route(): если ядро сейчас маршрутизирует на
+    этот IP через туннель — сначала убираем неправильный маршрут, затем
+    добавляем правильный (через шлюз с onlink или dev-only для on-link
+    дефолта) и проверяем итог по `ip route get`. True — только когда ядро
+    подтверждает, что трафик до IP уйдёт мимо wg-warp через orig_if."""
+    if WG_INTERFACE in _route_get(ip):
+        _run(["ip", "route", "del", f"{ip}/32"], capture=True, quiet=True, check=False)
+    r = _run(_protective_route_cmd(f"{ip}/32", orig_gw, orig_if),
+             capture=True, quiet=False, check=False)
+    ok = r.returncode == 0 or "File exists" in (r.stderr or "")
+    if ok:
+        chk = _route_get(ip)
+        ok = WG_INTERFACE not in chk and orig_if in chk
+    if not ok:
+        warn(f"Не удалось добавить защитный маршрут к SSH-клиенту ({ip}): "
+             f"{(r.stderr or '').strip()[:200] or 'ядро не подтверждает маршрут мимо ' + WG_INTERFACE}")
+    return ok
 
 
 # =============================================================================
@@ -1004,30 +1196,33 @@ def _warp_apply_full_mode(ssh_client_ip: str) -> None:
 
     orig = _ensure_original_route()
     orig_gw, orig_if = orig if orig else (None, None)
-    if not orig_gw:
-        warn("Не удалось определить реальный шлюз сервера — защита SSH/Endpoint может не сработать.")
+    if not orig_if:
+        warn("Не удалось определить реальный маршрут сервера (ни via-default, "
+             "ни on-link default) — защита SSH/Endpoint может не сработать.")
+    elif not orig_gw:
+        info(f"Дефолтный маршрут без шлюза (on-link, {orig_if}) — защитные "
+             f"маршруты пойдут напрямую через {orig_if}.")
 
     _ensure_endpoint_route()
 
+    # Защита SSH: state IP + все ЖИВЫЕ сессии (ss/who/env); протухший
+    # state обновляется на месте — кейс окт.2026 №12,
+    # см. _refresh_ssh_protection_set.
+    protect_ips = _refresh_ssh_protection_set(ssh_client_ip)
     ssh_route_ok = False
-    if ssh_client_ip and orig_gw:
-        ssh_cidr = ssh_client_ip if "/" in ssh_client_ip else f"{ssh_client_ip}/32"
-        r_ssh = _run(["ip", "route", "add", ssh_cidr, "via", orig_gw,
-                       "dev", orig_if, "onlink"], capture=True, quiet=False, check=False)
-        if r_ssh.returncode == 0 or "File exists" in (r_ssh.stderr or ""):
-            ssh_route_ok = True
-        else:
-            warn(f"Не удалось добавить защитный маршрут к SSH-клиенту "
-                 f"({ssh_client_ip}): {(r_ssh.stderr or '').strip()[:200]}")
-    elif not ssh_client_ip:
-        warn("SSH client IP не задан — защитный маршрут к SSH не создаётся.")
+    if protect_ips and orig_if:
+        ssh_route_ok = True
+        for ip in protect_ips:
+            if not _ensure_ssh_route(ip, orig_gw, orig_if):
+                ssh_route_ok = False
 
     _add_route("0.0.0.0/1")
     _add_route("128.0.0.0/1")
     _warp_state_save_autonomously()
 
     if ssh_route_ok:
-        success("Режим FULL активирован — SSH и Cloudflare Endpoint защищены.")
+        success(f"Режим FULL активирован — SSH ({', '.join(protect_ips)}) "
+                f"и Cloudflare Endpoint защищены.")
     else:
         warn("Режим FULL активирован, НО защитный маршрут к SSH не подтверждён — "
              "продолжайте полагаться на commit-confirm автооткат.")
@@ -1087,16 +1282,16 @@ def _apply_mode(mode: str, ssh_client_ip: str, custom_ips: list[str], custom_dom
 # Единственный режим, ломающий маршрут к собственной SSH-сессии — FULL (он
 # единственный трогает дефолтный маршрут через split-default 0.0.0.0/1 +
 # 128.0.0.0/1). Защитные host-маршруты к SSH-клиенту/эндпоинту в
-# _warp_apply_full_mode() — best-effort: они зависят от того, удалось ли
-# захватить шлюз (_capture_original_route — не все провайдеры отдают
-# `default via X dev Y`, у некоторых это `default dev eth0 scope link` без
-# `via`) и от того, актуален ли IP клиента (автоопределение через
-# SSH_CLIENT/SSH_CONNECTION не работает под sudo/su, при ручном вводе можно
-# опечататься или IP мог смениться). Любая из этих причин — и сколько угодно
-# ещё не предусмотренных — не должна требовать ручного вмешательства через
-# консоль провайдера. Поэтому здесь НЕ чиним конкретную причину, а ставим
-# страховку уровня "что бы ни случилось — через N секунд откатится само":
-# независимый transient systemd-таймер планируется ДО применения маршрутов
+# _warp_apply_full_mode() — best-effort. Две известные причины срыва защиты
+# закрыты адресно (кейс окт.2026 №12): _capture_original_route() понимает и
+# on-link дефолт (`default dev eth0` без via), а набор защищаемых IP перед
+# каждым FULL пересобирается по живым SSH-сессиям с автообновлением state
+# (_refresh_ssh_protection_set: ss/who/env). Но сколько угодно ещё НЕ
+# предусмотренных причин может остаться — и ни одна из них не должна
+# требовать ручного вмешательства через консоль провайдера. Поэтому
+# страховка уровня "что бы ни случилось — через N секунд откатится само"
+# остаётся без изменений: независимый transient systemd-таймер планируется
+# ДО применения маршрутов
 # (учли совет Ивана и сделали именно так, а не "после", иначе при разрыве
 # SSH прямо во время _warp_apply_full_mode таймер просто не успел бы встать)
 # и выполняет _rollback_full_mode() — БЕЗУСЛОВНУЮ остановку туннеля — если
@@ -2076,21 +2271,44 @@ def _check_ssh_protection() -> None:
     """Проверяет напрямую по таблице маршрутизации ядра, что трафик до
     SSH-клиента не уходит в wg-warp — для новой архитектуры (без iptables
     mangle-меток и policy routing) это прямой и более надёжный эквивалент
-    старой проверки `iptables -t mangle -L OUTPUT`."""
-    ssh_ip = _state_get("WARP_SSH_CLIENT_IP", "") or _detect_ssh_client_ip()
-    if not ssh_ip:
-        ssh_ip = input(f"  {YELLOW}SSH IP не задан. Введите IP клиента:{NC} ").strip()
-    if not ssh_ip:
+    старой проверки `iptables -t mangle -L OUTPUT`.
+
+    Дополнительно (кейс окт.2026 №12) сверяет сохранённый в state SSH IP с
+    IP живых сессий: протухший IP — причина, по которой FULL обрывал SSH,
+    хотя «SSH IP» в шапке меню выглядел заданным."""
+    state_ip = (_state_get("WARP_SSH_CLIENT_IP", "") or "").strip()
+    if "/" in state_ip:
+        state_ip = state_ip.split("/", 1)[0].strip()
+    live = _live_ssh_peer_ips()
+
+    if state_ip and live and state_ip not in live:
+        warn(f"⚠ Сохранённый SSH IP ({state_ip}) не совпадает с IP живых "
+             f"сессий ({', '.join(live)}) — при следующем FULL старый "
+             f"маршрут вас не защитит. Обновите его (пункт [10] меню WARP); "
+             f"при запуске FULL он также обновится автоматически.")
+
+    targets: list[str] = []
+    for ip in [state_ip] + live:
+        if ip and _is_valid_ipv4(ip) and ip not in targets:
+            targets.append(ip)
+    if not targets:
+        manual = input(f"  {YELLOW}SSH IP не задан. Введите IP клиента:{NC} ").strip()
+        if manual and _is_valid_ipv4(manual):
+            targets.append(manual)
+        elif manual:
+            warn(f"{manual!r} не похож на IPv4 — проверка пропущена.")
+    if not targets:
         warn("SSH IP не определён — проверка пропущена.")
         return
 
-    r = _run(["ip", "route", "get", ssh_ip], capture=True, check=False)
-    out = r.stdout or ""
-    if WG_INTERFACE in out:
-        warn(f"✗ Маршрут до {ssh_ip} проходит через {WG_INTERFACE} — SSH под угрозой разрыва!")
-        warn("  Переустановите режим FULL (пункт [2]), чтобы пересоздать защитный маршрут.")
-    else:
-        success(f"✓ Маршрут до {ssh_ip} идёт мимо {WG_INTERFACE} — SSH защищён.")
+    for ip in targets:
+        r = _run(["ip", "route", "get", ip], capture=True, check=False)
+        out = r.stdout or ""
+        if WG_INTERFACE in out:
+            warn(f"✗ Маршрут до {ip} проходит через {WG_INTERFACE} — SSH под угрозой разрыва!")
+            warn("  Обновите SSH IP (пункт [10]) или переустановите режим FULL (пункт [2]).")
+        else:
+            success(f"✓ Маршрут до {ip} идёт мимо {WG_INTERFACE} — SSH защищён.")
 
 
 # =============================================================================
@@ -2238,6 +2456,87 @@ def _menu_status_and_diagnostics() -> None:
             print(f"  {YELLOW}[WARN]{NC}  {tg_str}")
 
     _check_ssh_protection()
+
+
+def _menu_change_ssh_ip() -> None:
+    """Смена SSH IP без переустановки WARP (кейс окт.2026 №12: динамический
+    IP админа протухал в state, FULL обрывал сессию, а обновить IP можно
+    было только полным циклом удаления/установки)."""
+    os.system("clear")
+    current = (_state_get("WARP_SSH_CLIENT_IP", "") or "").strip()
+    live = _live_ssh_peer_ips()
+    live_str = ", ".join(live) if live else f"{YELLOW}не найдены{NC}"
+
+    _box_top("СМЕНА SSH IP (ИСКЛЮЧЕНИЕ ИЗ WARP)")
+    _box_row()
+    _box_row("  Этот IP всегда маршрутизируется мимо туннеля (режим FULL),")
+    _box_row("  чтобы полный туннель не оборвал вашу SSH-сессию. Если ваш")
+    _box_row("  адрес поменялся (динамический IP, CGNAT, другая сеть) —")
+    _box_row("  старое значение больше не защищает вас.")
+    _box_row()
+    _box_row(f"  Текущий IP:       {CYAN}{current or 'не задан'}{NC}")
+    _box_row(f"  Живые SSH-сессии: {live_str}")
+    _box_row()
+    _box_sep()
+    if live:
+        _box_row(f"  {GREEN}1{NC}  Взять из живой сессии: {CYAN}{live[0]}{NC}"
+                 + (f"  (ещё {len(live) - 1})" if len(live) > 1 else ""))
+    else:
+        _box_row(f"  {GREEN}1{NC}  Определить автоматически  {YELLOW}(живых сессий не найдено){NC}")
+    _box_row(f"  {GREEN}2{NC}  Ввести вручную")
+    _box_row(f"  {GREEN}3{NC}  Очистить (не защищать IP — небезопасно в FULL)")
+    _box_row()
+    _box_row(f"  {RED}0{NC}  ← Назад")
+    _box_bottom()
+
+    try:
+        ch = input(f"{CYAN}Выбор [1]:{NC} ").strip() or "1"
+    except KeyboardInterrupt:
+        print()
+        return
+    if ch in ("0", "q", "Q"):
+        return
+
+    new_ip = ""
+    if ch == "1":
+        if live:
+            new_ip = live[0]
+        else:
+            new_ip = (_detect_ssh_client_ip() or "").strip() or input("  SSH client IP: ").strip()
+    elif ch == "2":
+        new_ip = input("  SSH client IP: ").strip()
+    elif ch == "3":
+        if input(f"{YELLOW}Точно снять защиту SSH IP? [y/N]:{NC} ").strip().lower() == "y":
+            _state_set("WARP_SSH_CLIENT_IP", "")
+            _warp_state_save_autonomously()
+            warn("SSH IP очищен — в режиме FULL сессия не защищена "
+                 "(только автооткат).")
+        return
+    else:
+        warn("Неверный выбор.")
+        return
+
+    if "/" in new_ip:
+        new_ip = new_ip.split("/", 1)[0].strip()
+    if not _is_valid_ipv4(new_ip):
+        warn(f"{new_ip!r} не похож на IPv4-адрес — ничего не изменено.")
+        return
+
+    _state_set("WARP_SSH_CLIENT_IP", new_ip)
+    _warp_state_save_autonomously()
+    success(f"SSH IP обновлён: {current or 'не задан'} → {new_ip}")
+
+    # Если FULL уже активен — сразу строим защитный маршрут и проверяем его
+    # ядром, не дожидаясь следующего переприменения режима.
+    if _state_get("WARP_MODE", "") == MODE_FULL and _warp_service_active():
+        orig = _ensure_original_route()
+        if orig and orig[1]:
+            if _ensure_ssh_route(new_ip, orig[0], orig[1]):
+                success(f"✓ Маршрут до {new_ip} идёт мимо {WG_INTERFACE}.")
+        else:
+            warn("Реальный маршрут сервера не определён — защитный маршрут "
+                 "не проверен (пересоздастся при следующем FULL).")
+    input(f"{BLUE}Нажмите Enter...{NC}")
 
 
 # =============================================================================
@@ -2690,6 +2989,7 @@ def do_manage_warp() -> None:
             _box_row(f"  {GREEN}8{NC}  Экспорт клиентских конфигов WARP (WG / mihomo)")
             _box_row(f"  {GREEN}9{NC}  Пулы сканирования — автообновление из warpscout"
                      f"  {YELLOW}[{'вкл' if scan_pools_auto() else 'выкл'}]{NC}")
+            _box_row(f"  {GREEN}10{NC}  Сменить SSH IP (исключение из туннеля FULL)")
         _box_row()
         _box_row(f"  {RED}0{NC}  ← Назад")
         _box_bottom()
@@ -2763,6 +3063,9 @@ def do_manage_warp() -> None:
 
         elif ch == "9" and installed:
             do_manage_scan_pools()
+
+        elif ch == "10" and installed:
+            _menu_change_ssh_ip()
 
         else:
             warn("Неверный выбор.")
