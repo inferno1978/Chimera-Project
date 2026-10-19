@@ -12,8 +12,13 @@ chimera/modules/updater.py
   • find_repo_root() — поднимается от этого файла вверх до каталога с .git
     (работает в /opt/chimera, в dev-чекауте и в любом другом пути —
     никаких хардкодов инсталляции, паттерн warp.py).
-  • update_info(refresh) — `git fetch origin <ветка>` + сравнение HEAD ↔
-    origin/<ветка>. Результат кэшируется в update_check.json
+  • update_info(refresh) — `git fetch origin <ветка-на-origin>` + сравнение
+    HEAD ↔ origin/<ветка>. Ветка фетча — upstream локальной ветки из
+    конфига (branch.<имя>.merge): установки со старыми именами локальных
+    веток (chimera-v5 → origin/main) фетчат main, а не локальное имя —
+    иначе «couldn't find remote ref» на каждом пункте меню; если ветки
+    с таким именем на origin нет вовсе — фолбэк на дефолтную ветку
+    remote (HEAD symref). Результат кэшируется в update_check.json
     (TTL 1 час): главное меню читает ТОЛЬКО кэш и никогда не дёргает
     сеть при перерисовке; сеть трогают либо пункт U, либо фоновый тред.
   • do_update_interactive() — пред-чеки (чистота дерева, ветка, ahead),
@@ -221,20 +226,83 @@ def _log_subjects(repo: Path, a: str, b: str, limit: int = 20) -> list:
     return out[:limit]
 
 
+def upstream_branch(repo: Path, branch: str) -> Optional[str]:
+    """Ветка на origin, которую трекает локальная ветка (branch.<B>.merge),
+    либо None. Зачем: установки, развёрнутые со старыми именами веток,
+    держат локальную ветку chimera-v5 с upstream origin/main — фетчить
+    надо main, а не локальное имя (иначе «couldn't find remote ref»;
+    кейс окт.2026 №11: пункт «Обновление Chimera» падал на ровном месте).
+    Upstream, смотрящий в другой remote (github/gitlab-зеркала), не
+    используется — апдейтер origin-центричен.
+    """
+    r = _git(["config", "--get", f"branch.{branch}.remote"], repo)
+    if r.returncode != 0 or (r.stdout or "").strip() != "origin":
+        return None
+    r = _git(["config", "--get", f"branch.{branch}.merge"], repo)
+    merge = (r.stdout or "").strip()
+    if merge.startswith("refs/heads/"):
+        merge = merge[len("refs/heads/"):]
+    return merge or None
+
+
+def remote_default_branch(repo: Path) -> Optional[str]:
+    """Дефолтная ветка origin (ls-remote --symref: «ref: refs/heads/main»).
+    Фолбэк-цель сравнения, когда ни upstream, ни локального имени ветки
+    на origin нет. None — remote недоступен или HEAD не указывает на ветку.
+    """
+    r = _git(["ls-remote", "--symref", "origin", "HEAD"], repo,
+             timeout=FETCH_TIMEOUT)
+    for line in (r.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "ref:" \
+                and parts[1].startswith("refs/heads/"):
+            return parts[1][len("refs/heads/"):]
+    return None
+
+
+def _fetch_err_is_missing_ref(err: str) -> bool:
+    """Fetch упал из-за отсутствия ветки на remote — не сеть/не credentials.
+    Именно такой случай заслуживает фолбэка на дефолтную ветку remote."""
+    e = (err or "").lower()
+    return "couldn't find remote ref" in e or "could not find remote branch" in e
+
+
+def _fetch_origin_branch(repo: Path, branch: str) -> tuple:
+    """Fetch с origin той ветки, которой соответствует локальная ветка.
+
+    Порядок целей: (1) upstream локальной ветки (branch.<B>.merge → main),
+    (2) имя локальной ветки, (3) при «ветки нет на origin» — дефолтная
+    ветка remote (HEAD symref). Возвращает (CompletedProcess, имя ветки
+    на origin); rc != 0 — все цели исчерпаны либо сеть (текст в stderr).
+    """
+    fetch_branch = upstream_branch(repo, branch) or branch
+    r = _git_retry(["fetch", "--quiet", "origin", fetch_branch], repo,
+                   timeout=FETCH_TIMEOUT)
+    if r.returncode != 0 and _fetch_err_is_missing_ref(r.stderr or ""):
+        default_branch = remote_default_branch(repo)
+        if default_branch and default_branch != fetch_branch:
+            r2 = _git_retry(["fetch", "--quiet", "origin", default_branch],
+                            repo, timeout=FETCH_TIMEOUT)
+            if r2.returncode == 0:
+                return r2, default_branch
+    return r, fetch_branch
+
+
 def update_info(refresh: bool = False) -> dict:
-    """Сравнение локальной установки с origin/<ветка>.
+    """Сравнение локальной установки с origin/<ветка-на-origin>.
 
     refresh=False → вернуть кэш, если он свежее CACHE_TTL (меню/подсказка).
     refresh=True  → сделать git fetch и обновить кэш (пункт U / фоновый тред).
 
     Возвращает dict:
-      repo, branch, local, remote, behind, ahead, new_commits,
-      fetched_at, error, cached
+      repo, branch, remote_branch, local, remote, behind, ahead,
+      new_commits, fetched_at, error, fetch_err, cached
     """
     repo = find_repo_root()
     base = {"repo": str(repo) if repo else None, "branch": None,
-            "local": None, "remote": None, "behind": 0, "ahead": 0,
-            "new_commits": [], "fetched_at": 0, "error": None, "cached": True}
+            "remote_branch": None, "local": None, "remote": None,
+            "behind": 0, "ahead": 0, "new_commits": [], "fetched_at": 0,
+            "error": None, "fetch_err": None, "cached": True}
     if repo is None:
         base["error"] = "not-git"
         return base
@@ -255,22 +323,23 @@ def update_info(refresh: bool = False) -> dict:
         _write_cache({**base, "fetched_at": now})
         return base
 
-    fetch = _git_retry(["fetch", "--quiet", "origin", branch], repo,
-                       timeout=FETCH_TIMEOUT)
+    fetch, fetch_branch = _fetch_origin_branch(repo, branch)
     if fetch.returncode != 0:
         base["error"] = "fetch-failed"
+        base["fetch_err"] = ((fetch.stderr or "").strip()[:300] or None)
         _write_cache({**base, "fetched_at": now})
         return base
 
-    base["remote"] = _head(repo, f"origin/{branch}")
+    base["remote_branch"] = fetch_branch
+    base["remote"] = _head(repo, f"origin/{fetch_branch}")
     if not base["remote"]:
         base["error"] = "no-remote-branch"
         _write_cache({**base, "fetched_at": now})
         return base
 
-    base["behind"] = _count_between(repo, "HEAD", f"origin/{branch}")
-    base["ahead"]  = _count_between(repo, f"origin/{branch}", "HEAD")
-    base["new_commits"] = (_log_subjects(repo, "HEAD", f"origin/{branch}")
+    base["behind"] = _count_between(repo, "HEAD", f"origin/{fetch_branch}")
+    base["ahead"]  = _count_between(repo, f"origin/{fetch_branch}", "HEAD")
+    base["new_commits"] = (_log_subjects(repo, "HEAD", f"origin/{fetch_branch}")
                            if base["behind"] else [])
     base["fetched_at"] = now
     base["cached"] = False
@@ -397,8 +466,15 @@ def do_update_interactive() -> None:
         return
     if info.get("error") == "fetch-failed":
         _box_bottom()
-        _warn("git fetch не удался (сеть/CF/credentials). Повторите позже")
-        _warn("или проверьте вручную: git -C %s fetch origin" % repo)
+        _warn("git fetch не удался, текст ошибки git:")
+        err_text = (info.get("fetch_err") or "").strip()
+        if err_text:
+            for line in err_text.splitlines()[:3]:
+                _warn(f"    {line.strip()[:150]}")
+        else:
+            _warn("    (текст ошибки недоступен)")
+        _warn("сеть/CF/credentials → повторите позже; вручную проверить:")
+        _warn(f"    git -C {repo} fetch origin")
         input(f"{BLUE}Нажмите Enter...{NC}")
         return
     if info.get("error"):
@@ -408,8 +484,12 @@ def do_update_interactive() -> None:
         return
 
     branch = info.get("branch")
+    remote_branch = info.get("remote_branch") or branch
     behind, ahead = int(info.get("behind", 0)), int(info.get("ahead", 0))
-    _box_row(f"  Ветка:     {CYAN}{branch}{NC}  {DIM}(origin){NC}")
+    if remote_branch != branch:
+        _box_row(f"  Ветка:     {CYAN}{branch}{NC}  {DIM}→ origin/{remote_branch}{NC}")
+    else:
+        _box_row(f"  Ветка:     {CYAN}{branch}{NC}  {DIM}(origin){NC}")
 
     if ahead > 0:
         _box_bottom()
@@ -482,9 +562,9 @@ def do_update_interactive() -> None:
     # ── Тянем ────────────────────────────────────────────────────────────────
     old_version = _current_version()
     print()
-    _info("git pull --ff-only …")
-    pull = _git_retry(["pull", "--ff-only", "--quiet", "origin", branch], repo,
-                      timeout=FETCH_TIMEOUT)
+    _info(f"git pull --ff-only origin {remote_branch} …")
+    pull = _git_retry(["pull", "--ff-only", "--quiet", "origin", remote_branch],
+                      repo, timeout=FETCH_TIMEOUT)
     if pull.returncode != 0:
         _err("git pull --ff-only не удался (divergent?):")
         print(f"    {YELLOW}{(pull.stderr or pull.stdout or '').strip()[:300]}{NC}")
@@ -581,14 +661,14 @@ def cron_tick() -> int:
     if branch is None:
         _log_cron("SKIP: detached HEAD")
         return 0
-    fetch = _git_retry(["fetch", "--quiet", "origin", branch], repo,
-                       timeout=FETCH_TIMEOUT)
+    fetch, fetch_branch = _fetch_origin_branch(repo, branch)
     if fetch.returncode != 0:
-        _log_cron(f"WARN: fetch не удался (rc={fetch.returncode})")
+        _log_cron(f"WARN: fetch не удался (rc={fetch.returncode}): "
+                  f"{(fetch.stderr or '').strip()[:150]}")
         return 0
-    remote = _head(repo, f"origin/{branch}")
-    behind = _count_between(repo, "HEAD", f"origin/{branch}")
-    ahead = _count_between(repo, f"origin/{branch}", "HEAD")
+    remote = _head(repo, f"origin/{fetch_branch}")
+    behind = _count_between(repo, "HEAD", f"origin/{fetch_branch}")
+    ahead = _count_between(repo, f"origin/{fetch_branch}", "HEAD")
     if ahead > 0:
         _log_cron(f"SKIP: локальная ветка опережает origin на {ahead}")
         return 0
@@ -600,8 +680,8 @@ def cron_tick() -> int:
         return 0
 
     old_head = _head(repo) or "?"
-    pull = _git_retry(["pull", "--ff-only", "--quiet", "origin", branch], repo,
-                      timeout=FETCH_TIMEOUT)
+    pull = _git_retry(["pull", "--ff-only", "--quiet", "origin", fetch_branch],
+                      repo, timeout=FETCH_TIMEOUT)
     if pull.returncode != 0:
         _log_cron(f"ERROR: pull --ff-only не удался (rc={pull.returncode}), "
                   f"{(pull.stderr or '').strip()[:200]}")
@@ -609,7 +689,8 @@ def cron_tick() -> int:
 
     new_head = _head(repo) or "?"
     cache = _read_cache()
-    cache.update({"repo": str(repo), "branch": branch, "local": new_head,
+    cache.update({"repo": str(repo), "branch": branch,
+                  "remote_branch": fetch_branch, "local": new_head,
                   "remote": remote, "behind": 0, "ahead": 0, "fetched_at":
                   int(time.time()), "pending_restart": True})
     _write_cache(cache)
