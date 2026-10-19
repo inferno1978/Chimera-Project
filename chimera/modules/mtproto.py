@@ -1675,6 +1675,22 @@ def _ipt_ensure_single_owner_return(ipt: str, uid: int) -> int:
     return removed
 
 
+def _ipset_boot_sync_best_effort() -> None:
+    """Синхронизация /etc/iptables/ipset-boot.conf (кейс окт.2026 №10).
+
+    Дамп rules.v4/v6 ссылается на ipset-ы (--match-set), которых при ранней
+    загрузке ещё не существует → iptables-restore в telemt-iptables падал на
+    первом же --match-set и весь дамп терялся. Boot-файл с определениями
+    сетов восстанавливается юнитом ПЕРВЫМ ExecStart. Никогда не роняет
+    вызывающий код.
+    """
+    try:
+        from chimera.modules.ipset_boot_sync import sync_ipset_boot_conf
+        sync_ipset_boot_conf()
+    except Exception:
+        pass
+
+
 def _iptables_persist() -> None:
     """
     Сохраняет iptables-правила для выживания после ребута.
@@ -1682,9 +1698,12 @@ def _iptables_persist() -> None:
       1. netfilter-persistent save  (Debian/Ubuntu с iptables-persistent)
       2. iptables-save → /etc/iptables/rules.v4 + rules.v6
       3. systemd-сервис telemt-iptables (fallback)
+    В обоих путях — синхронизация ipset-boot.conf (кейс окт.2026 №10):
+    boot-файл обязан соответствовать свежему дампу.
     """
     if shutil.which("netfilter-persistent"):
         _run(["netfilter-persistent", "save"], capture=True)
+        _ipset_boot_sync_best_effort()
         return
     rules_dir = Path("/etc/iptables")
     rules_dir.mkdir(parents=True, exist_ok=True)
@@ -1694,6 +1713,7 @@ def _iptables_persist() -> None:
     r6 = _run(["ip6tables-save"], capture=True)
     if r6.returncode == 0 and r6.stdout:
         (rules_dir / "rules.v6").write_text(r6.stdout)
+    _ipset_boot_sync_best_effort()
     _ensure_ipt_restore_service()
 
 
@@ -1701,14 +1721,21 @@ def _ensure_ipt_restore_service() -> None:
     """
     Создаёт systemd-сервис восстановления iptables при загрузке,
     если нет netfilter-persistent.
+
+    Кейс окт.2026 №10: дамп ссылается на ipset-ы, которых при раннем старте
+    (Before=network-pre) ещё не существует → первым ExecStart восстанавливаем
+    /etc/iptables/ipset-boot.conf (см. ipset_boot_sync); guard-строка
+    «test -s … || true» переживает отсутствие файла (юнит не падает).
     """
     svc_path = Path("/etc/systemd/system/telemt-iptables.service")
-    if svc_path.exists():
-        # Пересоздаём чтобы обновить пути если изменились
-        pass
     rules_v4 = Path("/etc/iptables/rules.v4")
     rules_v6 = Path("/etc/iptables/rules.v6")
     exec_lines = ""
+    try:
+        from chimera.modules.ipset_boot_sync import IPSET_RESTORE_CMD_SHELL
+        exec_lines += f"ExecStart=/bin/sh -c '{IPSET_RESTORE_CMD_SHELL}'\n"
+    except Exception:
+        pass
     if rules_v4.exists():
         exec_lines += f"ExecStart=/bin/sh -c 'iptables-restore < {rules_v4}'\n"
     if rules_v6.exists():

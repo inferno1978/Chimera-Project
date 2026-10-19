@@ -1061,5 +1061,46 @@ class TestMigrationOldToDetailed(unittest.TestCase):
         self.assertIn("1.2.3.4", v4)
 
 
+class TestCronObservability(unittest.TestCase):
+    """cron-врапперы логируют stderr вместо /dev/null (кейс №10).
+
+    Битый враппер (без sys.path — чинено в 583379d) месяцами молча падал
+    с ModuleNotFoundError, потому что весь вывод уходил в /dev/null 2>&1.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_install_cron_script_logs_stderr(self):
+        from chimera.modules import user_ip_whitelist
+        script = self._tmpdir / "script.sh"
+        cron = self._tmpdir / "cron"
+        with patch.object(user_ip_whitelist, "CRON_SCRIPT", script), \
+             patch.object(user_ip_whitelist, "CRON_FILE", cron):
+            self.assertTrue(user_ip_whitelist.install_cron())
+        text = script.read_text()
+        self.assertIn("sys.path.insert", text, "импорт chimera из любого cwd")
+        self.assertIn("2>>/var/log/chimera-clients-wl.log", text,
+                      "stderr обязан попадать в лог")
+        self.assertNotIn(">/dev/null 2>&1", text)
+
+    def test_install_cleanup_cron_script_logs_stderr(self):
+        from chimera.modules import user_ip_whitelist
+        script = self._tmpdir / "cleanup.sh"
+        cron = self._tmpdir / "cron-cleanup"
+        with patch.object(user_ip_whitelist, "CLEANUP_CRON_SCRIPT", script), \
+             patch.object(user_ip_whitelist, "CLEANUP_CRON_FILE", cron):
+            self.assertTrue(user_ip_whitelist.install_cleanup_cron())
+        text = script.read_text()
+        self.assertIn("sys.path.insert", text)
+        self.assertIn("2>>/var/log/chimera-clients-wl.log", text)
+        self.assertNotIn(">/dev/null 2>&1", text)
+
+
 if __name__ == "__main__":
     unittest.main()

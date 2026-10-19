@@ -1433,5 +1433,28 @@ class TestMenuWiring(unittest.TestCase):
         ast.parse(src)  # raises if invalid
 
 
+class TestPkPersistSyncsIpsetBoot(unittest.TestCase):
+    """_pk_persist — синхронизация ipset-boot.conf вместо legacy-файла (кейс №10).
+
+    Legacy /etc/iptables/ipsets никто не читал при загрузке, а повторные
+    аппенды дублировали create-строки. Теперь persist синхронизирует
+    /etc/iptables/ipset-boot.conf (восстанавливается telemt-iptables
+    первым ExecStart — до iptables-restore, иначе restore падает на
+    --match-set по xray_knocked).
+    """
+
+    def test_sync_called_and_legacy_append_gone(self):
+        from chimera.modules import port_knocking as pk
+        import inspect
+        with patch.object(pk, "_run"), \
+             patch("chimera.modules.ipset_boot_sync.sync_ipset_boot_conf") as mock_sync:
+            pk._pk_persist()
+        mock_sync.assert_called_once()
+        # из кода убран аппенд в legacy-файл
+        src = inspect.getsource(pk._pk_persist)
+        self.assertNotIn('"/etc/iptables/ipsets"', src)
+        self.assertNotIn('"a")', src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
