@@ -704,6 +704,7 @@ def build_logrotate_stanza(paths) -> str:
     for p in paths:
         lines.append("")
         lines.append(str(p) + " {")
+        lines.append("    su root root")   # logrotate 3.21: без su — отказ из-за 1777 на /var/log
         lines.append("    weekly")
         lines.append("    rotate 4")
         lines.append("    size 50M")
