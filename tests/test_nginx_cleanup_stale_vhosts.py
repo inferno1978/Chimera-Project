@@ -29,12 +29,28 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 # version: import chimera → фейк-пакет без __version__ → _get_version()
 # → "unknown"). Снапшот до первой установки, восстановление — в
 # tearDownModule (паттерн — как в test_certmon_v2.py / test_b4_monitor.py).
-_CHIMERA_SNAPSHOT = {k: sys.modules.get(k) for k in
-                     ("chimera", "chimera.modules", "chimera._core")}
+#
+# FIX (ipmask-1, тест-инфра): снапшотим ВСЕ ключи chimera*, а не только
+# 3 корневых. Раньше teardown делал pop("chimera")/pop("chimera.modules"),
+# оставляя в sys.modules осиротевшие chimera.modules.* — последующий
+# `import chimera.modules.X as y` находил орфан полным именем, ПРОПУСКАЛ
+# импорт chimera.modules и падал: "cannot import name 'modules' from
+# 'chimera'" (155 ERROR в чанке m-p полного сьюта; первый пострадавший —
+# test_nginx_watchdog, детерминированно воспроизводилось на чистом main).
+_CHIMERA_SNAPSHOT = {k: v for k, v in sys.modules.items()
+                     if k == "chimera" or k.startswith("chimera.")}
 
 
 def tearDownModule():
-    """Снять фейки sys.modules после модуля (анти-загрязнение сьюта)."""
+    """Снять фейки sys.modules после модуля (анти-загрязнение сьюта).
+
+    Полное восстановление: все chimera*-ключи, появившиеся ЗА время модуля,
+    удаляются; ключи из снапшота — восстанавливаются (None в снапшоте → pop).
+    """
+    for k in [k for k in sys.modules
+              if k == "chimera" or k.startswith("chimera.")]:
+        if k not in _CHIMERA_SNAPSHOT:
+            sys.modules.pop(k, None)
     for k, v in _CHIMERA_SNAPSHOT.items():
         if v is not None:
             sys.modules[k] = v
