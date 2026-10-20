@@ -799,12 +799,15 @@ def _existing_log_files(cfg: dict) -> list:
     return sorted(set(out))
 
 
-def _logrotate_covered_basenames() -> set:
-    """Базовые имена, уже покрытые чужими logrotate-конфигами
-    (наш chimera-doctor НЕ считается — управляем им целиком)."""
+def _logrotate_covered_basenames(include_own: bool = False) -> set:
+    """Базовые имена, уже покрытые logrotate-конфигами.
+    include_own=False — наш chimera-doctor НЕ считается (для пересборки
+    фиксом: список того, что должен вести наш файл);
+    include_own=True — считается (для проверки: покрытое нашим файлом
+    не должно давать warn — иначе вечный цикл warn/no-op)."""
     tokens = set()
     for conf in ["/etc/logrotate.conf"] + glob.glob("/etc/logrotate.d/*"):
-        if os.path.basename(conf) == LOGROTATE_FILE.name:
+        if not include_own and os.path.basename(conf) == LOGROTATE_FILE.name:
             continue
         try:
             with open(conf, encoding="utf-8", errors="replace") as f:
@@ -820,7 +823,7 @@ def chk_logrotate_coverage(ctx: DoctorCtx) -> None:
     if not files:
         ctx.record("logrotate_coverage", "ok", "наблюдаемых логов нет")
         return
-    covered = _logrotate_covered_basenames()
+    covered = _logrotate_covered_basenames(include_own=True)
     uncovered = [p for p in files if os.path.basename(p) not in covered]
     if not uncovered:
         ctx.record("logrotate_coverage", "ok",
