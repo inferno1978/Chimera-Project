@@ -415,11 +415,22 @@ def parse_rc_local_issues(text: str, exists) -> list:
 _NETPLAN_SECTION_RE = re.compile(
     r"^\s{2,}(ethernets|bonds|bridges|vlans|wifis|modems|tunnels):\s*$")
 _NETPLAN_IFACE_RE = re.compile(r"^\s{4,}([A-Za-z0-9._-]+):\s*(#.*)?$")
+# ключи ВНУТРИ описания интерфейса, которые парсер не должен принимать
+# за имя интерфейса (кейс RU-2: 'match:' в ens3 дал ложный фантом)
+_NETPLAN_IFACE_KEYWORDS = {
+    "match", "set-name", "wakeonlan", "optional", "mtu", "addresses",
+    "routes", "routing-policy", "nameservers", "dhcp4", "dhcp6",
+    "dhcp-overrides", "link-local", "optional-addresses", "accept-ra",
+    "ipv6-address-generation", "gateway4", "gateway6", "renderer",
+    "interfaces", "parameters", "modes", "regulatory-domain", "access-points",
+    "auth", "dhcp-identifier",
+}
 
 
 def parse_netplan_ifaces(yaml_text: str) -> list:
     """Имена интерфейсов из netplan-yaml (без PyYAML — ручной разбор
-    секций ethernets/bonds/bridges/vlans/wifis/modems/tunnels).
+    секций ethernets/bonds/bridges/vlans/wifis/modems/tunnels; ключи
+    вроде match:/addresses: отсекаются по словарю ключей).
     Чистая функция."""
     ifaces, in_section = [], False
     for line in (yaml_text or "").splitlines():
@@ -427,7 +438,7 @@ def parse_netplan_ifaces(yaml_text: str) -> list:
             in_section = True
             continue
         m = _NETPLAN_IFACE_RE.match(line)
-        if in_section and m:
+        if in_section and m and m.group(1) not in _NETPLAN_IFACE_KEYWORDS:
             ifaces.append(m.group(1))
             continue
         if in_section and line and not line.startswith((" ", "\t", "#")):
