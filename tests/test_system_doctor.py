@@ -525,7 +525,8 @@ class TestLogrotateStanza(unittest.TestCase):
         from chimera.modules.system_doctor import build_logrotate_stanza
         st = build_logrotate_stanza(["/var/log/hysteria.log"])
         for needle in ("/var/log/hysteria.log {", "copytruncate", "compress",
-                       "missingok", "weekly", "rotate 4", "size 50M"):
+                       "missingok", "weekly", "rotate 4", "size 50M",
+                       "su root root"):  # logrotate 3.21 требует su для /var/log
             self.assertIn(needle, st)
 
     def test_multiple_paths(self):
