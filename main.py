@@ -149,6 +149,34 @@ if "--exit-watcher" in sys.argv:
     _ew_run_once(force=force)
     sys.exit(0)
 
+# --- System Doctor: медосмотр ОС + безопасные авто-фиксы (кейс №13) ---
+# --system-doctor            — только проверка (безопасный дефолт)
+# --system-doctor --fix      — чинить по тумблерам конфига
+# --system-doctor --dry-run  — показать план фиксов, ничего не менять
+# --system-doctor --only a,b — подмножество проверок
+# --system-doctor --install  — поставить ежедневный cron
+if "--system-doctor" in sys.argv:
+    if os.geteuid() != 0:
+        print("ERROR: требуются права root", file=sys.stderr)
+        sys.exit(1)
+    from chimera.modules.system_doctor import (
+        build_console_report, install_system_doctor, run_once)
+    if "--install" in sys.argv:
+        ok, msg = install_system_doctor()
+        print(("[OK] " if ok else "[FAIL] ") + msg)
+        sys.exit(0 if ok else 1)
+    only = None
+    if "--only" in sys.argv:
+        i = sys.argv.index("--only")
+        if i + 1 < len(sys.argv):
+            only = [x.strip() for x in sys.argv[i + 1].split(",") if x.strip()]
+    mode = "fix" if "--fix" in sys.argv else "check"
+    rep = run_once(mode=mode, only=only, dry_run="--dry-run" in sys.argv)
+    print(build_console_report(rep))
+    c = rep.get("counts") or {}
+    sys.exit(2 if (c.get("crit") or rep.get("fix_errors")) else
+             (1 if c.get("warn") else 0))
+
 # --- Pinned-нода: проверка доступности и авто-fallback (из cron) ---
 if "--pinned-fallback-check" in sys.argv:
     if os.geteuid() != 0:

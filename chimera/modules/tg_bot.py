@@ -274,6 +274,11 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "users_restored":  "🛠️",   # клиенты восстановлены автоматически
         "users_restore_failed": "❌",  # авто-восстановление не удалось
         "users_watchdog_budget": "⛔",  # лимит восстановлений исчерпан
+        # system-doctor (гигиена ОС; кейс окт.2026 №13: флот-аудит вскрыл
+        # класс одинаковых болячек — journald/rc.local/netplan/права на логи)
+        "doctor_alert":  "🚨",   # найдено критичное / фикс не удался
+        "doctor_fixed":  "🩺",   # сводка применённых авто-фиксов
+        "doctor_report": "📋",   # полный дайджест прохода (по желанию)
     }
     icon = icons.get(event, "ℹ️")
     text = f"{icon} <b>{header}</b> {detail}\n<i>{ts}</i>"
@@ -2345,6 +2350,10 @@ def do_manage_telegram() -> None:
             "users_restored": "Users Watchdog: клиенты восстановлены автоматически",
             "users_restore_failed": "Users Watchdog: авто-восстановление не удалось",
             "users_watchdog_budget": "Users Watchdog: лимит восстановлений исчерпан",
+            # system-doctor (гигиена ОС; кейс окт.2026 №13 — флот-аудит)
+            "doctor_alert":  "Doctor: критичные проблемы ОС / фикс не удался",
+            "doctor_fixed":  "Doctor: авто-фиксы применены",
+            "doctor_report": "Doctor: дайджест медосмотра ОС",
         }
 
         print()
@@ -2418,7 +2427,8 @@ def do_manage_telegram() -> None:
                        "ttl_expiring","ttl_expired","port_knocking",
                        "ingress_geoip","install_complete",
                        "users_drift","users_restored","users_restore_failed",
-                       "users_watchdog_budget"]
+                       "users_watchdog_budget",
+                       "doctor_alert","doctor_fixed","doctor_report"]
             ev_labels = [
                 "Xray упал","Xray восстановился","Сертификат истекает",
                 "Лимит трафика","Daily health-отчёт","Exit-нода недоступна",
@@ -2447,6 +2457,9 @@ def do_manage_telegram() -> None:
                 "Users Watchdog: клиенты восстановлены",
                 "Users Watchdog: восстановление не удалось",
                 "Users Watchdog: лимит восстановлений",
+                "Doctor: критичные проблемы ОС",
+                "Doctor: авто-фиксы применены",
+                "Doctor: дайджест медосмотра",
             ]
             events = cfg.get("events", {k: True for k in ev_keys})
             print()
