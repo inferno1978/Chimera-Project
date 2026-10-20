@@ -155,6 +155,21 @@ class TestNetplanParse(unittest.TestCase):
         yaml = "network:\n  version: 2\n  renderer: networkd\n"
         self.assertEqual(parse_netplan_ifaces(yaml), [])
 
+    def test_match_keyword_not_iface(self):
+        """Кейс RU-2: match: внутри ens3 не должен считаться интерфейсом
+        (иначе — ложный 'фантом вперемешку с живыми')."""
+        from chimera.modules.system_doctor import parse_netplan_ifaces
+        yaml = ("network:\n  version: 2\n  ethernets:\n"
+                "    ens3:\n      match:\n        name: en*\n"
+                "      addresses: [10.0.0.2/32]\n")
+        self.assertEqual(parse_netplan_ifaces(yaml), ["ens3"])
+
+    def test_common_keys_not_ifaces(self):
+        from chimera.modules.system_doctor import parse_netplan_ifaces
+        yaml = ("network:\n  ethernets:\n    ens3:\n      routes:\n"
+                "      nameservers:\n      wakeonlan: []\n")
+        self.assertEqual(parse_netplan_ifaces(yaml), ["ens3"])
+
 
 class TestRebootRequiredClassify(unittest.TestCase):
     """classify_reboot_required — кейс PL/FI: чей-то скрипт дописывал
