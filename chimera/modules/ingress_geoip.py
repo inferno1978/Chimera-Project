@@ -958,8 +958,30 @@ def do_manage_ingress_geoip() -> None:
                 _prefill_ip = ""
 
             if wl_act == "+":
-                new_ip = _prefill_ip or input("  IP или CIDR для whitelist: ").strip()
-                if new_ip and new_ip not in wl_ips:
+                new_ip = _prefill_ip or input("  IP/CIDR/маска для whitelist: ").strip()
+                # Валидация ввода (фикс ipmask-1: раньше опечатка молча
+                # уезжала в iptables). Принимаем IP / CIDR / wildcard-маску
+                # (176.9.*.* → 176.9.0.0/16), нормализуем к CIDR.
+                from chimera.modules.ip_mask import is_wildcard_mask, mask_to_cidr
+                norm_err = ""
+                if new_ip and is_wildcard_mask(new_ip):
+                    ok_m, cidr_m, err_m = mask_to_cidr(new_ip)
+                    if ok_m:
+                        new_ip = cidr_m
+                    else:
+                        norm_err = err_m
+                elif new_ip:
+                    import ipaddress as _ipa
+                    try:
+                        if "/" in new_ip:
+                            new_ip = str(_ipa.ip_network(new_ip, strict=False))
+                        else:
+                            new_ip = str(_ipa.ip_address(new_ip))
+                    except ValueError as _e:
+                        norm_err = f"невалидный IP/CIDR: {new_ip} ({_e})"
+                if new_ip and norm_err:
+                    warn(f"{norm_err} — не добавлено")
+                elif new_ip and new_ip not in wl_ips:
                     wl_ips.append(new_ip)
                     state["whitelist"] = wl_ips
                     _ingress_state_save(state)

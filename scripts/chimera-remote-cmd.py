@@ -9,12 +9,12 @@ Usage:
     chimera-remote-cmd.py <command> [args...]
 
 Commands (whitelist — безопасные, без shutdown/reboot):
-    ban <ip>                — ban IP в xray_manual_ban ipset
-    unban <ip>              — unban IP
-    banlist                 — list banned IPs (xray_manual_ban)
-    whitelist               — list whitelist IPs (clients_wl)
-    wl_add <ip>             — add IP to whitelist
-    wl_del <ip>             — del IP from whitelist
+    ban <ip|cidr|mask>       — ban IP/CIDR/маски (176.9.*.*) в xray_manual_ban(_6)
+    unban <ip|cidr|mask>     — unban (тот же формат)
+    banlist                 — список забаненных (v4+v6, IP и CIDR)
+    whitelist               — whitelist: clients_wl_v4/v6 + autoban.json
+    wl_add <ip|cidr|mask>   — dual-write: clients_wl_* + autoban whitelist
+    wl_del <ip|cidr|mask>   — удалить из обоих
     geo                     — geoip status (ipset counts + iptables rule)
     f2b                     — fail2ban status (jails + banned counts)
     restart <service>       — systemctl restart (whitelist: xray/nginx/
@@ -39,9 +39,9 @@ Exit codes:
     1 — invalid usage / unknown command
     2 — argument validation failed
 """
+import ipaddress
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -69,11 +69,92 @@ LOG_PATHS = {
 }
 
 STATE_FILE = Path("/var/lib/xray-installer/state.json")
+AUTOBAN_FILE = Path("/var/lib/xray-installer/autoban.json")
+
+# Актуальные имена ipset-сетов (user_ip_whitelist создаёт clients_wl_v4/v6;
+# старый monolithic clients_wl больше не существует — TG-команды wl_* раньше
+# писали в осиротевший сет, фикс ipmask-1).
+WL_V4 = "clients_wl_v4"
+WL_V6 = "clients_wl_v6"
+BAN_V4 = "xray_manual_ban"
+BAN_V6 = "xray_manual_ban6"
+
+
+def _normalize_ip_input(ip_str):
+    """IP / CIDR / wildcard-маска → канонический токен или None.
+
+    Маска хвостовых октетов (звёздочка = «этот и все следующие октеты не
+    фиксированы»): 176.9.*.* → 176.9.0.0/16, 152.65.*.* →
+    152.65.0.0/16, 176.9.40.* → 176.9.40.0/24, 176.9.* → 176.9.0.0/16,
+    176.* → 176.0.0.0/8.
+    Значения октетов — любые (0-255), примеры не хардкодятся.
+    Запрещены: *.*.*.* (весь интернет), звёздочки в середине (176.*.9.1),
+    IPv6-маски, пустые октеты (176..9.*.*).
+    SYNC: chimera/modules/ip_mask.py (канонические правила) +
+          chimera/modules/tg_bot.py (_normalize_ip_input в шаблоне бота).
+    """
+    if not ip_str or not isinstance(ip_str, str):
+        return None
+    v = ip_str.strip()
+    if not v:
+        return None
+    if "*" in v:
+        if ":" in v or "/" in v:
+            return None
+        parts = v.split(".")
+        if len(parts) > 4:
+            return None
+        parts = parts + ["*"] * (4 - len(parts))
+        base = []
+        for p in parts:
+            if p == "*":
+                break
+            if not p.isdigit() or int(p) > 255:
+                return None
+            base.append(int(p))
+        if not base or len(base) >= 4:
+            return None
+        if any(p != "*" for p in parts[len(base):]):
+            return None
+        return (".".join(str(x) for x in base) +
+                ".0" * (4 - len(base)) + "/" + str(8 * len(base)))
+    try:
+        if "/" in v:
+            return str(ipaddress.ip_network(v, strict=False))
+        return str(ipaddress.ip_address(v))
+    except ValueError:
+        return None
 
 
 def _validate_ip(ip_str):
-    """IPv4 валидация."""
-    return bool(re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip_str))
+    """Валидация IP / CIDR / маски (176.9.*.*). True/False."""
+    return _normalize_ip_input(ip_str) is not None
+
+
+def _is_v6(token):
+    """True если токен — IPv6 (CIDR или адрес)."""
+    return ":" in token
+
+
+def _parse_member_line(line):
+    """Строка из `ipset list` → (token, is_v6) или None.
+
+    Принимает IP и CIDR (v4+v6) — раньше фильтр был строгим IPv4-regex и
+    CIDR-баны из TUI не были видны в TG /banlist (фикс ipmask-1, баг #2).
+    Строки заголовка ipset (Name:/Type:/Header:/members:) не парсятся
+    как сети → отсекаются.
+    """
+    tok = line.strip()
+    if not tok:
+        return None
+    try:
+        net = ipaddress.ip_network(tok, strict=False)
+    except ValueError:
+        return None
+    # Одиночный адрес показываем без навязанного /32 (читаемость в TG)
+    if "/" not in tok and net.num_addresses == 1:
+        return str(net.network_address), net.version == 6
+    return str(net), net.version == 6
 
 
 def _load_state():
@@ -104,80 +185,194 @@ def _save_ipset():
 
 # ── Команды ───────────────────────────────────────────────────────────────────
 
+def _ban_set_for(token):
+    """xray_manual_ban (v4) или xray_manual_ban6 (v6) по токену."""
+    return BAN_V6 if _is_v6(token) else BAN_V4
+
+
 def cmd_ban(ip):
-    if not _validate_ip(ip):
-        return False, f"Invalid IPv4: {ip}"
-    rc, out, err = _run(["ipset", "add", "xray_manual_ban", ip], timeout=10)
+    token = _normalize_ip_input(ip)
+    if not token:
+        return False, (f"Invalid IP/CIDR/mask: {ip} "
+                       f"(примеры: 1.2.3.4, 10.0.0.0/24, 176.9.*.*)")
+    target = _ban_set_for(token)
+    rc, out, err = _run(["ipset", "add", target, token, "-exist"], timeout=10)
     if rc == 0:
         _save_ipset()
-        return True, f"IP {ip} added to xray_manual_ban (saved to /etc/ipset.conf)"
+        return True, f"{token} added to {target} (saved to /etc/ipset.conf)"
     if "already in set" in err.lower():
-        return True, f"IP {ip} already in xray_manual_ban"
+        return True, f"{token} already in {target}"
     return False, f"ipset add failed (exit={rc}): {err.strip()[:200]}"
 
 
 def cmd_unban(ip):
-    if not _validate_ip(ip):
-        return False, f"Invalid IPv4: {ip}"
-    rc, out, err = _run(["ipset", "del", "xray_manual_ban", ip], timeout=10)
+    token = _normalize_ip_input(ip)
+    if not token:
+        return False, (f"Invalid IP/CIDR/mask: {ip} "
+                       f"(примеры: 1.2.3.4, 10.0.0.0/24, 176.9.*.*)")
+    target = _ban_set_for(token)
+    rc, out, err = _run(["ipset", "del", target, token], timeout=10)
     if rc == 0:
         _save_ipset()
-        return True, f"IP {ip} removed from xray_manual_ban"
+        return True, f"{token} removed from {target}"
+    if "not in set" in err.lower():
+        return True, f"{token} not in {target} (already unban)"
     return False, f"ipset del failed (exit={rc}): {err.strip()[:200]}"
 
 
 def cmd_banlist():
-    rc, out, err = _run(["ipset", "list", "xray_manual_ban"], timeout=10)
-    if rc != 0:
-        return False, f"ipset list failed (exit={rc})"
-    lines = [l.strip() for l in out.split("\n") if _validate_ip(l.strip())]
-    if not lines:
-        return True, "xray_manual_ban: empty (no banned IPs)"
-    out_top = "\n".join(lines[:50])
-    suffix = f"\n... and {len(lines)-50} more" if len(lines) > 50 else ""
-    return True, f"xray_manual_ban ({len(lines)} IPs):\n{out_top}{suffix}"
+    """Оба сета (v4+v6), члены — IP и CIDR (фикс ipmask-1, баг #2)."""
+    entries = []
+    for name in (BAN_V4, BAN_V6):
+        rc, out, err = _run(["ipset", "list", name], timeout=10)
+        if rc != 0:
+            continue  # сета нет (например, v6 не создан) — не ошибка
+        for l in out.split("\n"):
+            parsed = _parse_member_line(l)
+            if parsed:
+                entries.append(f"{parsed[0]}  [{name}]")
+    if not entries:
+        return True, f"{BAN_V4}/{BAN_V6}: empty (no banned entries)"
+    out_top = "\n".join(entries[:50])
+    suffix = f"\n... and {len(entries)-50} more" if len(entries) > 50 else ""
+    return True, f"manual ban ({len(entries)} entries):\n{out_top}{suffix}"
+
+
+def _wl_set_for(token):
+    """clients_wl_v4 или clients_wl_v6 по токену."""
+    return WL_V6 if _is_v6(token) else WL_V4
+
+
+def _autoban_wl_read():
+    """Читает whitelist из autoban.json (для dual-write wl_add)."""
+    try:
+        if AUTOBAN_FILE.exists():
+            cfg = json.loads(AUTOBAN_FILE.read_text())
+            wl = cfg.get("whitelist")
+            if isinstance(wl, list):
+                return cfg, [str(x) for x in wl]
+    except Exception:
+        pass
+    return {}, []
+
+
+def _autoban_wl_write(cfg, wl):
+    """Аккуратно дописывает whitelist в autoban.json (не трогая остальные поля)."""
+    try:
+        if AUTOBAN_FILE.exists():
+            base = json.loads(AUTOBAN_FILE.read_text())
+        else:
+            base = cfg if isinstance(cfg, dict) else {}
+        if not isinstance(base.get("whitelist"), list):
+            base["whitelist"] = ["127.0.0.1", "::1"]
+        base["whitelist"] = sorted(set(str(x) for x in wl))
+        AUTOBAN_FILE.write_text(json.dumps(base, indent=2, ensure_ascii=False))
+        return True
+    except Exception:
+        return False
 
 
 def cmd_whitelist():
-    rc, out, err = _run(["ipset", "list", "clients_wl"], timeout=10)
-    if rc != 0:
-        return False, f"ipset list failed (exit={rc})"
-    lines = [l.strip() for l in out.split("\n") if _validate_ip(l.strip())]
+    """Whitelist: клиенты (clients_wl_v4/v6) + autoban-защита (autoban.json).
+
+    Фикс ipmask-1 (баг #1): раньше читался осиротевший сет clients_wl.
+    """
+    lines = []
+    total = 0
+    for name in (WL_V4, WL_V6):
+        rc, out, err = _run(["ipset", "list", name], timeout=10)
+        if rc != 0:
+            continue
+        members = []
+        for l in out.split("\n"):
+            parsed = _parse_member_line(l)
+            if parsed:
+                members.append(parsed[0])
+        if members:
+            lines.append(f"{name} ({len(members)}):")
+            lines.extend("  " + m for m in members)
+            total += len(members)
+    cfg, ab_wl = _autoban_wl_read()
+    if ab_wl:
+        lines.append(f"autoban-whitelist ({len(ab_wl)}):")
+        lines.extend("  " + m for m in ab_wl)
+        total += len(ab_wl)
     if not lines:
-        return True, "clients_wl: empty"
-    return True, f"clients_wl ({len(lines)} IPs):\n" + "\n".join(lines)
+        return True, "whitelist: empty (no clients_wl_*, no autoban entries)"
+    return True, f"whitelist ({total} entries):\n" + "\n".join(lines)
 
 
 def cmd_wl_add(ip):
-    if not _validate_ip(ip):
-        return False, f"Invalid IPv4: {ip}"
-    rc, out, err = _run(["ipset", "add", "clients_wl", ip], timeout=10)
+    """Dual-write: clients_wl_v4/v6 (доступ к порту xray) + autoban.json
+    whitelist (защита от автобана — как обещает /help бота).
+
+    Нюанс: клиенты-сеть пересобирается cron'ом из users.json
+    (per-user whitelist) — прямая ipset-запись может уйти при пересборке;
+    autoban-запись персистентна.
+    """
+    token = _normalize_ip_input(ip)
+    if not token:
+        return False, (f"Invalid IP/CIDR/mask: {ip} "
+                       f"(примеры: 1.2.3.4, 10.0.0.0/24, 176.9.*.*)")
+    target = _wl_set_for(token)
+    msgs = []
+    rc, out, err = _run(["ipset", "add", target, token, "-exist"], timeout=10)
     if rc == 0 or "already" in err.lower():
         _save_ipset()
-        return True, f"IP {ip} added to clients_wl"
-    return False, f"ipset add failed: {err.strip()[:200]}"
+        msgs.append(f"{token} added to {target}")
+    else:
+        # Сет может не существовать (модуль per-user WL не ставился) — создаём.
+        family = "inet6" if _is_v6(token) else "inet"
+        rc2, out2, err2 = _run(["ipset", "create", target, "hash:net",
+                                "family", family, "maxelem", "100000", "-exist"],
+                               timeout=10)
+        rc3, out3, err3 = _run(["ipset", "add", target, token, "-exist"], timeout=10)
+        if rc3 == 0:
+            _save_ipset()
+            msgs.append(f"{token} added to {target} (set created)")
+        else:
+            msgs.append(f"WARN ipset: {err3.strip()[:120]}")
+    cfg, ab_wl = _autoban_wl_read()
+    if token not in ab_wl:
+        ab_wl.append(token)
+        if _autoban_wl_write(cfg, ab_wl):
+            msgs.append("autoban-whitelist: добавлено (персистентно)")
+        else:
+            msgs.append("WARN autoban.json: не записан")
+    else:
+        msgs.append("autoban-whitelist: уже есть")
+    return True, "\n".join(msgs)
 
 
 def cmd_wl_del(ip):
-    if not _validate_ip(ip):
-        return False, f"Invalid IPv4: {ip}"
-    rc, out, err = _run(["ipset", "del", "clients_wl", ip], timeout=10)
+    token = _normalize_ip_input(ip)
+    if not token:
+        return False, (f"Invalid IP/CIDR/mask: {ip} "
+                       f"(примеры: 1.2.3.4, 10.0.0.0/24, 176.9.*.*)")
+    target = _wl_set_for(token)
+    msgs = []
+    rc, out, err = _run(["ipset", "del", target, token], timeout=10)
     if rc == 0:
         _save_ipset()
-        return True, f"IP {ip} removed from clients_wl"
-    return False, f"ipset del failed: {err.strip()[:200]}"
+        msgs.append(f"{token} removed from {target}")
+    else:
+        msgs.append(f"{target}: not present")
+    cfg, ab_wl = _autoban_wl_read()
+    if token in ab_wl:
+        ab_wl.remove(token)
+        _autoban_wl_write(cfg, ab_wl)
+        msgs.append("autoban-whitelist: удалено")
+    return True, "\n".join(msgs)
 
 
 def cmd_geo():
     # IPv4 count
     rc4, out4, _ = _run(["ipset", "list", "xray_ru_block"], timeout=10)
-    v4_count = sum(1 for l in out4.split("\n") if _validate_ip(l.strip())) if rc4 == 0 else 0
+    v4_count = sum(1 for l in out4.split("\n") if _parse_member_line(l)) if rc4 == 0 else 0
     # IPv6 count
     rc6, out6, _ = _run(["ipset", "list", "xray_ru_block6"], timeout=10)
-    v6_count = 0
-    if rc6 == 0:
-        v6_count = sum(1 for l in out6.split("\n")
-                       if l.strip() and ":" in l and not l.startswith(("Name", "Type", "Header", "Size", "Revision")) and l != "members:")
+    v6_count = sum(1 for l in out6.split("\n")
+                   if _parse_member_line(l) and _parse_member_line(l)[1]) if rc6 == 0 else 0
     # iptables rule
     rc_ipt, out_ipt, _ = _run(["iptables", "-S", "INPUT"], timeout=10)
     has_rule = "xray_ru_block" in out_ipt if rc_ipt == 0 else False

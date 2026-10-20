@@ -575,7 +575,7 @@ body {{
         <div class="loading"><span class="spinner"></span></div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <input type="text" class="input-field" id="new-ip" placeholder="IP или CIDR (5.6.7.8 или 5.6.7.0/24)" style="flex:1;min-width:200px">
+        <input type="text" class="input-field" id="new-ip" placeholder="IP, CIDR или маска (5.6.7.8 / 5.6.7.0/24 / 176.9.*.*)" style="flex:1;min-width:200px">
         <button class="btn btn-primary" onclick="addIP()">Добавить</button>
         <button class="btn btn-ghost" onclick="addAutoIP()" id="btn-auto-ip">Текущий IP</button>
       </div>

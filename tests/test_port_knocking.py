@@ -69,14 +69,14 @@ class _PortKnockingBase(unittest.TestCase):
         self._ipset_exists = {
             "xray_knocked":       False,
             "xray_knocked6":      False,
-            "clients_wl":         True,
+            "clients_wl_v4":      True,
             "xray_manual_ban":    True,
             "xray_manual_ban6":   True,
         }
         self._ipset_entries = {
             "xray_knocked":       0,
             "xray_knocked6":      0,
-            "clients_wl":         5,
+            "clients_wl_v4":      5,
             "xray_manual_ban":    2,
             "xray_manual_ban6":   1,
         }
@@ -414,8 +414,8 @@ class TestBuildIptablesRules(_PortKnockingBase):
         # Rule 1 (pos 1): DROP from xray_manual_ban
         self.assertIn("xray_manual_ban", rules[0]["spec"])
         self.assertIn("DROP", rules[0]["spec"])
-        # Rule 2 (pos 2): ACCEPT from clients_wl
-        self.assertIn("clients_wl", rules[1]["spec"])
+        # Rule 2 (pos 2): ACCEPT from clients_wl_v4 (ipmask-1: актуальное имя сета)
+        self.assertIn("clients_wl_v4", rules[1]["spec"])
         self.assertIn("ACCEPT", rules[1]["spec"])
         # Rule 3 (pos 3): ACCEPT from xray_knocked
         self.assertIn("xray_knocked", rules[2]["spec"])
@@ -557,13 +557,13 @@ class TestBuildIp6tablesRules(_PortKnockingBase):
         self.assertIn("ACCEPT", rules[1]["spec"])
 
     def test_no_clients_wl_in_ipv6_rules(self):
-        """No clients_wl rule for IPv6 (whitelist module is IPv4-only)."""
+        """No clients_wl_v4 rule for IPv6 (wl-правило только в IPv4-цепочке)."""
         from chimera.modules.port_knocking import (
             _pk_build_ip6tables_rules, _pk_default_state,
         )
         rules = _pk_build_ip6tables_rules(443, _pk_default_state())
         for r in rules:
-            self.assertNotIn("clients_wl", r["spec"])
+            self.assertNotIn("clients_wl_v4", r["spec"])
 
     def test_append_rules_use_recent_v6_name(self):
         from chimera.modules.port_knocking import (
@@ -938,7 +938,7 @@ class TestInstall(_PortKnockingBase):
         from chimera.modules.port_knocking import (
             _pk_install, _pk_default_state,
         )
-        self._ipset_exists["clients_wl"] = False
+        self._ipset_exists["clients_wl_v4"] = False
         ok = _pk_install(_pk_default_state())
         self.assertTrue(ok)
         # Only 2 inserts (ban + knocked, skip wl) instead of 3
@@ -975,7 +975,7 @@ class TestRemove(_PortKnockingBase):
         rules_with_tag = [
             f"-p tcp --dport 443 -m set --match-set xray_manual_ban src "
             f"-j DROP -m comment --comment {_PK_COMMENT_TAG}",
-            f"-p tcp --dport 443 -m set --match-set clients_wl src "
+            f"-p tcp --dport 443 -m set --match-set clients_wl_v4 src "
             f"-j ACCEPT -m comment --comment {_PK_COMMENT_TAG}",
             f"-p tcp --dport 443 -m set --match-set xray_knocked src "
             f"-j ACCEPT -m comment --comment {_PK_COMMENT_TAG}",
@@ -1154,19 +1154,19 @@ class TestRemove(_PortKnockingBase):
         self.assertEqual(loaded["installed_at"], "")
 
     def test_remove_does_not_touch_clients_wl_ipset(self):
-        """clients_wl и xray_manual_ban(6) — чужие ipsets, не flush/destroy."""
+        """clients_wl_v4 и xray_manual_ban(6) — чужие ipsets, не flush/destroy."""
         from chimera.modules.port_knocking import _pk_remove
         self._ipset_exists["xray_knocked"] = True
         self._ipset_exists["xray_knocked6"] = True
         _pk_remove()
-        # clients_wl and xray_manual_ban(6) still exist
-        self.assertTrue(self._ipset_exists["clients_wl"])
+        # clients_wl_v4 and xray_manual_ban(6) still exist
+        self.assertTrue(self._ipset_exists["clients_wl_v4"])
         self.assertTrue(self._ipset_exists["xray_manual_ban"])
         self.assertTrue(self._ipset_exists["xray_manual_ban6"])
-        # no flush/destroy for clients_wl or xray_manual_ban(6)
+        # no flush/destroy for clients_wl_v4 or xray_manual_ban(6)
         for call in self._calls:
             if call[:2] in (["ipset", "flush"], ["ipset", "destroy"]):
-                self.assertNotIn("clients_wl", call)
+                self.assertNotIn("clients_wl_v4", call)
                 self.assertNotIn("xray_manual_ban", call)
 
 
@@ -1415,7 +1415,7 @@ class TestMenuWiring(unittest.TestCase):
         # IPv4
         self.assertEqual(pk._PK_KNOCKED_SET, "xray_knocked")
         self.assertEqual(pk._PK_MANUAL_BAN_SET, "xray_manual_ban")
-        self.assertEqual(pk._PK_WL_SET, "clients_wl")
+        self.assertEqual(pk._PK_WL_SET, "clients_wl_v4")
         # IPv6 (new)
         self.assertEqual(pk._PK_KNOCKED_SET_V6, "xray_knocked6")
         self.assertEqual(pk._PK_MANUAL_BAN_SET_V6, "xray_manual_ban6")

@@ -117,21 +117,22 @@ CLEANUP_CRON_SCRIPT = Path("/usr/local/bin/chimera-ip-cleanup.sh")
 # ── Валидация IP/CIDR ────────────────────────────────────────────────────────
 
 def _validate_ip_or_cidr(value: str) -> "tuple[bool, str, Optional[str]]":
-    """Валидирует IP-адрес или CIDR.
+    """Валидирует IP-адрес, CIDR или wildcard-маску (хвостовые звёздочки).
 
     Возвращает (is_valid, normalized_value, error_message).
-    normalized_value — каноническая форма (без leading zeros, без /32 для IPv4).
+    normalized_value — каноническая форма: IP без /32, CIDR «a.b.c.d/n»,
+    маска 176.9.*.* нормализуется в 176.9.0.0/16 (храним и потребляем
+    только CIDR — ipset hash:net / iptables -s нативно его понимают).
     error_message — пустая строка если валиден, описание ошибки если нет.
 
-    Запрещает:
+    Wildcard-маски (запрос фичи): 176.9.*.* → 176.9.0.0/16,
+    176.9.* → 176.9.0.0/24, 176.* → 176.0.0.0/8. Звёздочки допускаются
+    ТОЛЬКО в последних октетах; *.*.*.* и IPv6-маски запрещены.
+
+    Запрещает (проверяется network-адрес результата):
       • Локальные/зарезервированные адреса (127.x, 10.x, 192.168.x, 169.254.x, ::1, fc00::/7, ...)
       • Multicast (224.0.0.0/4, ff00::/8)
-      • Loopback
-      • Link-local
-
-    Разрешает:
-      • Глобальные IPv4 (1.0.0.0/8 — 223.0.0.0/8, исключая 127/10/172.16/192.168/169.254)
-      • Глобальные IPv6 (2000::/3)
+      • Loopback / Link-local
     """
     if not value or not isinstance(value, str):
         return False, "", "Пустое значение"
@@ -139,6 +140,14 @@ def _validate_ip_or_cidr(value: str) -> "tuple[bool, str, Optional[str]]":
     value = value.strip()
     if not value:
         return False, "", "Пустое значение"
+
+    # Wildcard-маска → CIDR (176.9.*.* → 176.9.0.0/16) до общих проверок.
+    from chimera.modules.ip_mask import is_wildcard_mask, mask_to_cidr
+    if is_wildcard_mask(value):
+        ok, cidr, err = mask_to_cidr(value)
+        if not ok:
+            return False, "", err
+        value = cidr
 
     try:
         # ipaddress.ip_address / ip_network принимают оба формата.
@@ -1107,7 +1116,7 @@ def _tui_manage_single_user(core, users: list[dict]) -> None:
             for i, ip in enumerate(ips, 1):
                 _box_row(f"    {GREEN}[{i}]{NC} {ip}")
         _box_sep()
-        _box_item("1", f"{GREEN}Добавить IP/CIDR{NC}")
+        _box_item("1", f"{GREEN}Добавить IP/CIDR/маску (176.9.*.*){NC}")
         if ips:
             _box_item("2", f"{RED}Удалить IP/CIDR{NC}")
         _box_item("3", "Показать текущий IP клиента (curl ifconfig.me)")
@@ -1125,11 +1134,12 @@ def _tui_manage_single_user(core, users: list[dict]) -> None:
 
         if ch2 == "1":
             print()
-            print(f"{DIM}  Формат: IP (5.6.7.8) или CIDR (5.6.7.0/24).{NC}")
+            print(f"{DIM}  Формат: IP (5.6.7.8), CIDR (5.6.7.0/24) или маска (176.9.*.*).{NC}")
+            print(f"{DIM}  Маска покрывает подсеть целиком: 176.9.*.* = 176.9.0.0/16.{NC}")
             print(f"{DIM}  Допускается IPv6 (2600:dead:beef::/64).{NC}")
             print(f"{DIM}  Подсказка: пусть клиент откроет https://2ip.ru с устройства.{NC}")
             try:
-                new_ip = input(f"{CYAN}  IP/CIDR:{NC} ").strip()
+                new_ip = input(f"{CYAN}  IP/CIDR/маска (5.6.7.8 / 5.6.7.0/24 / 176.9.*.*):{NC} ").strip()
             except (EOFError, KeyboardInterrupt):
                 continue
             if not new_ip:

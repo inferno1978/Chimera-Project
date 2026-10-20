@@ -883,9 +883,19 @@ class TestCronWhitelistNoPersist(unittest.TestCase):
                          "cron-скрипт снова добавляет авто-IP в пользовательский whitelist")
 
     def test_scan_skips_whitelist_and_auto_wl(self):
-        """Сканер TLS-ошибок пропускает IP из обоих сетов."""
-        self.assertIn("im.group(1) in whitelist or im.group(1) in auto_wl",
-                      self._body())
+        """Сканер TLS-ошибок пропускает IP из обоих сетов.
+
+        ipmask-1: точное сравнение заменено на _wl_hit() — точное
+        совпадение + CIDR-containment (запись 176.9.0.0/16 из маски
+        176.9.*.* накрывает все свои IP).
+        """
+        body = self._body()
+        self.assertIn("_wl_hit(im.group(1))", body)
+        self.assertIn("ip in whitelist or ip in auto_wl", body)  # быстрый путь в _wl_hit
+        # Сети действительно считаются по ОБЕИМ сетам
+        self.assertIn("_wl_nets(whitelist | auto_wl)", body)
+        # Старое точное сравнение в цикле скана больше не используется
+        self.assertNotIn("im.group(1) in whitelist or im.group(1) in auto_wl", body)
 
     def test_user_whitelist_still_persisted(self):
         """Прошлый FIX сохранён: cfg['whitelist'] записывается обратно в
@@ -1048,13 +1058,21 @@ class TestWhitelistBatchOperations(unittest.TestCase):
         self.assertEqual(added, ["5.6.7.8"])
         self.assertTrue(any("уже в whitelist" in w for w in warns))
 
-    def test_add_many_cidr_rejected(self):
-        # КРИТИЧНО (кейс <node-2>): whitelist сравнивает точные строки —
-        # «203.0.113.141/24» молча не срабатывает никогда → отклоняем явно.
+    def test_add_many_cidr_accepted_and_normalized(self):
+        # ipmask-1 (кейс <node-2> закрыт): whitelist больше НЕ сравнивает
+        # точные строки — скан проверяет CIDR-containment, поэтому CIDR
+        # принимается и нормализуется (host-биты обрезаются).
         wl = []
         added, warns = self._add_many(wl, "203.0.113.141/24")
-        self.assertEqual(added, [])
-        self.assertTrue(any("подсети не поддерживаются" in w for w in warns))
+        self.assertEqual(added, ["203.0.113.0/24"])
+        self.assertEqual(warns, [])
+
+    def test_add_many_mask_normalized(self):
+        # Wildcard-маска → CIDR (фича ipmask-1)
+        wl = []
+        added, warns = self._add_many(wl, "176.9.*.*")
+        self.assertEqual(added, ["176.9.0.0/16"])
+        self.assertEqual(warns, [])
 
     def test_add_many_invalid_rejected(self):
         wl = []

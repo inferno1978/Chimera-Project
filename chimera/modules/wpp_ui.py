@@ -1976,6 +1976,26 @@ function toggleTheme(){
 /* Collapsible sections */
 function toggleCollapse(el){el.classList.toggle('collapsed');}
 /* Connection-status dot: turns green when detected_ip is in user's whitelist */
+/* _ipInCidr: точный IP против записи whitelist (IP или CIDR, IPv4+IPv6-exact).
+   FIX ipmask-1: раньше работало только точное совпадение или запись вида
+   «detected/...» — CIDR-записи (176.9.0.0/16 из маски 176.9.*.*) точку
+   не зажигали. Теперь — честная проверка вхождения по битовой маске. */
+function _ipInCidr(ip, entry){
+  if(!ip||!entry)return false;
+  ip=(''+ip).trim(); entry=(''+entry).trim();
+  if(ip===entry)return true;
+  if(entry.indexOf('/')<0)return false;
+  if(ip.indexOf(':')>=0||entry.indexOf(':')>=0)return false; /* IPv6: только точное совпадение */
+  var parts=entry.split('/'), base=parts[0], bits=parseInt(parts[1],10);
+  var a=ip.split('.').map(Number), b=base.split('.').map(Number);
+  if(a.length!==4||b.length!==4)return false;
+  if(a.some(isNaN)||b.some(isNaN))return false;
+  if(isNaN(bits)||bits<0||bits>32)return false;
+  var mask=bits===0?0:((0xffffffff<<(32-bits))>>>0);
+  var ai=(((a[0]<<24)|(a[1]<<16)|(a[2]<<8)|a[3])>>>0)&mask;
+  var bi=(((b[0]<<24)|(b[1]<<16)|(b[2]<<8)|b[3])>>>0)&mask;
+  return ai===bi;
+}
 async function loadConnStatus(){
   let d=null;
   try{d=await api('/api/portal/ips');}catch(e){return;}
@@ -1985,7 +2005,7 @@ async function loadConnStatus(){
   const detected=(d.detected_ip||'').trim();
   const ips=(d.ips||[]).map(function(x){return x.ip;});
   if(!detected){dot.className='conn-dot';dot.title='IP не определён';return;}
-  const matched=ips.some(function(ip){return ip===detected||(ip&&ip.indexOf(detected+'/')===0);});
+  const matched=ips.some(function(ip){return _ipInCidr(detected,ip);});
   dot.className='conn-dot '+(matched?'on':'off');
   dot.title=matched?('Ваш IP в whitelist ('+detected+')'):('Ваш IP '+detected+' не в whitelist — добавьте его во вкладке IP');
 }
