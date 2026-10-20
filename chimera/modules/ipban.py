@@ -470,6 +470,7 @@ def _detect_input_kind(raw: str) -> str:
     """
     Определяет тип введённых данных:
       'asn'   — AS12345
+      'mask'  — wildcard-маска с хвостовыми звёздочками (176.9.*.*)
       'range' — содержит дефис между двумя IP
       'cidr'  — содержит /
       'ip'    — одиночный IP
@@ -478,11 +479,27 @@ def _detect_input_kind(raw: str) -> str:
     up = raw.upper()
     if up.startswith("AS") or (raw.isdigit() and len(raw) <= 10):
         return "asn"
+    if "*" in raw:
+        return "mask"
     if "/" in raw:
         return "cidr"
     if "-" in raw and ":" not in raw:
         return "range"
     return "ip"
+
+
+def _parse_mask(raw: str) -> List[str]:
+    """Wildcard-маска (176.9.*.*) → список из одного CIDR (176.9.0.0/16).
+
+    Правила — в chimera/modules/ip_mask.py (хвостовые звёздочки только,
+    *.*.*.* и серединные маски запрещены). Нормализация в CIDR — чтобы
+    хранение и ipset hash:net оставались каноническими.
+    """
+    from chimera.modules.ip_mask import mask_to_cidr
+    ok, cidr, err = mask_to_cidr(raw)
+    if not ok:
+        raise ValueError(f"Неверная маска: {err}")
+    return [cidr]
 
 
 def _resolve_to_cidrs(raw: str) -> Tuple[str, str, List[str]]:
@@ -498,6 +515,10 @@ def _resolve_to_cidrs(raw: str) -> Tuple[str, str, List[str]]:
         asn = _asn_normalize(raw)
         cidrs = _fetch_asn_prefixes(asn)
         return asn, "asn", cidrs
+
+    if kind == "mask":
+        cidrs = _parse_mask(raw)
+        return cidrs[0], "mask", cidrs
 
     if kind == "range":
         cidrs = _parse_range(raw)
@@ -659,11 +680,12 @@ def do_manage_ipban() -> None:
             _box_row()
             _box_row(f"    {CYAN}1.2.3.4{NC}              — одиночный IP")
             _box_row(f"    {CYAN}10.0.0.0/24{NC}          — подсеть (CIDR)")
+            _box_row(f"    {CYAN}176.9.*.*{NC}            — маска (хвостовые октеты звёздочками = 176.9.0.0/16)")
             _box_row(f"    {CYAN}10.0.0.1-10.0.0.255{NC}  — диапазон IPv4")
             _box_row(f"    {CYAN}AS12345{NC}               — вся ASN (RIPE Stat)")
             _box_row(f"    {CYAN}2001:db8::/32{NC}         — IPv6 подсеть")
             _box_row()
-            _box_row(f"  {DIM}Пример: 1.2.3.4, 10.0.0.0/8, AS1234{NC}")
+            _box_row(f"  {DIM}Пример: 1.2.3.4, 10.0.0.0/8, 176.9.*.*, AS1234{NC}")
             _box_bottom()
 
             try:

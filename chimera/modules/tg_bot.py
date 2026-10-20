@@ -1341,9 +1341,52 @@ LOG_PATHS = {{
 }}
 
 def _validate_ip(ip_str):
-    """Валидация IPv4. Возвращает True/False."""
-    import re
-    return bool(re.match(r"^\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}\\.\\d{{1,3}}$", ip_str))
+    """Валидация IP / CIDR / wildcard-маски (176.9.*.*). True/False."""
+    return _normalize_ip_input(ip_str) is not None
+
+def _normalize_ip_input(ip_str):
+    """IP / CIDR / маска → канонический токен для chimera-remote-cmd.py.
+
+    Маска с хвостовыми звёздочками (176.9.*.* → 176.9.0.0/16,
+    152.65.*.* → 152.65.0.0/16, 176.* → 176.0.0.0/8) приводится к CIDR —
+    ipset hash:net / iptables -s понимают только CIDR. Примеры в коде —
+    не догма: значения октетов любые (0-255).
+    Запрещено: *.*.*.*, звёздочки в середине (176.*.9.1), IPv6-маски.
+    SYNC: chimera/modules/ip_mask.py (канонические правила) +
+          scripts/chimera-remote-cmd.py (двойник).
+    Возвращает None при невалидном вводе."""
+    import ipaddress
+    if not ip_str or not isinstance(ip_str, str):
+        return None
+    v = ip_str.strip()
+    if not v:
+        return None
+    if "*" in v:
+        if ":" in v or "/" in v:
+            return None
+        parts = v.split(".")
+        if len(parts) > 4:
+            return None
+        parts = parts + ["*"] * (4 - len(parts))
+        base = []
+        for p in parts:
+            if p == "*":
+                break
+            if not p.isdigit() or int(p) > 255:
+                return None
+            base.append(int(p))
+        if not base or len(base) >= 4:
+            return None
+        if any(p != "*" for p in parts[len(base):]):
+            return None
+        return (".".join(str(x) for x in base) +
+                ".0" * (4 - len(base)) + "/" + str(8 * len(base)))
+    try:
+        if "/" in v:
+            return str(ipaddress.ip_network(v, strict=False))
+        return str(ipaddress.ip_address(v))
+    except ValueError:
+        return None
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CASCADE EXEC HELPERS — для каскадного выполнения команд на peer'ах
@@ -1512,10 +1555,10 @@ def handle_ban(msg, args):
     # Парсим [server] из args
     args_no_server, server_target = _parse_server_arg(args)
     if not args_no_server or not _validate_ip(args_no_server[0]):
-        send(uid, "Использование: <code>/ban &lt;ip&gt; [1|2|3|all|local]</code>\\n"
-                  "Например: <code>/ban 1.2.3.4</code> (primary), <code>/ban 1.2.3.4 all</code> (cascade)")
+        send(uid, "Использование: <code>/ban &lt;ip|cidr|маска&gt; [1|2|3|all|local]</code>\\n"
+                  "Например: <code>/ban 1.2.3.4</code>, <code>/ban 10.0.0.0/24</code>, <code>/ban 176.9.*.*</code>")
         return
-    ip = args_no_server[0]
+    ip = _normalize_ip_input(args_no_server[0])
     # Execute on target(s)
     results = _exec_cascade(server_target, "ban", ip)
     intro = f"🛡️ <b>Ban {{ip}}</b>" + (f" (cascade)" if server_target == "all" else
@@ -1534,9 +1577,9 @@ def handle_unban(msg, args):
         return
     args_no_server, server_target = _parse_server_arg(args)
     if not args_no_server or not _validate_ip(args_no_server[0]):
-        send(uid, "Использование: <code>/unban &lt;ip&gt; [1|2|3|all|local]</code>")
+        send(uid, "Использование: <code>/unban &lt;ip|cidr|маска&gt; [1|2|3|all|local]</code>")
         return
-    ip = args_no_server[0]
+    ip = _normalize_ip_input(args_no_server[0])
     results = _exec_cascade(server_target, "unban", ip)
     intro = f"✅ <b>Unban {{ip}}</b>" + (f" (cascade)" if server_target == "all" else "")
     send(uid, _format_cascade_results(results, intro))
@@ -1576,9 +1619,9 @@ def handle_wl_add(msg, args):
         return
     args_no_server, server_target = _parse_server_arg(args)
     if not args_no_server or not _validate_ip(args_no_server[0]):
-        send(uid, "Использование: <code>/wl_add &lt;ip&gt; [1|2|3|all|local]</code>")
+        send(uid, "Использование: <code>/wl_add &lt;ip|cidr|маска&gt; [1|2|3|all|local]</code>")
         return
-    ip = args_no_server[0]
+    ip = _normalize_ip_input(args_no_server[0])
     results = _exec_cascade(server_target, "wl_add", ip)
     intro = f"✅ <b>WL add {{ip}}</b>" + (f" (cascade)" if server_target == "all" else "")
     send(uid, _format_cascade_results(results, intro))
@@ -1593,9 +1636,9 @@ def handle_wl_del(msg, args):
         return
     args_no_server, server_target = _parse_server_arg(args)
     if not args_no_server or not _validate_ip(args_no_server[0]):
-        send(uid, "Использование: <code>/wl_del &lt;ip&gt; [1|2|3|all|local]</code>")
+        send(uid, "Использование: <code>/wl_del &lt;ip|cidr|маска&gt; [1|2|3|all|local]</code>")
         return
-    ip = args_no_server[0]
+    ip = _normalize_ip_input(args_no_server[0])
     results = _exec_cascade(server_target, "wl_del", ip)
     intro = f"✅ <b>WL del {{ip}}</b>" + (f" (cascade)" if server_target == "all" else "")
     send(uid, _format_cascade_results(results, intro))
@@ -2045,11 +2088,11 @@ def handle_help(msg):
         "/invite           — создать одноразовую invite-ссылку\\n"
         "/broadcast &lt;текст&gt; — рассылка всем привязанным пользователям\\n"
         "\\n<b>🛡️ Бан-лист и whitelist</b>\\n"
-        "/ban &lt;ip&gt; [N]    — ручной бан IP (N=all → на всех серверах)\\n"
-        "/unban &lt;ip&gt; [N]  — разбан IP\\n"
+        "/ban &lt;ip|маска&gt; [N] — бан IP/CIDR/маски 176.9.*.* (N=all → на всех)\\n"
+        "/unban &lt;ip&gt; [N]  — разбан IP/CIDR/маски\\n"
         "/banlist [N]      — список забаненных IP\\n"
         "/whitelist [N]    — список whitelist IP (clients_wl)\\n"
-        "/wl_add &lt;ip&gt; [N] — добавить IP в whitelist (защита от autoban)\\n"
+        "/wl_add &lt;ip&gt; [N] — добавить IP/CIDR/маску в whitelist (защита от autoban)\\n"
         "/wl_del &lt;ip&gt; [N] — удалить IP из whitelist\\n"
         "\\n<b>🌍 GeoIP и fail2ban</b>\\n"
         "/geo [N]          — статус ingress GeoIP-блокировки\\n"
@@ -2070,7 +2113,7 @@ def handle_help(msg):
         "  <code>N=all</code>   — на ВСЕХ серверах (cascade)\\n"
         "  <code>N=local</code> — то же что N=1\\n\\n"
         "  Примеры:\\n"
-        "  <code>/ban 1.2.3.4 all</code>     — бан на всех 3 серверах\\n"
+        "  <code>/ban 176.9.*.* all</code>  — бан подсети на всех 3 серверах\\n"
         "  <code>/restart xray 2</code>      — restart xray на server 2\\n"
         "  <code>/logs nginx 50 all</code>   — логи nginx со всех 3\\n"
         "  <code>/users 2</code>             — пользователи server 2\\n"

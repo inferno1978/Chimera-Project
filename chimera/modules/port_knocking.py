@@ -10,14 +10,14 @@ Port Knocking — динамический ACL для защиты VPN-порт�
   • После N SYN за W секунд → IP добавляется в ipset `xray_knocked`
     (или `xray_knocked6` для IPv6) с TTL
   • Если IP в `xray_knocked`/`xray_knocked6` → SYN ACCEPTED → handshake
-  • Whitelist IPs в существующем ipset `clients_wl` → обходят knocking
+  • Whitelist IPs в существующем ipset `clients_wl_v4` → обходят knocking
     (приоритет, только IPv4 — whitelist модуль хранит IPv4)
   • Существующие `xray_manual_ban`/`xray_manual_ban6` ipsets → DROP независимо
     от knocking
 
 Порядок правил iptables (приоритет — позиция в INPUT):
   1. INSERT 1: -m set --match-set xray_manual_ban src -j DROP    (бан от ipban.py)
-  2. INSERT 2: -m set --match-set clients_wl src     -j ACCEPT  (wl от user_ip_whitelist.py)
+  2. INSERT 2: -m set --match-set clients_wl_v4 src  -j ACCEPT  (wl от user_ip_whitelist.py)
   3. INSERT 3: -m set --match-set xray_knocked src    -j ACCEPT  (кто постучался)
   4. APPEND:   --syn -m recent --name KNOCK{port} --set           (трекать SYN)
   5. APPEND:   --syn -m recent --rcheck --seconds W --hitcount N
@@ -31,7 +31,8 @@ Port Knocking — динамический ACL для защиты VPN-порт�
   4. APPEND:   --syn -m recent --rcheck ... -j SET --add-set xray_knocked6 src
   5. APPEND:   --syn -j DROP
 
-  (нет clients_wl для IPv6 — whitelist модуль хранит только IPv4)
+  (IPv6-клиенты не в wl-правиле knocking'а — модуль user_ip_whitelist
+   хранит v4/v6 в раздельных сетах; knocking-цепочка здесь IPv4-only)
 
 UFW-конфликт:
   При install: ufw delete allow <port>/tcp (убирает ACCEPT :port от UFW,
@@ -87,14 +88,14 @@ _PK_LOG_FILE   = Path("/var/log/chimera.log")
 # ipset-имена:
 #   `xray_knocked`    — СОЗДАЁТСЯ этим модулем (с TTL timeout), IPv4
 #   `xray_knocked6`   — СОЗДАЁТСЯ этим модулем (с TTL timeout), IPv6 (family inet6)
-#   `clients_wl`      — уже существует (user_ip_whitelist.py) — читаем, не трогаем
+#   `clients_wl_v4`   — уже существует (user_ip_whitelist.py) — читаем, не трогаем
 #   `xray_manual_ban`  — уже существует (ipban.py) — читаем, не трогаем
 #   `xray_manual_ban6` — может существовать (ipban.py для IPv6) — читаем, не трогаем
 _PK_KNOCKED_SET       = "xray_knocked"
 _PK_KNOCKED_SET_V6    = "xray_knocked6"   # IPv6 ipset name
 _PK_MANUAL_BAN_SET    = "xray_manual_ban"
 _PK_MANUAL_BAN_SET_V6 = "xray_manual_ban6"  # IPv6 manual ban
-_PK_WL_SET            = "clients_wl"
+_PK_WL_SET            = "clients_wl_v4"   # ipmask-1: старый monolithic clients_wl переименован в v4/v6
 
 # Comment-маркер для всех iptables/ip6tables-правил модуля — для идемпотентной
 # установки и безопасной очистки при remove(): ищем/удаляем только свои правила.
@@ -301,7 +302,7 @@ def _pk_build_iptables_rules(port: int, state: dict) -> list:
         {"op": "insert", "pos": 1,
          "spec": base + ["-m", "set", "--match-set", _PK_MANUAL_BAN_SET, "src",
                          "-j", "DROP"] + comment},
-        # 2. ACCEPT для ipset clients_wl (whitelist от user_ip_whitelist.py)
+        # 2. ACCEPT для ipset clients_wl_v4 (whitelist от user_ip_whitelist.py)
         {"op": "insert", "pos": 2,
          "spec": base + ["-m", "set", "--match-set", _PK_WL_SET, "src",
                          "-j", "ACCEPT"] + comment},
@@ -347,7 +348,7 @@ def _pk_build_ip6tables_rules(port: int, state: dict) -> list:
     Аналог _pk_build_iptables_rules, но для IPv6:
       • Использует xray_manual_ban6 / xray_knocked6 ipsets
       • Использует KNOCK{port}v6 recent-имя (отдельное пространство имён)
-      • Без clients_wl (whitelist модуль хранит только IPv4)
+      • Без clients_wl_v4 (whitelist модуль не сконфигурирован)
       • Comment имеет суффикс :...6 для отладки
 
     Возвращает 5 rules (2 INSERT + 3 APPEND).
@@ -535,7 +536,7 @@ def _pk_install(state: dict) -> bool:
       4. Создаём ipset xray_knocked6 (IPv6, family inet6) — идемпотентно.
       5. Для каждого порта:
          a. ufw delete allow <port>/tcp (Bug 3 fix)
-         b. iptables-правила IPv4 (3 INSERT + 3 APPEND) — skip clients_wl
+         b. iptables-правила IPv4 (3 INSERT + 3 APPEND) — skip clients_wl_v4
             если ipset не существует; идемпотентно через -C check.
          c. ip6tables-правила IPv6 (2 INSERT + 3 APPEND) — skip
             xray_manual_ban6 если ipset не существует; идемпотентно через -C.

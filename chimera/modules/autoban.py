@@ -819,6 +819,9 @@ def _autoban_run_once() -> int:
     # как источники TLS-соединений и НЕ должны баниться
     for chain_ip in _autoban_get_chain_ips():
         whitelist.add(chain_ip)
+    #  FIX (ipmask-1): whitelist поддерживает CIDR/маски (176.9.0.0/16 из
+    # 176.9.*.*) — точного сравнения мало, проверяем вхождение по сетям.
+    from chimera.modules.ip_mask import ip_in_entries
     banned    = cfg.get("banned", {})
 
     error_log = Path("/var/log/xray/error.log")
@@ -859,7 +862,7 @@ def _autoban_run_once() -> int:
             if not ip_m:
                 continue
             ip = ip_m.group(1)
-            if ip in whitelist:
+            if ip in whitelist or ip_in_entries(ip, whitelist):
                 continue
             ip_errors[ip] = ip_errors.get(ip, 0) + 1
     except Exception:
@@ -1133,6 +1136,41 @@ try:
                     auto_wl.add(_ip)
 except: pass
 
+#  FIX (ipmask-1): whitelist поддерживает CIDR и wildcard-маски
+# (176.9.*.* нормализуется в 176.9.0.0/16 на входе меню/TG wl_add) —
+# точного строкового сравнения мало: подсеть обязана накрывать все свои
+# IP. Сети парсим один раз за прогон, проверяем вхождение адресом.
+import ipaddress as _ipa
+
+def _wl_nets(entries):
+    nets = []
+    for e in entries:
+        try:
+            nets.append(_ipa.ip_network(str(e).strip(), strict=False))
+        except ValueError:
+            pass
+    return nets
+
+_wl_nets_cache = None
+
+def _wl_hit(ip):
+    global _wl_nets_cache
+    if ip in whitelist or ip in auto_wl:
+        return True
+    if _wl_nets_cache is None:
+        _wl_nets_cache = _wl_nets(whitelist | auto_wl)
+    try:
+        a = _ipa.ip_address(ip)
+    except ValueError:
+        return False
+    for n in _wl_nets_cache:
+        try:
+            if a in n:
+                return True
+        except TypeError:
+            pass
+    return False
+
 banned = cfg.get('banned', {{}})
 
 error_log = Path('/var/log/xray/error.log')
@@ -1151,7 +1189,7 @@ for line in error_log.read_text(errors='replace').splitlines()[-5000:]:
         except: pass
     if not tls_re.search(line): continue
     im = ip_re.search(line)
-    if not im or im.group(1) in whitelist or im.group(1) in auto_wl: continue
+    if not im or _wl_hit(im.group(1)): continue
     ip_errors[im.group(1)] = ip_errors.get(im.group(1), 0) + 1
 
 for ip, cnt in ip_errors.items():
@@ -1306,14 +1344,16 @@ def _parse_selection_targets(raw: str, items: list,
 
 
 def _whitelist_add_many(wl: list, raw: str) -> "tuple[list, list]":
-    """Добавляет в whitelist несколько IP (запятая/пробелы).
+    """Добавляет в whitelist несколько записей (запятая/пробелы).
 
-    Валидация точных IP (IPv4/IPv6) — подсети/CIDR НЕ поддерживаются:
-    whitelist автобана сравнивает точные строки (кейс <node-2> —
-    «203.0.113.141/24» молча не срабатывает никогда).
+    Форматы: точные IP (IPv4/IPv6), CIDR, wildcard-маска хвостовых октетов
+    (176.9.*.* → 176.9.0.0/16; значения октетов любые — примеры не догма).
+    Скан autoban'а проверяет вхождение по CIDR-containment (фикс ipmask-1,
+    кейс <node-2> закрыт: подсеть больше не «молча не срабатывает»).
     Мутирует wl по месту. Возвращает (added, warnings).
     """
     import ipaddress
+    from chimera.modules.ip_mask import is_wildcard_mask, mask_to_cidr
     added: list = []
     warnings: list = []
     tokens = [t.strip() for t in re.split(r"[,\s]+", raw or "") if t.strip()]
@@ -1321,20 +1361,28 @@ def _whitelist_add_many(wl: list, raw: str) -> "tuple[list, list]":
         warnings.append("Пустой ввод")
         return added, warnings
     for token in tokens:
-        if "/" in token:
-            warnings.append(f"{token}: подсети не поддерживаются — только точные "
-                            f"IP (сравнение по строке)")
+        norm = token
+        if is_wildcard_mask(token):
+            ok_m, cidr_m, err_m = mask_to_cidr(token)
+            if ok_m:
+                norm = cidr_m
+            else:
+                warnings.append(f"{token}: {err_m}")
+                continue
+        else:
+            try:
+                if "/" in norm:
+                    norm = str(ipaddress.ip_network(norm, strict=False))
+                else:
+                    norm = str(ipaddress.ip_address(norm))
+            except ValueError:
+                warnings.append(f"{token}: не похоже на IP/CIDR/маску — пропущен")
+                continue
+        if norm in wl:
+            warnings.append(f"{norm}: уже в whitelist")
             continue
-        try:
-            ipaddress.ip_address(token)
-        except ValueError:
-            warnings.append(f"{token}: не похоже на IP — пропущен")
-            continue
-        if token in wl:
-            warnings.append(f"{token}: уже в whitelist")
-            continue
-        wl.append(token)
-        added.append(token)
+        wl.append(norm)
+        added.append(norm)
     return added, warnings
 
 
