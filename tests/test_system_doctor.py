@@ -378,6 +378,47 @@ class TestCertPaths(unittest.TestCase):
         self.assertEqual(extract_cert_paths(None), [])
 
 
+class TestWgDump(unittest.TestCase):
+    """parse_wg_dump / peer_for_target — честный сигнал туннеля
+    (кейс NL: ICMP через AWG не ходит, хендшейк живой)."""
+
+    DUMP = (
+        "awg0\t(private)\tNMNaXx/0f4=\t52831\n"
+        "awg0\teWfUaEV4=\t(none)\t91.224.87.154:6304\t"
+        "172.16.91.4/32, fd66:66:91::4/128\t1760000000\t65250\t62030\toff\n"
+        "awg0\taWslmD67=\t(none)\t138.124.255.238:60590\t"
+        "172.16.91.3/32, fd66:66:91::3/128\t1760000005\t65310\t61860\toff\n"
+    )
+
+    def test_parse_peers(self):
+        from chimera.modules.system_doctor import parse_wg_dump
+        peers = parse_wg_dump(self.DUMP)
+        self.assertEqual(len(peers), 2)  # interface-строка отфильтрована
+        self.assertEqual(peers[0]["endpoint"], "91.224.87.154:6304")
+        self.assertEqual(peers[0]["handshake_ts"], 1760000000)
+        self.assertIn("172.16.91.4/32", peers[0]["allowed_ips"])
+
+    def test_peer_for_target(self):
+        from chimera.modules.system_doctor import peer_for_target, parse_wg_dump
+        peers = parse_wg_dump(self.DUMP)
+        p = peer_for_target(peers, "172.16.91.3")
+        self.assertIsNotNone(p)
+        self.assertEqual(p["endpoint"], "138.124.255.238:60590")
+        self.assertIsNone(peer_for_target(peers, "10.9.9.9"))
+        self.assertIsNone(peer_for_target([], "172.16.91.3"))
+
+    def test_no_handshake_ts_zero(self):
+        from chimera.modules.system_doctor import parse_wg_dump
+        dump = ("awg0\tPUB\t(none)\t1.2.3.4:5\t10.0.0.2/32\t0\t0\t0\toff\n")
+        peers = parse_wg_dump(dump)
+        self.assertEqual(peers[0]["handshake_ts"], 0)
+
+    def test_garbage(self):
+        from chimera.modules.system_doctor import parse_wg_dump
+        self.assertEqual(parse_wg_dump(""), [])
+        self.assertEqual(parse_wg_dump("случайный текст\nбез табов"), [])
+
+
 class TestXrayVersion(unittest.TestCase):
     """parse_xray_version — CalVer (26.10.17) и semver (1.8.4)."""
 

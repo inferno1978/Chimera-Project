@@ -172,6 +172,7 @@ DEFAULT_CONFIG: dict = {
     "disk_crit_pct": 90,
     "xray_target_version": "",           # "" = не сверять дрифт
     "tunnel_targets": [],                # напр. ["172.16.91.3", "172.16.91.4"]
+    "tunnel_handshake_max_s": 180,       # свежесть хендшейка AWG/WG-пира
     "dns_test_host": "debian.org",
     # ── тумблеры по пунктам (check/fix) ──
     "checks": {cid: {"check": meta[3], "fix": meta[4]}
@@ -638,6 +639,42 @@ def extract_cert_paths(xray_cfg: dict) -> list:
     except Exception:
         pass
     return sorted(set(paths))
+
+
+def parse_wg_dump(text: str) -> list:
+    """`wg/awg show all dump` → [{'iface','endpoint','allowed_ips',
+    'handshake_ts','rx','tx'}] по пирам (строки с 5+ полями; ts=0 —
+    хендшейка не было). Чистая функция."""
+    peers = []
+    for line in (text or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 8:
+            continue
+        # interface-line: iface, privkey, pubkey, listen-port — 4 поля
+        try:
+            ts = int(parts[5])
+        except ValueError:
+            continue
+        try:
+            rx, tx = int(parts[6]), int(parts[7])
+        except ValueError:
+            rx = tx = 0
+        peers.append({"iface": parts[0], "endpoint": parts[3],
+                      "allowed_ips": parts[4].split(","),
+                      "handshake_ts": ts, "rx": rx, "tx": tx})
+    return peers
+
+
+def peer_for_target(dump: list, ip: str):
+    """Пир, чьи allowed-ips покрывают цель (172.16.91.3 → пир RU-ноды).
+    Чистая функция."""
+    ip = str(ip).strip()
+    for p in dump or []:
+        for a in p.get("allowed_ips") or []:
+            a = a.strip()
+            if a and (a == ip or a.endswith("/32") and a[:-3] == ip):
+                return p
+    return None
 
 
 def parse_xray_version(text: str) -> str:
@@ -1172,17 +1209,47 @@ def chk_steal_snapshot(ctx: DoctorCtx) -> None:
 
 
 def chk_tunnels(ctx: DoctorCtx) -> None:
+    """Каскадные туннели: честный сигнал — свежесть AWG/WG-хендшейка
+    пира (ICMP через AmneziaWG может не ходить при живом туннеле —
+    кейс NL: ping мёртв, handshake 11с назад, трафик течёт)."""
     targets = ctx.cfg.get("tunnel_targets") or []
     if not targets:
         ctx.record("tunnels", "ok", "цели туннелей не настроены — пропуск")
         return
+    max_s = int(ctx.cfg.get("tunnel_handshake_max_s") or 180)
+    dump = []
+    for tool in ("awg", "wg"):
+        r = _run([tool, "show", "all", "dump"], timeout=20)
+        if r.returncode == 0 and r.stdout.strip():
+            dump = parse_wg_dump(r.stdout)
+            if dump:
+                break
+    now = time.time()
     for t in targets:
+        peer = peer_for_target(dump, t) if dump else None
+        if peer is not None:
+            age = now - peer["handshake_ts"] if peer["handshake_ts"] else None
+            if age is None:
+                ctx.record("tunnels", "crit",
+                           f"{t}: пир {peer['endpoint']} без хендшейка")
+            elif age <= max_s:
+                ctx.record("tunnels", "ok",
+                           f"{t} — туннель жив (handshake {int(age)} c назад)")
+            else:
+                ctx.record("tunnels", "crit",
+                           f"{t}: хендшейк {int(age)} c назад (> {max_s} c) — "
+                           f"туннель к {peer['endpoint']} мёртв?")
+            continue
+        # пира нет в дампе (или нет wg/awg) — фолбэк на ping
         r = _run(["ping", "-c", "1", "-W", "2", str(t)], timeout=8)
         if r.returncode == 0:
-            ctx.record("tunnels", "ok", f"{t} доступен")
+            ctx.record("tunnels", "ok", f"{t} доступен (ping)")
+        elif dump:
+            ctx.record("tunnels", "crit",
+                       f"{t}: пира нет в AWG/WG-дампе и ping не проходит")
         else:
             ctx.record("tunnels", "crit",
-                       f"{t} НЕ пингуется — каскадный туннель/маршрут мёртв?")
+                       f"{t} НЕ пингуется — туннель/маршрут мёртв?")
 
 
 def chk_ssh_audit(ctx: DoctorCtx) -> None:
