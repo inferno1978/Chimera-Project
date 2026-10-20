@@ -25,7 +25,7 @@ IPv4 wildcard-маски (звёздочки в последних октета�
 
 Почему нормализация в CIDR: ВСЯ инфраструктура Chimera уже CIDR-native —
 ipset hash:net (clients_wl_v4/v6, xray_manual_ban/6), iptables -s,
-ipaddress.* в модулях.Wildcard-маска — это лишь НОТАЦИЯ на входе;
+ipaddress.* в модулях. Wildcard-маска — это лишь НОТАЦИЯ на входе;
 хранение и потребление — канонический CIDR. Поэтому каждый октет-маска
 даёт ровно один CIDR (хвостовые октеты бинарно выровнены: /8, /16, /24).
 
@@ -42,9 +42,9 @@ ipaddress.* в модулях.Wildcard-маска — это лишь НОТАЦ
         раньше сравнивался по точной строке.
 
 Двойники (SYNC: держать в актуальном состоянии):
-    chimera/modules/tg_bot.py        — _normalize_ip_token() в шаблоне бота
+    chimera/modules/tg_bot.py        — _normalize_ip_input() в шаблоне бота
                                        (standalone-скрипт, без импортов chimera)
-    scripts/chimera-remote-cmd.py    — _mask_to_cidr() (deployed в /usr/local/bin)
+    scripts/chimera-remote-cmd.py    — _normalize_ip_input() (deployed в /usr/local/bin)
     chimera/modules/autoban.py       — inline-парсер CIDR в cron-скрипте
 Двойники сознательно урезаны (только mask_to_cidr) и помечены комментарием
 «SYNC: ip_mask.py».
@@ -76,7 +76,7 @@ def mask_to_cidr(value: str) -> Tuple[bool, str, str]:
     Примеры:
         176.9.*.*  → (True, '176.9.0.0/16', '')
         152.65.*.* → (True, '152.65.0.0/16', '')
-        189.122.*  → (True, '189.122.0.0/24', '')
+        189.122.*  → (True, '189.122.0.0/16', '')   # сокращённая форма
         176.*      → (True, '176.0.0.0/8', '')
         *.*.*.*    → (False, '', 'маска *.*.*.* запрещена — это весь интернет')
         176.*.9.1  → (False, '', 'звёздочки допускаются только в ПОСЛЕДНИХ октетах')
