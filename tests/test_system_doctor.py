@@ -34,6 +34,10 @@ reboot-required) — модуль закрывает класс «гигиена
  20. build_console_report / build_tg_text — отчёты
  21. run_once(disabled)        — выключенный доктор = skip
  22. Wiring с tg_bot: иконки/подписи/паритет ev_keys/ev_labels
+ 23. parse_tsc_mhz / tsc_change_kind — TSC-детектор: парсер строки
+                                 ядра + классификация same/moved
+ 24. chk_vm_migration          — базовая линия / тот же бут / новый бут
+                                 (джиттер) / переезд (crit) / dry-run
 """
 from __future__ import annotations
 
@@ -453,6 +457,63 @@ class TestXrayVersion(unittest.TestCase):
         self.assertEqual(parse_xray_version("xray binary not found"), "")
 
 
+class TestTscParse(unittest.TestCase):
+    """parse_tsc_mhz — строка 'tsc: Detected NNN.NNN MHz processor'
+    (живой фингерпринт кремния под KVM: journalctl- и dmesg-формат)."""
+
+    def test_journal_style(self):
+        from chimera.modules.system_doctor import parse_tsc_mhz
+        log = ("Oct 20 14:02:48 testhost kernel: "
+               "tsc: Detected 2599.996 MHz processor\n"
+               "clocksource: tsc-early: mask: 0xffffffffffffffff\n")
+        self.assertAlmostEqual(parse_tsc_mhz(log), 2599.996)
+
+    def test_dmesg_style(self):
+        from chimera.modules.system_doctor import parse_tsc_mhz
+        log = ("[    0.000000] Linux version 6.8.0-147-generic\n"
+               "[    0.000000] tsc: Detected 2000.000 MHz processor\n")
+        self.assertAlmostEqual(parse_tsc_mhz(log), 2000.0)
+
+    def test_first_match_wins(self):
+        from chimera.modules.system_doctor import parse_tsc_mhz
+        log = ("tsc: Detected 2449.998 MHz processor\n"
+               "tsc: Detected 9999.000 MHz processor\n")
+        self.assertAlmostEqual(parse_tsc_mhz(log), 2449.998)
+
+    def test_refined_line_not_matched(self):
+        from chimera.modules.system_doctor import parse_tsc_mhz
+        self.assertIsNone(parse_tsc_mhz(
+            "tsc: Refined TSC clocksource calibration: 2449.998 MHz"))
+
+    def test_empty(self):
+        from chimera.modules.system_doctor import parse_tsc_mhz
+        self.assertIsNone(parse_tsc_mhz(""))
+        self.assertIsNone(parse_tsc_mhz(None))
+        self.assertIsNone(parse_tsc_mhz("случайный текст без тикера"))
+
+
+class TestTscChangeKind(unittest.TestCase):
+    """tsc_change_kind — джиттер того же камня vs другой физхост."""
+
+    def test_same_silicon_jitter(self):
+        from chimera.modules.system_doctor import tsc_change_kind
+        self.assertEqual(tsc_change_kind(2450.000, 2449.998, 1.0), "same")
+
+    def test_moved_class_change(self):
+        from chimera.modules.system_doctor import tsc_change_kind
+        self.assertEqual(tsc_change_kind(2449.998, 2000.000, 1.0), "moved")
+
+    def test_boundary_inclusive_same(self):
+        from chimera.modules.system_doctor import tsc_change_kind
+        self.assertEqual(tsc_change_kind(2000.0, 2001.0, 1.0), "same")
+        self.assertEqual(tsc_change_kind(2000.0, 2001.001, 1.0), "moved")
+
+    def test_unknown(self):
+        from chimera.modules.system_doctor import tsc_change_kind
+        self.assertEqual(tsc_change_kind(None, 2000.0), "unknown")
+        self.assertEqual(tsc_change_kind(2000.0, None), "unknown")
+
+
 class TestQuietHours(unittest.TestCase):
     """in_quiet_hours — интервал через полночь (как у watcher'а)."""
 
@@ -821,6 +882,115 @@ class TestRunOnce(unittest.TestCase):
         self.assertEqual(saved["counts"]["ok"], 1)
         # фикс не применялся: в конфиге fix выключен для journald_cap
         self.assertEqual(rep["fixed"], [])
+
+
+class TestVmMigration(unittest.TestCase):
+    """chk_vm_migration: базовая линия → тот же бут → новый бут (джиттер) →
+    переезд (crit + история) → нет строки TSC → битый стейт → dry-run."""
+
+    KLOG_2450 = ("Oct 20 06:02:48 testhost kernel: "
+                 "tsc: Detected 2450.000 MHz processor\n")
+    KLOG_2000 = ("Oct 21 02:01:55 testhost kernel: "
+                 "tsc: Detected 2000.000 MHz processor\n")
+
+    class _Proc:
+        def __init__(self, stdout=""):
+            self.stdout = stdout
+            self.returncode = 0
+
+    def setUp(self):
+        import chimera.modules.system_doctor as sd
+        self.sd = sd
+        self.tmp = Path(tempfile.mkdtemp())
+        self.state = self.tmp / "system-doctor-vm.json"
+        self.bak = self.tmp / "backups"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _check(self, klog, boot_id, mode="check", dry=False):
+        ctx = self.sd.DoctorCtx(cfg=dict(self.sd.DEFAULT_CONFIG),
+                                mode=mode, dry_run=dry)
+        with patch.multiple(self.sd, VM_STATE_FILE=self.state,
+                            BACKUP_ROOT=self.bak,
+                            _boot_kernel_log=lambda: klog,
+                            _read_boot_id=lambda: boot_id), \
+             patch.object(self.sd, "_run",
+                          lambda cmd, timeout=30, input_text="":
+                          self._Proc()):
+            self.sd.chk_vm_migration(ctx)
+        return ctx
+
+    def _write_state(self, boot_id, tsc_mhz, changes=None):
+        self.state.write_text(json.dumps(
+            {"boot_id": boot_id, "tsc_mhz": tsc_mhz,
+             "since": "01.10.2026", "changes": changes or []}),
+            encoding="utf-8")
+
+    def test_baseline_first_run(self):
+        ctx = self._check(self.KLOG_2450, "boot-aaa")
+        self.assertEqual(ctx.findings[-1]["level"], "ok")
+        self.assertIn("базовая линия", ctx.findings[-1]["msg"])
+        st = json.loads(self.state.read_text())
+        self.assertAlmostEqual(st["tsc_mhz"], 2450.0)
+        self.assertEqual(st["boot_id"], "boot-aaa")
+        self.assertEqual(st["changes"], [])
+
+    def test_same_boot_quiet(self):
+        self._write_state("boot-aaa", 2450.0)
+        before = self.state.read_text()
+        ctx = self._check(self.KLOG_2450, "boot-aaa")
+        self.assertEqual(ctx.findings[-1]["level"], "ok")
+        self.assertIn("тот же бут", ctx.findings[-1]["msg"])
+        self.assertEqual(self.state.read_text(), before)  # стейт не трогаем
+
+    def test_new_boot_jitter_same_host(self):
+        self._write_state("boot-aaa", 2449.998)
+        ctx = self._check(self.KLOG_2450, "boot-bbb")
+        self.assertEqual(ctx.findings[-1]["level"], "ok")
+        self.assertIn("тот же физхост", ctx.findings[-1]["msg"])
+        st = json.loads(self.state.read_text())
+        self.assertEqual(st["boot_id"], "boot-bbb")
+
+    def test_migration_crit_and_history(self):
+        self._write_state("boot-aaa", 2449.998)
+        ctx = self._check(self.KLOG_2000, "boot-bbb")
+        self.assertEqual(ctx.findings[-1]["level"], "crit")
+        self.assertIn("ПЕРЕЕХАЛА", ctx.findings[-1]["msg"])
+        self.assertIn("2000.000", ctx.findings[-1]["msg"])
+        st = json.loads(self.state.read_text())
+        self.assertAlmostEqual(st["tsc_mhz"], 2000.0)
+        self.assertEqual(len(st["changes"]), 1)
+        self.assertAlmostEqual(st["changes"][0]["from_mhz"], 2449.998)
+
+    def test_no_tsc_line_skip(self):
+        ctx = self._check("random junk without tsc line", "boot-x")
+        self.assertEqual(ctx.findings[-1]["level"], "info")
+        self.assertFalse(self.state.exists())
+
+    def test_broken_state_resets_baseline(self):
+        self.state.write_text("{это не json")
+        ctx = self._check(self.KLOG_2450, "boot-aaa")
+        self.assertIn("базовая линия", ctx.findings[-1]["msg"])
+        st = json.loads(self.state.read_text())
+        self.assertAlmostEqual(st["tsc_mhz"], 2450.0)
+
+    def test_dry_run_does_not_consume_event(self):
+        self._write_state("boot-aaa", 2449.998)
+        ctx = self._check(self.KLOG_2000, "boot-bbb", mode="fix", dry=True)
+        self.assertEqual(ctx.findings[-1]["level"], "crit")
+        st = json.loads(self.state.read_text())   # стейт не перезаписан
+        self.assertAlmostEqual(st["tsc_mhz"], 2449.998)
+
+    def test_cfg_defaults_for_old_config(self):
+        """Конфиг ноды, сохранённый ДО появления пункта, добирает его
+        дефолтами: check вкл, fix принудительно выкл (danger 3)."""
+        from chimera.modules.system_doctor import DEFAULT_CONFIG, merge_cfg
+        m = merge_cfg(DEFAULT_CONFIG, {})
+        self.assertTrue(m["checks"]["vm_migration"]["check"])
+        self.assertFalse(m["checks"]["vm_migration"]["fix"])
+        self.assertEqual(m["vm_tsc_tolerance_mhz"], 1.0)
 
 
 class TestTgWiring(unittest.TestCase):
