@@ -27,13 +27,13 @@ apt-апдейтов без unattended-upgrades, pingtunnel-логи по 16MB/�
   • dry-run показывает команды/записи без применения;
   • всё идемпотентно: повторный проход по уже здоровой ноде = no-op.
 
-Состав (23 пункта, группы: journal/logs, boot/units, apt/kernel,
+Состав (24 пункта, группы: journal/logs, boot/units, apt/kernel,
 services, security-audit, fleet):
   journald_cap, big_logs, logrotate_coverage, unit_log_perms,
   failed_units, rc_local, phantom_netplan, crash_loops,
   apt_cache, old_kernels, updates_pending, reboot_flag, unattended,
   timesync, fail2ban, disk_usage,
-  xray_version, cert_expiry, steal_snapshot, tunnels,
+  xray_version, cert_expiry, steal_snapshot, vm_migration, tunnels,
   ssh_audit, ufw_audit, dns_check
 
 Режимы (main.py --system-doctor [--fix] [--only id,id] [--dry-run]
@@ -45,6 +45,7 @@ services, security-audit, fleet):
 Файлы:
   /var/lib/xray-installer/system-doctor.json        — конфиг (тумблеры)
   /var/lib/xray-installer/system-doctor-last.json   — последний отчёт
+  /var/lib/xray-installer/system-doctor-vm.json     — состояние TSC-детектора (boot_id + МГц + история переездов)
   /var/log/system-doctor.log                        — журнал
   /var/backups/system-doctor/<TS>/<name>            — бэкапы правок
   /etc/cron.d/system-doctor                         — cron (день, 05:40)
@@ -62,7 +63,8 @@ services, security-audit, fleet):
 parse_netplan_ifaces, classify_reboot_required, parse_nrestarts,
 parse_unit_log_rules, parse_journal_usage_mb, parse_kernel_pkgs,
 parse_listening_ports, parse_ufw_allowed, extract_cert_paths,
-parse_xray_version, human_mb, merge_cfg, build_logrotate_stanza.
+parse_xray_version, parse_tsc_mhz, tsc_change_kind, human_mb,
+merge_cfg, build_logrotate_stanza.
 """
 from __future__ import annotations
 
@@ -80,6 +82,7 @@ from pathlib import Path
 BASE_DIR      = Path("/var/lib/xray-installer")
 CONFIG_FILE   = BASE_DIR / "system-doctor.json"
 LAST_FILE     = BASE_DIR / "system-doctor-last.json"
+VM_STATE_FILE = BASE_DIR / "system-doctor-vm.json"   # TSC-детектор переездов VM
 TG_BOT_CFG    = BASE_DIR / "tg_bot.json"
 LOG_FILE      = Path("/var/log/system-doctor.log")
 BACKUP_ROOT   = Path("/var/backups/system-doctor")
@@ -133,6 +136,10 @@ CHECK_CATALOG: dict = {
                     "срок TLS-сертификатов из конфига Xray: отчёт"),
     "steal_snapshot": ("CPU Steal (мгнов.)", 3, False, True, False,
                         "быстрый замер %steal — хроника оверселла (детально: steal_monitor)"),
+    "vm_migration": ("Миграция VM (TSC)", 3, False, True, False,
+                     "частота TSC сменилась между бутами → VM переселили "
+                     "на другой физхост: crit-алерт (модель CPU в госте "
+                     "статична и может маскировать реальный кремний)"),
     "tunnels": ("Каскадные туннели", 3, False, True, False,
                 "ping до внутренних адресов AWG-каскада: отчёт"),
     "ssh_audit": ("Аудит SSH", 3, False, True, False,
@@ -173,6 +180,7 @@ DEFAULT_CONFIG: dict = {
     "xray_target_version": "",           # "" = не сверять дрифт
     "tunnel_targets": [],                # напр. ["172.16.91.3", "172.16.91.4"]
     "tunnel_handshake_max_s": 180,       # свежесть хендшейка AWG/WG-пира
+    "vm_tsc_tolerance_mhz": 1.0,         # джиттер TSC того же физхоста (МГц)
     "dns_test_host": "debian.org",
     # ── тумблеры по пунктам (check/fix) ──
     "checks": {cid: {"check": meta[3], "fix": meta[4]}
@@ -693,6 +701,37 @@ def parse_xray_version(text: str) -> str:
     Чистая функция."""
     m = re.search(r"Xray\s+v?([\d][\w.\-]*)", text or "")
     return m.group(1) if m else ""
+
+
+_TSC_DETECTED_RE = re.compile(
+    r"tsc: Detected (\d+(?:\.\d+)?) MHz processor")
+
+
+def parse_tsc_mhz(kernel_log_text: str):
+    """Частота TSC из строки ядра 'tsc: Detected NNNN.NNN MHz processor'
+    (первое вхождение = CPU0; в KVM-госте калибруется с физхоста на каждом
+    буту — живой фингерпринт реального кремния под гипервизором).
+    Чистая функция; None = строки нет (контейнер/нестандартный лог)."""
+    m = _TSC_DETECTED_RE.search(kernel_log_text or "")
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def tsc_change_kind(prev, cur, tolerance_mhz: float = 1.0) -> str:
+    """Классификация смены тикера между бутами: 'same' — джиттер калибровки
+    того же кремния (2450.000 vs 2449.998), 'moved' — другой физхост/класс
+    (2449.998 → 2000.000), 'unknown' — нет данных. Чистая функция."""
+    if prev is None or cur is None:
+        return "unknown"
+    try:
+        return "moved" if abs(float(cur) - float(prev)) > float(tolerance_mhz) \
+            else "same"
+    except (TypeError, ValueError):
+        return "unknown"
 
 
 def build_logrotate_stanza(paths) -> str:
@@ -1221,6 +1260,90 @@ def chk_steal_snapshot(ctx: DoctorCtx) -> None:
         ctx.record("steal_snapshot", "warn", f"%steal {steal:.1f}")
     else:
         ctx.record("steal_snapshot", "ok", f"%steal {steal:.1f}")
+
+
+def _boot_kernel_log() -> str:
+    """Журнал ядра текущего бута: journalctl → dmesg (fallback)."""
+    r = _run(["journalctl", "-k", "-b", "--no-pager"], timeout=30)
+    if parse_tsc_mhz(r.stdout or ""):
+        return r.stdout or ""
+    r = _run(["dmesg"], timeout=30)
+    return r.stdout or ""
+
+
+def _read_boot_id() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _vm_state_write(ctx: DoctorCtx, state: dict) -> None:
+    """Сохранить состояние TSC-детектора (dry-run-aware через ctx.write)."""
+    ok = ctx.write(VM_STATE_FILE,
+                   json.dumps(state, ensure_ascii=False, indent=1))
+    if not ok:
+        ctx.record("vm_migration", "warn",
+                   "не удалось записать состояние TSC-детектора")
+
+
+def chk_vm_migration(ctx: DoctorCtx) -> None:
+    """Детектор переезда VM на другой физхост по частоте TSC (живой кейс
+    окт.2026: ночной переезд VM без уведомления — модель CPU в госте не
+    изменилась, а тикер 2449.998 → 2000.000 МГц выдал замену кремния
+    7763-класса на 7713). TSC пробрасывается гипервизором с физического
+    камня и перекалибруется на каждом буте: смена частоты между бутами =
+    фингерпринт другого хоста. Live-миграцию живого гостя так не поймать
+    (тикер масштабируется TSC-scaling'ом) — детект срабатывает на первом
+    проходе после рестарта VM."""
+    cur = parse_tsc_mhz(_boot_kernel_log())
+    if cur is None:
+        ctx.record("vm_migration", "info",
+                   "строка 'tsc: Detected …MHz processor' в журнале ядра "
+                   "не найдена — пропуск (контейнер?)")
+        return
+    boot_id = _read_boot_id()
+    state = {}
+    try:
+        if VM_STATE_FILE.exists():
+            state = json.loads(VM_STATE_FILE.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                state = {}
+    except Exception:
+        state = {}
+    prev = state.get("tsc_mhz")
+    prev_boot = str(state.get("boot_id") or "")
+    tol = float(ctx.cfg.get("vm_tsc_tolerance_mhz") or 1.0)
+    if prev is None:
+        _vm_state_write(ctx, {"boot_id": boot_id, "tsc_mhz": cur,
+                              "since": _now_str(), "changes": []})
+        ctx.record("vm_migration", "ok",
+                   f"TSC {cur:.3f} МГц — базовая линия записана "
+                   "(детектор переездов VM активен)")
+        return
+    if prev_boot == boot_id and boot_id:
+        ctx.record("vm_migration", "ok", f"TSC {cur:.3f} МГц (тот же бут)")
+        return
+    boot_at = _run(["uptime", "-s"], timeout=10).stdout.strip()
+    kind = tsc_change_kind(prev, cur, tol)
+    changes = state.get("changes") if isinstance(state.get("changes"), list) \
+        else []
+    if kind == "moved":
+        ctx.record("vm_migration", "crit",
+                   f"VM ПЕРЕЕХАЛА на другой физхост: TSC {float(prev):.3f} → "
+                   f"{cur:.3f} МГц (бут {boot_at or '?'}) — класс кремния "
+                   f"сменился; модель CPU в госте статична и могла остаться "
+                   f"прежней. Уточнить у хостера (миграция/сбой физхоста)")
+        changes = (changes +
+                   [{"ts": _now_str(), "from_mhz": float(prev),
+                     "to_mhz": cur}])[-10:]
+    else:
+        ctx.record("vm_migration", "ok",
+                   f"новый бут {boot_at or '?'}, TSC {cur:.3f} МГц — тот же "
+                   f"физхост (джиттер {abs(cur - float(prev)):.3f} МГц)")
+    _vm_state_write(ctx, {"boot_id": boot_id, "tsc_mhz": cur,
+                          "since": state.get("since") or _now_str(),
+                          "changes": changes})
 
 
 def chk_tunnels(ctx: DoctorCtx) -> None:
