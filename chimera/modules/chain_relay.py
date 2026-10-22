@@ -571,6 +571,91 @@ _PROBE_HTTPS_204 = f"https://{_PROBE_HOST}/generate_204"     # домен + по
 _PROBE_IP_CF     = "https://1.1.1.1/"                        # IP, без DNS (Cloudflare)
 _PROBE_IP_GG     = "https://8.8.8.8/"                        # IP, без DNS (Google)
 
+# P5-дискриминатор «мёртвый v6-egress exit-а» vs «сломанный DNS на exit»
+# (живой кейс окт.2026 №9): домены с AAAA умирают на exit с дохлым IPv6,
+# IP-пробы и v4-домены при этом живы. Кандидаты — хосты с A и БЕЗ AAAA
+# (проверяется DoH на ENTRY при каждом незакэшированном lookup-е).
+_V4ONLY_PROBE_CANDIDATES = ["ipv4.icanhazip.com", "v4.ident.me",
+                            "api-ipv4.ip.sb"]
+_v4only_host_cache: dict = {}   # {"host": ...} — кэш только УСПЕШНОГО результата
+
+
+def _doh_has_records(host: str, rtype: str, timeout: int = 3) -> Optional[bool]:
+    """DoH-запрос type=A/AAAA → True/False (есть/нет записей), None = упал.
+
+    Сначала Cloudflare (JSON /dns-query), затем Google (/resolve) — тот же
+    паттерн, что _resolve_host_fresh в chain_nodes. None = ни один не
+    ответил: вызывающий код обязан трактовать это как «не знаю», а не
+    «нет записей» (консервативно)."""
+    rtype_num = 1 if rtype == "A" else 28
+    for base, header in (("https://1.1.1.1/dns-query", True),
+                         ("https://8.8.8.8/resolve", False)):
+        try:
+            cmd = ["curl", "-s", "--max-time", str(timeout),
+                   f"{base}?name={host}&type={rtype}"]
+            if header:
+                cmd += ["-H", "Accept: application/dns-json"]
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=timeout + 5)
+            if r.returncode != 0 or not (r.stdout or "").strip():
+                continue
+            data = json.loads(r.stdout)
+            if data.get("Status", 0) != 0:
+                continue
+            return any(a.get("type") == rtype_num
+                       for a in data.get("Answer", []))
+        except Exception:
+            continue
+    return None
+
+
+def _lookup_v4only_probe_host() -> Optional[str]:
+    """Хост с A-записью и БЕЗ AAAA для P5 (v4-only probe-домен).
+
+    Кандидаты из _V4ONLY_PROBE_CANDIDATES проверяются DoH: нужен
+    A=True (обязательно есть v4) и AAAA=False (обязательно нет v6 —
+    иначе дискриминатор соврёт). AAAA=None (DoH не ответил) → кандидат
+    пропускается: консервативность важнее скорости. Ничего не нашлось
+    (или DoH недоступен на ENTRY) → None → P5 пропускается, вердикт
+    остаётся прежним «DNS на exit» (как до кейса №9).
+
+    Успешный результат кэшируется на процесс (cron-HM = новый процесс
+    каждый тик; интерактивное меню = один процесс на сессию)."""
+    cached = _v4only_host_cache.get("host")
+    if cached:
+        return cached
+    for cand in _V4ONLY_PROBE_CANDIDATES:
+        if _doh_has_records(cand, "A") is not True:
+            continue
+        if _doh_has_records(cand, "AAAA") is not False:
+            continue
+        _v4only_host_cache["host"] = cand
+        return cand
+    return None
+
+
+def _probe_v4only_domain(socks_port: int, timeout: int) -> bool:
+    """P5: домен БЕЗ AAAA через цепочку/ноду (socks5h → DNS на exit).
+
+    Вызывается ТОЛЬКО когда лестница уже решила «delivered, но не
+    domain_ok» (IP-проба прошла, доменные — нет). Возвращает True, если
+    v4-only домен ДОШЁЛ: DNS на exit жив, доменные пробы P1/P2 умирали
+    на наборе AAAA → мёртвый v6-egress exit-а (живой кейс окт.2026 №9:
+    мониторинг показывал DOWN/«недоступна» при живом v4-туннеле).
+    False = v4-домен тоже не дошёл (или lookup не нашёл хост/DoH
+    недоступен) → честный старый вердикт «DNS на exit».
+
+    https затем http: часть v4-only хостов редиректит 80→443 или
+    наоборот — любой HTTP-код ≠ 000 означает «дошёл»."""
+    host = _lookup_v4only_probe_host()
+    if not host:
+        return False
+    for url in (f"https://{host}/", f"http://{host}/"):
+        rc, code, ms = _curl_socks(socks_port, url, timeout)
+        if code and code != "000":
+            return True
+    return False
+
 
 def _socks_check_inbound(socks_port: int) -> dict:
     """Socks-инбаунд временного xray-клиента чекера."""
@@ -973,10 +1058,21 @@ def check_via_node_full_path(nd: dict, hops: list[dict],
                 # IP-проба проходит, доменные — нет: цепь доходит, но
                 # DNS/домены на exit-ноде не работают → реальный трафик
                 # (клиенты шлют домены) через такую ноду не пойдёт.
-                res["reason"] = "DNS на exit"
-                res["detail"] = ("цепь доходит (IP-проба проходит), но домены "
-                                 "с ноды не резолвятся — проверьте DNS/порт 53 "
-                                 "на exit-ноде")
+                # P5 (кейс №9): v4-only домен через exit ходит, а AAAA-
+                # домены (P1/P2) умирают → DNS жив, сломан v6-egress.
+                if _probe_v4only_domain(socks_port, curl_timeout):
+                    res["reason"] = "v6-egress на exit"
+                    res["detail"] = ("цепь и REALITY живы, IP-проба и v4-домен "
+                                     "через exit ходят, но домены с AAAA не "
+                                     "доходят — на exit-ноде мёртвый IPv6-egress "
+                                     "(резолв в AAAA → набор мёртвого v6). Лечится "
+                                     "на exit-ноде: xray dns queryStrategy="
+                                     "UseIPv4 или починить v6")
+                else:
+                    res["reason"] = "DNS на exit"
+                    res["detail"] = ("цепь доходит (IP-проба проходит), но домены "
+                                     "с ноды не резолвятся — проверьте DNS/порт 53 "
+                                     "на exit-ноде")
             else:
                 # полный отказ: все пробы без ответа
                 res["xray_tail"] = client.err_tail()
@@ -1080,18 +1176,82 @@ def icmp_rtt(host: str, count: int = 4, per_packet_wait: int = 2,
     статус ноды (DOWN решает только full-path зонд).
 
     Возвращает {"ok": bool, "avg": float, "min": float, "max": float,
-    "loss": int (0-100), "err": str}. ok=True — есть хотя бы один
-    ответивший пакет и строка rtt min/avg/max (iputils/round-trip).
+    "loss": int (0-100), "err": str, "target": str, "family": "4"|"6"}.
+    ok=True — есть хотя бы один ответивший пакет и строка rtt min/avg/max
+    (iputils/round-trip). family — по какому семейству прошли пробы
+    (только для IP-literal таргета; hostname-фолбэк — без family).
+
+    Дуал-стек v4-first (живой кейс окт.2026 №9): ICMP по hostname на
+    дуал-стек ENTRY берёт AAAA первым (getaddrinfo, RFC 6724) → мёртвый
+    v6 exit-а съедал все пакеты → «-» в колонке RTT [T]/HM при живом
+    IPv4 (руками ping по IP — 60 мс, мониторинг «врёт»). Явный резолв
+    с v4-first это чинит; v6 остаётся запасным (v6-only хосты не
+    ломаются), hostname-фолбэк — при полном нерезолве (ping сам
+    попробует оба семейства).
     """
-    res = {"ok": False, "avg": 0.0, "min": 0.0, "max": 0.0,
-           "loss": 100, "err": ""}
     if not host:
-        res["err"] = "нет host"
-        return res
+        return {"ok": False, "avg": 0.0, "min": 0.0, "max": 0.0,
+                "loss": 100, "err": "нет host", "target": ""}
+    last = {"ok": False, "avg": 0.0, "min": 0.0, "max": 0.0,
+            "loss": 100, "err": "", "target": host}
+    for target in _icmp_ping_targets(host):
+        r = _icmp_ping_once(target, count, per_packet_wait, interval)
+        if r.get("ok"):
+            try:
+                socket.inet_pton(socket.AF_INET6, target)
+                r["family"] = "6"
+            except OSError:
+                try:
+                    socket.inet_pton(socket.AF_INET, target)
+                    r["family"] = "4"
+                except OSError:
+                    pass    # hostname-фолбэк: семейство неизвестно
+            return r
+        last = r
+    return last
+
+
+def _icmp_ping_targets(host: str) -> list:
+    """Адреса ICMP-проб хоста: v4-адрес первым, затем v6, затем сам host.
+
+    v4-first — осознанный выбор (флот v4-first, туннели ходят по v4,
+    AAAA у exit-нод бывают дохлыми — кейс №9); v6 в списке — чтобы
+    v6-only хосты не потеряли RTT. Нерезолв обоих семейств → [host]
+    (ping сам разберётся). fe80::/::1 не таргетируем (бесполезно для
+    внешних нод)."""
+    for fam in (socket.AF_INET, socket.AF_INET6):
+        try:
+            socket.inet_pton(fam, host)
+            return [host]      # уже IP-literal — пингуем как есть
+        except OSError:
+            pass
+    cands: list = []
+    for fam in (socket.AF_INET, socket.AF_INET6):
+        try:
+            infos = socket.getaddrinfo(host, None, fam)
+        except Exception:
+            continue
+        for info in infos or []:
+            try:
+                addr = info[4][0]
+            except (IndexError, TypeError):
+                continue
+            if not addr or addr == "::1" or addr.startswith("fe80"):
+                continue
+            if addr not in cands:
+                cands.append(addr)
+    return cands or [host]
+
+
+def _icmp_ping_once(target: str, count: int, per_packet_wait: int,
+                    interval: float) -> dict:
+    """Один ICMP-замер по конкретному адресу (тело бывой icmp_rtt)."""
+    res = {"ok": False, "avg": 0.0, "min": 0.0, "max": 0.0,
+           "loss": 100, "err": "", "target": target}
     try:
         out = subprocess.run(
             ["ping", "-c", str(int(count)), "-i", str(interval),
-             "-W", str(int(per_packet_wait)), str(host)],
+             "-W", str(int(per_packet_wait)), str(target)],
             capture_output=True, text=True,
             timeout=int(count * interval) + int(per_packet_wait) + 3,
         ).stdout or ""
@@ -1135,6 +1295,26 @@ def fmt_icmp_rtt(r: dict) -> str:
     if r and r.get("ok"):
         return f"{r.get('avg', 0.0):.0f} мс"
     return "-"
+
+
+# ── Деградированные вердикты (живой кейс окт.2026 №9) ────────────────────────
+# ok=False с такой причиной = нода/туннель/REALITY ЖИВЫ, но доменный
+# трафик через exit не ходит (мёртвый v6-egress или сломанный DNS).
+# Ротация/UP-DOWN семантику НЕ меняем (ок=False остаётся ок=False —
+# клиенты шлют домены, такая нода их не доставит), но UI/TG обязаны
+# говорить «деградация», а не «недоступна»: владелец руками пинговал
+# узел по IP (жив, 60 мс) и ловил мониторинг на лжи сразу в трёх
+# местах (HM-панель DOWN, Тест 5 ERR, [T] «недоступна | RTT -»).
+EXIT_DEGRADED_REASONS = frozenset({"DNS на exit", "v6-egress на exit"})
+
+
+def is_exit_degraded(reason: str) -> bool:
+    """Причина отказа full-path-зонда — «нода жива, домены не ходят».
+
+    Для таких причин вызывающий код ([T]/HM/TG) обязан использовать
+    честное слово «деградация»/«деградировала» вместо «недоступна»:
+    ICMP/туннель/REALITY живы, недоступности нет."""
+    return str(reason or "").strip() in EXIT_DEGRADED_REASONS
 
 
 def check_node_full_path(nd: dict,
@@ -1254,10 +1434,21 @@ def check_node_full_path(nd: dict,
                 # IP-проба проходит, доменные — нет: нода доходит, но DNS/
                 # домены на ней не работают → реальный клиентский трафик
                 # (домены) через такую ноду не пойдёт.
-                res["reason"] = "DNS на exit"
-                res["detail"] = ("нода доходит (IP-проба проходит), но домены "
-                                 "с ноды не резолвятся — проверьте DNS/порт 53 "
-                                 "на exit-ноде")
+                # P5 (кейс №9): v4-only домен через ноду ходит, а AAAA-
+                # домены (P1/P2) умирают → DNS жив, сломан v6-egress.
+                if _probe_v4only_domain(socks_port, curl_timeout):
+                    res["reason"] = "v6-egress на exit"
+                    res["detail"] = ("нода и REALITY живы, IP-проба и v4-домен "
+                                     "через ноду ходят, но домены с AAAA не "
+                                     "доходят — на exit-ноде мёртвый IPv6-egress "
+                                     "(резолв в AAAA → набор мёртвого v6). Лечится "
+                                     "на ноде: xray dns queryStrategy=UseIPv4 "
+                                     "или починить v6")
+                else:
+                    res["reason"] = "DNS на exit"
+                    res["detail"] = ("нода доходит (IP-проба проходит), но домены "
+                                     "с ноды не резолвятся — проверьте DNS/порт 53 "
+                                     "на exit-ноде")
             else:
                 res["xray_tail"] = client.err_tail()
                 res["reason"] = "нода не отвечает"

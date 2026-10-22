@@ -152,6 +152,18 @@ def _tg_send(msg: str) -> bool:
         return False
 
 
+def _is_degraded_reason(reason: str) -> bool:
+    """Причина отказа — «нода жива, домены не ходят» (кейс №9).
+
+    Зеркалит chain_relay.is_exit_degraded с локальным фолбэком (модуль
+    может быть недоступен в изолированных окружениях)."""
+    try:
+        from chimera.modules.chain_relay import is_exit_degraded
+        return is_exit_degraded(reason)
+    except Exception:
+        return str(reason or "").strip() in ("DNS на exit", "v6-egress на exit")
+
+
 def _hostname() -> str:
     try:
         return _run(["hostname", "-s"], check=False).stdout.strip()
@@ -191,6 +203,7 @@ def check_nodes_once() -> list[dict]:
         # (dialerProxy) + HTTP-проба. Fallback на TCP при сбое механизма.
         via = nd.get("via", "") or ""
         _via_verdict = False      # True = вердикт уже вынесен выше
+        down_reason = ""          # причина отказа full-path (для UI/TG)
         if via:
             try:
                 from chimera.modules.chain_relay import (
@@ -210,6 +223,8 @@ def check_nodes_once() -> list[dict]:
                         up, ms = _tcp_ping(host, port)
                     else:
                         up, ms = bool(_r.get("ok")), float(_r.get("ms", 0.0) or 0.0)
+                        if not up:
+                            down_reason = str(_r.get("reason") or "").strip()
                         _log(f"[{host}:{port}] via:{via} full-path "
                              f"{'up' if up else 'DOWN'}"
                              f"{' ' + _r.get('detail', '')[:120] if _r.get('detail') else ''}")
@@ -255,6 +270,8 @@ def check_nodes_once() -> list[dict]:
                              f"({_r.get('reason', '')}) — TCP-fallback")
                     else:
                         up, ms = bool(_r.get("ok")), float(_r.get("ms", 0.0) or 0.0)
+                        if not up:
+                            down_reason = str(_r.get("reason") or "").strip()
                         _log(f"[{host}:{port}] full-path(прямой) "
                              f"{'up' if up else 'DOWN'}"
                              f"{' ' + _r.get('detail', '')[:120] if _r.get('detail') else ''}")
@@ -288,6 +305,7 @@ def check_nodes_once() -> list[dict]:
             "last_change": time.time() if (changed or first_seen) else prev_state.get(key, {}).get("last_change", time.time()),
             "ms":          round(ms, 1),
             "rtt":         rtt,
+            "reason":      down_reason,
             "host":        host,
             "port":        port,
         }
@@ -295,18 +313,34 @@ def check_nodes_once() -> list[dict]:
         results.append({
             "host": host, "port": port, "sni": sni,
             "up": up, "ms": ms, "rtt": rtt, "changed": changed,
+            "reason": down_reason,
         })
 
         rtt_str = f"{rtt:.0f}ms" if rtt else "-"
         status_str = f"up ({ms:.0f}ms / RTT {rtt_str})" if up else f"DOWN (RTT {rtt_str})"
+        if not up and down_reason:
+            # причина рядом с вердиктом: DOWN без объяснения выглядит
+            # ложью при живом ICMP (кейс №9: узел пинговался руками)
+            status_str += f" - {down_reason}"
         _log(f"[{key}] {status_str}" + (" [CHANGED]" if changed else ""))
 
         # Telegram уведомление только при изменении статуса (не при первой проверке)
         if changed and not first_seen:
             if not up:
-                msg = (f"📡 <b>[{host_name}]</b> Exit-нода недоступна\n"
-                       f"🔴 <code>{host}:{port}</code>\n"
-                       f"<i>{ts}</i>")
+                # Формулировка по причине (кейс №9): деградированные
+                # вердикты (DNS/v6-egress на exit) — нода ЖИВА (ICMP/
+                # туннель/REALITY), «недоступна» было бы ложью; честно —
+                # жёлтое «деградировала» с причиной. Жёсткий отказ —
+                # прежний красный текст.
+                if _is_degraded_reason(down_reason):
+                    msg = (f"📡 <b>[{host_name}]</b> Exit-нода деградирована\n"
+                           f"🟠 <code>{host}:{port}</code> — туннель жив, "
+                           f"домены не ходят ({down_reason})\n"
+                           f"<i>{ts}</i>")
+                else:
+                    msg = (f"📡 <b>[{host_name}]</b> Exit-нода недоступна\n"
+                           f"🔴 <code>{host}:{port}</code>\n"
+                           f"<i>{ts}</i>")
                 _tg_send(msg)
                 _log(f"TG: уведомление об отказе ноды {key}")
             else:
@@ -451,12 +485,19 @@ def do_health_monitor_menu() -> None:
                     up      = h.get("up", None)
                     ms      = h.get("ms", 0)
                     rtt     = h.get("rtt")
+                    reason  = str(h.get("reason") or "").strip()
                     lc      = h.get("last_check", 0)
                     lc_str  = time.strftime("%d.%m %H:%M", time.localtime(lc)) if lc else "-"
                     if up is True:
                         st, stc = "UP", GREEN
                     elif up is False:
-                        st, stc = "DOWN", RED
+                        # Деградированный DOWN (кейс №9: DNS/v6-egress на
+                        # exit — туннель жив): жёлтый, не красный — сразу
+                        # виден класс «нода жива, домены не ходят».
+                        if _is_degraded_reason(reason):
+                            st, stc = "DEGR", YELLOW
+                        else:
+                            st, stc = "DOWN", RED
                     else:
                         st, stc = "-", DIM
                     ms_str  = f"{ms:.0f} мс" if up else "-"
@@ -466,8 +507,15 @@ def do_health_monitor_menu() -> None:
                     ms_str    = "-"
                     rtt_str   = "-"
                     lc_str    = "-"
+                    reason    = ""
                 _box_row(_box_narrow(
                     f"  {host:<26} {stc}{st:<7}{NC} {ms_str:>9} {rtt_str:>8}  {lc_str}"))
+                # Подстрока причины для DOWN/DEGR (кейс №9): вердикт без
+                # объяснения на живом ICMP выглядит ложью — причина
+                # обязана быть видна прямо в панели. ASCII-пунктуация.
+                if up is False and reason:
+                    _box_row(_box_narrow(
+                        f"      {DIM}{reason}: туннель жив, домены не ходят{NC}"))
         else:
             _box_row(f"  {DIM}Exit-ноды не настроены (только Режим B){NC}")
 
@@ -496,7 +544,15 @@ def do_health_monitor_menu() -> None:
             else:
                 for r in results:
                     icon = f"{GREEN}✓{NC}" if r["up"] else f"{RED}✗{NC}"
-                    ms_s = f"{r['ms']:.0f} мс (full-path)" if r["up"] else "недоступна"
+                    if r["up"]:
+                        ms_s = f"{r['ms']:.0f} мс (full-path)"
+                    elif _is_degraded_reason(r.get("reason")):
+                        # кейс №9: нода жива (ICMP/туннель), «недоступна» —
+                        # ложь; честно — жёлтая «деградация (причина)»
+                        icon = f"{YELLOW}!{NC}"
+                        ms_s = f"деградация ({r.get('reason')})"
+                    else:
+                        ms_s = "недоступна"
                     rt_s = f"{r['rtt']:.0f} мс" if r.get("rtt") else "-"
                     # «-»/«|» (ASCII): em-dash/middot — ambiguous-ширина,
                     # лесенит правую границу рамки (кейс №7)

@@ -1562,5 +1562,77 @@ class TestChainRoutingRulesHelpers(unittest.TestCase):
         self.assertTrue(sn["metadataOnly"])
 
 
+class TestLatencyDegradedWording(unittest.TestCase):
+    """Кейс окт.2026 №9: отказ full-path с причиной «DNS на exit»/
+    «v6-egress на exit» = нода ЖИВА (ICMP/туннель) → честное
+    «деградация (причина)», НЕ «недоступна»; жёсткие причины — как раньше."""
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+
+    _ND = {"host": "nl.example.com", "port": 443, "uuid": "uuid-x",
+           "pubkey": "pbk-x", "shortid": "sid", "sni": "nl.example.com",
+           "fp": "firefox", "proto": "reality"}
+
+    def _patch_relay(self, **attrs):
+        import chimera.modules.chain_relay as cr
+        saved = {}
+        for k, v in attrs.items():
+            saved[k] = getattr(cr, k)
+            setattr(cr, k, v)
+        return saved
+
+    def _restore_relay(self, saved):
+        import chimera.modules.chain_relay as cr
+        for k, v in saved.items():
+            setattr(cr, k, v)
+
+    def test_v6egress_reason_degradation_not_unavailable(self):
+        from chimera.modules import chain_nodes
+        saved = self._patch_relay(
+            check_node_full_path=lambda nd, **kw: {
+                "ok": False, "ms": 0.0, "reason": "v6-egress на exit",
+                "infra": False},
+            node_has_reality_creds=lambda nd: True)
+        try:
+            result = chain_nodes._speed_test_node_latency(
+                "nl.example.com", 443, dict(self._ND))
+        finally:
+            self._restore_relay(saved)
+        self.assertIn("деградация", result)
+        self.assertIn("v6-egress на exit", result)
+        self.assertNotIn("недоступна", result)
+
+    def test_dns_reason_degradation_not_unavailable(self):
+        from chimera.modules import chain_nodes
+        saved = self._patch_relay(
+            check_node_full_path=lambda nd, **kw: {
+                "ok": False, "ms": 0.0, "reason": "DNS на exit",
+                "infra": False},
+            node_has_reality_creds=lambda nd: True)
+        try:
+            result = chain_nodes._speed_test_node_latency(
+                "nl.example.com", 443, dict(self._ND))
+        finally:
+            self._restore_relay(saved)
+        self.assertIn("деградация (DNS на exit)", result)
+        self.assertNotIn("недоступна", result)
+
+    def test_hard_reason_still_unavailable(self):
+        from chimera.modules import chain_nodes
+        saved = self._patch_relay(
+            check_node_full_path=lambda nd, **kw: {
+                "ok": False, "ms": 0.0, "reason": "нода не отвечает",
+                "infra": False},
+            node_has_reality_creds=lambda nd: True)
+        try:
+            result = chain_nodes._speed_test_node_latency(
+                "nl.example.com", 443, dict(self._ND))
+        finally:
+            self._restore_relay(saved)
+        self.assertIn("недоступна", result)
+        self.assertNotIn("деградация", result)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
