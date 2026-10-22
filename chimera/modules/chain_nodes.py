@@ -106,14 +106,53 @@ def _core_module():
 #  режимы эти хелперы НЕ затрагивают (у них другой routing: fwmark/loopback).
 # =============================================================================
 
+# v4-режим закрепления: известные публичные DoH/DoT-резолверы.
+# TUN-клиенты (Karing/v2rayNG/sing-box) держат свой DNS-канал (DoH) ЧЕРЕЗ
+# туннель ДОМЕНОМ (cloudflare-dns.com:443 и т.п.) — при закреплении за
+# нодой со сломанным v6-egress этот канал умирает первым («Name not
+# Resolved» на всех сайтах). Правило domain:*  →  direct отправляет их
+# с собственного egress entry: DNS клиентов жив, пока чинят v6 хостера.
+_V4PIN_DOH_DOMAINS = [
+    "cloudflare-dns.com", "one.one.one.one", "dns.google",
+    "dns.quad9.net", "dns.adguard.com", "doh.mullvad.net",
+    "doh.opendns.com", "dns.sb",
+]
+
+
 def _build_chain_routing_rules(outbound_target: str,
-                               balancer: bool = False) -> list:
+                               balancer: bool = False,
+                               v4_pin: bool = False) -> list:
     """Строит список routing rules для VLESS REALITY TCP каскада.
 
     Параметры:
       outbound_target — тег outbound'а цепочки ('chain-exit', 'chain-exit-1')
                         или 'chain-balancer' если balancer=True.
       balancer         — True если outbound_target это balancerTag, не outboundTag.
+      v4_pin           — v4-режим закрепления (state['chain_pinned_v4only']):
+                        нода закреплена за exit'ом со сломанным v6-egress
+                        (живой кейс окт.2026 №10: NL/qwins — маршрут v6-сегмента
+                        потерян хостером, v4-egress жив). Добавляет два правила
+                        ПЕРЕД catch-all:
+                          (а) известные DoH/DoT-резолверы → direct: DNS-канал
+                              клиентов (DoH cloudflare-dns.com:443 и т.п. — их
+                              TUN-клиенты шлют ДОМЕНОМ через туннель) живёт на
+                              egress entry и не умирает вместе с v6 ноды
+                              (симптом кейса: «Name not Resolved» на всех
+                              сайтах при живом v4);
+                          (б) ip ::/0 → BLOCK: v6-назначения отклоняются
+                              мгновенно (RST за мс вместо 15-120 с чёрной дыры
+                              qwins) — клиенты с happy-eyeballs откатываются
+                              на v4, IP-трафик полностью жив.
+                        Честное ограничение: подключения, приходящие ДОМЕНОМ
+                        (TUN-клиенты сниффят SNI и шлют домены — ~78% TLS
+                        сегодня), резолвит сам exit со своим domainStrategy;
+                        dual-stack сайты на ноде со сломанным v6 всё ещё могут
+                        висеть (проверено: dispatcher IPIfNonMatch НЕ подменяет
+                        домен на IP, sockopt.domainStrategy на vless-outbound
+                        резолвит только адрес сервера). Полное лечение — v6 у
+                        хостера или UseIPv4 на exit (владелец запретил).
+                        В balancer-режиме флаг игнорируется (не бывает
+                        «закреплённого v4» без закрепления).
 
     Возвращает список routing rules (порядок важен — первый матч выигрывает):
       1. loopback → direct (DNSCrypt на 127.0.0.1:5300 и т.п.)
@@ -121,6 +160,8 @@ def _build_chain_routing_rules(outbound_target: str,
       3. UDP DNS (порт 53 tcp+udp) → direct (резолвится через DNSCrypt на entry)
       4. QUIC (UDP порт 443) → BLOCK (браузер откатится на TCP/HTTP2)
       5. Весь остальной UDP → BLOCK (VLESS REALITY TCP-only не туннелирует UDP)
+      5a. [v4_pin] DoH/DoT-резолверы → direct
+      5b. [v4_pin] ::/0 → BLOCK (мгновенный отказ v6)
       6. TCP → outbound_target (chain-exit-1 / chain-balancer)
 
     Совместимость: для AWG-режима эта функция НЕ вызывается — там используется
@@ -134,7 +175,7 @@ def _build_chain_routing_rules(outbound_target: str,
     else:
         _tcp_rule = {"type": "field", "network": "tcp",
                      "outboundTag": outbound_target}
-    return [
+    rules = [
         # loopback → direct (DNSCrypt, внутренние сервисы Xray)
         {"type": "field", "ip": ["127.0.0.1/8", "::1/128"], "outboundTag": "direct"},
         # Блокируем торренты (всегда — независимо от transport)
@@ -154,9 +195,24 @@ def _build_chain_routing_rules(outbound_target: str,
         # VLESS over REALITY — TCP-only transport, UDP туннелировать не может.
         # Без этого правила UDP-трафик попадал в catch-all → обрыв → EOF.
         {"type": "field", "network": "udp", "outboundTag": "BLOCK"},
-        # Только TCP → через exit-ноду (chain-exit-1 / chain-balancer)
-        _tcp_rule,
     ]
+    # v4-pin: только для закреплённого/одиночного exit'а (не balancer)
+    if v4_pin and not balancer:
+        rules.append({
+            "type": "field",
+            "domain": [f"domain:{d}" for d in _V4PIN_DOH_DOMAINS],
+            "outboundTag": "direct",
+            "comment": "v4-pin: DoH/DoT-резолверы напрямую с entry — "
+                       "DNS-канал клиентов не зависит от v6-exit (кейс №10)",
+        })
+        rules.append({
+            "type": "field", "ip": ["::/0"], "outboundTag": "BLOCK",
+            "comment": "v4-pin: v6-назначения — мгновенный отказ, "
+                       "клиенты откатываются на v4 (v6-egress exit сломан)",
+        })
+    # Только TCP → через exit-ноду (chain-exit-1 / chain-balancer)
+    rules.append(_tcp_rule)
+    return rules
 
 
 def _build_chain_sniffing(awg: bool = False) -> dict:
@@ -179,6 +235,126 @@ def _build_chain_sniffing(awg: bool = False) -> dict:
         "metadataOnly": True if awg else False,
         "routeOnly":    False,
     }
+
+
+# ── v4-режим закрепления: состояние + здоровье для меню [P] ─────────────
+
+def _chain_pinned_v4only() -> bool:
+    """Флаг v4-режима закрепления в state.json (chain_pinned_v4only).
+
+    Читается ГЕНЕРАТОРОМ напрямую из файла (не из core-глобалей): любой путь
+    пересборки (меню [P], dpi_detector restore, emergency_repair) подхватывает
+    флаг автоматически — как chain_pinned_node_index.
+    """
+    try:
+        st = json.loads(_CHAIN_STATE_FILE.read_text(encoding="utf-8"))
+        return st.get("chain_pinned_v4only") is True
+    except Exception:
+        return False
+
+
+def _pin_v4_set(enabled: bool) -> None:
+    """Записывает/снимает флаг v4-режима закрепления в state.json."""
+    try:
+        st = {}
+        if _CHAIN_STATE_FILE.exists():
+            st = json.loads(_CHAIN_STATE_FILE.read_text(encoding="utf-8"))
+        if enabled:
+            st["chain_pinned_v4only"] = True
+        else:
+            st.pop("chain_pinned_v4only", None)
+        _CHAIN_STATE_FILE.write_text(
+            json.dumps(st, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+# Порог свежести вердикта HM для подсказки в меню (сек): старше — помечаем
+_PIN_HINT_MAX_AGE_S = 45 * 60
+# Файлы здоровья для подсказок меню [P] (константы — для тестов)
+_PIN_HM_STATE_FILE = Path("/var/lib/xray-installer/node-health-state.json")
+_PIN_SB_STATE_FILE = Path("/var/lib/xray-installer/smart_balancer.json")
+
+
+def _pin_health_hints(nodes: list) -> dict:
+    """Подсказки здоровья нод для меню [P] (закрепление).
+
+    Источники (оба читаются безопасно, отсутствующие/битые — пусто):
+      • node-health-state.json (HM) — {"host:port": {up, reason, ms,
+        last_check}} — вердикты полного пути: UP / DEGR(причина) / DOWN;
+      • smart_balancer.json nodes_meta — карантин балансировщика
+        (quarantine_until/quarantine_until_str).
+
+    Возвращает {"host:port": " <подсказка>"} (с ведущим пробелом;
+    пустая строка — данных нет). Чистая функция от файлов состояния —
+    тестируется подменой путей.
+    """
+    hints: dict = {}
+    hm: dict = {}
+    sb: dict = {}
+    try:
+        hm = json.loads(_PIN_HM_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        hm = {}
+    try:
+        sb = json.loads(_PIN_SB_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        sb = {}
+    meta = sb.get("nodes_meta") or {}
+    import time as _t
+    now = _t.time()
+    for nd in nodes or []:
+        host = (nd.get("host") or "").strip()
+        port = int(nd.get("port") or 443)
+        key = f"{host}:{port}"
+        h = hm.get(key) or {}
+        parts = []
+        reason = str(h.get("reason") or "").strip()
+        if h:
+            if h.get("up"):
+                ms = h.get("ms") or 0
+                parts.append(f"UP {ms:.0f}мс" if ms else "UP")
+            elif reason:
+                from chimera.modules.chain_relay import is_exit_degraded
+                if is_exit_degraded(reason):
+                    parts.append(f"DEGR ({reason})")
+                else:
+                    parts.append(f"DOWN ({reason})")
+            else:
+                parts.append("DOWN")
+            # свежесть HM-вердикта
+            lc = float(h.get("last_check") or 0)
+            if lc and (now - lc) > _PIN_HINT_MAX_AGE_S:
+                import datetime as _dt
+                parts.append(f"данные {_dt.datetime.fromtimestamp(lc):%H:%M}")
+        # карантин балансировщика
+        m = meta.get(key) or {}
+        q_until = m.get("quarantine_until") or 0
+        if isinstance(q_until, (int, float)) and q_until > now:
+            q_str = m.get("quarantine_until_str") or ""
+            q_hm = q_str[-8:-3] if q_str else "скоро"
+            parts.append(f"карантин до {q_hm}")
+        hints[key] = (" — " + ", ".join(parts)) if parts else ""
+    return hints
+
+
+def _pin_probe_node(nd: dict) -> dict:
+    """Полный путь ноды для меню [P]: via-ноды через хоп, прямые — напрямую.
+
+    Зеркалит выбор зонда node_health_monitor.check_nodes_once:
+    hop_via_tag_for(nd, hops) → check_via_node_full_path, иначе
+    check_node_full_path. Возвращает вердикт-словарь зонда
+    (ok/ms/detail/reason/infra/...); исключения не ловит — вызывающий
+    код решает, что делать со сбоем проверки.
+    """
+    from chimera.modules.chain_relay import (
+        check_node_full_path, check_via_node_full_path,
+        load_relay_hops, hop_via_tag_for,
+    )
+    hops = load_relay_hops()
+    if hop_via_tag_for(nd, hops):
+        return check_via_node_full_path(nd, hops, deep_diag=False)
+    return check_node_full_path(nd, deep_diag=False)
 
 
 # =============================================================================
@@ -2571,13 +2747,19 @@ def generate_xray_config_chain_entry_multi() -> None:
         effective_tag = outbound_tags[pinned] if (0 <= pinned < n_nodes) else outbound_tags[0]
         if 0 <= pinned < n_nodes and n_nodes > 1:
             info(f"Pinned-режим: весь трафик → нода #{pinned+1} ({nodes[pinned]['host']})")
+        # v4-режим закрепления (для нод со сломанным v6-egress, кейс №10):
+        # флаг из state.json — любой путь пересборки подхватывает его сам
+        _v4pin = _chain_pinned_v4only()
+        if _v4pin:
+            info("Pinned v4-режим: v6-назначения → BLOCK (мгновенный отказ), "
+                 "DoH/DoT-резолверы → direct (DNS клиентов жив)")
         balancers   = []
         observatory = None
         # FIX: используем единый helper — он правильно обрабатывает UDP
         # (DNS→direct, QUIC→BLOCK, UDP→BLOCK, только TCP→exit-нода).
         # Раньше catch-all {"network": "tcp,udp"} рвал UDP-трафик, что
         # приводило к EOF и «dns: exchange failed» у VPN-клиентов.
-        routing_rules = _build_chain_routing_rules(effective_tag)
+        routing_rules = _build_chain_routing_rules(effective_tag, v4_pin=_v4pin)
     else:
         # Несколько нод — балансировщик с выбранной стратегией.
         # LB-состав (chain_lb_nodes): selector только по выбранным нодам
@@ -3137,24 +3319,78 @@ def do_manage_nodes() -> None:
 
         elif ch == "p" and CHAIN_NODES:
             print()
+            _pin_hints = _pin_health_hints(CHAIN_NODES)
             _box_top(f"Закрепить exit-ноду  (0 = отключить)")
             _box_row(f"  {DIM}Весь трафик идёт только через выбранную ноду; балансировщик выключен.{NC}")
+            _box_row(f"  {DIM}Пин работает вне состава балансировки и игнорирует карантин.{NC}")
+            if 0 <= CHAIN_PINNED_NODE_INDEX < len(CHAIN_NODES):
+                _v4_state = "вкл" if _chain_pinned_v4only() else "выкл"
+                _box_row(f"  v4-режим закрепления: {CYAN}{_v4_state}{NC}  "
+                         f"{DIM}(для нод со сломанным v6-egress){NC}")
             _box_sep()
             for i, nd in enumerate(CHAIN_NODES):
                 marker = f"  {GREEN}◀ активна{NC}" if i == CHAIN_PINNED_NODE_INDEX else ""
-                _box_item(f"{i+1}", f"{nd['host']}:{nd['port']}  SNI={nd['sni']}{marker}")
+                _hint = _pin_hints.get(f"{nd['host']}:{nd.get('port', 443)}", "")
+                _hint_c = (f"{YELLOW}{_hint}{NC}"
+                           if ("DEGR" in _hint or "DOWN" in _hint
+                               or "карантин" in _hint) else f"{DIM}{_hint}{NC}")
+                _box_item(f"{i+1}", f"{nd['host']}:{nd['port']}  SNI={nd['sni']}"
+                                    f"{_hint_c}{marker}")
             _box_item("0", f"Отключить закрепление (включить балансировщик)")
             _box_bottom()
             v = input(f"  Выбор: ").strip()
             if v == "0":
                 CHAIN_PINNED_NODE_INDEX = -1
                 setattr(core, "CHAIN_PINNED_NODE_INDEX", CHAIN_PINNED_NODE_INDEX)
+                _pin_v4_set(False)
                 info("Pinned-режим отключён. Активен балансировщик.")
             elif v.isdigit() and 1 <= int(v) <= len(CHAIN_NODES):
                 CHAIN_PINNED_NODE_INDEX = int(v) - 1
                 setattr(core, "CHAIN_PINNED_NODE_INDEX", CHAIN_PINNED_NODE_INDEX)
                 nd = CHAIN_NODES[CHAIN_PINNED_NODE_INDEX]
                 success(f"Закреплена нода #{CHAIN_PINNED_NODE_INDEX+1}: {nd['host']}:{nd['port']}")
+                # ── Живая проверка ноды + предложение v4-режима ────────────
+                # Кейс №10: пин на деградированную ноду (v6-egress) без
+                # предупреждения ронял весь клиентский DNS (DoH в туннеле).
+                _cached_hint = _pin_hints.get(f"{nd['host']}:{nd.get('port', 443)}", "")
+                _offer_v4 = False
+                _degraded_reason = ""
+                try:
+                    from chimera.modules.chain_relay import is_exit_degraded
+                    print(f"{DIM}Проверяем ноду полным путём (до ~20 с)...{NC}")
+                    _verdict = _pin_probe_node(nd)
+                    if _verdict.get("infra"):
+                        warn(f"Зонд недоступен ({_verdict.get('reason', '')}) — "
+                             f"проверка пропущена.")
+                    elif _verdict.get("ok"):
+                        print(f"{GREEN}Полный путь жив: {_verdict.get('ms', 0):.0f} мс{NC}")
+                    else:
+                        _degraded_reason = str(_verdict.get("reason") or "").strip()
+                        warn(f"Нода деградирована/недоступна: "
+                             f"{_verdict.get('detail') or _degraded_reason or 'нет ответа'}")
+                        if _degraded_reason == "v6-egress на exit":
+                            _offer_v4 = True
+                except Exception as _pe:
+                    warn(f"Проверка не удалась ({_pe}) — закрепление без диагностики.")
+                if not _offer_v4 and "v6-egress на exit" in _cached_hint:
+                    # проба не смогла, но HM-вердикт знает про v6-egress
+                    _offer_v4 = True
+                    warn("HM-вердикт: v6-egress на exit — предлагаем v4-режим.")
+                if _offer_v4:
+                    print()
+                    _box_top("v4-режим закрепления (у ноды сломан v6-egress)")
+                    _box_row(f"  Даст: v6-назначения отклоняются мгновенно (клиенты")
+                    _box_row(f"  откатываются на IPv4), DoH/DoT-резолверы идут напрямую")
+                    _box_row(f"  с entry — DNS клиентов не умирает вместе с v6 ноды.")
+                    _box_row(f"  Ограничение: подключения, приходящие доменом на")
+                    _box_row(f"  dual-stack сайты, всё ещё резолвит exit (могут висеть).")
+                    _box_row(f"  Полное лечение — v6 у хостера или UseIPv4 на exit.")
+                    _box_bottom()
+                    _ans_v4 = input(f"{YELLOW}Включить v4-режим для этого закрепления? "
+                                    f"[Y/n]:{NC} ").strip().lower()
+                    _pin_v4_set(_ans_v4 not in ("n", "нет"))
+                else:
+                    _pin_v4_set(False)
             else:
                 warn("Неверный выбор.")
                 time.sleep(1)
