@@ -1602,5 +1602,285 @@ class TestHealthMonitorRtt(unittest.TestCase):
         self.assertEqual(results[0]["rtt"], 27.0)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Кейс окт.2026 №9: мониторинг «врал» на дуал-стеке (мёртвый v6-egress
+#  exit-ноды): ICMP-RTT брал AAAA → «-» при живом v4; delivered-вердикт
+#  говорил «недоступна» при живом туннеле. icmp_rtt v4-first + P5.
+# ══════════════════════════════════════════════════════════════════════════════
+class TestIcmpRttDualStack(unittest.TestCase):
+    """icmp_rtt v4-first: дохлый v6 exit-а больше не роняет RTT-колонку."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _ping_recorder(self, outputs):
+        """Мок subprocess.run: пишет argv каждого ping, отдаёт outputs."""
+        import chimera.modules.chain_relay as cr
+        self.argvs = []
+        outs = list(outputs)
+
+        def fake_run(cmd, **kw):
+            self.argvs.append(list(cmd))
+            fake = MagicMock()
+            fake.stdout = outs.pop(0) if outs else ""
+            return fake
+
+        return patch.object(cr.subprocess, "run", side_effect=fake_run)
+
+    @staticmethod
+    def _gai_dual(host, port, family, *a, **kw):
+        """getaddrinfo-мок: дуал-стек узел (v4 + v6 записи)."""
+        import socket as _s
+        if family == _s.AF_INET:
+            return [(_s.AF_INET, _s.SOCK_STREAM, 6, "", ("203.0.113.10", 0))]
+        if family == _s.AF_INET6:
+            return [(_s.AF_INET6, _s.SOCK_STREAM, 6, "",
+                     ("2001:db8::10", 0, 0, 0))]
+        return []
+
+    _OK_V4 = ("PING 203.0.113.10 56(84) bytes of data.\n"
+              "4 packets transmitted, 4 received, 0% packet loss\n"
+              "rtt min/avg/max/mdev = 60.1/63.9/67.6/3.4 ms\n")
+    _OK_V6 = ("PING 2001:db8::10 56(84) bytes of data.\n"
+              "4 packets transmitted, 4 received, 0% packet loss\n"
+              "rtt min/avg/max/mdev = 30.0/31.0/32.0/0.5 ms\n")
+    _DEAD = "4 packets transmitted, 0 received, 100% packet loss\n"
+
+    def test_dual_stack_v4_pinged_first(self):
+        # кейс №9: v6 мёртв, v4 жив → пингуется v4, v6 не таргетится вовсе
+        import chimera.modules.chain_relay as cr
+        with patch("socket.getaddrinfo", side_effect=self._gai_dual), \
+             self._ping_recorder([self._OK_V4]):
+            r = cr.icmp_rtt("dual.example.com")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["family"], "4")
+        self.assertEqual(r["target"], "203.0.113.10")
+        self.assertEqual(len(self.argvs), 1)
+        self.assertIn("203.0.113.10", self.argvs[0])
+
+    def test_dead_v4_falls_back_v6(self):
+        import chimera.modules.chain_relay as cr
+        with patch("socket.getaddrinfo", side_effect=self._gai_dual), \
+             self._ping_recorder([self._DEAD, self._OK_V6]):
+            r = cr.icmp_rtt("dual.example.com")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["family"], "6")
+        self.assertEqual(len(self.argvs), 2)
+
+    def test_v6only_host_still_gets_rtt(self):
+        # v6-only хост (нет A) → v6 пингуется, RTT не теряется
+        import socket as _s
+        import chimera.modules.chain_relay as cr
+
+        def gai_v6only(host, port, family, *a, **kw):
+            if family == _s.AF_INET6:
+                return [(_s.AF_INET6, _s.SOCK_STREAM, 6, "",
+                         ("2001:db8::20", 0, 0, 0))]
+            raise OSError("no A record")
+
+        with patch("socket.getaddrinfo", side_effect=gai_v6only), \
+             self._ping_recorder([self._OK_V6]):
+            r = cr.icmp_rtt("v6only.example.com")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["family"], "6")
+
+    def test_unresolvable_pings_host_as_is(self):
+        # нерезолв → [host]: ping сам попробует оба семейства
+        import chimera.modules.chain_relay as cr
+
+        def gai_dead(host, port, family, *a, **kw):
+            raise OSError("no dns")
+
+        with patch("socket.getaddrinfo", side_effect=gai_dead), \
+             self._ping_recorder([self._OK_V4]):
+            r = cr.icmp_rtt("node.example.com")
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.argvs[0][-1], "node.example.com")
+
+
+class TestProbeV4only(unittest.TestCase):
+    """P5-дискриминатор: v4-only домен через туннель отличает
+    «мёртвый v6-egress» от «сломанный DNS на exit» (кейс №9)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import chimera.modules.chain_relay as cr
+        self._cr = cr
+        cr._v4only_host_cache.clear()
+
+    def tearDown(self):
+        self._cr._v4only_host_cache.clear()
+
+    def test_lookup_picks_first_clean_candidate(self):
+        cr = self._cr
+        # A есть, AAAA нет → выбран первый кандидат
+        with patch.object(cr, "_doh_has_records",
+                          side_effect=lambda h, t, *a, **kw:
+                          True if t == "A" else False):
+            self.assertEqual(cr._lookup_v4only_probe_host(),
+                             "ipv4.icanhazip.com")
+
+    def test_lookup_skips_candidate_with_aaaa(self):
+        cr = self._cr
+        # у первого кандидата есть AAAA → пропущен, взят второй
+        with patch.object(cr, "_doh_has_records",
+                          side_effect=lambda h, t, *a, **kw:
+                          True if t == "A"
+                          else h == "ipv4.icanhazip.com"):
+            self.assertEqual(cr._lookup_v4only_probe_host(),
+                             "v4.ident.me")
+
+    def test_lookup_none_when_doh_dead_or_ambiguous(self):
+        cr = self._cr
+        # DoH не ответил (None) → консервативный пропуск всех кандидатов
+        with patch.object(cr, "_doh_has_records", return_value=None):
+            self.assertIsNone(cr._lookup_v4only_probe_host())
+
+    def test_lookup_cached_after_success(self):
+        cr = self._cr
+        calls = {"n": 0}
+
+        def counting(h, t, *a, **kw):
+            calls["n"] += 1
+            return True if t == "A" else False
+
+        with patch.object(cr, "_doh_has_records", side_effect=counting):
+            first = cr._lookup_v4only_probe_host()
+            second = cr._lookup_v4only_probe_host()
+        self.assertEqual(first, second)
+        self.assertEqual(calls["n"], 2)   # повтор — из кэша, без DoH
+
+    def test_probe_ok_on_https(self):
+        cr = self._cr
+        with patch.object(cr, "_lookup_v4only_probe_host",
+                          return_value="ipv4.icanhazip.com"), \
+             patch.object(cr, "_curl_socks", return_value=(0, "200", 0.4)):
+            self.assertTrue(cr._probe_v4only_domain(12345, 8))
+
+    def test_probe_http_fallback(self):
+        # https молчит, http отвечает (80/443-специфика хоста) → True
+        cr = self._cr
+        seq = [(0, "000", 1.0), (0, "301", 0.5)]
+        with patch.object(cr, "_lookup_v4only_probe_host",
+                          return_value="v4.ident.me"), \
+             patch.object(cr, "_curl_socks",
+                          side_effect=lambda *a, **kw: seq.pop(0)):
+            self.assertTrue(cr._probe_v4only_domain(12345, 8))
+
+    def test_probe_dead_both_schemes(self):
+        cr = self._cr
+        seq = [(28, "000", None), (28, "000", None)]
+        with patch.object(cr, "_lookup_v4only_probe_host",
+                          return_value="api-ipv4.ip.sb"), \
+             patch.object(cr, "_curl_socks",
+                          side_effect=lambda *a, **kw: seq.pop(0)):
+            self.assertFalse(cr._probe_v4only_domain(12345, 8))
+
+    def test_probe_skipped_without_v4only_host(self):
+        # lookup не нашёл хост → ни одного curl-запроса, честный False
+        cr = self._cr
+        with patch.object(cr, "_lookup_v4only_probe_host",
+                          return_value=None), \
+             patch.object(cr, "_curl_socks",
+                          side_effect=AssertionError("curl не должен зваться")):
+            self.assertFalse(cr._probe_v4only_domain(12345, 8))
+
+    def test_is_exit_degraded(self):
+        from chimera.modules.chain_relay import (
+            is_exit_degraded, EXIT_DEGRADED_REASONS)
+        self.assertIn("DNS на exit", EXIT_DEGRADED_REASONS)
+        self.assertIn("v6-egress на exit", EXIT_DEGRADED_REASONS)
+        self.assertTrue(is_exit_degraded("v6-egress на exit"))
+        self.assertTrue(is_exit_degraded(" DNS на exit "))
+        self.assertFalse(is_exit_degraded("нода не отвечает"))
+        self.assertFalse(is_exit_degraded(""))
+        self.assertFalse(is_exit_degraded(None))
+
+
+class TestFullPathV6EgressVerdict(unittest.TestCase):
+    """delivered-ветка зондов: P5 решает v6-egress/DNS, ok=False в обоих
+    случаях (доменный трафик через такой exit не ходит — кейс №9)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self.nd = _mk_node()
+        self.via_nd = _mk_node(via="hop-a")
+        self.hops = [_mk_hop("hop-a")]
+
+    class _FakeProc:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            pass
+
+        def kill(self):
+            pass
+        stderr = b""
+
+    _LADDER_IP_ONLY = {"delivered": True, "domain_ok": False,
+                       "code": "301", "ms": None,
+                       "port80_blocked": False, "ip_only": True}
+
+    def _direct(self, p5):
+        import chimera.modules.chain_relay as cr
+        with patch.object(cr, "_find_xray_bin",
+                          return_value="/usr/local/bin/xray"), \
+             patch.object(cr.subprocess, "Popen",
+                          return_value=self._FakeProc()), \
+             patch.object(cr.subprocess, "run",
+                          return_value=MagicMock(stdout="",
+                                                 returncode=1)), \
+             patch.object(cr, "_probe_ladder",
+                          return_value=dict(self._LADDER_IP_ONLY)), \
+             patch.object(cr, "_probe_v4only_domain", return_value=p5):
+            return cr.check_node_full_path(self.nd)
+
+    def _via(self, p5):
+        import chimera.modules.chain_relay as cr
+        with patch.object(cr, "_find_xray_bin",
+                          return_value="/usr/local/bin/xray"), \
+             patch.object(cr.subprocess, "Popen",
+                          return_value=self._FakeProc()), \
+             patch.object(cr.subprocess, "run",
+                          return_value=MagicMock(stdout="",
+                                                 returncode=1)), \
+             patch.object(cr, "_probe_ladder",
+                          return_value=dict(self._LADDER_IP_ONLY)), \
+             patch.object(cr, "_probe_v4only_domain", return_value=p5):
+            return cr.check_via_node_full_path(self.via_nd, self.hops)
+
+    def test_direct_v6egress_verdict(self):
+        # v4-домен через exit ходит → DNS жив, AAAA-домены умирают на v6
+        res = self._direct(p5=True)
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["infra"])
+        self.assertEqual(res["reason"], "v6-egress на exit")
+        self.assertIn("мёртвый IPv6-egress", res["detail"])
+        self.assertIn("UseIPv4", res["detail"])
+
+    def test_direct_dns_verdict_when_p5_dead(self):
+        # v4-домен тоже не дошёл → честный прежний «DNS на exit»
+        res = self._direct(p5=False)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["reason"], "DNS на exit")
+        self.assertIn("порт 53", res["detail"])
+
+    def test_via_v6egress_verdict(self):
+        res = self._via(p5=True)
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["infra"])
+        self.assertEqual(res["reason"], "v6-egress на exit")
+        self.assertIn("мёртвый IPv6-egress", res["detail"])
+
+    def test_via_dns_verdict_when_p5_dead(self):
+        res = self._via(p5=False)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["reason"], "DNS на exit")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

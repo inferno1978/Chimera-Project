@@ -3924,11 +3924,19 @@ def _speed_test_node_latency(host: str, port: int, nd: dict = None) -> str:
 
     Ноды без ключей (nd=None, чужие host:port, не-REALITY) — TCP-пинг
     через _resolve_host_fresh (DoH + fallback), как раньше.
+
+    Формулировка отказа (живой кейс окт.2026 №9): причины «DNS на exit»/
+    «v6-egress на exit» = нода и туннель ЖИВЫ (ICMP/REALITY/IP-пробы
+    проходят), но доменный трафик через exit не ходит → честное слово
+    «деградация», НЕ «недоступна» (владелец пинговал узел руками — 60
+    мс, а [T] писал «недоступна | RTT -»). Остальные причины — как
+    раньше «недоступна (причина)».
     Возвращает строку с результатом.
     """
     core = _core_module()
     GREEN = core.GREEN
     RED = core.RED
+    YELLOW = getattr(core, "YELLOW", "\033[33m")
     NC = core.NC
     DIM = core.DIM
     via = str((nd or {}).get("via") or "").strip()
@@ -3953,8 +3961,7 @@ def _speed_test_node_latency(host: str, port: int, nd: dict = None) -> str:
                     return (f"{GREEN}{r.get('ms', 0):.0f} мс{NC} "
                             f"{DIM}(via {via}){NC}")
                 if not r.get("infra"):
-                    return (f"{RED}недоступна "
-                            f"({r.get('reason') or 'full-path FAIL'}){NC}")
+                    return _latency_fail_line(r, YELLOW, RED, NC)
                 # сбой механизма зонда (нет xray и т.п.) → TCP-пинг ниже
             else:
                 # Хоп выключен/удалён: генератор прод-конфига в этом
@@ -3979,8 +3986,7 @@ def _speed_test_node_latency(host: str, port: int, nd: dict = None) -> str:
                     return (f"{GREEN}{r.get('ms', 0):.0f} мс{NC} "
                             f"{DIM}(full-path){NC}" + note)
                 else:
-                    return (f"{RED}недоступна "
-                            f"({r.get('reason') or 'full-path FAIL'}){NC}" + note)
+                    return _latency_fail_line(r, YELLOW, RED, NC) + note
         except Exception:
             pass    # сбой механизма зонда → честный TCP-пинг ниже
     # 3) TCP-пинг (ноды без ключей / сбой полного зонда)
@@ -3997,6 +4003,28 @@ def _speed_test_node_latency(host: str, port: int, nd: dict = None) -> str:
         return f"{RED}таймаут{NC}" + note
     except Exception as e:
         return f"{RED}ошибка ({e}){NC}" + note
+
+
+def _latency_fail_line(r: dict, yellow: str, red: str, nc: str) -> str:
+    """Строка отказа full-path-зонда для [T] — честная, по причине.
+
+    Живой кейс окт.2026 №9: причины «DNS на exit»/«v6-egress на exit» =
+    нода/туннель/REALITY живы (ICMP и IP-пробы проходят), не ходят
+    только домены → «деградация (причина)», НЕ «недоступна» — узел
+    при этом пингуется по IP (владелец проверял руками). Жёлтый цвет:
+    класс «жива, но не годна для доменного трафика» между зелёным UP
+    и красным DOWN. Остальные причины — прежний красный «недоступна».
+    «-» в текстах, не «—» (ambiguous-ширина, кейс №7)."""
+    reason = str(r.get("reason") or "").strip() or "full-path FAIL"
+    degraded = False
+    try:
+        from chimera.modules.chain_relay import is_exit_degraded
+        degraded = is_exit_degraded(reason)
+    except Exception:
+        degraded = reason in ("DNS на exit", "v6-egress на exit")
+    if degraded:
+        return f"{yellow}деградация ({reason}){nc}"
+    return f"{red}недоступна ({reason}){nc}"
 
 
 def _speed_test_node_geo(host: str) -> tuple[str, str, str, str, str]:

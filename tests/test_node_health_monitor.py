@@ -282,5 +282,98 @@ class TestTcpPing(unittest.TestCase):
         self.assertEqual(ms, 0.0)
 
 
+class TestDegradedReasons(unittest.TestCase):
+    """Кейс окт.2026 №9: reason деградированного DOWN (DNS/v6-egress на
+    exit — туннель жив) пишется в state/results/лог; TG говорит
+    «деградировала», не «недоступна»; жёсткий DOWN — прежний текст."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        core = sys.modules["chimera._core"]
+        self._tmp = tempfile.TemporaryDirectory()
+        core.STATE_FILE = Path(self._tmp.name) / "state.json"
+        core.STATE_FILE.write_text(json.dumps({
+            "chain_nodes": [{"host": "nl.example.com", "port": 443,
+                             "sni": "nl.example.com", "uuid": "u",
+                             "pubkey": "p"}],
+            "relay_hops": [],
+        }))
+        from chimera.modules import node_health_monitor as _nhm
+        self._nhm = _nhm
+        self._orig = (_nhm.STATE_FILE, _nhm.HEALTH_STATE, _nhm.HEALTH_LOG)
+        _nhm.STATE_FILE = core.STATE_FILE
+        _nhm.HEALTH_STATE = Path(self._tmp.name) / "node-health-state.json"
+        _nhm.HEALTH_LOG = Path(self._tmp.name) / "xray-node-health.log"
+
+    def tearDown(self):
+        (self._nhm.STATE_FILE, self._nhm.HEALTH_STATE,
+         self._nhm.HEALTH_LOG) = self._orig
+        self._tmp.cleanup()
+
+    def _run_check(self, probe_result, prev_state):
+        import chimera.modules.chain_relay as cr
+        nhm = self._nhm
+        nhm.HEALTH_STATE.write_text(json.dumps(prev_state))
+        sent = []
+        orig_fp, orig_icmp, orig_tg = (cr.check_node_full_path,
+                                       cr.icmp_rtt, nhm._tg_send)
+        cr.check_node_full_path = lambda nd, **kw: probe_result
+        cr.icmp_rtt = lambda host, **kw: {"ok": True, "avg": 60.5}
+        nhm._tg_send = lambda msg: sent.append(msg) or True
+        try:
+            results = nhm.check_nodes_once()
+        finally:
+            (cr.check_node_full_path, cr.icmp_rtt,
+             nhm._tg_send) = orig_fp, orig_icmp, orig_tg
+        return results, sent
+
+    def test_degraded_down_reason_everywhere(self):
+        # была UP → стала DOWN с v6-egress: reason в results/state/лог,
+        # TG — «деградирована ... туннель жив», НЕ «недоступна»
+        results, sent = self._run_check(
+            {"ok": False, "ms": 0.0, "infra": False,
+             "reason": "v6-egress на exit",
+             "detail": "нода и REALITY живы"},
+            {"nl.example.com:443": {"up": True, "last_check": 1.0}})
+        self.assertFalse(results[0]["up"])
+        self.assertEqual(results[0]["reason"], "v6-egress на exit")
+        st = json.loads(self._nhm.HEALTH_STATE.read_text())
+        self.assertEqual(st["nl.example.com:443"]["reason"],
+                         "v6-egress на exit")
+        log = self._nhm.HEALTH_LOG.read_text()
+        self.assertIn("v6-egress на exit", log)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("деградирована", sent[0])
+        self.assertIn("туннель жив", sent[0])
+        self.assertNotIn("недоступна", sent[0])
+
+    def test_hard_down_keeps_unavailable_wording(self):
+        # жёсткий отказ (все пробы 000) — прежний красный текст
+        results, sent = self._run_check(
+            {"ok": False, "ms": 0.0, "infra": False,
+             "reason": "нода не отвечает"},
+            {"nl.example.com:443": {"up": True, "last_check": 1.0}})
+        self.assertFalse(results[0]["up"])
+        self.assertEqual(len(sent), 1)
+        self.assertIn("недоступна", sent[0])
+        self.assertNotIn("деградирована", sent[0])
+
+    def test_up_node_has_empty_reason(self):
+        results, sent = self._run_check(
+            {"ok": True, "ms": 250.0, "infra": False, "reason": "нода жива"},
+            {"nl.example.com:443": {"up": True, "last_check": 1.0}})
+        self.assertTrue(results[0]["up"])
+        self.assertEqual(results[0]["reason"], "")
+        self.assertEqual(sent, [])     # статуса не менялся — TG нет
+
+    def test_is_degraded_reason_helper(self):
+        nhm = self._nhm
+        self.assertTrue(nhm._is_degraded_reason("DNS на exit"))
+        self.assertTrue(nhm._is_degraded_reason("v6-egress на exit"))
+        self.assertFalse(nhm._is_degraded_reason("нода не отвечает"))
+        self.assertFalse(nhm._is_degraded_reason(""))
+        self.assertFalse(nhm._is_degraded_reason(None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
