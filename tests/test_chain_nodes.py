@@ -1634,5 +1634,269 @@ class TestLatencyDegradedWording(unittest.TestCase):
         self.assertNotIn("деградация", result)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  Кейс №10: пин на деградированную ноду (v6-egress) — здоровье в меню [P]
+#  + v4-режим закрепления (DoH→direct, v6→BLOCK fast-fail)
+# ═════════════════════════════════════════════════════════════════════════════
+class TestPinV4RoutingRules(unittest.TestCase):
+    """_build_chain_routing_rules(v4_pin=True): два правила перед catch-all."""
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+
+    def test_v4_pin_inserts_doh_direct_and_v6_block_before_catchall(self):
+        """v4_pin=True: DoH-резолверы → direct и ::/0 → BLOCK идут ПЕРЕД
+        TCP catch-all (порядок важен: первый матч выигрывает)."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-1",
+                                                       v4_pin=True)
+        # catch-all — последний
+        self.assertEqual(rules[-1]["network"], "tcp")
+        self.assertEqual(rules[-1]["outboundTag"], "chain-exit-1")
+        # предпоследнее — BLOCK ::/0 (v6 fast-fail)
+        v6_block = rules[-2]
+        self.assertEqual(v6_block.get("ip"), ["::/0"])
+        self.assertEqual(v6_block.get("outboundTag"), "BLOCK")
+        # перед ним — DoH-резолверы → direct
+        doh = rules[-3]
+        self.assertEqual(doh.get("outboundTag"), "direct")
+        doms = doh.get("domain", [])
+        self.assertIn("domain:cloudflare-dns.com", doms)
+        self.assertIn("domain:dns.google", doms)
+        self.assertIn("domain:dns.quad9.net", doms)
+        # все домены с префиксом domain: (subdomain-match, как geosite-правила)
+        self.assertTrue(all(d.startswith("domain:") for d in doms))
+
+    def test_v4_pin_disabled_by_default_regression(self):
+        """Регрессия: без флага — прежний список из 6 правил, никаких
+        v4-правил (конфиги живых нод без флага байт-в-байт прежние)."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-1")
+        self.assertEqual(len(rules), 6)
+        for r in rules:
+            self.assertNotIn("::/0", r.get("ip", []))
+            self.assertNotIn("comment", r)
+            self.assertNotIn("domain", r)
+
+    def test_balancer_ignores_v4_pin(self):
+        """Balancer-режим флаг игнорирует: v4-правил нет (не бывает
+        «закреплённого v4» без закрепления)."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules(
+            "chain-balancer", balancer=True, v4_pin=True)
+        self.assertEqual(rules[-1].get("balancerTag"), "chain-balancer")
+        for r in rules:
+            self.assertNotIn("::/0", r.get("ip", []))
+            self.assertNotIn("domain", r)
+
+    def test_v4_pin_port53_direct_precedes_v6_block(self):
+        """Порядок: plain-DNS (порт 53) → direct идёт РАНЬШЕ BLOCK ::/0 —
+        v6-DNS клиентов не должен съедать fast-fail (замер кейса №10)."""
+        from chimera.modules import chain_nodes
+        rules = chain_nodes._build_chain_routing_rules("chain-exit-2",
+                                                       v4_pin=True)
+        idx_port53 = next(i for i, r in enumerate(rules)
+                          if r.get("port") == "53")
+        idx_v6block = next(i for i, r in enumerate(rules)
+                           if r.get("ip") == ["::/0"])
+        self.assertLess(idx_port53, idx_v6block)
+
+
+class TestPinV4State(unittest.TestCase):
+    """Флаг chain_pinned_v4only: чтение/запись state.json, снятие пина."""
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+        import tempfile
+        from pathlib import Path as _P
+        from chimera.modules import chain_nodes
+        self._tmp = tempfile.mkdtemp()
+        self._state_file = _P(self._tmp) / "state.json"
+        self._orig = chain_nodes._CHAIN_STATE_FILE
+        chain_nodes._CHAIN_STATE_FILE = self._state_file
+
+    def tearDown(self):
+        from chimera.modules import chain_nodes
+        chain_nodes._CHAIN_STATE_FILE = self._orig
+
+    def test_flag_roundtrip_and_clear(self):
+        from chimera.modules import chain_nodes
+        self.assertFalse(chain_nodes._chain_pinned_v4only())
+        chain_nodes._pin_v4_set(True)
+        self.assertTrue(chain_nodes._chain_pinned_v4only())
+        # флаг ложится в существующий state.json, не затирая соседей
+        st = json.loads(self._state_file.read_text())
+        self.assertIs(st.get("chain_pinned_v4only"), True)
+        st["chain_nodes"] = [{"host": "a.example"}]
+        self._state_file.write_text(json.dumps(st))
+        chain_nodes._pin_v4_set(True)
+        st2 = json.loads(self._state_file.read_text())
+        self.assertIs(st2.get("chain_pinned_v4only"), True)
+        self.assertEqual(len(st2.get("chain_nodes", [])), 1)
+        # снятие — ключ удаляется (не False-мусор)
+        chain_nodes._pin_v4_set(False)
+        st3 = json.loads(self._state_file.read_text())
+        self.assertNotIn("chain_pinned_v4only", st3)
+        self.assertFalse(chain_nodes._chain_pinned_v4only())
+
+    def test_flag_corrupt_state_safe(self):
+        """Битый state.json → False (не исключение)."""
+        from chimera.modules import chain_nodes
+        self._state_file.write_text("{broken json")
+        self.assertFalse(chain_nodes._chain_pinned_v4only())
+
+
+class TestPinHealthHints(unittest.TestCase):
+    """_pin_health_hints: HM-вердикты + карантин + свежесть + нет данных."""
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+        import tempfile
+        import time
+        from pathlib import Path as _P
+        from chimera.modules import chain_nodes
+        self._tmp = _P(tempfile.mkdtemp())
+        self._now = time.time()
+        self._hm = self._tmp / "hm.json"
+        self._sb = self._tmp / "sb.json"
+        self._orig_hm = chain_nodes._PIN_HM_STATE_FILE
+        self._orig_sb = chain_nodes._PIN_SB_STATE_FILE
+        chain_nodes._PIN_HM_STATE_FILE = self._hm
+        chain_nodes._PIN_SB_STATE_FILE = self._sb
+
+    def tearDown(self):
+        from chimera.modules import chain_nodes
+        chain_nodes._PIN_HM_STATE_FILE = self._orig_hm
+        chain_nodes._PIN_SB_STATE_FILE = self._orig_sb
+
+    def _nodes(self):
+        return [{"host": "nl.example.com", "port": 443},
+                {"host": "de.example.com", "port": 443},
+                {"host": "fi.example.com", "port": 443},
+                {"host": "ee.example.com", "port": 443}]
+
+    def test_up_degr_down_quarantine_and_nodata(self):
+        from chimera.modules import chain_nodes
+        self._hm.write_text(json.dumps({
+            "nl.example.com:443": {"up": False, "ms": 0.0,
+                                   "reason": "v6-egress на exit",
+                                   "last_check": self._now},
+            "de.example.com:443": {"up": True, "ms": 157.4,
+                                   "reason": "", "last_check": self._now},
+            "fi.example.com:443": {"up": False, "ms": 0.0,
+                                   "reason": "нода не отвечает",
+                                   "last_check": self._now},
+        }))
+        self._sb.write_text(json.dumps({"nodes_meta": {
+            "nl.example.com:443": {
+                "fails": 3,
+                "quarantine_until": self._now + 1200,
+                "quarantine_until_str": "2026-10-22 20:45:50"},
+        }}))
+        hints = chain_nodes._pin_health_hints(self._nodes())
+        nl = hints["nl.example.com:443"]
+        self.assertIn("DEGR", nl)
+        self.assertIn("v6-egress на exit", nl)
+        self.assertIn("карантин до 20:45", nl)
+        self.assertIn("UP 157мс", hints["de.example.com:443"])
+        fi = hints["fi.example.com:443"]
+        self.assertIn("DOWN", fi)
+        self.assertIn("нода не отвечает", fi)
+        self.assertNotIn("DEGR", fi)
+        # нет данных ни в HM, ни в балансировщике — пустая подсказка
+        self.assertEqual(hints["ee.example.com:443"], "")
+
+    def test_stale_verdict_marked(self):
+        """HM-вердикт старше 45 минут — помечается временем данных."""
+        from chimera.modules import chain_nodes
+        stale = self._now - 46 * 60
+        self._hm.write_text(json.dumps({
+            "nl.example.com:443": {"up": True, "ms": 100.0,
+                                   "reason": "", "last_check": stale},
+        }))
+        self._sb.write_text("{}")
+        hints = chain_nodes._pin_health_hints(self._nodes()[:1])
+        self.assertIn("данные ", hints["nl.example.com:443"])
+
+    def test_missing_files_all_empty(self):
+        """Файлов нет — все подсказки пустые (меню не ломается)."""
+        from chimera.modules import chain_nodes
+        hints = chain_nodes._pin_health_hints(self._nodes())
+        self.assertTrue(all(h == "" for h in hints.values()))
+        self.assertEqual(len(hints), 4)
+
+
+class TestPinProbeNode(unittest.TestCase):
+    """_pin_probe_node: via-нода → зонд через цепочку, прямая → прямой."""
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+
+    def _patch_relay(self, **attrs):
+        import chimera.modules.chain_relay as cr
+        saved = {}
+        for k, v in attrs.items():
+            saved[k] = getattr(cr, k)
+            setattr(cr, k, v)
+        return saved
+
+    def _restore_relay(self, saved):
+        import chimera.modules.chain_relay as cr
+        for k, v in saved.items():
+            setattr(cr, k, v)
+
+    def test_via_node_uses_via_probe(self):
+        from chimera.modules import chain_nodes
+        calls = []
+
+        def fake_via(nd, hops, **kw):
+            calls.append("via")
+            return {"ok": False, "ms": 0.0, "reason": "v6-egress на exit",
+                    "detail": "туннель жив, AAAA умирают", "infra": False}
+
+        def fake_direct(nd, **kw):
+            calls.append("direct")
+            return {"ok": True, "ms": 99.0, "reason": "", "infra": False}
+
+        saved = self._patch_relay(
+            check_via_node_full_path=fake_via,
+            check_node_full_path=fake_direct,
+            load_relay_hops=lambda: [{"tag": "hop-fi"}],
+            hop_via_tag_for=lambda nd, hops: "hop-fi")
+        try:
+            verdict = chain_nodes._pin_probe_node(
+                {"host": "ee.example.com", "port": 443, "via": "hop-fi"})
+        finally:
+            self._restore_relay(saved)
+        self.assertEqual(calls, ["via"])
+        self.assertEqual(verdict["reason"], "v6-egress на exit")
+
+    def test_direct_node_uses_direct_probe(self):
+        from chimera.modules import chain_nodes
+        calls = []
+
+        def fake_via(nd, hops, **kw):
+            calls.append("via")
+            return {"ok": True, "ms": 1.0, "reason": "", "infra": False}
+
+        def fake_direct(nd, **kw):
+            calls.append("direct")
+            return {"ok": True, "ms": 98.5, "reason": "цепь жива",
+                    "infra": False}
+
+        saved = self._patch_relay(
+            check_via_node_full_path=fake_via,
+            check_node_full_path=fake_direct,
+            load_relay_hops=lambda: [{"tag": "hop-fi"}],
+            hop_via_tag_for=lambda nd, hops: None)
+        try:
+            verdict = chain_nodes._pin_probe_node(
+                {"host": "nl.example.com", "port": 443})
+        finally:
+            self._restore_relay(saved)
+        self.assertEqual(calls, ["direct"])
+        self.assertTrue(verdict["ok"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
