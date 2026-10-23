@@ -6624,51 +6624,95 @@ def do_manage_backup() -> None:
 
 def _speed_test_download(resolve_host: str, resolve_ip: str, port: int, size_mb_target: int = 10) -> str:
     """
-    Измеряет скорость загрузки с Cloudflare.
+    Измеряет скорость загрузки с Cloudflare SpeedTest.
     size_mb_target — размер файла в МБ (10 / 100 / 500 / 1000).
     Возвращает строку с результатом.
+
+    Кейс №15 (окт.2026, живой баг): все размеры кроме 10 МБ вечно давали
+    «Cloudflare недоступен с сервера». Корень: жёсткий потолок endpoint —
+    запрос bytes≥100_000_000 (100 МБ = 104_857_600) Cloudflare отвечает
+    HTTP 403 с телом 1 байт, а curl без --fail отдаёт rc=0 — старый код
+    видел «скачано <1 КБ» и делал ложный вывод о недоступности. Теперь:
+    (1) объём выше потолка качается последовательными запросами по
+    ≤90 МиБ (CF_DOWN_CHUNK_BYTES); (2) %{http_code} фиксируется — 4xx
+    честно диагнозится как «отклонён», а не «недоступен»; (3) скорость =
+    сумма байт / сумма времени всех чанков (однопоточный честный замер).
+    При обрыве в середине отдаёт частичный результат (если ≥1 МБ скачано).
 
     DoH-резолв speed.cloudflare.com через _resolve_host_fresh (Cloudflare/Google
     JSON API), минуя серверный DNS. Это КРИТИЧНО после фикса DNS-leak —
     серверный DNS направлен на 127.0.0.1 (DNSCrypt-proxy), и если DNSCrypt
     не может резолвить speed.cloudflare.com (или работает медленно) — curl
-    падает с "Cloudflare недоступен с сервера". DoH обходит это: IP
-    передаётся в curl через --resolve, системный резолвер не используется.
+    падает. DoH обходит это: IP передаётся в curl через --resolve,
+    системный резолвер не используется.
 
     Fallback: если DoH не сработал — обычный curl (через системный DNS).
     """
-    bytes_count = size_mb_target * 1024 * 1024
-    timeout = max(60, size_mb_target * 8)
-    url = f"https://speed.cloudflare.com/__down?bytes={bytes_count}"
+    from chimera.modules.chain_nodes import CF_DOWN_CHUNK_BYTES
 
+    target_bytes = size_mb_target * 1024 * 1024
     cf_ip = _cf_resolve_ip()
 
-    try:
-        curl_cmd = [
-            "curl", "-s", "-o", "/dev/null", "--max-time", str(timeout),
-            "-w", "%{size_download} %{time_total} %{speed_download}",
-        ]
-        # Если DoH отдал IP — передаём в curl через --resolve, чтобы обойти
-        # системный DNS. Иначе curl будет резолвить через /etc/resolv.conf.
-        if cf_ip:
-            curl_cmd += ["--resolve", f"speed.cloudflare.com:443:{cf_ip}"]
-        curl_cmd.append(url)
+    total_b = 0
+    total_t = 0.0
+    remaining = target_bytes
+    max_requests = target_bytes // CF_DOWN_CHUNK_BYTES + 3
 
-        r = _run(curl_cmd, capture=True, check=False)
-        parts = r.stdout.strip().split()
-        if r.returncode != 0 or len(parts) < 3:
-            return f"{RED}ошибка curl (код {r.returncode}){NC}"
-        size_b     = int(parts[0])
-        time_s     = float(parts[1])
-        speed_bs   = float(parts[2])
-        if size_b < 1024:
-            return f"{YELLOW}Cloudflare недоступен с сервера — тестируйте на клиенте (fast.com){NC}"
-        speed_mbit = speed_bs * 8 / 1_000_000
-        size_mb    = size_b / 1_048_576
-        colour     = GREEN if speed_mbit > 100 else YELLOW if speed_mbit > 20 else RED
-        return f"{colour}{speed_mbit:.1f} Мбит/с{NC} ({size_mb:.0f} МБ за {time_s:.1f}с)"
+    try:
+        for _ in range(max_requests):
+            if remaining <= 0:
+                break
+            chunk = min(remaining, CF_DOWN_CHUNK_BYTES)
+            chunk_mb = max(1, chunk // (1024 * 1024))
+            timeout = max(60, chunk_mb * 8)
+            curl_cmd = [
+                "curl", "-s", "-o", "/dev/null", "--max-time", str(timeout),
+                "-w", "%{size_download} %{time_total} %{speed_download} %{http_code}",
+            ]
+            # Если DoH отдал IP — передаём в curl через --resolve, чтобы обойти
+            # системный DNS. Иначе curl будет резолвить через /etc/resolv.conf.
+            if cf_ip:
+                curl_cmd += ["--resolve", f"speed.cloudflare.com:443:{cf_ip}"]
+            curl_cmd.append(f"https://speed.cloudflare.com/__down?bytes={chunk}")
+
+            r = _run(curl_cmd, capture=True, check=False)
+            parts = (r.stdout or "").strip().split()
+            if r.returncode != 0 or len(parts) < 3:
+                if total_b >= 1024 * 1024:
+                    break        # частичный результат уже измерен — отдаём его
+                return f"{RED}ошибка curl (код {r.returncode}){NC}"
+            try:
+                size_b = int(parts[0])
+                time_s = float(parts[1])
+            except (ValueError, IndexError):
+                if total_b >= 1024 * 1024:
+                    break
+                return f"{RED}ошибка парсинга вывода curl{NC}"
+            http_code = parts[3] if len(parts) >= 4 else ""
+            if size_b < 1024:
+                if http_code in ("403", "413", "414"):
+                    # endpoint отклонил запрос: потолок размера (кейс №15)
+                    if total_b >= 1024 * 1024:
+                        break
+                    return (f"{RED}Cloudflare отклонил запрос "
+                            f"(HTTP {http_code}) — потолок ~100 МБ "
+                            f"на один запрос{NC}")
+                if total_b >= 1024 * 1024:
+                    break
+                return f"{YELLOW}Cloudflare недоступен с сервера — тестируйте на клиенте (fast.com){NC}"
+            total_b += size_b
+            total_t += time_s
+            remaining -= size_b
     except Exception as e:
-        return f"{RED}ошибка: {e}{NC}"
+        if total_b < 1024 * 1024:
+            return f"{RED}ошибка: {e}{NC}"
+
+    if total_b < 1024 * 1024 or total_t <= 0:
+        return f"{YELLOW}Cloudflare недоступен с сервера — тестируйте на клиенте (fast.com){NC}"
+    speed_mbit = total_b * 8 / total_t / 1_000_000
+    size_mb    = total_b / 1_048_576
+    colour     = GREEN if speed_mbit > 100 else YELLOW if speed_mbit > 20 else RED
+    return f"{colour}{speed_mbit:.1f} Мбит/с{NC} ({size_mb:.0f} МБ за {total_t:.1f}с)"
 
 
 def _cf_resolve_ip() -> Optional[str]:

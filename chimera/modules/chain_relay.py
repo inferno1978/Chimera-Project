@@ -945,6 +945,61 @@ def _diagnose_dead_chain(nd: dict, chain: list[dict], xbin: str,
     return {"legs": legs, "reason": reason, "detail": detail}
 
 
+def socks_cf_download_mbps(socks_port: int, want_mb: int,
+                           cf_ip: Optional[str] = None) -> float:
+    """Скачивание want_mb МБ с Cloudflare SpeedTest ЧЕРЕЗ SOCKS5-прокси
+    127.0.0.1:socks_port (временный xray-клиент: entry → хопы → exit).
+    Возвращает Мбит/с или 0.0, если ничего не скачалось (<1 МБ).
+
+    Кейс №15 (окт.2026, живой баг): замер скорости через цепочку вечно
+    давал «Download (через цепочку): не измерен» — want_speed_mb до 100 МБ
+    запрашивался ОДНИМ запросом __down, а при bytes≥100_000_000 endpoint
+    отвечает HTTP 403 с телом 1 байт (curl без --fail → rc=0), проверка
+    «≥100 КБ скачано» не проходила никогда. Теперь объём выше потолка
+    качается последовательными запросами по ≤90 МиБ (CF_DOWN_CHUNK_BYTES,
+    константа в chain_nodes — общий канон с _core._speed_test_download),
+    скорость = сумма байт / сумма времени всех чанков. При обрыве в
+    середине возвращается частичный результат (если ≥1 МБ уже скачано).
+    """
+    from chimera.modules.chain_nodes import CF_DOWN_CHUNK_BYTES
+
+    remaining = max(1, int(want_mb)) * 1024 * 1024
+    max_requests = remaining // CF_DOWN_CHUNK_BYTES + 3
+    total_b, total_t = 0, 0.0
+    for _ in range(max_requests):
+        if remaining <= 0:
+            break
+        chunk = min(remaining, CF_DOWN_CHUNK_BYTES)
+        chunk_mb = max(1, chunk // (1024 * 1024))
+        tmo = max(60, chunk_mb * 8)
+        cmd = ["curl", "-s", "-o", "/dev/null", "-m", str(tmo),
+               "-w", "%{size_download} %{time_total} %{speed_download} %{http_code}",
+               "-x", f"socks5h://127.0.0.1:{socks_port}"]
+        if cf_ip:
+            cmd += ["--resolve", f"speed.cloudflare.com:443:{cf_ip}"]
+        cmd.append(f"https://speed.cloudflare.com/__down?bytes={chunk}")
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=tmo + 15)
+        except Exception:
+            break
+        p = (r.stdout or "").split()
+        if r.returncode != 0 or len(p) < 3:
+            break
+        try:
+            size_b, t_s = int(p[0]), float(p[1])
+        except ValueError:
+            break
+        if size_b < 1024 * 100:      # <100 КБ — чанк не пришёл (403/обрыв)
+            break
+        total_b += size_b
+        total_t += t_s
+        remaining -= size_b
+    if total_b < 1024 * 1024 or total_t <= 0:
+        return 0.0
+    return total_b * 8 / total_t / 1_000_000
+
+
 def check_via_node_full_path(nd: dict, hops: list[dict],
                              want_ip: bool = False,
                              curl_timeout: int = 20,
@@ -1100,31 +1155,16 @@ def check_via_node_full_path(nd: dict, hops: list[dict],
                 if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', ip):
                     res["exit_ip"] = ip
 
-            # 3) скорость через цепочку (опционально, для speed-test)
+            # 3) скорость через цепочку (опционально, для speed-test).
+            # Чанками ≤90 МиБ: у __down потолок ~100 МБ на запрос (кейс №15).
             if want_speed_mb > 0:
-                _mb = max(1, int(want_speed_mb))
-                _dl_timeout = max(60, _mb * 8)
                 try:
                     from chimera.modules.chain_nodes import _resolve_host_fresh
                     _cf_ip = _resolve_host_fresh("speed.cloudflare.com")
                 except Exception:
                     _cf_ip = None
-                _dl = ["curl", "-s", "-o", "/dev/null", "-m", str(_dl_timeout),
-                       "-w", "%{size_download} %{time_total} %{speed_download}",
-                       "-x", f"socks5h://127.0.0.1:{socks_port}"]
-                if _cf_ip:
-                    _dl += ["--resolve", f"speed.cloudflare.com:443:{_cf_ip}"]
-                _dl.append(f"https://speed.cloudflare.com/__down?bytes={_mb * 1048576}")
-                r3 = subprocess.run(_dl, capture_output=True, text=True,
-                                    timeout=_dl_timeout + 15)
-                _p = (r3.stdout or "").split()
-                if r3.returncode == 0 and len(_p) >= 3:
-                    try:
-                        _size_b = int(_p[0])
-                        if _size_b >= 1024 * 100:      # ≥100 КБ — считаем валидным
-                            res["speed_mbps"] = float(_p[2]) * 8 / 1_000_000
-                    except ValueError:
-                        pass
+                res["speed_mbps"] = socks_cf_download_mbps(
+                    socks_port, want_speed_mb, cf_ip=_cf_ip)
 
             return res
 

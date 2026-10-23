@@ -81,7 +81,9 @@ DEFAULT_DAILY_MINUTE         = 50
 
 # Таймауты
 SMALL_DOWNLOAD_BYTES  = 10_000_000   # 10 MB для лёгкой пробы
-BIG_DOWNLOAD_BYTES    = 100_000_000  # 100 MB для полного замера
+BIG_DOWNLOAD_BYTES    = 95_000_000   # 95 MB — НИЖЕ потолка Cloudflare __down:
+                                     # при 100_000_000 endpoint отвечает HTTP 403
+                                     # с телом 1 байт (живой замер, окт.2026, кейс №15)
 SMALL_DOWNLOAD_TIMEOUT = 30          # сек
 BIG_DOWNLOAD_TIMEOUT   = 60          # сек
 PING_COUNT             = 5
@@ -254,16 +256,22 @@ def _ping_latency(target: str, count: int = PING_COUNT,
 
 
 def _curl_download(url: str, timeout: int = 30) -> Optional[float]:
-    """Download через curl, возвращает скорость в bytes/sec или None."""
+    """Download через curl, возвращает скорость в bytes/sec или None.
+
+    Скорость <10 КБ/с считается отсутствием загрузки: 403/404 от CDN с
+    телом в 1 байт даёт rc=0 и «скорость» ~30 Б/с — без порога это
+    записалось бы как ложный успешный замер (кейс №15).
+    """
     r = _run(["curl", "-sS", "-o", "/dev/null", "-w", "%{speed_download}",
               "--max-time", str(timeout), url],
              capture=True, timeout=timeout + 5)
     if r.returncode != 0:
         return None
     try:
-        return float((r.stdout or "").strip())
+        speed = float((r.stdout or "").strip())
     except (ValueError, TypeError):
         return None
+    return speed if speed > 10_000 else None
 
 
 def _try_download(sources: list, size_bytes: int, timeout: int) -> tuple:
