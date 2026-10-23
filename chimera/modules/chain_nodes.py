@@ -4057,6 +4057,16 @@ def _validate_chain_node_host(host: str) -> "tuple[bool, str, Optional[str]]":
     return True, f"Домен '{host}' резолвится в {resolved_ip}", resolved_ip
 
 
+# Лимиты Cloudflare SpeedTest endpoint (живой замер, окт.2026, кейс №15):
+# https://speed.cloudflare.com/__down?bytes=N отвечает 200 OK строго до
+# 99_999_999 байт включительно; при 100_000_000 и выше — HTTP 403 с телом
+# 1 байт. Потребители: _core._speed_test_download (speed-test TUI) и
+# chain_relay.socks_cf_download_mbps (замер через цепочку) — объёмы выше
+# потолка качаются последовательными запросами по ≤90 МиБ.
+CF_DOWN_MAX_BYTES = 99_999_999
+CF_DOWN_CHUNK_BYTES = 90 * 1024 * 1024   # 94_371_840 — с запасом ниже потолка
+
+
 def _resolve_host_fresh(host: str, timeout: int = 3) -> Optional[str]:
     """
     Резолв hostname → IPv4 через публичные DoH-резолверы (Cloudflare 1.1.1.1
