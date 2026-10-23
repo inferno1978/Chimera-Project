@@ -32,6 +32,11 @@ chimera/modules/updater.py
   • Стартовая фоновая проверка: main.py вызывает start_background_check()
     — daemon-тред делает один fetch за сессию; строка-подсказка в главном
     меню рисуется из кэша.
+  • Кэш-подсказка валидируется локально (живой кейс окт.2026 №14):
+    update_check.json живёт в /var/lib/xray-installer и ПЕРЕЖИВАЕТ
+    удаление/переустановку /opt/chimera — подсказка показывается только
+    при совпадении repo-пути и HEAD на диске и без ошибки последней
+    проверки; фантомные данные зачищаются на старте TUI.
 
 Безопасность (зеркалит политику bootstrap.sh):
   • НИКОГДА не делает reset --hard / force-push — только --ff-only.
@@ -85,6 +90,14 @@ GIT_TIMEOUT   = 60     # сек — на локальные git-операции
 # HEAD на момент старта TUI: если ночной cron обновил код — главном меню
 # покажет «перезапустите TUI», пока код в памяти не совпадёт с диском.
 _session_head: Optional[str] = None
+
+# HEAD на диске для подсказки меню: git-подпроцесс в цикле перерисовки
+# недопустим, поэтому rev-parse делается один раз за процесс и
+# инвалидируется в _remember_session_head(). Отличие от _session_head:
+# ночной cron может сдвинуть диск-HEAD мимо живой сессии — подсказка
+# «перезапустите TUI» сравнивает именно диск-HEAD с HEAD старта сессии.
+_disk_head: Optional[str] = None
+_disk_head_known = False
 
 
 # ── Вспомогательные ──────────────────────────────────────────────────────────
@@ -347,41 +360,117 @@ def update_info(refresh: bool = False) -> dict:
     return base
 
 
+def _disk_head_cached(repo: Path) -> Optional[str]:
+    """HEAD на диске (rev-parse), один subprocess за процесс.
+
+    Главное меню зовёт update_hint_line() при каждой перерисовке — дёргать
+    git на каждый кадр нельзя. Кэш инвалидируется в
+    _remember_session_head() (старт TUI / завершение обновления).
+    """
+    global _disk_head, _disk_head_known
+    if not _disk_head_known:
+        _disk_head = _head(repo)
+        _disk_head_known = True
+    return _disk_head
+
+
+def _sanitize_stale_cache(repo: Optional[Path]) -> None:
+    """Локальная (без сети) зачистка фантомных данных кэша подсказки.
+
+    Кэш живёт в /var/lib/xray-installer/update_check.json и ПЕРЕЖИВАЕТ
+    удаление/переустановку /opt/chimera (живой кейс окт.2026 №14): без
+    зачистки главное меню могло вечно показывать «Доступно обновление:
+    1425 коммит(ов)» от установки, которой больше нет. Вызывается на старте
+    TUI в ветках, где фоновая проверка выполняться не будет (не-git
+    установка или выключенная пользователем проверка), — чтобы фантом не
+    доживал до первого ручного пункта U. Локально валидно лишь совпадение
+    repo+HEAD без ошибки последней проверки; настройку autocheck не трогаем.
+    """
+    try:
+        cache = _read_cache()
+    except Exception:
+        return
+    if not isinstance(cache, dict) or not cache:
+        return
+    phantom = bool(cache.get("behind") or cache.get("ahead")
+                   or cache.get("new_commits") or cache.get("pending_restart"))
+    if not phantom:
+        return
+    locally_valid = (repo is not None
+                     and cache.get("repo") == str(repo)
+                     and not cache.get("error")
+                     and _session_head is not None
+                     and cache.get("local") == _session_head)
+    if locally_valid:
+        return
+    cache.update({"repo": str(repo) if repo else None,
+                  "branch": None, "remote_branch": None,
+                  "local": None, "remote": None,
+                  "behind": 0, "ahead": 0, "new_commits": [],
+                  "pending_restart": False, "error": None,
+                  "fetched_at": 0})
+    _write_cache(cache)
+
+
 def update_hint_line() -> Optional[str]:
     """Одна строка-подсказка для главного меню. ЧИТАЕТ ТОЛЬКО КЭШ —
-    никакой сети из отрисовки меню (меню перерисовывается постоянно)."""
+    никакой сети из отрисовки меню (меню перерисовывается постоянно).
+
+    Кэш проходит локальную валидацию (живой кейс окт.2026 №14): файл живёт
+    в /var/lib/xray-installer и переживает удаление/переустановку
+    /opt/chimera, а до фикса показывался как есть — свежеустановленный TUI
+    рапортовал «Доступно обновление: 1425 коммит(ов)» от прошлой установки.
+    Показываем только совпадающее с текущей установкой: путь репо, HEAD на
+    диске (один subprocess за процесс) и отсутствие ошибки последней
+    проверки; за бортом — не-git установки (подсказка неактуальна вовсе).
+    """
     try:
         cache = _read_cache()
     except Exception:
         return None
+    if not isinstance(cache, dict):
+        return None
+    repo = find_repo_root()
+    if repo is None:
+        return None            # не-git установка (bootstrap-архив без .git)
+    if cache.get("repo") != str(repo) or cache.get("error"):
+        return None            # кэш другой установки / последняя проверка упала
+    disk_head = _disk_head_cached(repo)
+    if not disk_head or cache.get("local") != disk_head:
+        return None            # HEAD на диске уже другой (переустановились)
     behind = int(cache.get("behind", 0) or 0)
     if behind > 0:
         return (f"{YELLOW}⬆️  Доступно обновление Chimera: {behind} коммит(ов)"
                 f"{NC}  {DIM}(Раздел 1 → U){NC}")
-    if cache.get("pending_restart"):
-        head_now = cache.get("local")
-        if head_now and _session_head and head_now != _session_head:
-            return (f"{YELLOW}🌙  Код обновлён ночью — перезапустите TUI"
-                    f"{NC}  {DIM}(Раздел 1 → U → 1){NC}")
+    if cache.get("pending_restart") and _session_head \
+            and disk_head != _session_head:
+        return (f"{YELLOW}🌙  Код обновлён ночью — перезапустите TUI"
+                f"{NC}  {DIM}(Раздел 1 → U → 1){NC}")
     return None
 
 
 def _remember_session_head() -> None:
-    global _session_head
+    global _session_head, _disk_head, _disk_head_known
     repo = find_repo_root()
     if repo:
         _session_head = _head(repo)
+        # свежесчитанный HEAD актуален и как диск-HEAD (кэш подсказки)
+        _disk_head, _disk_head_known = _session_head, True
 
 
 def start_background_check() -> None:
     """Стартовая фоновая проверка (вызывается из main.py): daemon-тред
     делает один fetch за сессию. Ошибки глотаются целиком — подсказка
-    обновлений никогда не должна мешать запуску TUI."""
+    обновлений никогда не должна мешать запуску TUI.
+
+    Веткам без сети (не-git установка / выключенная пользователем проверка)
+    refresh-а ждать неоткуда — чистим фантомные данные кэша локально
+    (_sanitize_stale_cache, кейс №14), чтобы подсказка не показывала
+    состояние прошлой установки."""
     _remember_session_head()
-    if not autocheck_enabled():
-        return
     repo = find_repo_root()
-    if repo is None:
+    if repo is None or not autocheck_enabled():
+        _sanitize_stale_cache(repo)
         return
 
     def _worker() -> None:
@@ -493,9 +582,15 @@ def do_update_interactive() -> None:
 
     if ahead > 0:
         _box_bottom()
-        _warn(f"Локальная ветка опережает origin на {ahead} коммит(ов) —")
+        _warn(f"Локальная ветка опережает origin/{remote_branch} на {ahead} коммит(ов) —")
         _warn("автообновление отключено (политика ff-only). Разберитесь")
-        _warn("вручную: git log --oneline origin/%s..HEAD" % branch)
+        _warn(f"вручную: git log --oneline origin/{remote_branch}..HEAD")
+        if behind > 0:
+            _warn("Ветка дивергентна (есть и локальные, и новые удалённые")
+            _warn("коммиты) — обычно это след force-push/перезаписи истории")
+            _warn("origin. Самое простое — переустановка свежим bootstrap.sh")
+            _warn("(README → «CHIMERA SECURE INSTALL»); если локальные правки")
+            _warn(f"не нужны: git reset --hard origin/{remote_branch}")
         input(f"{BLUE}Нажмите Enter...{NC}")
         return
 

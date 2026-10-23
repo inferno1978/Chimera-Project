@@ -16,7 +16,10 @@ Unit-тесты модуля самообновления Chimera (chimera/modul
      behind/ahead; список новых коммитов; кэш (TTL: свежий → без сети,
      протухший/refresh → fetch); запись кэша на диск.
   5. _log_subjects — парсер «sha<TAB>subject», пустой вывод, мусор.
-  6. update_hint_line — behind>0 → подсказка; pending_restart с несовпадающим
+  6. update_hint_line — локальная валидация кэша (кейс №14): валидный
+     кэш (repo+HEAD совпадают, без ошибки) с behind>0 → подсказка;
+     фантомные (другой путь установки, другой HEAD на диске, не-git
+     установка, ошибка проверки) → None; pending_restart с несовпадающим
      _session_head → «перезапустите»; совпадение/отсутствие → None;
      кэш нечитаем → None (никаких исключений в отрисовку меню).
   7. _git_retry — ретраи только на сетевой шум (403/timeout/Connection),
@@ -28,7 +31,9 @@ Unit-тесты модуля самообновления Chimera (chimera/modul
      пишется, лог пишется; ошибочный pull: rc=1, лог ERROR, код не меняется.
  10. autocheck_enabled/set_autocheck — roundtrip через кэш-файл.
  11. start_background_check — выключенная проверка не создаёт тред;
-     включённая делает fetch и не падает на ошибках.
+     включённая делает fetch и не падает на ошибках; ветки без сети
+     (не-git / autocheck выкл) зачищают фантомный кэш локально
+     (_sanitize_stale_cache), валидный кэш не трогают.
  12. _write_cache — атомарная запись, tmp-файл не остаётся.
  13. upstream-aware fetch (кейс окт.2026 №11: локальная ветка
      chimera-v5 с upstream origin/main): upstream_branch (merge → имя,
@@ -90,10 +95,12 @@ class UpdaterTempBase(unittest.TestCase):
         updater.CRON_FILE  = self.cron_file
         updater.LOG_FILE   = self.log_file
         self._saved_head = updater._session_head
+        self._saved_disk = (updater._disk_head, updater._disk_head_known)
 
     def tearDown(self):
         updater.CACHE_FILE, updater.CRON_FILE, updater.LOG_FILE = self._saved
         updater._session_head = self._saved_head
+        updater._disk_head, updater._disk_head_known = self._saved_disk
         self._tmp.cleanup()
 
 
@@ -326,31 +333,97 @@ class TestLogSubjects(UpdaterTempBase):
 
 # ── 6. update_hint_line ──────────────────────────────────────────────────────
 class TestHintLine(UpdaterTempBase):
+    """Подсказка из кэша — только после локальной валидации (кейс №14).
 
-    def test_behind_hint(self):
-        _write_cache({"behind": 4, "fetched_at": int(time.time())})
-        h = update_hint_line()
+    Кэш живёт в /var/lib/xray-installer и переживает удаление/переустановку
+    /opt/chimera — фантомные данные от прошлой установки (другой путь,
+    другой HEAD, ошибка последней проверки) показывать нельзя.
+    """
+
+    def _hint(self, repo, cache, session=None, disk=None):
+        """Записать кэш, выставить головы и получить подсказку.
+
+        disk=None + disk_known=True → HEAD на диске не читается; диск-HEAD
+        подставляется напрямую (без subprocess).
+        """
+        _write_cache(cache)
+        updater._session_head = session
+        updater._disk_head, updater._disk_head_known = disk, True
+        with patch.object(updater, "find_repo_root", return_value=repo):
+            return update_hint_line()
+
+    def test_behind_hint_valid_cache(self):
+        h = self._hint(self.repo,
+                       {"behind": 4, "repo": str(self.repo), "local": "aaa111",
+                        "error": None, "fetched_at": int(time.time())},
+                       session="aaa111", disk="aaa111")
         self.assertIsNotNone(h)
         self.assertIn("4 коммит", h)
 
+    def test_stale_cache_other_install_path_ignored(self):
+        # кэш от другой установки (другой путь) — фантом
+        h = self._hint(self.repo,
+                       {"behind": 1425, "repo": "/opt/chimera",
+                        "local": "aaa111", "error": None},
+                       session="aaa111", disk="aaa111")
+        self.assertIsNone(h)
+
+    def test_stale_cache_same_path_other_head_ignored(self):
+        # тот же путь, но HEAD на диске уже другой (переустановились) —
+        # ровно сценарий «удалил папку, склонил заново — баннер остался»
+        h = self._hint(self.repo,
+                       {"behind": 1425, "repo": str(self.repo),
+                        "local": "20d6a420e", "error": None},
+                       session="b1ce093ab", disk="b1ce093ab")
+        self.assertIsNone(h)
+
+    def test_no_git_install_never_hints(self):
+        # не-git установка (bootstrap-архив без .git): подсказка неактуальна
+        h = self._hint(None,
+                       {"behind": 1425, "repo": str(self.repo),
+                        "local": "aaa111", "error": None},
+                       session="aaa111", disk="aaa111")
+        self.assertIsNone(h)
+
+    def test_cache_with_error_ignored(self):
+        # последняя проверка упала — данным верить нельзя
+        h = self._hint(self.repo,
+                       {"behind": 5, "repo": str(self.repo),
+                        "local": "aaa111", "error": "fetch-failed"},
+                       session="aaa111", disk="aaa111")
+        self.assertIsNone(h)
+
+    def test_disk_head_unresolvable_ignored(self):
+        h = self._hint(self.repo,
+                       {"behind": 5, "repo": str(self.repo),
+                        "local": "aaa111", "error": None},
+                       session="aaa111", disk=None)
+        self.assertIsNone(h)
+
     def test_pending_restart_when_heads_differ(self):
-        _write_cache({"behind": 0, "pending_restart": True,
-                      "local": "bbb222"})
-        updater._session_head = "aaa111"
-        h = update_hint_line()
+        # ночной cron обновил код: диск-HEAD уже новый, сессия — на старом
+        h = self._hint(self.repo,
+                       {"behind": 0, "pending_restart": True, "local": "bbb222",
+                        "repo": str(self.repo), "error": None},
+                       session="aaa111", disk="bbb222")
         self.assertIsNotNone(h)
         self.assertIn("перезапуст", h)
 
     def test_pending_restart_cleared_after_restart(self):
-        _write_cache({"behind": 0, "pending_restart": True,
-                      "local": "bbb222"})
-        updater._session_head = "bbb222"          # TUI перезапущен на новом коде
-        self.assertIsNone(update_hint_line())
+        # TUI перезапущен на новом коде: диск == сессии
+        h = self._hint(self.repo,
+                       {"behind": 0, "pending_restart": True, "local": "bbb222",
+                        "repo": str(self.repo), "error": None},
+                       session="bbb222", disk="bbb222")
+        self.assertIsNone(h)
 
-    def test_pending_restart_without_session_head(self):
-        _write_cache({"behind": 0, "pending_restart": True, "local": "b"})
-        updater._session_head = None               # _remember не вызывался
-        self.assertIsNone(update_hint_line())
+    def test_pending_restart_ghost_ignored(self):
+        # pending_restart от прошлой установки: local не совпадает с диском
+        h = self._hint(self.repo,
+                       {"behind": 0, "pending_restart": True, "local": "bbb222",
+                        "repo": str(self.repo), "error": None},
+                       session="aaa111", disk="b1ce093ab")
+        self.assertIsNone(h)
 
     def test_fresh_state_no_hint(self):
         self.assertIsNone(update_hint_line())
@@ -537,6 +610,45 @@ class TestBackgroundCheck(UpdaterTempBase):
             start_background_check()
             time.sleep(0.2)     # даём daemon-треду отработать
             ui.assert_called_once_with(refresh=True)   # исключение проглочено
+
+    def test_no_git_sanitize_phantom_cache(self):
+        # не-git установка: фантомный кэш от прошлой git-установки зачищается
+        # без сети (настройка autocheck сохраняется)
+        _write_cache({"behind": 1425, "ahead": 541, "repo": "/opt/chimera",
+                      "local": "20d6a420e", "pending_restart": True,
+                      "new_commits": [("x", "y")], "autocheck": True,
+                      "fetched_at": 1, "error": None})
+        with patch.object(updater, "find_repo_root", return_value=None):
+            start_background_check()
+        cache = _read_cache()
+        self.assertEqual(cache.get("behind"), 0)
+        self.assertEqual(cache.get("ahead"), 0)
+        self.assertEqual(cache.get("new_commits"), [])
+        self.assertFalse(cache.get("pending_restart"))
+        self.assertTrue(cache.get("autocheck"))    # настройка не тронута
+
+    def test_autocheck_off_sanitize_phantom_cache(self):
+        # проверка выключена пользователем: refresh-а не будет — чистим фантом
+        set_autocheck(False)
+        _write_cache({"behind": 1425, "repo": str(self.repo),
+                      "local": "20d6a420e", "autocheck": False,
+                      "fetched_at": 1, "error": None})
+        with patch.object(updater, "find_repo_root", return_value=self.repo), \
+             patch.object(updater, "_head", return_value="b1ce093ab"):
+            start_background_check()
+        self.assertEqual(_read_cache().get("behind"), 0)
+
+    def test_autocheck_off_valid_cache_preserved(self):
+        # ручная проверка (U→1) уже записала актуальные данные — не трогаем:
+        # HEAD сессии совпадает с кэшем, это честный результат для юзера
+        set_autocheck(False)
+        _write_cache({"behind": 5, "repo": str(self.repo), "local": "aaa111",
+                      "autocheck": False, "error": None,
+                      "fetched_at": int(time.time())})
+        with patch.object(updater, "find_repo_root", return_value=self.repo), \
+             patch.object(updater, "_head", return_value="aaa111"):
+            start_background_check()
+        self.assertEqual(_read_cache().get("behind"), 5)
 
 
 # ── 12. _write_cache ─────────────────────────────────────────────────────────

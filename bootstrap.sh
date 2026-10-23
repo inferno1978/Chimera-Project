@@ -358,6 +358,27 @@ _archive_update() {
     fi
     ok "Импорт chimera проверен — обновление успешно"
 
+    # --- Stage 6.5: Выровнять git-метаданные (git-установка) ---
+    # Архив привёл файлы к состоянию origin/${BRANCH}, но .git остался от
+    # старой истории (divergent после force-push / переустановки поверх) —
+    # без выравнивания апдейтер TUI вечно видит «опережает origin» и грязное
+    # дерево. FETCH_HEAD — ровно тот коммит, чьё дерево мы скопировали;
+    # выравнивание не разрушительнее самого archive-replace (backup выше
+    # ещё жив), а при недоступной сети просто пропускается (файлы уже новые).
+    if [[ -d "${install_dir}/.git" ]]; then
+        if git -C "${install_dir}" fetch --quiet origin "$BRANCH" 2>/dev/null || \
+           git -C "${install_dir}" fetch --quiet "$REPO_URL" "$BRANCH" 2>/dev/null; then
+            if git -C "${install_dir}" reset --hard FETCH_HEAD >/dev/null 2>&1; then
+                ok "Git-метаданные выровнены под origin/${BRANCH}"
+            else
+                warn "git reset не удался — git status может показывать правки"
+            fi
+        else
+            warn "fetch для выравнивания git-метаданных не удался (сеть) —"
+            warn "файлы обновлены, .git не синхронизирован с origin/${BRANCH}"
+        fi
+    fi
+
     # --- Stage 7: Cleanup ---
     rm -rf "$_backup" "$_staging" "$_archive_tmp"
 
@@ -380,19 +401,23 @@ _archive_update() {
 # его отдаёт). Возврат: 0 — успех; 1 — источник не сработал (пробуем следующее).
 _acquire_one() {
     if [[ -d "${INSTALL_DIR}/.git" ]]; then
-        # Git-установка: сначала штатный git pull origin, затем прямой pull
-        # с зеркала, затем полный archive-tarball через _archive_update (atomic, с rollback).
+        # Git-установка: сначала штатный git pull --ff-only origin, затем прямой
+        # pull с зеркала, затем полный archive-tarball через _archive_update
+        # (atomic, с rollback). ff-only обязателен: merge-коммиты на дивергентной
+        # установке (след force-push в origin) навсегда ломают ff-only
+        # апдейтер TUI («опережает origin» вместо обновления) — дивергентную
+        # установку честнее привести к состоянию origin через archive-путь.
         info "Обновление существующей git-установки (${SRC_LABEL})..."
-        if git -C "$INSTALL_DIR" pull --quiet origin "$BRANCH" 2>/dev/null; then
+        if git -C "$INSTALL_DIR" pull --ff-only --quiet origin "$BRANCH" 2>/dev/null; then
             ok "Обновлено до последней версии (fast-forward, origin)"
             return 0
         fi
-        info "git pull origin не удался — пробую напрямую ${REPO_URL} (${BRANCH})..."
-        if git -C "$INSTALL_DIR" pull --quiet "$REPO_URL" "$BRANCH" 2>/dev/null; then
+        info "git pull --ff-only origin не удался — пробую напрямую ${REPO_URL} (${BRANCH})..."
+        if git -C "$INSTALL_DIR" pull --ff-only --quiet "$REPO_URL" "$BRANCH" 2>/dev/null; then
             ok "Обновлено напрямую с ${SRC_LABEL} (fast-forward)"
             return 0
         fi
-        warn "git pull (${SRC_LABEL}) не удался (возможно divergent branches) — полное обновление через archive..."
+        warn "git pull --ff-only (${SRC_LABEL}) не удался (возможно divergent branches) — полное обновление через archive..."
         if [[ -z "$ARCHIVE_URL" ]]; then
             warn "Кастомное зеркало (${SRC_LABEL}) не отдаёт tar.gz — archive-обновление недоступно."
             return 1
@@ -501,6 +526,13 @@ if [[ "$_ACQUIRE_OK" != "1" ]]; then
         err "  CHIMERA_MIRROR=<mirror-url> bash bootstrap.sh"
         exit 1
     fi
+else
+    # Кэш проверки обновлений TUI (/var/lib/xray-installer/update_check.json)
+    # живёт ВНЕ репозитория и переживает удаление/переустановку /opt/chimera.
+    # Без сброса главное меню показывало бы фантомное «Доступно обновление:
+    # N коммит(ов)» от прошлой установки (живой кейс окт.2026 №14) — TUI
+    # пересчитает кэш фоновой проверкой при следующем старте.
+    rm -f /var/lib/xray-installer/update_check.json 2>/dev/null || true
 fi
 
 [[ -f "${INSTALL_DIR}/main.py" ]] || { err "main.py не найден в ${INSTALL_DIR}"; exit 1; }
