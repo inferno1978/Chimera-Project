@@ -18,6 +18,8 @@ Unit-тесты для chimera/modules/icmp_gate.py.
      remove возвращает сток-вид, before6, бэкап
   8. детект режима — raw-теги в INPUT → raw; чистый INPUT + before.rules → ufw
   9. check/apply — машинная проверка, headless-apply с overrides
+ 10. UI-smoke — меню и check-экран рисуются рамками box_renderer,
+     под пайпом (EOF на input) выходят без падения
 Все вызовы iptables/ip6tables/ufw — mock'd через _fake_run.
 ───────────────────────────────────────────────────────────────────────────────
 """
@@ -402,6 +404,55 @@ class TestCheckApply(_IGBase):
         s = ig.icmp_gate_status()
         self.assertIn("ICMP Gate", s)
         self.assertIn("role=entry", s)
+
+
+class TestUiSmoke(_IGBase):
+    """Меню рисуется рамками проекта (box_renderer) и не падает.
+
+    input/os.system замоканы: меню под пайпом отрабатывает и выходит.
+    """
+
+    def _menu(self, answers: list) -> str:
+        import io
+        from contextlib import redirect_stdout
+        it = iter(answers)
+
+        def _fake_input(prompt=""):
+            try:
+                return next(it)
+            except StopIteration:
+                raise EOFError
+
+        out = io.StringIO()
+        with patch("builtins.input", _fake_input), \
+             patch("os.system", lambda *a, **k: None), \
+             redirect_stdout(out):
+            ig.do_manage_icmp_gate()
+        return out.getvalue()
+
+    def test_menu_box_when_active_raw(self):
+        ig.icmp_gate_apply({"role": "entry", "mode": "raw",
+                            "admin_ips": ["198.51.100.10"]})
+        text = self._menu(["0"])
+        self.assertIn("ICMP GATE", text)
+        self.assertIn("╔", text)                    # рамка проекта на месте
+        self.assertIn("● активен", text)
+        self.assertIn("198.51.100.10/32", text)     # allowlist отрисован
+        self.assertIn("[1]", text)                  # нумерация пунктов та же
+        self.assertIn("← Назад", text)
+
+    def test_menu_when_disabled(self):
+        text = self._menu(["0"])
+        self.assertIn("○ выключен", text)
+        self.assertIn("Стек правил", text)
+        self.assertIn("╔", text)
+
+    def test_check_screen(self):
+        text = self._menu(["3", "", "0"])
+        self.assertIn("ПРОВЕРКА ПРЯМО СЕЙЧАС", text)
+        self.assertIn("icmp_gate_check()", text)
+        self.assertIn("enabled", text)              # машинный вывод в рамке
+        self.assertIn("╔", text)
 
 
 if __name__ == "__main__":

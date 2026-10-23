@@ -68,8 +68,10 @@ managed-блока перед вставкой нового. Повторный 
                                   поверх state; headless-деплой)
     icmp_gate_remove()          — выключить (вырезать всё своё)
     icmp_gate_check()           — машинная проверка состояния (dict)
-    icmp_gate_status()          — человеческий статус (str)
-    do_manage_icmp_gate()       — интерактивное меню (точка входа _core)
+    icmp_gate_status()          — человеческий статус plain-строкой
+                                  (для скриптов/мониторинга, формат стабилен)
+    do_manage_icmp_gate()       — интерактивное меню в рамках проекта
+                                  (box_renderer), точка входа _core
 
 Точка входа из _core.py:
     from chimera.modules.icmp_gate import do_manage_icmp_gate
@@ -79,6 +81,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import subprocess
 import sys
@@ -171,6 +174,21 @@ def _ok(msg: str)   -> None: print(f"  {GREEN}✓{NC} {msg}")
 def _warn(msg: str) -> None: print(f"  {YELLOW}⚠{NC}  {msg}")
 def _info(msg: str) -> None: print(f"  {CYAN}•{NC} {msg}")
 def _err(msg: str)  -> None: print(f"  {RED}✗{NC} {msg}")
+
+
+# ── Рамки TUI (общий рендерер проекта) ────────────────────────────────────────
+# Канон оформления подменю проекта: _box_top/_box_kv/_box_item (logrotate,
+# telemt_syn_limiter, ingress_geoip и ещё 30+ модулей). Ширина рамки и
+# перенос строк - единый _box_row: правая граница ║ всегда ровная.
+from chimera.modules.box_renderer import (
+    _box_top, _box_sep, _box_bottom, _box_row, _box_item, _box_item_exit,
+    _box_kv, _box_ok, _box_warn, _box_info, _box_dim,
+)
+
+
+def _box_err(msg: str) -> None:
+    """err() внутри рамки, в семье тегов рендерера: [INFO]/[WARN]/[OK]/[ERR]."""
+    _box_row(f"{RED}[ERR]{NC}   {msg}")
 
 
 def _tg_notify_event(event: str, detail: str = "") -> None:
@@ -684,7 +702,7 @@ def icmp_gate_status() -> str:
     return "\n".join(lines)
 
 
-# ── Интерактивное меню ─────────────────────────────────────────────────────────
+# ── Интерактивное меню (рамки — общий box_renderer проекта) ───────────────────
 def _ig_input(prompt: str, default: str = "") -> str:
     try:
         val = input(f"{CYAN}{prompt}{NC}" +
@@ -694,52 +712,206 @@ def _ig_input(prompt: str, default: str = "") -> str:
     return val or default
 
 
+def _ig_pause() -> None:
+    try:
+        input(f"{DIM}Enter - назад в меню...{NC}")
+    except EOFError:
+        pass
+
+
+def _ig_choice() -> str:
+    """Выбор пункта меню; EOF/Ctrl+C = назад (безопасно под пайпом/смоком)."""
+    try:
+        return input(f"{CYAN}Выбор [0]:{NC} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return "0"
+
+
+def _ig_draw_status(state: dict, chk: dict) -> None:
+    """Статус-блок внутри рамки (меню).
+
+    Публичный plain-статус для скриптов/мониторинга - icmp_gate_status():
+    его формат не менялся. Внутри рамок только ASCII-дефисы и прочие
+    однозначные символы - см. _BOX_NARROW_MAP (живой кейс окт.2026 №7:
+    правая граница «лесенкой» на em-dash в браузерных SSH-клиентах).
+    """
+    if chk["ok"]:
+        status = f"{GREEN}● активен{NC}"
+    elif state.get("enabled"):
+        status = f"{YELLOW}⚠ включён, но правил в стеке нет{NC}"
+    else:
+        status = f"{DIM}○ выключен{NC}"
+    _box_kv("Статус:", status)
+
+    role = state.get("role")
+    _box_kv("Роль:", (f"{BOLD}exit{NC} - пинг: админ + пиры каскада"
+                      if role == "exit" else
+                      f"{BOLD}entry{NC} - пинг: только админ"))
+    mode = chk["mode"]
+    mode_txt = {"raw": "raw - iptables TOP INPUT + rules.v4/v6",
+                "ufw": "ufw - managed-блок в before.rules"}.get(mode, str(mode))
+    _box_kv("Механизм:", mode_txt)
+    _box_row()
+
+    allowed = _ig_allowed_sources(state)
+    _box_row(f"  {CYAN}Кому отвечаем на пинг (allow, {len(allowed)}):{NC}")
+    if allowed:
+        for src in allowed:
+            _box_row(f"     {GREEN}✓{NC} {src}")
+    else:
+        _box_row(f"     {DIM}пусто: полный stealth, ноду не пингует никто{NC}")
+    if role == "entry" and state.get("peer_ips"):
+        _box_warn("role=entry игнорирует peer_ips (пинг - только admin_ips)")
+    _box_row()
+
+    drops = state.get("drop_types") or []
+    _box_row(f"  {CYAN}Прячем v4 (остальным - DROP):{NC}")
+    if drops:
+        _box_row(f"     {RED}✗{NC} " + ", ".join(drops))
+    else:
+        _box_row(f"     {DIM}нет{NC}")
+    _box_row(f"  {CYAN}Прячем v6 (ICMPv6):{NC}")
+    if state.get("drop_v6", True):
+        _box_row(f"     {RED}✗{NC} echo-request  {DIM}(NDP/PMTUD не тронуты){NC}")
+    else:
+        _box_row(f"     {DIM}нет{NC}")
+    _box_row()
+
+    _box_row(f"  {CYAN}Стек правил (факт/ожидается):{NC}")
+    if mode == "raw":
+        ok4 = chk["raw_v4_rules"] == chk["expected_rules_v4"]
+        ok6 = chk["raw_v6_rules"] == chk["expected_rules_v6"]
+        _box_kv("v4 (iptables):",
+                f"{GREEN if ok4 else RED}{chk['raw_v4_rules']}/{chk['expected_rules_v4']}{NC}")
+        _box_kv("v6 (ip6tables):",
+                f"{GREEN if ok6 else RED}{chk['raw_v6_rules']}/{chk['expected_rules_v6']}{NC}")
+    else:
+        b4 = chk["ufw_block_v4"]
+        b6 = chk["ufw_block_v6"]
+        _box_kv("Блок before.rules:", f"{GREEN}есть{NC}" if b4 else f"{RED}НЕТ{NC}")
+        if b6:
+            _box_kv("Блок before6.rules:", f"{GREEN}есть{NC}")
+        elif state.get("drop_v6", True):
+            _box_kv("Блок before6.rules:", f"{RED}НЕТ{NC}")
+        else:
+            _box_kv("Блок before6.rules:", f"{DIM}не нужен (drop_v6=нет){NC}")
+    if chk["ok"]:
+        _box_ok("стек соответствует конфигу")
+    elif state.get("enabled"):
+        _box_warn("стек не соответствует конфигу - переконфигурируйте [1], проверьте [3]")
+    _box_dim("     PMTUD (dest-unreachable / time-exceeded / packet-too-big) не трогаем")
+
+
+def _ig_config_dialog() -> None:
+    """[1] Переконфигурировать: опрос role/mode/admin(+peer) + apply."""
+    state = _ig_state_load()
+    os.system("clear")
+    print()
+    _box_top("ICMP GATE  •  КОНФИГУРАЦИЯ")
+    _box_row()
+    _box_row(f"  {CYAN}Роль{NC} - семантика доверия (списки хранятся на ноде,")
+    _box_row( "  в репозиторий не попадают):")
+    _box_row( "     exit   - пинг: admin_ips + peer_ips (exit-нода каскада;")
+    _box_row( "              peer_ips - bridge-ноды и ICMP-партнёры GRE/pingtunnel)")
+    _box_row( "     entry  - пинг: только admin_ips (bridge/entry-нода)")
+    _box_row()
+    _box_row(f"  {CYAN}Механизм{NC} - как вставляются правила:")
+    _box_row( "     auto   - детект по стеку ноды (рекомендуется)")
+    _box_row( "     ufw    - managed-блок в /etc/ufw/before.rules + ufw reload")
+    _box_row( "     raw    - iptables TOP INPUT + пересохранение rules.v4/v6")
+    _box_row()
+    _box_row(f"  {CYAN}Списки{NC} - IP/CIDR (v4+v6) через запятую. PMTUD-типы")
+    _box_row( "  (destination-unreachable и др.) запрещены валидатором.")
+    _box_bottom()
+    role = _ig_input("Роль (exit/entry)", state.get("role", "exit")).lower()
+    if role not in IG_ROLES:
+        _err(f"неизвестная роль {role!r} - допустимо: exit / entry")
+        _ig_pause()
+        return
+    mode = _ig_input("Механизм (auto/ufw/raw)", state.get("mode", "auto")).lower()
+    if mode not in IG_MODES:
+        _err(f"неизвестный mode {mode!r} - допустимо: auto / ufw / raw")
+        _ig_pause()
+        return
+    admins = _ig_input("admin_ips через запятую (IP/CIDR, v4+v6)",
+                       ", ".join(state.get("admin_ips") or []))
+    overrides: dict = {
+        "role": role,
+        "mode": mode,
+        "admin_ips": [x.strip() for x in admins.split(",") if x.strip()],
+    }
+    if role == "exit":
+        peers = _ig_input("peer_ips через запятую (bridge-ноды, ICMP-партнёры)",
+                          ", ".join(state.get("peer_ips") or []))
+        overrides["peer_ips"] = [x.strip() for x in peers.split(",") if x.strip()]
+    ok = icmp_gate_apply(overrides)
+    print()
+    _box_top("ICMP GATE  •  РЕЗУЛЬТАТ")
+    if ok:
+        st = _ig_state_load()
+        n_allow = len(_ig_allowed_sources(st))
+        _box_ok(f"включён: role={st['role']}, mode={st['mode']}, allow={n_allow} ист.")
+        _box_info("посторонние сканеры (Censys/Shodan, nmap -PP/-PM) видят 'хоста нет'")
+    else:
+        _box_err("apply не удался - см. сообщения выше")
+    _box_bottom()
+    _ig_pause()
+
+
+def _ig_check_dialog() -> None:
+    """[3] Проверить сейчас: вердикт + машинный вывод icmp_gate_check()."""
+    chk = icmp_gate_check()
+    os.system("clear")
+    print()
+    _box_top("ICMP GATE  •  ПРОВЕРКА ПРЯМО СЕЙЧАС")
+    _box_row()
+    if chk["ok"]:
+        _box_ok("состояние согласовано: стек соответствует конфигу")
+    elif chk["enabled"]:
+        _box_err("рассинхрон: включён в конфиге, но стек не соответствует")
+    else:
+        _box_info("выключен: своих правил в стеке нет")
+    _box_row()
+    _box_row(f"  {CYAN}Машинный вывод icmp_gate_check():{NC}")
+    for k, v in chk.items():
+        _box_kv(k, str(v), kw=24)
+    _box_bottom()
+    _ig_pause()
+
+
 def do_manage_icmp_gate() -> None:
-    """Меню модуля (точка входа из _core)."""
+    """Меню модуля (точка входа из _core). Оформление - рамки проекта."""
     while True:
+        os.system("clear")
         print()
-        print(icmp_gate_status())
+        state = _ig_state_load()
+        chk = icmp_gate_check()
+        _box_top("🛡️   ICMP GATE  •  МАСКИРОВКА ПИНГА")
+        _box_row()
+        _ig_draw_status(state, chk)
+        _box_sep()
+        _box_item("1", ("🚀  Переконфигурировать и включить"
+                        if state.get("enabled") else "🚀  Настроить и включить"))
+        _box_item("2", f"{RED}⏹️   Выключить (вырезать все свои правила){NC}")
+        _box_item("3", "📊  Проверить сейчас (check)")
+        _box_sep()
+        _box_item_exit("0", "← Назад")
+        _box_bottom()
         print()
-        print(f"  [{BOLD}1{NC}] {'Переконфигурировать и включить' if _ig_state_load().get('enabled') else 'Настроить и включить'}")
-        print(f"  [{BOLD}2{NC}] Выключить (вырезать все свои правила)")
-        print(f"  [{BOLD}3{NC}] Проверить сейчас (check)")
-        print(f"  [{BOLD}0{NC}] Назад")
-        ch = _ig_input("Выбор", "0")
+        ch = _ig_choice()
         if ch == "0":
             return
         if ch == "1":
-            state = _ig_state_load()
-            role = _ig_input("Роль: exit (пинг: админ + пиры) / entry (только админ)",
-                             state.get("role", "exit")).lower()
-            if role not in IG_ROLES:
-                _err(f"неизвестная роль {role!r}")
-                continue
-            mode = _ig_input("Механизм: auto / ufw / raw",
-                             state.get("mode", "auto")).lower()
-            if mode not in IG_MODES:
-                _err(f"неизвестный mode {mode!r}")
-                continue
-            admins = _ig_input("admin_ips через запятую (IP/CIDR, v4+v6)",
-                               ", ".join(state.get("admin_ips") or []))
-            peers = _ig_input("peer_ips через запятую (для exit-роли)",
-                              ", ".join(state.get("peer_ips") or []))
-            overrides = {
-                "role": role,
-                "mode": mode,
-                "admin_ips": [x.strip() for x in admins.split(",") if x.strip()],
-                "peer_ips": [x.strip() for x in peers.split(",") if x.strip()],
-            }
-            if icmp_gate_apply(overrides):
-                _ok("готово")
-            else:
-                _err("apply не удался — см. ошибки выше")
-            input(f"{DIM}Enter…{NC}")
+            _ig_config_dialog()
         elif ch == "2":
-            if icmp_gate_remove():
-                _ok("ICMP Gate выключен")
-            input(f"{DIM}Enter…{NC}")
+            ok = icmp_gate_remove()
+            print()
+            _box_top("ICMP GATE  •  РЕЗУЛЬТАТ")
+            if ok:
+                _box_ok("выключен: свои правила вырезаны, стек - сток")
+            else:
+                _box_err("remove не удался - см. сообщения выше")
+            _box_bottom()
+            _ig_pause()
         elif ch == "3":
-            chk = icmp_gate_check()
-            for k, v in chk.items():
-                print(f"  {k}: {v}")
-            input(f"{DIM}Enter…{NC}")
+            _ig_check_dialog()
