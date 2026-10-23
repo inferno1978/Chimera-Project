@@ -324,7 +324,19 @@ class TestScriptStructure(unittest.TestCase):
             self.text)
 
     def test_direct_pull_from_mirror(self):
-        self.assertIn('git -C "$INSTALL_DIR" pull --quiet "$REPO_URL" "$BRANCH"',
+        # ff-only обязателен (кейс окт.2026 №14): merge-коммиты на дивергентной
+        # установке ломают ff-only апдейтер TUI навсегда
+        self.assertIn(
+            'git -C "$INSTALL_DIR" pull --ff-only --quiet origin "$BRANCH"',
+            self.text)
+        self.assertIn(
+            'git -C "$INSTALL_DIR" pull --ff-only --quiet "$REPO_URL" "$BRANCH"',
+            self.text)
+
+    def test_update_cache_reset_after_acquire(self):
+        # кэш TUI-подсказки живёт вне репо и переживает переустановку —
+        # bootstrap обязан сбрасывать его (иначе фантомный баннер)
+        self.assertIn("rm -f /var/lib/xray-installer/update_check.json",
                       self.text)
 
     def test_fallback_loop_present(self):
