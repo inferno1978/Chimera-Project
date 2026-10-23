@@ -79,6 +79,7 @@
 | `fail2ban_setup.py` | Конфигурация Fail2ban (jail для xray-reality/sshd/nginx) + Xray watchdog (systemd timer каждые 2 мин) |
 | `fail2ban_manager.py` | Управление fail2ban jail'ами через меню |
 | `ipban.py` | Ручной ban/unban IP-адресов через меню |
+| `icmp_gate.py` | ICMP Gate — маскировка пинга: echo-запросы только доверенным (роли exit/entry), остальным DROP «хоста нет»; ufw-блок в before.rules или raw-правила с тегом + rules.v4/v6; PMTUD-типы защищены валидатором |
 | `ipset_persist.py` | Сохранение ipset правил после ребута (systemd unit) |
 | `fw_guard.py` | FW Guard — авто-восстановление правил ufw/ipset/iptables (systemd timer, снапшот «как до сбоя») |
 | `ssh_hardening.py` | SSH hardening: смена порта, отключение паролей, AllowUsers, 2FA (TOTP через google-authenticator) |
