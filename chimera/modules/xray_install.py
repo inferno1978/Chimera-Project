@@ -3231,7 +3231,13 @@ except Exception:
         [[ -f /etc/xray/config.json ]] && CFG_PATH="/etc/xray/config.json"
         [[ -z "$CFG_PATH" && -f /usr/local/etc/xray/config.json ]] && CFG_PATH="/usr/local/etc/xray/config.json"
         if [[ -n "$CFG_PATH" ]]; then
-            TEST_OUT=$("$NEW_BIN" run -test -config "$CFG_PATH" 2>&1) && TEST_RC=0 || TEST_RC=$?
+            # XRAY_LOCATION_ASSET обязателен: xray ищет геоданные рядом с
+            # бинарником (exe-dir), а NEW_BIN лежит в EXTRACT_DIR рядом со
+            # СТАНДАРТНЫМИ XTLS .dat из zip — без env конфиг с runetfreedom-
+            # правилами (geosite:ru-available-only-inside) тестировался бы
+            # против них и падал, хотя прод-ассеты валидны (кейс RU-нод).
+            TEST_OUT=$(XRAY_LOCATION_ASSET=/usr/local/share/xray \
+                "$NEW_BIN" run -test -config "$CFG_PATH" 2>&1) && TEST_RC=0 || TEST_RC=$?
             if [[ "$TEST_RC" -ne 0 ]]; then
                 TEST_ERR=$(printf '%s' "$TEST_OUT" | grep -vE '^[[:space:]]*$' | tail -1 | cut -c1-150)
                 log "ERROR: Конфиг не прошёл тест новым бинарником $LATEST — обновление отменено (бинарник не заменялся): $TEST_ERR"
