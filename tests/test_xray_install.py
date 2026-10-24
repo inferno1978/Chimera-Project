@@ -1499,16 +1499,22 @@ class TestAutoupdateScriptV3(TestAutoupdateScript):
 
     # ── песочница v3 ───────────────────────────────────────────────────
 
-    def _make_zip(self, path, ver: str, config_ok: bool) -> bytes:
+    def _make_zip(self, path, ver: str, config_ok: bool,
+                  env_record=None) -> bytes:
         """Собирает zip c фейковым xray: version → запечённая версия,
-        run -test → exit 0/1 (по config_ok)."""
+        run -test → exit 0/1 (по config_ok) + запись XRAY_LOCATION_ASSET
+        в env_record (проверяем, что скрипт гоняет тест с прод-ассетами,
+        а не с .dat из zip рядом с бинарником — exe-dir lookup xray)."""
         run_body = ("exit 0" if config_ok else
                     'echo "Failed to start: geodata EOF (fake)" >&2; exit 1')
+        env_rec = ""
+        if env_record:
+            env_rec = (f'echo "$XRAY_LOCATION_ASSET" > "{env_record}"; ')
         fake = (
             "#!/bin/sh\n"
             "case \"$1\" in\n"
             f"  version) echo \"Xray {ver} (fake zip binary)\";;\n"
-            f"  run) {run_body};;\n"
+            f"  run) {env_rec}{run_body};;\n"
             "esac\n"
         )
         import zipfile
@@ -1548,7 +1554,8 @@ class TestAutoupdateScriptV3(TestAutoupdateScript):
         zip_path = sbx / "xray.zip"
 
         if zip_ver is not None:
-            zip_bytes = self._make_zip(zip_path, zip_ver, config_ok)
+            zip_bytes = self._make_zip(zip_path, zip_ver, config_ok,
+                                       env_record=sbx / "xray_env.txt")
             import hashlib
             digest = hashlib.sha256(zip_bytes).hexdigest()
             api_json_path.write_text(
@@ -1616,11 +1623,14 @@ class TestAutoupdateScriptV3(TestAutoupdateScript):
                          capture_output=True, text=True, timeout=10).stdout
         stamp = (tg_stamp.read_text().strip()
                  if tg_stamp.exists() else "")
+        env_rec_path = sbx / "xray_env.txt"
         result = {
             "rc": proc.returncode,
             "log": log_text,
             "bin_version": bin_out.strip(),
             "tg_stamp": stamp,
+            "xray_env": (env_rec_path.read_text().strip()
+                         if env_rec_path.exists() else ""),
         }
         if not keep_sandbox:
             shutil.rmtree(sbx, ignore_errors=True)
@@ -1662,6 +1672,10 @@ class TestAutoupdateScriptV3(TestAutoupdateScript):
         self.assertIn("Xray 26.3.27", r["bin_version"])
         self.assertIn("SHA256 OK (digest GitHub API)", r["log"])
         self.assertNotIn("ERROR", r["log"])
+        # конфиг-тест гонялся с ПРОД-ассетами, а не с .dat из zip
+        # рядом с бинарником (exe-dir lookup xray — кейс RU-нод)
+        self.assertEqual(r["xray_env"], "/usr/local/share/xray",
+                         "тест конфига обязан задавать XRAY_LOCATION_ASSET")
 
     def test_update_swallows_no_failure_when_version_wrong(self):
         """Пост-проверка: zip-бинарник сообщил НЕ ту версию → откат
