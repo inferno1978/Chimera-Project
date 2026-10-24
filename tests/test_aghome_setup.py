@@ -2347,3 +2347,173 @@ class TestPrintAghomeStatusLinks(unittest.TestCase):
              redirect_stdout(buf):
             self.mod.print_aghome_status()
         self.assertNotIn("Готовые ссылки для клиентов", buf.getvalue())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Web UI-блок в статусе: ПОРТ СЛЕДУЕТ ИЗ СПОСОБА ДОСТУПА
+# (кейс https://host:3000 -> ERR_SSL_PROTOCOL_ERROR: браузер говорил TLS
+#  с plain-HTTP портом; :3000 в TLS/loopback-режимах снаружи закрыт UFW)
+# ─────────────────────────────────────────────────────────────────────────────
+class TestWebUiAccessBlock(unittest.TestCase):
+    """Статус-бокс показывает ОБА входа Web UI с подписями способа
+    доступа: браузером -> https на DoH-порту, SSH-туннелем -> 127.0.0.1
+    на plain-порту; плюс готовую команду туннеля (конвенция wpp_panel)."""
+
+    PUB_IP = "93.184.216.34"   # example.com — глобальный по is_global
+    TUNNEL_CMD = f"ssh -L 3000:127.0.0.1:3000 root@93.184.216.34"
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import aghome_setup
+        self.mod = aghome_setup
+
+    def _fake_status(self, web_mode, tls=True, domain="cdn.example"):
+        return {
+            "installed": True, "version": "0.107.79", "active": True,
+            "enabled": True, "dns_port": 53, "dns_udp": True, "dns_tcp": True,
+            "upstream_port": 5300, "upstream_active": True,
+            "web_port": 3000, "web_listening": True, "web_mode": web_mode,
+            "tls_enabled": tls, "domain": domain if tls else "",
+            "self_signed": web_mode == "https_self",
+            "doh_port": 30443, "doh_listening": True,
+            "dot_port": 853, "dot_listening": True,
+            "doq_port": 853, "doq_listening": True,
+            "wizard_pending": False, "filters": 3, "conf_exists": True,
+        }
+
+    def _render(self, st) -> str:
+        buf = io.StringIO()
+        with patch.object(self.mod, "aghome_status", return_value=st), \
+             patch.object(self.mod, "_get_public_ip",
+                          return_value=self.PUB_IP), \
+             redirect_stdout(buf):
+            self.mod.print_aghome_status()
+        return buf.getvalue()
+
+    # ── https_le / https_self: браузер + туннель ─────────────────────────
+
+    def test_https_le_shows_both_access_paths(self):
+        out = self._render(self._fake_status("https_le"))
+        self.assertIn("браузером:", out)
+        self.assertIn("https://cdn.example:30443", out)
+        self.assertIn("SSH-туннелем:", out)
+        self.assertIn("http://127.0.0.1:3000", out)
+        # объяснение, почему снаружи :3000 не работает
+        self.assertIn("порт :3000 снаружи закрыт", out)
+        # готовая команда туннеля (конвенция wpp_panel: root@IP)
+        self.assertIn(self.TUNNEL_CMD, out)
+        # человеческий ярлык режима вместо внутреннего кода
+        self.assertIn("HTTPS + Let's Encrypt", out)
+        self.assertNotIn("(https_le)", out)
+
+    def test_https_self_uses_public_ip(self):
+        out = self._render(self._fake_status("https_self", domain=""))
+        self.assertIn(f"https://{self.PUB_IP}:30443", out)
+        self.assertIn("HTTPS + self-signed", out)
+
+    def test_tls_down_no_browser_url(self):
+        """TLS-режим с упавшим TLS (self-heal downgrade): браузерного
+        https-входа нет, только туннель — и предупреждение TLS-строки."""
+        st = self._fake_status("https_le", tls=False)
+        out = self._render(st)
+        self.assertNotIn("браузером:", out)
+        self.assertIn("SSH-туннелем:", out)
+        self.assertIn("порт :3000 снаружи закрыт", out)
+        # без пересечения цветового маркера: фраза внутри DIM..NC
+        self.assertIn("выключен (DoH/DoT/DoQ недоступны)", out)
+
+    # ── http_public / loopback ───────────────────────────────────────────
+
+    def test_http_public_plain_url_no_tunnel(self):
+        out = self._render(self._fake_status("http_public", tls=False))
+        self.assertIn(f"http://{self.PUB_IP}:3000", out)
+        self.assertIn("plain HTTP", out)
+        self.assertIn("HTTP публично", out)
+        # публичный режим — туннель не нужен, команды не показываем
+        self.assertNotIn("SSH-туннелем", out)
+        self.assertNotIn("ssh -L", out)
+
+    def test_loopback_tunnel_only(self):
+        out = self._render(self._fake_status("loopback", tls=False, domain=""))
+        self.assertIn("SSH-туннелем:", out)
+        self.assertIn("http://127.0.0.1:3000", out)
+        self.assertIn("только 127.0.0.1", out)
+        self.assertIn(self.TUNNEL_CMD, out)
+        # браузерного входа нет вовсе
+        self.assertNotIn("браузером:", out)
+
+    def test_private_ip_no_tunnel_command(self):
+        """Приватный/неопределимый IP — команду туннеля не показываем
+        (root@IP был бы бессмысленным)."""
+        st = self._fake_status("https_le")
+        buf = io.StringIO()
+        with patch.object(self.mod, "aghome_status", return_value=st), \
+             patch.object(self.mod, "_get_public_ip", return_value=""), \
+             redirect_stdout(buf):
+            self.mod.print_aghome_status()
+        self.assertNotIn("ssh -L", buf.getvalue())
+
+    # ── рамка цела во всех режимах ────────────────────────────────────────
+
+    def test_frame_integrity_all_modes(self):
+        for st in (self._fake_status("https_le"),
+                   self._fake_status("https_self", domain=""),
+                   self._fake_status("http_public", tls=False),
+                   self._fake_status("loopback", tls=False, domain="")):
+            out = self._render(st)
+            for line in out.splitlines():
+                if line.startswith("║") and line.strip("║ \n"):
+                    self.assertTrue(
+                        line.rstrip().endswith("║"),
+                        f"рамка сломана: {line!r}")
+
+    def test_long_domain_wraps_inside_frame(self):
+        long_domain = "dns." + "verylongsubdomain" * 3 + ".example.org"
+        out = self._render(self._fake_status("https_le", domain=long_domain))
+        for line in out.splitlines():
+            if line.startswith("║") and line.strip("║ \n"):
+                self.assertTrue(
+                    line.rstrip().endswith("║"),
+                    f"рамка сломана: {line!r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _web_mode_label + _webui_tls_host (хелперы Web UI-блока)
+# ─────────────────────────────────────────────────────────────────────────────
+class TestWebUiHelpers(unittest.TestCase):
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import aghome_setup
+        self.mod = aghome_setup
+
+    def test_mode_labels(self):
+        self.assertEqual(self.mod._web_mode_label("https_le"),
+                         "HTTPS + Let's Encrypt")
+        self.assertEqual(self.mod._web_mode_label("https_self"),
+                         "HTTPS + self-signed")
+        self.assertEqual(self.mod._web_mode_label("http_public"),
+                         "HTTP публично")
+        self.assertEqual(self.mod._web_mode_label("loopback"),
+                         "локально — SSH-туннель")
+        # неизвестный непустой режим — как есть; пустой — ?
+        self.assertEqual(self.mod._web_mode_label("weird_mode"), "weird_mode")
+        self.assertEqual(self.mod._web_mode_label(""), "?")
+
+    def test_tls_host_domain_wins(self):
+        with patch.object(self.mod, "_get_public_ip", return_value="1.2.3.4"):
+            self.assertEqual(
+                self.mod._webui_tls_host({"domain": "cdn.example"}),
+                "cdn.example")
+
+    def test_tls_host_falls_back_to_public_ip(self):
+        with patch.object(self.mod, "_get_public_ip",
+                          return_value="93.184.216.34"):
+            self.assertEqual(
+                self.mod._webui_tls_host({"domain": " "}),
+                "93.184.216.34")
+
+    def test_tls_host_private_ip_empty(self):
+        with patch.object(self.mod, "_get_public_ip",
+                          return_value="192.168.50.1"):
+            self.assertEqual(self.mod._webui_tls_host({"domain": ""}), "")

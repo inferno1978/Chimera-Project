@@ -85,8 +85,13 @@ MIGRATION (нулевый даунтайм на живых серверах):
 ПОРТЫ (все через port_registry, авто-открытие/закрытие):
   :53/udp+tcp   aghome       — DNS (loopback+public bind; публичный :53
                                в UFW НЕ открывается — нет open resolver)
-  :3000/tcp     aghome_web   — Web UI (loopback или public по выбору)
-  :30443/tcp    aghome_doh   — DoH + Web UI HTTPS (native TLS AGH)
+  :3000/tcp     aghome_web   — Web UI, plain-HTTP вход: wizard-фаза (публично)
+                               или SSH-туннель/с сервера; в TLS/loopback-
+                               режимах снаружи закрыт UFW (https:// на нём
+                               даст ERR_SSL_PROTOCOL_ERROR — порт не говорит
+                               TLS; браузерный вход — только :30443)
+  :30443/tcp    aghome_doh   — DoH + Web UI HTTPS (native TLS AGH) —
+                               браузерный вход Web UI в TLS-режимах
   :853/tcp      aghome_dot   — DoT
   :853/udp      aghome_doq   — DoQ
   :5300         dnscrypt     — upstream (loopback, force=True)
@@ -3174,10 +3179,20 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
     if tls_enabled and domain:
         info(f"AGH: DoH: https://{domain}:{AGH_DOH_PORT}/dns-query")
         info(f"AGH: DoT: {domain}:{AGH_DOT_PORT} | DoQ: {domain}:{AGH_DOQ_PORT}/udp")
-    if web_mode == AGH_WEB_HTTP_PUB:
-        info(f"AGH: Web UI: http://{domain or (_get_public_ip() or 'IP-СЕРВЕРА')}:{web_port}")
-    elif web_port != AGH_WEB_PORT:
-        info(f"AGH: Web UI (локально): http://127.0.0.1:{web_port}")
+    # Web UI-входы: порт следует из способа доступа (кейс ERR_SSL_
+    # PROTOCOL_ERROR при https:// на plain-порту :3000). TLS-режим:
+    # браузером — https на DoH-порту (Web UI + DoH мультиплексированы),
+    # :web_port — только SSH-туннелем/с сервера (снаружи закрыт UFW).
+    if tls_enabled:
+        info(f"AGH: Web UI (браузером): https://"
+             f"{domain or (_get_public_ip() or 'IP-СЕРВЕРА')}:{AGH_DOH_PORT}")
+        info(f"AGH: Web UI (SSH-туннелем): http://127.0.0.1:{web_port} "
+             f"(порт :{web_port} снаружи закрыт)")
+    elif web_mode == AGH_WEB_HTTP_PUB:
+        info(f"AGH: Web UI (браузером): http://"
+             f"{domain or (_get_public_ip() or 'IP-СЕРВЕРА')}:{web_port}")
+    else:  # loopback
+        info(f"AGH: Web UI (SSH-туннелем): http://127.0.0.1:{web_port}")
     return True
 
 
@@ -3472,6 +3487,33 @@ def aghome_reset_admin_password() -> bool:
 #  СТАТУС
 # ============================================================================
 
+def _web_mode_label(web_mode: str) -> str:
+    """Человекочитаемый ярлык режима Web UI для статус-бокса.
+
+    Внутренние коды (https_le/http_public/…) пользователю ничего не
+    говорят — показываем способ доступа по-русски.
+    """
+    return {
+        AGH_WEB_HTTPS_LE:   "HTTPS + Let's Encrypt",
+        AGH_WEB_HTTPS_SELF: "HTTPS + self-signed",
+        AGH_WEB_HTTP_PUB:   "HTTP публично",
+        AGH_WEB_LOOPBACK:   "локально — SSH-туннель",
+    }.get(web_mode or "", web_mode or "?")
+
+
+def _webui_tls_host(s: dict) -> str:
+    """Хост для ссылок Web UI/DoH: домен TLS-режима, иначе публичный IP.
+
+    Пустая строка, если хост определить не удалось (домена нет, IP
+    приватный/неизвестен) — ссылка была бы бесполезна снаружи сервера.
+    """
+    host = str(s.get("domain") or "").strip()
+    if host:
+        return host
+    ip = str(_get_public_ip() or "").strip()
+    return ip if _is_public_ipv4(ip) else ""
+
+
 def _client_dns_links(s: dict) -> "list[tuple[str, str]]":
     """Готовые ссылки DoH/DoT/DoQ для вставки в клиент (браузер/ОС/приложение).
 
@@ -3482,10 +3524,7 @@ def _client_dns_links(s: dict) -> "list[tuple[str, str]]":
     """
     if not s.get("tls_enabled"):
         return []
-    host = str(s.get("domain") or "").strip()
-    if not host:
-        ip = str(_get_public_ip() or "").strip()
-        host = ip if _is_public_ipv4(ip) else ""
+    host = _webui_tls_host(s)
     if not host:
         return []
     return [
@@ -3574,11 +3613,43 @@ def print_aghome_status() -> None:
              f"(udp {s['dns_udp']}, tcp {s['dns_tcp']})")
     _box_row(f"  Upstream:          dnscrypt:{s['upstream_port']} "
              f"{_mark(s['upstream_active'])}")
-    _box_row(f"  Web UI:            :{s['web_port']} {_mark(s['web_listening'])} "
-             f"({s['web_mode'] or '?'})")
+    # Web UI: способы входа зависят от режима — ПОРТ СЛЕДУЕТ ИЗ СПОСОБА
+    # ДОСТУПА (кейс https://host:3000 -> ERR_SSL_PROTOCOL_ERROR: браузер
+    # говорил TLS с plain-HTTP портом; :3000 в TLS/loopback-режимах
+    # снаружи закрыт UFW — вход только с сервера или SSH-туннелем,
+    # браузером напрямую — :30443, где Web UI + DoH мультиплексированы).
+    _box_row(f"  Web UI:            {_mark(s['web_listening'])} "
+             f"({_web_mode_label(str(s['web_mode'] or ''))})")
+    _wm = str(s['web_mode'] or '')
+    _wp = s['web_port']
+
+    def _tunnel_hint_row(port: int) -> None:
+        """Готовая команда SSH-туннеля (конвенция wpp_panel: root@IP)."""
+        pub = str(_get_public_ip() or "").strip()
+        if _is_public_ipv4(pub):
+            _box_row(f"    {DIM}туннель:         "
+                     f"ssh -L {port}:127.0.0.1:{port} root@{pub}{NC}")
+
+    if _wm in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF):
+        if s['tls_enabled']:
+            _host = _webui_tls_host(s) or "IP-СЕРВЕРА"
+            _box_row(f"    браузером:       {CYAN}https://{_host}:"
+                     f"{s.get('doh_port', AGH_DOH_PORT)}{NC}")
+        _box_row(f"    SSH-туннелем:    http://127.0.0.1:{_wp}  "
+                 f"{DIM}(порт :{_wp} снаружи закрыт){NC}")
+        _tunnel_hint_row(_wp)
+    elif _wm == AGH_WEB_HTTP_PUB:
+        _host = _webui_tls_host(s) or "IP-СЕРВЕРА"
+        _box_row(f"    браузером:       {CYAN}http://{_host}:{_wp}{NC}"
+                 f"  {DIM}(plain HTTP){NC}")
+    elif _wm == AGH_WEB_LOOPBACK:
+        _box_row(f"    SSH-туннелем:    http://127.0.0.1:{_wp}  "
+                 f"{DIM}(только 127.0.0.1){NC}")
+        _tunnel_hint_row(_wp)
     if s["tls_enabled"]:
-        _box_row(f"  TLS:               {CYAN}{s['domain'] or 'self-signed'}{NC}"
-                 f"{' (self-signed)' if s['self_signed'] else ''}")
+        _tls_name = s['domain'] or 'self-signed'
+        _box_row(f"  TLS:               {CYAN}{_tls_name}{NC}"
+                 f"{' (self-signed)' if (s['self_signed'] and s['domain']) else ''}")
         _box_row(f"  DoH :{s['doh_port']}:          {_mark(s['doh_listening'])} "
                  f"(https + /dns-query)")
         _box_row(f"  DoT :{s['dot_port']}/tcp:       {_mark(s['dot_listening'])}")
