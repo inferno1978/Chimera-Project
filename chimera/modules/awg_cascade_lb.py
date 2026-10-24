@@ -1556,37 +1556,50 @@ def lb_menu() -> None:
         if ch in ("0", "q", ""):
             return
         if ch == "1":
+            # Рамочный выбор стратегии (раньше — плоский print-список).
+            # Внутри рамок только однозначная ширина: ∝ -> ~, ★ -> *
             print()
+            box_top("СТРАТЕГИЯ БАЛАНСИРОВКИ")
+            box_row()
+            _strat_desc = {"prio": "первый живой (аналог failover, дефолт)",
+                           "rr": "по очереди на соединение",
+                           "random": "равномерно случайно на соединение",
+                           "clienthash": "клиент прилипает к exit'у (нужен xt_HMARK)",
+                           "leastping": "доли ~ 1/RTT (взвешенный random)",
+                           "leastload": "доли ~ 1/нагрузке интерфейса",
+                           "smart": "RTT+потери+нагрузка * (как VLESS)"}
             for i, s in enumerate(_STRATS, 1):
-                d = {"prio": "первый живой (аналог failover, дефолт)",
-                     "rr": "по очереди на соединение",
-                     "random": "равномерно случайно на соединение",
-                     "clienthash": "клиент прилипает к exit'у (нужен xt_HMARK)",
-                     "leastping": "доли ∝ 1/RTT (взвешенный random)",
-                     "leastload": "доли ∝ 1/нагрузке интерфейса",
-                     "smart": "RTT+потери+нагрузка ★ (как VLESS)"}
-                print(f"  {i}. {s:<12} {d.get(s, '')}")
+                box_item(str(i), f"{s:<12} {_strat_desc.get(s, '')}")
+            box_bottom()
             try:
-                v = input(f"{CYAN}Стратегия [1-{len(_STRATS)}]:{NC} ").strip()
+                v = core._box_ask(f"Стратегия [1-{len(_STRATS)}]")
                 if v.isdigit() and 1 <= int(v) <= len(_STRATS):
                     strat = _STRATS[int(v) - 1]
                     pin = ""
-                    if input(f"{CYAN}Закрепить exit? [y/N]:{NC} ").strip().lower() in ("y", "yes", "д", "да"):
+                    if core._box_ask("Закрепить exit? [y/N]").lower() in ("y", "yes", "д", "да"):
                         exits = state.get("cascade_exits") or []
-                        for i, e in enumerate(exits, 1):
-                            print(f"    [{i}] {e.get('name')}")
-                        p = input(f"{CYAN}Номер (Enter = без закрепления):{NC} ").strip()
+                        if exits:
+                            print()
+                            box_top("ЗАКРЕПИТЬ EXIT")
+                            box_row()
+                            for i, e in enumerate(exits, 1):
+                                box_item(str(i), e.get("name", ""))
+                            box_item("Q", "Без закрепления (Enter)")
+                            box_bottom()
+                        p = core._box_ask("Номер")
                         if p.isdigit() and 1 <= int(p) <= len(exits):
                             pin = exits[int(p) - 1].get("name", "")
                     sel_exits = None
                     all_ex = state.get("cascade_exits") or []
                     if len(all_ex) > 2:
                         print()
+                        box_top("СОСТАВ БАЛАНСИРОВКИ")
+                        box_row()
                         for i, e in enumerate(all_ex, 1):
-                            print(f"    [{i}] {e.get('name')} — "
-                                  f"{e.get('endpoint')}")
-                        v2 = input(f"{CYAN}Балансировать между (номера "
-                                   f"через запятую, Enter = все):{NC} ").strip()
+                            box_item(str(i), f"{e.get('name')} — "
+                                     f"{e.get('endpoint')}")
+                        box_bottom()
+                        v2 = core._box_ask("Балансировать между (номера через запятую, Enter = все)")
                         if v2:
                             nums = [int(t) for t in
                                     re.split(r"[,\s]+", v2) if t.isdigit()]
@@ -1609,12 +1622,16 @@ def lb_menu() -> None:
                 core.warn("LB выключен")
                 input(f"\n{core.BLUE}Enter…{NC}")
                 continue
+            # Рамочная смена стратегии (раньше — плоский список)
             print()
+            box_top("СМЕНА СТРАТЕГИИ НА ЛЕТУ")
+            box_row()
             for i, s in enumerate(_STRATS, 1):
-                mark = " ←" if s == info["strategy"] else ""
-                print(f"  {i}. {s}{mark}")
+                mark = f" {GREEN}← текущая{NC}" if s == info["strategy"] else ""
+                box_item(str(i), f"{s}{mark}")
+            box_bottom()
             try:
-                v = input(f"{CYAN}Стратегия [1-{len(_STRATS)}]:{NC} ").strip()
+                v = core._box_ask(f"Стратегия [1-{len(_STRATS)}]")
                 if v.isdigit() and 1 <= int(v) <= len(_STRATS):
                     st = awgs_state_load()
                     st["lb_strategy"] = _STRATS[int(v) - 1]
@@ -1636,14 +1653,17 @@ def lb_menu() -> None:
             if not all_ex:
                 continue
             cur = info.get("exits_selected") or []
+            # Рамочная смена состава (раньше — плоский список)
             print()
+            box_top("СОСТАВ БАЛАНСИРОВКИ (НА ЛЕТУ)")
+            box_row()
             for i, e in enumerate(all_ex, 1):
-                mark = (" ←" if (e.get("name") or "") in cur else "")
-                print(f"  [{i}] {e.get('name')} — "
-                      f"{e.get('endpoint')}:{e.get('port')}{mark}")
+                mark = (f" {GREEN}← в составе{NC}" if (e.get("name") or "") in cur else "")
+                box_item(str(i), f"{e.get('name')} — "
+                         f"{e.get('endpoint')}:{e.get('port')}{mark}")
+            box_bottom()
             try:
-                v = input(f"{CYAN}Номера через запятую "
-                          f"(Enter = все):{NC} ").strip()
+                v = core._box_ask("Номера через запятую (Enter = все)")
                 if v:
                     nums = [int(t) for t in re.split(r"[,\s]+", v)
                             if t.isdigit()]
@@ -1667,11 +1687,15 @@ def lb_menu() -> None:
             exits = state.get("cascade_exits") or []
             if not exits:
                 continue
+            # Рамочное закрепление (раньше — плоский список)
             print()
+            box_top("ЗАКРЕПИТЬ EXIT (ВЕСЬ ТРАФИК НА ВЫБРАННЫЙ)")
+            box_row()
             for i, e in enumerate(exits, 1):
-                print(f"  [{i}] {e.get('name')} — {e.get('endpoint')}:{e.get('port')}")
+                box_item(str(i), f"{e.get('name')} — {e.get('endpoint')}:{e.get('port')}")
+            box_bottom()
             try:
-                p = input(f"{CYAN}Номер exit для закрепления:{NC} ").strip()
+                p = core._box_ask("Номер exit для закрепления")
                 if p.isdigit() and 1 <= int(p) <= len(exits):
                     st = awgs_state_load()
                     st["lb_pinned"] = exits[int(p) - 1].get("name", "")

@@ -1095,6 +1095,10 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
     _box_row = core._box_row
     _box_sep = core._box_sep
     _box_bottom = core._box_bottom
+    _box_desc = core._box_desc
+    _box_input = core._box_input
+    _box_info = core._box_info
+    _box_warn = core._box_warn
 
     _box_top(f"Ручная настройка параметров обфускации {awg_protocol_label(protocol_version)}")
     _box_row()
@@ -1116,70 +1120,84 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
     # дефолтами.
     _S_RANGES_31 = {"s1": (15, 150), "s2": (15, 150),
                     "s3": (12, 55), "s4": (12, 27)}
+    # Каждая секция — непрерывная рамка: ввод врезается в неё
+    # (_box_input: закрыл нижнюю границу → промпт → открыл верхнюю),
+    # канон диалога проверки порта в _core. До кейса стилизации
+    # параметры печатались плоским print.
+    _box_top("ЧИСЛОВЫЕ ПАРАМЕТРЫ (JC/JMIN/JMAX/S1-S4)")
+    _box_row()
     for key, label, vmin, vmax, recommended, desc in AWGS_PARAMS_SPEC:
         if is_31 and key in _S_RANGES_31:
             vmin, vmax = _S_RANGES_31[key]
             recommended = (vmin + vmax) // 2
-        print(f"{BOLD}{label}{NC}")
-        print(f"  {DIM}{desc}{NC}")
-        print(f"  {GREEN}Рекомендуется:{NC} {recommended}  {DIM}(диапазон: {vmin}-{vmax}){NC}")
+        _box_row(f"  {BOLD}{label}{NC}")
+        _box_desc(desc)
+        _box_row(f"     {GREEN}Рекомендуется:{NC} {recommended}  {DIM}(диапазон: {vmin}-{vmax}){NC}")
+        _box_row()
         while True:
-            val_str = input(f"  {CYAN}Значение [{recommended}]: {NC}").strip()
-            if not val_str:
-                val = recommended
-                break
+            val_str = _box_input(f"{key.upper()} [{recommended}]",
+                                 default=str(recommended))
             if not val_str.isdigit():
-                print(f"  {YELLOW}Нужно целое число{NC}")
+                _box_row(f"  {YELLOW}[!] Нужно целое число{NC}")
+                _box_row()
                 continue
             val = int(val_str)
             if val < vmin or val > vmax:
-                print(f"  {YELLOW}Вне диапазона ({vmin}-{vmax}){NC}")
+                _box_row(f"  {YELLOW}[!] Вне диапазона ({vmin}-{vmax}){NC}")
+                _box_row()
                 continue
             # Спец-проверка: Jmax >= Jmin
             if key == "jmax" and val < params.get("jmin", 0):
-                print(f"  {YELLOW}Jmax ({val}) не может быть меньше Jmin ({params['jmin']}){NC}")
+                _box_row(f"  {YELLOW}[!] Jmax ({val}) не может быть меньше Jmin ({params['jmin']}){NC}")
+                _box_row()
                 continue
             break
         params[key] = val
-        print()
+        _box_row()
+    _box_bottom()
+    print()
 
     # H1-H4 — официальный формат «N» / «N-M»
-    print(f"{BOLD}H1-H4 — magic headers (официальный формат AWG 2.0+: «N» или «N-M» до {AWGS_H_UPPER_LIMIT}){NC}")
-    print(f"  {DIM}Диапазоны скрывают заголовок от DPI; не должны пересекаться между собой.{NC}")
-    print(f"  {DIM}Значения 1-4 не используйте — это узнаваемые vanilla-WireGuard типы сообщений.{NC}")
-    print(f"  {GREEN}Рекомендуется:{NC} auto — непересекающиеся диапазоны" +
-          (f" (узкие ~20k, фикс бага amneziawg-go в 3.1)" if is_31 else ""))
+    _box_top(f"H1-H4 — MAGIC HEADERS («N» или «N-M» до {AWGS_H_UPPER_LIMIT})")
+    _box_row()
+    _box_desc("Диапазоны скрывают заголовок от DPI; не должны пересекаться между собой.")
+    _box_desc("Значения 1-4 не используйте — это узнаваемые vanilla-WireGuard типы сообщений.")
+    _box_row(f"     {GREEN}Рекомендуется:{NC} auto — непересекающиеся диапазоны" +
+             (f" (узкие ~20k, фикс бага amneziawg-go в 3.1)" if is_31 else ""))
+    _box_row()
     _h_vals = None
     while True:
-        _h_auto = input(f"  {CYAN}H1-H4 ['auto' или четыре значения через пробел, напр. "
-                        f"'2135087609-2135093954 2147225277 2147461177 2147478893-2147482205']: {NC}").strip()
+        _h_auto = _box_input("H1-H4 ['auto' или четыре значения через пробел]")
         if not _h_auto or _h_auto.lower() == "auto":
             _h_gen = (_generate_non_overlapping_h_values_31() if is_31
                       else _generate_non_overlapping_h_values())
             _h_vals = [str(v) for v in _h_gen]
-            info(f"  Сгенерированы H1-H4: {' '.join(_h_vals)}")
+            _box_info(f"Сгенерированы H1-H4: {' '.join(_h_vals)}")
+            _box_row()
             break
         parts = _h_auto.split()
         if len(parts) != 4:
-            print(f"  {YELLOW}Нужно 4 значения (H1 H2 H3 H4) или 'auto'{NC}")
+            _box_row(f"  {YELLOW}[!] Нужно 4 значения (H1 H2 H3 H4) или 'auto'{NC}")
+            _box_row()
             continue
         ok_h = True
         for p in parts:
             if not (p.isdigit() or ("-" in p and p.split("-", 1)[0].isdigit()
                                     and p.split("-", 1)[1].isdigit())):
-                print(f"  {YELLOW}'{p}' не «N» и не «N-M»{NC}")
+                _box_row(f"  {YELLOW}[!] '{p}' не «N» и не «N-M»{NC}")
                 ok_h = False
                 break
             _lo = int(p.split("-")[0])
             _hi = int(p.split("-")[-1])
             if _lo > _hi or _hi > AWGS_H_UPPER_LIMIT:
-                print(f"  {YELLOW}'{p}': lo>hi или превышает INT32_MAX{NC}")
+                _box_row(f"  {YELLOW}[!] '{p}': lo>hi или превышает INT32_MAX{NC}")
                 ok_h = False
                 break
             if 1 <= _lo <= 4 or 1 <= _hi <= 4:
-                warn(f"  '{p}' содержит значения 1-4 — узнаваемые vanilla-WireGuard "
-                     f"типы сообщений; рекомендуется диапазон от 5")
+                _box_warn(f"'{p}' содержит значения 1-4 — узнаваемые vanilla-WireGuard "
+                          f"типы сообщений; рекомендуется диапазон от 5")
         if not ok_h:
+            _box_row()
             continue
         # Проверка пересечений
         _h_parsed = []
@@ -1194,44 +1212,63 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
         for _i in range(4):
             for _j in range(_i + 1, 4):
                 if _h_parsed[_i][0] <= _h_parsed[_j][1] and _h_parsed[_j][0] <= _h_parsed[_i][1]:
-                    print(f"  {YELLOW}H{_i+1} и H{_j+1} пересекаются — пакеты из зоны "
-                          f"перекрытия не классифицируются и дропаются{NC}")
+                    _box_row(f"  {YELLOW}[!] H{_i+1} и H{_j+1} пересекаются — пакеты из зоны "
+                             f"перекрытия не классифицируются и дропаются{NC}")
                     _overlap = True
         if _overlap:
+            _box_row()
             continue
         _h_vals = parts
         break
     params["h1"], params["h2"], params["h3"], params["h4"] = _h_vals
+    _box_bottom()
     print()
 
     # CPS-параметры (I1-I5)
-    print(f"{BOLD}Опциональные параметры (I1-I5) — CPS-цепочки:{NC}")
-    print(f"  {DIM}Оставьте пустым (Enter) если не уверены — большинство операторов не требуют.{NC}")
-    print(f"  {DIM}Профили мимикрии: auto quic quic0rtt burst dns tls altsvc dtls12 dtls13 noise http3 sip binary{NC}")
-    print()
+    _box_top("ОПЦИОНАЛЬНЫЕ ПАРАМЕТРЫ (I1-I5) — CPS-ЦЕПОЧКИ")
+    _box_row()
+    _box_desc("Оставьте пустым (Enter) если не уверены — большинство операторов не требуют.")
+    _box_desc("Профили мимикрии: auto quic quic0rtt burst dns tls altsvc dtls12 dtls13 noise http3 sip binary")
+    _box_row()
     _burst_filled = False
     for key, label, recommended, desc in AWGS_PARAMS_SPEC_HEX:
         if _burst_filled:
             break
-        print(f"{BOLD}{label}{NC}")
-        print(f"  {DIM}{desc}{NC}")
-        if recommended == "random":
-            print(f"  {GREEN}Рекомендуется:{NC} auto — нейтральный <r N> (безопасен для всех клиентов)")
+        _box_row(f"  {BOLD}{label}{NC}")
+        _box_desc(desc)
+        if is_31 and key == "i1":
+            _box_row(f"     {GREEN}Рекомендуется:{NC} Enter — нейтральная цепочка "
+                     f"(3.1 требует CPS в I1)")
+        elif recommended == "random":
+            _box_row(f"     {GREEN}Рекомендуется:{NC} auto — нейтральный <r N> (безопасен для всех клиентов)")
         elif recommended:
-            print(f"  {GREEN}Рекомендуется:{NC} {recommended}")
+            _box_row(f"     {GREEN}Рекомендуется:{NC} {recommended}")
         else:
-            print(f"  {GREEN}Рекомендуется:{NC} пусто")
+            _box_row(f"     {GREEN}Рекомендуется:{NC} пусто")
+        _box_row()
         while True:
-            val = input(f"  {CYAN}Значение (Enter=пусто, профиль, fill, CPS-цепочка): {NC}").strip()
+            val = _box_input(f"{key.upper()} (Enter=пусто, профиль, fill, CPS-цепочка)")
             if not val:
-                val = ""
+                # 2.0: пусто допустимо (большинство операторов не требуют).
+                # 3.1: валидатор требует CPS-цепочку в I1 — Enter на I1
+                # вечно проваливал финальную валидацию ручного 3.1-конфига
+                # (тесты кормили «auto», живой юзер жал Enter). Теперь
+                # Enter на I1 в 3.1 генерирует нейтральную цепочку;
+                # I2-I5 по Enter остаются пустыми (валидатор допускает).
+                if is_31 and key == "i1":
+                    val = _generate_neutral_i_chain()
+                    _box_info("I1: сгенерирована нейтральная цепочка "
+                              "(3.1 требует CPS в I1)")
+                else:
+                    val = ""
                 break
             _low = val.lower()
             # 'fill' — нейтральная цепочка (та же форма, что
             # автозаполнение I2-I5 в генераторах 3.1)
             if _low == "fill":
                 val = _generate_neutral_i_chain()
-                info(f"  Сгенерирована нейтральная цепочка {key}: {val}")
+                _box_info(f"Сгенерирована нейтральная цепочка {key}: {val}")
+                _box_row()
                 break
             if _low in AWGS_MIMICRY_SHORTCUTS:
                 _profile = AWGS_MIMICRY_SHORTCUTS[_low]
@@ -1241,46 +1278,50 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
                     _chain = awg_i_chain_mimicry_generate("quic_burst")
                     params["i1"], params["i2"], params["i3"], \
                         params["i4"], params["i5"] = _chain
-                    info("  Сгенерирован QUIC-всплеск (I1-I5):")
+                    _box_info("Сгенерирован QUIC-всплеск (I1-I5):")
                     for _ik in ("i1", "i2", "i3", "i4", "i5"):
-                        info(f"    {_ik.upper()} = {params[_ik]}")
+                        _box_row(f"     {_ik.upper()} = {params[_ik]}")
                     _burst_filled = True
+                    _box_row()
                     break
                 val = awg_i1_mimicry_generate(_profile)
-                info(f"  Сгенерирован {key} (профиль {_profile}): {val}")
+                _box_info(f"Сгенерирован {key} (профиль {_profile}): {val}")
                 _port_hint = AWGS_MIMICRY_PORT_HINTS.get(_profile)
                 if _port_hint:
-                    info(f"  Под маскировку желательно значение AWG-порта: {_port_hint}")
+                    _box_info(f"Под маскировку желательно значение AWG-порта: {_port_hint}")
+                _box_row()
                 break
             if not _is_valid_cps_or_legacy_hex(val):
-                warn(f"  Не похоже на CPS-цепочку (<b 0x...>, <t>, <r N>, <rc N>, "
-                     f"<rd N>) и не hex — попробуйте ещё раз")
+                _box_warn("Не похоже на CPS-цепочку (<b 0x...>, <t>, <r N>, <rc N>, "
+                          "<rd N>) и не hex — попробуйте ещё раз")
                 continue
             # наш стандартный деплой — kernel-сервер + go-клиенты;
             # теги одного движка БЛОКИРУЮТСЯ с переспросом (раньше <c>
             # только предупреждал — можно было собрать конфиг, который
             # не подключится ни на одном клиенте-приложении)
             if _cps_has_kernel_only_tags(val):
-                warn(f"  <c> — тег ТОЛЬКО модуля ядра Linux; клиентские "
-                     f"приложения Amnezia (Windows/Android/iOS/macOS) "
-                     f"отвергнут весь junk-пакет — подключение не "
-                     f"состоялось бы. Используйте кросс-движковые теги: "
-                     f"<b 0x...>/<t>/<r N>/<rc N>/<rd N>")
+                _box_warn("<c> — тег ТОЛЬКО модуля ядра Linux; клиентские "
+                          "приложения Amnezia (Windows/Android/iOS/macOS) "
+                          "отвергнут весь junk-пакет — подключение не "
+                          "состоялось бы. Используйте кросс-движковые теги: "
+                          "<b 0x...>/<t>/<r N>/<rc N>/<rd N>")
                 continue
             if _cps_has_go_only_tags(val):
-                warn(f"  <d>/<ds>/<dz N> — теги ТОЛЬКО amneziawg-go (и no-op); "
-                     f"серверный модуль ядра amneziawg-tools такой конфиг "
-                     f"не загрузит. Используйте кросс-движковые теги: "
-                     f"<b 0x...>/<t>/<r N>/<rc N>/<rd N>")
+                _box_warn("<d>/<ds>/<dz N> — теги ТОЛЬКО amneziawg-go (и no-op); "
+                          "серверный модуль ядра amneziawg-tools такой конфиг "
+                          "не загрузит. Используйте кросс-движковые теги: "
+                          "<b 0x...>/<t>/<r N>/<rc N>/<rd N>")
                 continue
             if all(c in "0123456789abcdefABCDEF" for c in val) and "<" not in val:
-                warn(f"  Голый hex — формат AWG 1.5; на Keenetic/amneziawg-go "
-                     f"может не работать. Рекомендуется CPS-формат, напр. "
-                     f"'<r {len(val)//2}>'")
+                _box_warn(f"Голый hex — формат AWG 1.5; на Keenetic/amneziawg-go "
+                          f"может не работать. Рекомендуется CPS-формат, напр. "
+                          f"'<r {len(val)//2}>'")
             break
         if not _burst_filled:
             params[key] = val
-        print()
+        _box_row()
+    _box_bottom()
+    print()
 
     # AWG 3.1: 9 транспортных директив (полный ручной контроль)
     if is_31:
@@ -1310,22 +1351,24 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
                 "on/off — не отвечать cookiereply на порту WireGuard (3.1; "
                 "ломает keepalive за NAT под нагрузкой — включать осознанно).",
         }
-        print(f"{BOLD}Транспортная защита AWG 3.1 (9 директив):{NC}")
-        print(f"  {DIM}Enter — рекомендованное значение (генерация по констрейнтам 3.1).{NC}")
-        print()
+        _box_top("ТРАНСПОРТНАЯ ЗАЩИТА AWG 3.1 (9 ДИРЕКТИВ)")
+        _box_row()
+        _box_desc("Enter — рекомендованное значение (генерация по констрейнтам 3.1).")
+        _box_row()
         for _k31 in _defaults_31:
             _dir = AWG31_DIRECTIVE_NAMES[_k31]
             _def = _defaults_31[_k31]
-            print(f"{BOLD}{_dir}{NC}")
-            print(f"  {DIM}{_short.get(_k31, '')}{NC}")
+            _box_row(f"  {BOLD}{_dir}{NC}")
+            _box_desc(_short.get(_k31, ""))
             while True:
-                v31 = input(f"  {CYAN}Значение [{_def}]: {NC}").strip()
-                if not v31:
-                    v31 = _def
-                    break
+                if _k31 == "header_protection_key":
+                    v31 = _box_input(f"{_dir} (Enter = сгенерированный ключ)",
+                                     default=_def)
+                else:
+                    v31 = _box_input(f"{_dir} [{_def}]", default=_def)
                 if _k31 in ("random_trailers", "disable_cookies"):
                     if v31.lower() not in ("on", "off", "0", "1"):
-                        print(f"  {YELLOW}Допустимо: on / off / 0 / 1{NC}")
+                        _box_row(f"  {YELLOW}[!] Допустимо: on / off / 0 / 1{NC}")
                         continue
                     break
                 # диапазонные: «N» или «N-M» — проверка ниже общей валидацией
@@ -1335,17 +1378,19 @@ def awgs_prompt_custom_params(protocol_version: str = "2.0") -> dict:
                         if len(_b64.b64decode(v31, validate=True)) < 30:
                             raise ValueError
                     except Exception:
-                        print(f"  {YELLOW}Нужен base64-ключ 32 байта (44 символа, как wg genkey){NC}")
+                        _box_row(f"  {YELLOW}[!] Нужен base64-ключ 32 байта (44 символа, как wg genkey){NC}")
                         continue
                     break
                 if not (v31.isdigit() or ("-" in v31 and
                                           v31.split("-", 1)[0].isdigit() and
                                           v31.split("-", 1)[1].isdigit())):
-                    print(f"  {YELLOW}Формат: число «N» или диапазон «N-M»{NC}")
+                    _box_row(f"  {YELLOW}[!] Формат: число «N» или диапазон «N-M»{NC}")
                     continue
                 break
             params[_k31] = v31
-            print()
+            _box_row()
+        _box_bottom()
+        print()
 
     # Итоговая сводка
     _box_top(f"Итоговые параметры")
@@ -2531,29 +2576,43 @@ def _awgs_menu_custom_params(protocol_version: str = "2.0") -> None:
     """Подменю ручной настройки параметров обфускации (2.0 или 3.1)."""
     from .awg_protocol import awg31_merge_into_params, awg_is_31
     core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_kv = core._box_kv
+    _box_bottom = core._box_bottom
     info = core.info
-    warn = core.warn
-    CYAN, NC = core.CYAN, core.NC
+    DIM, NC = core.DIM, core.NC
 
-    # Сначала спрашиваем базовые параметры (порт/подсеть/MTU/IPv6/endpoint)
+    # Сначала спрашиваем базовые параметры (порт/подсеть/MTU/IPv6/endpoint).
+    # Рамочный конфиг-диалог: подсказки-значения в рамке + EOF-безопасные
+    # промпты (канон icmp_gate._ig_config_dialog) — до кейса стилизации
+    # был плоский input().
     print()
-    info("Ручная настройка параметров обфускации.")
-    info("Сначала базовые параметры, затем — параметры обфускации.")
-    print()
+    _box_top("РУЧНАЯ НАСТРОЙКА • БАЗОВЫЕ ПАРАМЕТРЫ")
+    _box_row()
+    _box_row(f"  {DIM}Сначала базовые параметры, затем — параметры{NC}")
+    _box_row(f"  {DIM}обфускации по одному (с рекомендациями и диапазонами).{NC}")
+    _box_row()
+    _box_kv("UDP-порт", str(AWGS_DEFAULT_PORT))
+    _box_kv("Подсеть IPv4", AWGS_DEFAULT_SUBNET)
+    _box_kv("IPv6 в туннеле", "да (анти-утечка AAAA)")
+    _box_kv("MTU", str(AWGS_DEFAULT_MTU))
+    _box_kv("Endpoint", "пусто = сервер не за NAT")
+    _box_bottom()
 
-    port_str = input(f"{CYAN}UDP-порт [51820]: {NC}").strip()
+    port_str = core._box_ask("UDP-порт", str(AWGS_DEFAULT_PORT))
     port = int(port_str) if port_str.isdigit() else AWGS_DEFAULT_PORT
 
-    subnet = input(f"{CYAN}Подсеть IPv4 [10.66.66.0/24]: {NC}").strip() or AWGS_DEFAULT_SUBNET
+    subnet = core._box_ask("Подсеть IPv4", AWGS_DEFAULT_SUBNET) or AWGS_DEFAULT_SUBNET
 
-    ipv6_ch = input(f"{CYAN}Включить IPv6 в туннеле? [Y/n] — рекомендуется (анти-утечка AAAA при IPv6 у клиента): {NC}").strip().lower()
+    ipv6_ch = core._box_ask("Включить IPv6 в туннеле? (анти-утечка AAAA) [Y/n]").lower()
     allow_ipv6 = ipv6_ch not in ("n", "no", "н", "нет")
     subnet_v6 = awg_v6_ula_from_subnet(subnet) if allow_ipv6 else ""
 
-    mtu_str = input(f"{CYAN}MTU [1280]: {NC}").strip()
+    mtu_str = core._box_ask("MTU", str(AWGS_DEFAULT_MTU))
     mtu = int(mtu_str) if mtu_str.isdigit() else AWGS_DEFAULT_MTU
 
-    endpoint = input(f"{CYAN}Endpoint (если за NAT, иначе пусто) []: {NC}").strip()
+    endpoint = core._box_ask("Endpoint (если за NAT, иначе пусто)")
 
     # Теперь — параметры обфускации (с версией протокола — для 3.1
     # промпт охватывает и 9 транспортных директив)
@@ -2571,8 +2630,7 @@ def _awgs_menu_custom_params(protocol_version: str = "2.0") -> None:
              "ContentPaddingAddition, таймеры, RandomTrailers, "
              "DisableCookies) сгенерированы автоматически")
 
-    print()
-    confirm = input(f"{CYAN}Начать установку с этими параметрами? [Y/n]: {NC}").strip().lower()
+    confirm = core._box_ask("Начать установку с этими параметрами? [Y/n]").lower()
     if confirm in ("n", "no", "н", "нет"):
         return
 
@@ -2625,35 +2683,45 @@ def _awgs_menu_carrier(protocol_version: str = "2.0") -> None:
 def _awgs_menu_advanced(protocol_version: str = "2.0") -> None:
     """Подменю расширенных параметров."""
     core = _core_module()
-    info = core.info
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_kv = core._box_kv
+    _box_bottom = core._box_bottom
     warn = core.warn
-    CYAN, NC = core.CYAN, core.NC
+    DIM, NC = core.DIM, core.NC
 
+    # Рамочный конфиг-диалог: подсказки-значения в рамке + EOF-безопасные
+    # промпты (канон icmp_gate._ig_config_dialog).
     print()
-    info("Расширенные параметры (Enter = значение по умолчанию)")
-    print()
+    _box_top(f"РАСШИРЕННЫЕ ПАРАМЕТРЫ • {awg_protocol_label_static(protocol_version)}")
+    _box_row()
+    _box_row(f"  {DIM}Enter = значение по умолчанию. Endpoint — только если{NC}")
+    _box_row(f"  {DIM}сервер за NAT (иначе пусто). IPv6 рекомендуется:{NC}")
+    _box_row(f"  {DIM}анти-утечка AAAA при IPv6-канале у клиента.{NC}")
+    _box_row()
+    _box_kv("UDP-порт", str(AWGS_DEFAULT_PORT))
+    _box_kv("Подсеть IPv4", AWGS_DEFAULT_SUBNET)
+    _box_kv("IPv6 в туннеле", "да (рекомендуется)")
+    _box_kv("MTU", str(AWGS_DEFAULT_MTU))
+    _box_kv("Endpoint", "пусто = не за NAT")
+    _box_kv("Carrier preset", "default (+8 пресетов операторов)")
+    _box_bottom()
 
-    # Порт
-    port_str = input(f"{CYAN}UDP-порт [51820]: {NC}").strip()
+    port_str = core._box_ask("UDP-порт", str(AWGS_DEFAULT_PORT))
     port = int(port_str) if port_str.isdigit() else AWGS_DEFAULT_PORT
 
-    # Подсеть
-    subnet = input(f"{CYAN}Подсеть IPv4 [10.66.66.0/24]: {NC}").strip() or AWGS_DEFAULT_SUBNET
+    subnet = core._box_ask("Подсеть IPv4", AWGS_DEFAULT_SUBNET) or AWGS_DEFAULT_SUBNET
 
-    # IPv6
-    ipv6_ch = input(f"{CYAN}Включить IPv6 в туннеле? [Y/n] — рекомендуется (анти-утечка AAAA при IPv6 у клиента): {NC}").strip().lower()
+    ipv6_ch = core._box_ask("Включить IPv6 в туннеле? (анти-утечка AAAA) [Y/n]").lower()
     allow_ipv6 = ipv6_ch not in ("n", "no", "н", "нет")
     subnet_v6 = awg_v6_ula_from_subnet(subnet) if allow_ipv6 else ""
 
-    # MTU
-    mtu_str = input(f"{CYAN}MTU [1280]: {NC}").strip()
+    mtu_str = core._box_ask("MTU", str(AWGS_DEFAULT_MTU))
     mtu = int(mtu_str) if mtu_str.isdigit() else AWGS_DEFAULT_MTU
 
-    # Endpoint (для NAT)
-    endpoint = input(f"{CYAN}Endpoint (если за NAT, иначе пусто) []: {NC}").strip()
+    endpoint = core._box_ask("Endpoint (если за NAT, иначе пусто)")
 
-    # Пресет
-    carrier = input(f"{CYAN}Carrier preset [default]: {NC}").strip() or "default"
+    carrier = core._box_ask("Carrier preset", "default") or "default"
     if carrier not in awgs_presets_list():
         warn(f"Пресет '{carrier}' не найден, используется 'default'")
         carrier = "default"
@@ -2869,15 +2937,24 @@ def do_awgs_rotate_menu() -> None:
             warn(msg)
         input(f"\n{CYAN}Нажмите Enter...{NC}")
     elif ch == "2":
-        # Показать список пресетов
+        # Смена пресета перед ротацией — рамочный список пресетов
+        # (раньше плоский print-список)
         print()
         presets = awgs_presets_list()
+        _box_top("СМЕНА ПРЕСЕТА ПЕРЕД РОТАЦИЕЙ")
+        _box_row()
+        _box_desc("Пресет задаёт диапазоны новых случайных значений;")
+        _box_desc("обфускация обеих сторон совпадать перестанет — после")
+        _box_desc("ротации передайте клиентам обновлённые конфиги.")
+        _box_row()
         for i, p in enumerate(presets, 1):
             preset = awgs_presets_get(p)
             marker = f" {GREEN}← текущий{NC}" if p == current_preset else ""
-            print(f"  [{i}] {p} — {preset.get('label', '')}{marker}")
-        print()
-        choice = input(f"{CYAN}Выберите пресет [1-{len(presets)}]: {NC}").strip()
+            _box_item(str(i) if i < 10 else "0",
+                      f"{p} — {preset.get('label', '')}{marker}")
+        _box_item("Q", "Отмена")
+        _box_bottom()
+        choice = core._box_ask(f"Выберите пресет [1-{len(presets)}]")
         try:
             idx = int(choice) - 1
             if 0 <= idx < len(presets):

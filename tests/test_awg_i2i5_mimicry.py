@@ -63,9 +63,15 @@ def _mock_core():
     core = MagicMock()
     for attr in ("GREEN", "NC", "RED", "YELLOW", "CYAN", "BLUE", "DIM", "BOLD"):
         setattr(core, attr, "")
+    # box-хелперы — НАСТОЯЩИЕ из box_renderer (после кейса стилизации
+    # экспертный диалог берёт ввод через core._box_input: мок MagicMock
+    # давал int(MagicMock)=1 и вечный цикл переспроса в числовых
+    # параметрах). Настоящие функции честно едят input() из side_effect.
+    from chimera.modules import box_renderer as _br
     for attr in ("_box_top", "_box_row", "_box_sep", "_box_bottom",
-                 "_box_item", "_box_desc", "_box_wrap_msg"):
-        setattr(core, attr, MagicMock())
+                 "_box_item", "_box_desc", "_box_wrap_msg",
+                 "_box_input", "_box_ask", "_box_info", "_box_warn"):
+        setattr(core, attr, getattr(_br, attr))
     for attr in ("info", "success", "warn", "error", "log_to_file"):
         setattr(core, attr, MagicMock())
     return core

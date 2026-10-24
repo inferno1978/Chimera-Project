@@ -13,6 +13,7 @@ Box-рендеринг для интерактивных меню Chimera Projec
         _box_row, _box_row_auto, _box_link, _box_top, _box_sep, _box_bottom,
         _box_item, _box_item_exit, _box_back, _box_desc, _box_kv,
         _box_wrap_msg, _box_info, _box_warn, _box_ok, _box_dim, _box_input,
+        _box_ask,
         _submenu_header, _submenu_item, _submenu_back,
     )
 ───────────────────────────────────────────────────────────────────────────────
@@ -597,12 +598,36 @@ def _box_dim(msg: str) -> None:
 
 
 def _box_input(prompt: str, default: str = "", reopen: bool = True) -> str:
-    """Ввод внутри бокса: закрывает рамку, берёт ввод, опционально рисует ╠══╣."""
+    """Ввод внутри бокса: закрывает рамку, берёт ввод, опционально рисует ╔══╗.
+
+    Под пайпом/EOF (смок-тесты, </dev/null) возвращает default вместо
+    EOFError — длинные конфиг-диалоги обязаны выдерживать пайп
+    (канон UI-smoke icmp_gate).
+    """
     _box_bottom()
-    val = input(f"  {CYAN}{prompt}: {NC}").strip()
+    try:
+        val = input(f"  {CYAN}{prompt}: {NC}").strip()
+    except (EOFError, KeyboardInterrupt):
+        val = ""
     if reopen:
         _box_line_top()
     return val if val else default
+
+
+def _box_ask(prompt: str, default: str = "") -> str:
+    """Цветной EOF-безопасный промпт МЕЖДУ рамками (канон icmp_gate._ig_input).
+
+    Печатается после _box_bottom() — вне рамки: подсказка цианетом, default
+    в квадратных скобках, двоеточие. Под пайпом/EOF (смок-тесты, cron,
+    </dev/null) возвращает default вместо падения с EOFError — диалоги
+    проекта обязаны выдерживать пайп (кейс UI-smoke icmp_gate).
+    """
+    try:
+        val = input(f"{CYAN}{prompt}{NC}"
+                    + (f" [{default}]" if default else "") + ": ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return default
+    return val or default
 
 
 def _submenu_header(title: str) -> None:

@@ -1804,7 +1804,7 @@ def _awgs_cascade_prompt_exit_version() -> str:
     _box_row()
     _box_bottom()
     while True:
-        ch = input(f"{CYAN}Версия протокола AWG1 [1/2, Enter=1]:{NC} ").strip()
+        ch = core._box_ask("Версия протокола AWG1 [1/2, Enter=1]")
         if ch in ("", "1"):
             return AWG_VERSION_20
         if ch == "2":
@@ -1816,14 +1816,33 @@ def _awgs_cascade_menu_awg0() -> None:
     """Подменю настройки AWG0 (вход каскада)."""
     from .awg_protocol import awg_normalize_version
     core = _core_module()
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_kv = core._box_kv
+    _box_bottom = core._box_bottom
     info = core.info
     warn = core.warn
-    CYAN, NC = core.CYAN, core.NC
+    DIM, NC = core.DIM, core.NC
 
+    # Рамочный конфиг-диалог (канон icmp_gate): подсказки-поля в рамке +
+    # EOF-безопасные промпты; до кейса стилизации — плоский input().
     print()
-    info("Настройка AWG0 (вход каскада).")
-    info("Сначала настройте AWG1 (выход) на зарубежном сервере — получите endpoint/pubkey.")
-    print()
+    _box_top("НАСТРОЙКА AWG0 • ВХОД КАСКАДА")
+    _box_row()
+    _box_row(f"  {DIM}Сначала настройте AWG1 (выход) на зарубежном сервере —{NC}")
+    _box_row(f"  {DIM}меню каскада → «Настроить как AWG1» даст бокс со всеми{NC}")
+    _box_row(f"  {DIM}строками ниже. Обфускация и версия протокола обязаны{NC}")
+    _box_row(f"  {DIM}совпадать на обеих сторонах — иначе handshake не сойдётся.{NC}")
+    _box_row()
+    _box_kv("Endpoint host AWG1", "зарубежный IP/домен")
+    _box_kv("UDP-порт AWG1", "51820")
+    _box_kv("Cascade peer privkey", "строка из бокса AWG1")
+    _box_kv("Server pubkey AWG1", "строка из бокса AWG1")
+    _box_kv("Подсеть AWG1", "172.16.61.0/24")
+    _box_kv("Cascade peer IP", "база.2 (из бокса AWG1)")
+    _box_kv("Obfuscation JSON", "Enter = как на этом сервере")
+    _box_kv("Версия протокола", "1=2.0, 2=3.1 (как на AWG1)")
+    _box_bottom()
 
     # Если standalone AWG не установлен — нужно сначала установить
     if not awgs_state_is_installed():
@@ -1832,43 +1851,42 @@ def _awgs_cascade_menu_awg0() -> None:
             return
 
     # Запрашиваем данные от AWG1
-    exit_host = input(f"{CYAN}Endpoint host AWG1 (зарубежный IP/домен): {NC}").strip()
+    exit_host = core._box_ask("Endpoint host AWG1 (зарубежный IP/домен)")
     if not exit_host:
         warn("Endpoint обязателен")
         return
 
-    exit_port_str = input(f"{CYAN}UDP-порт AWG1 [51820]: {NC}").strip()
+    exit_port_str = core._box_ask("UDP-порт AWG1", "51820")
     exit_port = int(exit_port_str) if exit_port_str.isdigit() else 51820
 
     # FIX-E: privkey пира cascade_entry (строка «Cascade peer
     # privkey» из бокса AWG1). КРИТИЧНО: exit ждёт pubkey именно этого
     # ключа в своём [Peer]. Раньше промпта не было и setup_awg0 молча
     # генерировал НОВЫЙ ключ — handshake никогда не сходился в TUI-флоу.
-    exit_peer_privkey = input(
-        f"{CYAN}Cascade peer privkey с AWG1 (строка из бокса): {NC}").strip()
+    exit_peer_privkey = core._box_ask("Cascade peer privkey с AWG1 (строка из бокса)")
     if not exit_peer_privkey:
         warn("Без peer privkey с AWG1 handshake НЕ сойдётся (exit ждёт "
              "pubkey этого ключа). Будет сгенерирован новый ключ — "
              "потребуется пересоздать cascade_entry на AWG1 с ним.")
 
-    exit_pubkey = input(f"{CYAN}Server pubkey AWG1: {NC}").strip()
+    exit_pubkey = core._box_ask("Server pubkey AWG1")
     if not exit_pubkey:
         warn("Server pubkey обязателен")
         return
 
-    exit_subnet = input(f"{CYAN}Подсеть AWG1 [172.16.61.0/24]: {NC}").strip() or "172.16.61.0/24"
+    exit_subnet = core._box_ask("Подсеть AWG1", "172.16.61.0/24") or "172.16.61.0/24"
 
     # IP пира cascade_entry на AWG1 (из бокса "Cascade peer IP").
     # Enter = base.2 (для чистого exit без других пиров).
     _base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
-    exit_peer_ip = input(f"{CYAN}Cascade peer IP на AWG1 [{_base}.2]: {NC}").strip() or f"{_base}.2"
+    exit_peer_ip = core._box_ask("Cascade peer IP на AWG1", f"{_base}.2") or f"{_base}.2"
 
     # параметры обфускации AWG1 (строка Obfuscation из бокса AWG1).
     # Обфускация обязана совпадать на обеих сторонах — иначе handshake
     # никогда не сойдётся. Enter = параметры этого сервера (только если
     # вы УВЕРЕНЫ, что пресеты совпадают).
     exit_params = None
-    _params_raw = input(f"{CYAN}Obfuscation JSON с AWG1 (Enter = как на этом сервере): {NC}").strip()
+    _params_raw = core._box_ask("Obfuscation JSON с AWG1 (Enter = как на этом сервере)")
     if _params_raw:
         import json as _json
         try:
@@ -1880,11 +1898,10 @@ def _awgs_cascade_menu_awg0() -> None:
 
     # версия протокола AWG1 (строка Protocol version из бокса AWG1).
     # Обязательна для 3.1-каскада — версии должны совпадать на обоих концах.
-    _pv_raw = input(f"{CYAN}Версия протокола AWG1 [1=2.0, 2=3.1, Enter=2.0]: {NC}").strip()
+    _pv_raw = core._box_ask("Версия протокола AWG1 [1=2.0, 2=3.1, Enter=2.0]")
     exit_protocol_version = "3.1" if _pv_raw == "2" else "2.0"
 
-    print()
-    confirm = input(f"{core.YELLOW}Настроить каскад с {exit_host}:{exit_port}? [y/N]: {NC}").strip().lower()
+    confirm = core._box_ask(f"Настроить каскад с {exit_host}:{exit_port}? [y/N]").lower()
     if confirm not in ("y", "yes", "д", "да"):
         return
 
@@ -1959,12 +1976,18 @@ def _awgs_cascade_menu_multiexit() -> None:
                 warn("Список exit пуст")
                 input(f"{core.BLUE}Нажмите Enter...{NC}")
                 continue
+            # Рамочный пикер активации (раньше — плоский print-список)
             print()
+            _box_top("АКТИВАЦИЯ EXIT-НОДЫ")
+            _box_row()
             for i, e in enumerate(exits, 1):
-                mark = "●" if e.get("name") == active else " "
-                print(f"  [{i}] {mark} {e.get('name')} — {e.get('endpoint')}:"
-                      f"{e.get('port')}")
-            pick = input(f"{CYAN}Номер exit для активации:{NC} ").strip()
+                mark = "●" if e.get("name") == active else "○"
+                _box_item(str(i) if i < 10 else "0",
+                          f"{mark} {e.get('name')} — {e.get('endpoint')}:"
+                          f"{e.get('port')}")
+            _box_item("Q", "Отмена")
+            _box_bottom()
+            pick = core._box_ask("Номер exit для активации")
             if pick.isdigit() and 1 <= int(pick) <= len(exits):
                 name = exits[int(pick) - 1].get("name", "")
                 if awgs_cascade_activate_exit(name):
@@ -1977,7 +2000,12 @@ def _awgs_cascade_menu_multiexit() -> None:
                 warn("Список exit пуст")
                 input(f"{core.BLUE}Нажмите Enter...{NC}")
                 continue
-            name = input(f"{CYAN}Имя exit для удаления:{NC} ").strip()
+            print()
+            _box_top("УДАЛЕНИЕ EXIT-НОДЫ")
+            _box_row()
+            _box_row(f"  {DIM}Имя — как в списке выше (например de/nl1/pl1).{NC}")
+            _box_bottom()
+            name = core._box_ask("Имя exit для удаления")
             if name:
                 if awgs_cascade_remove_exit(name):
                     success(f"Exit '{name}' удалён")
@@ -2006,27 +2034,42 @@ def _awgs_cascade_menu_exit_add(active: str) -> None:
     core = _core_module()
     info = core.info
     warn = core.warn
-    CYAN, NC, YELLOW = core.CYAN, core.NC, core.YELLOW
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_kv = core._box_kv
+    _box_bottom = core._box_bottom
+    DIM, NC = core.DIM, core.NC
 
+    # Рамочный конфиг-диалог (канон icmp_gate); раньше — плоские input().
     print()
-    info("Добавление exit-ноды. Все данные — из бокса «Данные для")
-    info("настройки AWG0» на exit-ноде (меню каскада → «Настроить как AWG1»).")
-    print()
-    name = input(f"{CYAN}Имя exit (например de/nl1/pl1/fi1): {NC}").strip()
-    endpoint = input(f"{CYAN}Endpoint host: {NC}").strip()
+    _box_top("ДОБАВЛЕНИЕ / ОБНОВЛЕНИЕ EXIT-НОДЫ")
+    _box_row()
+    _box_row(f"  {DIM}Все данные — из бокса «Данные для настройки AWG0» на{NC}")
+    _box_row(f"  {DIM}exit-ноде (меню каскада → «Настроить как AWG1»).{NC}")
+    _box_row()
+    _box_kv("Имя exit", "de / nl1 / pl1 / fi1")
+    _box_kv("Endpoint host", "IP или домен exit-ноды")
+    _box_kv("UDP-порт", "52831")
+    _box_kv("Server pubkey", "строка из бокса AWG1")
+    _box_kv("Cascade peer privkey", "строка из бокса AWG1")
+    _box_kv("Cascade peer IP / subnet", "172.16.91.2 / 172.16.91.0/24")
+    _box_kv("Obfuscation JSON", "обязателен (совпадает с exit)")
+    _box_bottom()
+    name = core._box_ask("Имя exit (например de/nl1/pl1/fi1)")
+    endpoint = core._box_ask("Endpoint host")
     if not endpoint:
         warn("Endpoint обязателен")
         return
-    port_str = input(f"{CYAN}UDP-порт [52831]: {NC}").strip()
+    port_str = core._box_ask("UDP-порт", "52831")
     port = int(port_str) if port_str.isdigit() else 52831
-    server_pubkey = input(f"{CYAN}Server pubkey: {NC}").strip()
-    peer_privkey = input(f"{CYAN}Cascade peer privkey: {NC}").strip()
-    peer_ip = input(f"{CYAN}Cascade peer IP [172.16.91.2]: {NC}").strip() or "172.16.91.2"
-    subnet = input(f"{CYAN}Cascade subnet [172.16.91.0/24]: {NC}").strip() or "172.16.91.0/24"
+    server_pubkey = core._box_ask("Server pubkey")
+    peer_privkey = core._box_ask("Cascade peer privkey")
+    peer_ip = core._box_ask("Cascade peer IP", "172.16.91.2") or "172.16.91.2"
+    subnet = core._box_ask("Cascade subnet", "172.16.91.0/24") or "172.16.91.0/24"
 
     import json as _json
     params = None
-    _params_raw = input(f"{CYAN}Obfuscation JSON с exit (обязателен): {NC}").strip()
+    _params_raw = core._box_ask("Obfuscation JSON с exit (обязателен)")
     if _params_raw:
         try:
             params = _json.loads(_params_raw)
@@ -2036,12 +2079,12 @@ def _awgs_cascade_menu_exit_add(active: str) -> None:
     else:
         warn("Obfuscation JSON обязателен — параметры обязаны совпадать с exit")
 
-    _pv_raw = input(f"{CYAN}Версия протокола exit [1=2.0, 2=3.1, Enter=3.1]: {NC}").strip()
+    _pv_raw = core._box_ask("Версия протокола exit [1=2.0, 2=3.1, Enter=3.1]")
     protocol_version = "2.0" if _pv_raw == "1" else "3.1"
 
     first = not _awgs_cascade_exits_load()
     activate_default = "n" if (not first and active) else "y"
-    act = input(f"{CYAN}Активировать сразу? [Y/n]: {NC}").strip().lower()
+    act = core._box_ask("Активировать сразу? [Y/n]").lower()
     activate = (act not in ("n", "no", "н", "нет")) if act else (activate_default == "y")
 
     print()

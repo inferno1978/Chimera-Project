@@ -910,14 +910,26 @@ def do_manage_awg_peers() -> None:
             _awgs_peers_menu_add()
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "2":
-            name = input(f"{CYAN}Имя клиента для удаления: {NC}").strip()
+            print()
+            _box_top("УДАЛЕНИЕ КЛИЕНТА")
+            _box_row()
+            _box_row(f"  {core.DIM}Пир удаляется из конфига и отключается;{NC}")
+            _box_row(f"  {core.DIM}сгенерированные ранее .conf/.png остаются в экспорт-папке.{NC}")
+            _box_bottom()
+            name = core._box_ask("Имя клиента для удаления")
             if name:
-                confirm = input(f"{core.YELLOW}Удалить '{name}'? [y/N]: {NC}").strip().lower()
+                confirm = core._box_ask(f"Точно удалить '{name}'? [y/N]").lower()
                 if confirm in ("y", "yes", "д", "да"):
                     awg_peer_remove(name)
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "3":
-            name = input(f"{CYAN}Имя клиента для regen: {NC}").strip()
+            print()
+            _box_top("ПЕРЕГЕНЕРАЦИЯ КЛЮЧЕЙ (REGEN)")
+            _box_row()
+            _box_row(f"  {core.DIM}Старый ключ пира заменяется новым, IP сохраняется;{NC}")
+            _box_row(f"  {core.DIM}клиенту нужно передать обновлённый конфиг/QR.{NC}")
+            _box_bottom()
+            name = core._box_ask("Имя клиента для regen")
             if name:
                 awg_peer_regen(name)
             input(f"{BLUE}Нажмите Enter...{NC}")
@@ -925,14 +937,27 @@ def do_manage_awg_peers() -> None:
             awg_peer_stats()
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "5":
-            name = input(f"{CYAN}Имя клиента: {NC}").strip()
-            param = input(f"{CYAN}Параметр (dns1/dns2/expires_at/owner_email): {NC}").strip()
-            value = input(f"{CYAN}Значение (пусто = снять expires_at/owner_email): {NC}").strip()
+            print()
+            _box_top("ИЗМЕНЕНИЕ ПАРАМЕТРА КЛИЕНТА")
+            _box_row()
+            _box_row(f"  {core.DIM}dns1/dns2 — IP-адрес DNS для клиента;{NC}")
+            _box_row(f"  {core.DIM}expires_at — длительность (1h/12h/7d/30d/4w);{NC}")
+            _box_row(f"  {core.DIM}owner_email — владелец. Пустое значение = снять.{NC}")
+            _box_bottom()
+            name = core._box_ask("Имя клиента")
+            param = core._box_ask("Параметр (dns1/dns2/expires_at/owner_email)")
+            value = core._box_ask("Значение (пусто = снять expires_at/owner_email)")
             if name and param:
                 awg_peer_modify(name, param, value)
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "6":
-            name = input(f"{CYAN}Имя клиента: {NC}").strip()
+            print()
+            _box_top("QR-КОД КЛИЕНТА")
+            _box_row()
+            _box_row(f"  {core.DIM}Перегенерирует .conf и .png в экспорт-папке —{NC}")
+            _box_row(f"  {core.DIM}для ручной передачи клиенту.{NC}")
+            _box_bottom()
+            name = core._box_ask("Имя клиента")
             if name:
                 peer = awgs_state_peer_find(name)
                 if peer:
@@ -947,17 +972,31 @@ def do_manage_awg_peers() -> None:
 def _awgs_peers_menu_add() -> None:
     """Подменю добавления клиента."""
     core = _core_module()
-    info = core.info
-    warn = core.warn
-    CYAN, NC = core.CYAN, core.NC
+    _box_top = core._box_top
+    _box_row = core._box_row
+    _box_kv = core._box_kv
+    _box_bottom = core._box_bottom
+    DIM, NC = core.DIM, core.NC
 
+    # Рамочный конфиг-диалог (канон icmp_gate): подсказки в рамке +
+    # EOF-безопасные промпты; до кейса стилизации — плоский input().
     print()
-    name = input(f"{CYAN}Имя клиента (1-32 симв, [a-zA-Z0-9_-]): {NC}").strip()
+    _box_top("ДОБАВЛЕНИЕ КЛИЕНТА (PEER)")
+    _box_row()
+    _box_row(f"  {DIM}Имя — латиница/цифры/-/_ (1-32); срок — 1h/12h/7d/30d/4w.{NC}")
+    _box_row(f"  {DIM}PresharedKey добавляет слой симметричного шифрования.{NC}")
+    _box_row()
+    _box_kv("Имя", "user-main (пример)")
+    _box_kv("Срок", "пусто = бессрочно")
+    _box_kv("PresharedKey", "нет (Enter = по умолчанию)")
+    _box_bottom()
+
+    name = core._box_ask("Имя клиента (1-32 симв, [a-zA-Z0-9_-])")
     if not name:
         return
 
-    expires = input(f"{CYAN}Срок действия (1h/12h/7d/30d/4w, пусто = бессрочно): {NC}").strip()
-    psk_ch = input(f"{CYAN}Сгенерировать PresharedKey? [y/N]: {NC}").strip().lower()
+    expires = core._box_ask("Срок действия (1h/12h/7d/30d/4w, пусто = бессрочно)")
+    psk_ch = core._box_ask("Сгенерировать PresharedKey? [y/N]").lower()
     psk = psk_ch in ("y", "yes", "д", "да")
 
     print()
