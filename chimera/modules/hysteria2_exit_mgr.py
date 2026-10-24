@@ -48,7 +48,7 @@ from chimera.modules.hysteria2_common import (
 )
 from chimera.modules.box_renderer import (
     _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
-    _box_bottom, _box_back,
+    _box_bottom, _box_back, _box_ask, _box_kv, _box_warn, _box_ok,
 )
 
 # ── GitHub releases ───────────────────────────────────────────────────────────
@@ -701,21 +701,40 @@ def _h2_remote_status(host: str, ssh_key: Optional[str], ssh_pass: Optional[str]
     }
 
 
+def _pause() -> None:
+    """Пауза после действия; EOF/Ctrl+C безопасны (канон icmp_gate._ig_pause)."""
+    try:
+        input(f"{DIM}Enter - назад в меню...{NC}")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
 def _interactive_remote_status() -> None:
     h2 = _load_h2_state()
     nodes = h2.get("exit_nodes", [])
     default_host = nodes[0]["ip"] if nodes else ""
-    host = input(f"  IP/домен удалённой Exit-ноды [{default_host}]: ").strip() or default_host
+    _box_top("📊  СТАТУС УДАЛЁННОЙ EXIT-НОДЫ (SSH)")
+    _box_row()
+    _box_kv("IP/домен ноды", "адрес Exit-ноды с Hysteria2")
+    _box_kv("SSH-порт", "22")
+    _box_kv("SSH-ключ", "путь к ключу (пусто = пароль)")
+    _box_row()
+    _box_row(f"  {DIM}Enter = значение по умолчанию. Статус снимается по SSH.{NC}")
+    _box_bottom()
+    host = _box_ask("IP/домен удалённой Exit-ноды", default_host)
     if not host:
         warn("IP не указан")
         time.sleep(1)
         return
-    _sp_raw = input(f"  SSH-порт [22]: ").strip()
+    _sp_raw = _box_ask("SSH-порт", "22")
     ssh_port = int(_sp_raw) if _sp_raw.isdigit() else 22
-    ssh_key = input("  Путь к SSH-ключу (пусто = пароль): ").strip() or None
+    ssh_key = _box_ask("Путь к SSH-ключу (пусто = пароль)") or None
     ssh_pass = None
     if not ssh_key:
-        ssh_pass = getpass.getpass("  SSH-пароль: ").strip() or None
+        try:
+            ssh_pass = getpass.getpass("  SSH-пароль: ").strip() or None
+        except (EOFError, KeyboardInterrupt):
+            ssh_pass = None
     st = _h2_remote_status(host, ssh_key, ssh_pass, ssh_port=ssh_port)
     os.system("clear")
     print()
@@ -724,8 +743,8 @@ def _interactive_remote_status() -> None:
         _box_row(f"  {RED}{st['error']}{NC}")
     else:
         active_col = GREEN if st["active"] == "active" else RED
-        _box_row(f"  {CYAN}active:{NC}  {active_col}{st['active'] or '—'}{NC}")
-        _box_row(f"  {CYAN}version:{NC}  {st['version'] or '—'}")
+        _box_row(f"  {CYAN}active:{NC}  {active_col}{st['active'] or '-'}{NC}")
+        _box_row(f"  {CYAN}version:{NC}  {st['version'] or '-'}")
         _box_row()
         _box_row(f"  {CYAN}последние строки лога:{NC}")
         for line in (st["log_tail"] or "(пусто)").splitlines():
@@ -733,10 +752,7 @@ def _interactive_remote_status() -> None:
     _box_row()
     _box_item_exit("0", "← Назад")
     _box_bottom()
-    try:
-        input(f"{CYAN}Нажмите Enter...{NC}")
-    except KeyboardInterrupt:
-        pass
+    _pause()
 
 
 def do_h2_exit_menu() -> None:
@@ -765,10 +781,7 @@ def do_h2_exit_menu() -> None:
         _box_item_exit("Q", "← Назад")
         _box_bottom()
 
-        try:
-            ch = input(f"{CYAN}Выбор:{NC} ").strip().upper()
-        except KeyboardInterrupt:
-            break
+        ch = _box_ask("Выбор").strip().upper()
 
         if ch == "1":
             _interactive_local_install()
@@ -784,16 +797,13 @@ def do_h2_exit_menu() -> None:
             _box_row()
             _box_item_exit("0", "← Назад")
             _box_bottom()
-            try:
-                input(f"{CYAN}Нажмите Enter...{NC}")
-            except KeyboardInterrupt:
-                pass
+            _pause()
         elif ch == "4":
             _systemctl("restart", H2_SERVICE)
             time.sleep(1)
             ok = _service_active(H2_SERVICE)
             success("Перезапущен") if ok else error("Не запустился")
-            input(f"\n{CYAN}Нажмите Enter...{NC}")
+            _pause()
         elif ch == "5":
             os.system("clear")
             print()
@@ -806,18 +816,12 @@ def do_h2_exit_menu() -> None:
             _box_row()
             _box_item_exit("0", "← Назад")
             _box_bottom()
-            try:
-                input(f"{CYAN}Нажмите Enter...{NC}")
-            except KeyboardInterrupt:
-                pass
+            _pause()
         elif ch == "6":
-            try:
-                confirm = input(f"{YELLOW}Удалить Hysteria2? [y/N]:{NC} ").strip().lower()
-            except KeyboardInterrupt:
-                continue
-            if confirm == "y":
+            confirm = _box_ask(f"{YELLOW}Удалить Hysteria2? [y/N]{NC}").lower()
+            if confirm in ("y", "yes", "д", "да"):
                 h2_exit_remove()
-                input(f"\n{CYAN}Нажмите Enter...{NC}")
+                _pause()
         elif ch == "7":
             _interactive_remote_status()
         elif ch in ("Q", ""):
@@ -828,45 +832,51 @@ def do_h2_exit_menu() -> None:
 
 
 def _interactive_local_install() -> None:
-    print()
-    try:
-        raw_ports = input(
-            f"  UDP-порт(ы) [{CYAN}443{NC}] (несколько через запятую): "
-        ).strip()
-        ports = [int(p.strip()) for p in raw_ports.split(",") if p.strip().isdigit()] \
-            if raw_ports else [443]
-
-        domain = input(f"  {CYAN}Домен для TLS-сертификата{NC} (пусто = самоподписанный): ").strip()
-        raw_pass = input(f"  {CYAN}Пароль аутентификации{NC} (пусто = авто): ").strip()
-    except KeyboardInterrupt:
-        return
+    _box_top("💻  УСТАНОВКА HYSTERIA2 (ЛОКАЛЬНО, ЭТА НОДА)")
+    _box_row()
+    _box_kv("UDP-порт(ы)", "443 (несколько через запятую)")
+    _box_kv("Домен для TLS", "пусто = самоподписанный сертификат")
+    _box_kv("Пароль аутентификации", "пусто = сгенерировать автоматически")
+    _box_bottom()
+    raw_ports = _box_ask("UDP-порт(ы)", "443")
+    ports = [int(p.strip()) for p in raw_ports.split(",") if p.strip().isdigit()] \
+        if raw_ports else [443]
+    domain = _box_ask("Домен для TLS-сертификата (пусто = самоподписанный)")
+    raw_pass = _box_ask("Пароль аутентификации (пусто = авто)")
 
     auth = raw_pass or secrets.token_urlsafe(24)
     h2_exit_install(ports=ports, auth_password=auth, domain=domain)
-    input(f"\n{BLUE}Нажмите Enter...{NC}")
+    _pause()
 
 
 def _interactive_remote_install() -> None:
-    print()
-    try:
-        host = input(f"  {CYAN}IP/домен удалённой Exit-ноды:{NC} ").strip()
-        if not host:
-            return
-        raw_ports = input(f"  {CYAN}UDP-порт(ы){NC} [{CYAN}443{NC}]: ").strip()
-        ports = [int(p.strip()) for p in raw_ports.split(",") if p.strip().isdigit()] \
-            if raw_ports else [443]
-        ssh_key = input(f"  {CYAN}Путь к SSH-ключу{NC} (пусто = пароль): ").strip() or None
-        _sp_raw = input(f"  {CYAN}SSH-порт{NC} [{CYAN}22{NC}]: ").strip()
-        ssh_port = int(_sp_raw) if _sp_raw.isdigit() else 22
-        ssh_pass = getpass.getpass(f"  {CYAN}SSH-пароль{NC} (пусто = ключ): ") if not ssh_key else None
-        raw_pass = input(f"  {CYAN}Пароль H2{NC} (пусто = авто): ").strip()
-    except KeyboardInterrupt:
+    _box_top("💻  УСТАНОВКА HYSTERIA2 НА УДАЛЁННУЮ EXIT-НОДУ (SSH)")
+    _box_row()
+    _box_kv("IP/домен ноды", "адрес удалённой Exit-ноды")
+    _box_kv("UDP-порт(ы)", "443 (несколько через запятую)")
+    _box_kv("SSH-ключ", "путь к ключу (пусто = пароль)")
+    _box_kv("SSH-порт", "22")
+    _box_kv("Пароль H2", "пусто = сгенерировать автоматически")
+    _box_bottom()
+    host = _box_ask("IP/домен удалённой Exit-ноды")
+    if not host:
         return
+    raw_ports = _box_ask("UDP-порт(ы)", "443")
+    ports = [int(p.strip()) for p in raw_ports.split(",") if p.strip().isdigit()] \
+        if raw_ports else [443]
+    ssh_key = _box_ask("Путь к SSH-ключу (пусто = пароль)") or None
+    _sp_raw = _box_ask("SSH-порт", "22")
+    ssh_port = int(_sp_raw) if _sp_raw.isdigit() else 22
+    try:
+        ssh_pass = getpass.getpass("  SSH-пароль (пусто = ключ): ") if not ssh_key else None
+    except (EOFError, KeyboardInterrupt):
+        ssh_pass = None
+    raw_pass = _box_ask("Пароль H2 (пусто = авто)")
 
     auth = raw_pass or secrets.token_urlsafe(24)
     h2_exit_remote_install(host, ssh_key=ssh_key, ssh_pass=ssh_pass,
                             ports=ports, auth_password=auth, ssh_port=ssh_port)
-    input(f"\n{BLUE}Нажмите Enter...{NC}")
+    _pause()
 
 
 """

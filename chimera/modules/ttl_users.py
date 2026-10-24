@@ -394,6 +394,73 @@ def _ttl_cron_active() -> bool:
     return TTL_CRON_FILE.exists()
 
 
+def _pause() -> None:
+    """Пауза после действия; EOF/Ctrl+C безопасны (канон icmp_gate._ig_pause)."""
+    core = _core_module()
+    DIM                      = core.DIM
+    NC                       = core.NC
+    try:
+        input(f"{DIM}Enter - назад в меню...{NC}")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def _ttl_pick(items, title, prompt="Номер (Enter = отмена)"):
+    """
+    Рамочный выбор из списка (канон пикера entry_mirrors / awg_diagnose).
+    items: список пар (label, payload). Возвращает payload или None.
+    Enter/Q/EOF = отмена; неверный номер = карточка об ошибке + None.
+    """
+    core = _core_module()
+    DIM                      = core.DIM
+    NC                       = core.NC
+    RED                      = core.RED
+    _box_ask                 = core._box_ask
+    _box_bottom              = core._box_bottom
+    _box_item                = core._box_item
+    _box_row                 = core._box_row
+    _box_sep                 = core._box_sep
+    _box_top                 = core._box_top
+
+    _box_top(title)
+    _box_row()
+    for i, (label, _payload) in enumerate(items, 1):
+        _box_item(str(i), label)
+    _box_sep()
+    _box_item("Q", f"{DIM}Отмена (Enter){NC}")
+    _box_bottom()
+    raw = _box_ask(prompt)
+    if not raw or raw.lower() in ("q", "й"):
+        return None
+    if raw.isdigit() and 1 <= int(raw) <= len(items):
+        return items[int(raw) - 1][1]
+    _box_top(title)
+    _box_row()
+    _box_row(f"  {RED}Неверный номер: {raw}{NC}")
+    _box_bottom()
+    return None
+
+
+def _ttl_ask_days(title="СРОК ДЕЙСТВИЯ (ДНИ)"):
+    """Ввод количества дней 1-3650, EOF-безопасно, до 5 попыток. None = отмена."""
+    core = _core_module()
+    RED                      = core.RED
+    NC                       = core.NC
+    _box_ask                 = core._box_ask
+    _box_bottom              = core._box_bottom
+    _box_row                 = core._box_row
+    _box_top                 = core._box_top
+    for _ in range(5):
+        raw = _box_ask("Количество дней (1-3650)")
+        if raw.isdigit() and 1 <= int(raw) <= 3650:
+            return int(raw)
+        _box_top(title)
+        _box_row()
+        _box_row(f"  {RED}Нужно целое число от 1 до 3650.{NC}")
+        _box_bottom()
+    return None
+
+
 # ── меню управления ───────────────────────────────────────────────────────────
 
 def do_manage_ttl_users() -> None:
@@ -409,6 +476,10 @@ def do_manage_ttl_users() -> None:
     _box_item   = core._box_item
     _box_back   = core._box_back
     _box_bottom = core._box_bottom
+    _box_ask    = core._box_ask
+    _box_ok     = core._box_ok
+    _box_warn   = core._box_warn
+    _box_kv     = core._box_kv
     info    = core.info
     warn    = core.warn
     success = core.success
@@ -500,299 +571,298 @@ def do_manage_ttl_users() -> None:
         _box_back()
         _box_bottom()
 
-        try:
-            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
-        except KeyboardInterrupt:
-            break
+        ch = _box_ask("Выбор").strip().lower()
 
         # ── 1: Назначить TTL ──────────────────────────────────────────────
         if ch == "1":
-            print()
             if not users:
-                warn("Нет пользователей. Сначала добавьте через менеджер пользователей.")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("НАЗНАЧЕНИЕ TTL")
+                _box_row()
+                _box_warn("Нет пользователей. Сначала добавьте через менеджер пользователей.")
+                _box_bottom()
+                _pause()
                 continue
 
             # Показываем только тех, у кого нет TTL
             no_ttl = [u for u in users if u.get("email") not in data]
             if not no_ttl:
-                warn("У всех пользователей уже есть TTL.")
-                info("Используйте [2] для продления или [3] чтобы снять ограничение.")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("НАЗНАЧЕНИЕ TTL")
+                _box_row()
+                _box_warn("У всех пользователей уже есть TTL.")
+                _box_row()
+                _box_row(f"  {DIM}Используйте [2] для продления или [3] чтобы снять ограничение.{NC}")
+                _box_bottom()
+                _pause()
                 continue
 
-            _box_top("Выбор пользователя")
-            for i, u in enumerate(no_ttl, 1):
-                _box_row(
-                    f"  {DIM}[{NC}{BOLD}{i}{NC}{DIM}]{NC}"
-                    f"  {u.get('name', u.get('email', '—')):<20}"
-                    f"  {DIM}{u.get('email','')}{NC}"
-                )
-            _box_bottom()
-            raw = input(f"  Номер: ").strip()
-            if not (raw.isdigit() and 1 <= int(raw) <= len(no_ttl)):
-                warn("Неверный номер")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+            items = [
+                (f"{u.get('name', u.get('email', '-')):<20}  {DIM}{u.get('email','')}{NC}", u)
+                for u in no_ttl
+            ]
+            target = _ttl_pick(items, "НАЗНАЧЕНИЕ TTL: ВЫБОР ПОЛЬЗОВАТЕЛЯ")
+            if not target:
                 continue
-            target = no_ttl[int(raw) - 1]
             email  = target.get("email", "")
 
-            print()
             presets = {"1": 1, "2": 3, "3": 7, "4": 14, "5": 30, "6": 90}
-            _box_top(f"Установить срок действия для: {email}")
+            _box_top(f"УСТАНОВИТЬ СРОК ДЕЙСТВИЯ ДЛЯ: {email}")
+            _box_row()
             for k, v in presets.items():
                 _box_item(k, f"{v} дней")
             _box_item("7", "Ввести своё количество дней")
             _box_bottom()
-            raw2 = input(f"  Выбор: ").strip()
+            raw2 = _box_ask("Выбор")
 
             if raw2 in presets:
                 days = presets[raw2]
             elif raw2 == "7":
-                d = input("  Количество дней (1–3650): ").strip()
-                if not (d.isdigit() and 1 <= int(d) <= 3650):
-                    warn("Неверное значение")
-                    input(f"{BLUE}Нажмите Enter...{NC}")
+                days = _ttl_ask_days(f"СРОК ДЕЙСТВИЯ ДЛЯ: {email}")
+                if not days:
+                    info("Отмена")
+                    _pause()
                     continue
-                days = int(d)
             else:
-                warn("Отмена")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                info("Отмена")
+                _pause()
                 continue
 
             _ttl_set(email, days)
 
             # Устанавливаем cron если не был
             if not cron_ok:
-                info("Cron-агент ещё не установлен — устанавливаю автоматически...")
+                info("Cron-агент ещё не установлен - устанавливаю автоматически...")
                 _ttl_install_cron()
 
-            exp = _ttl_expires_str(data.get(email, {}).get("expires_at", ""))
             # Перечитываем после _ttl_set
             data = _ttl_load()
             exp  = _ttl_expires_str(data.get(email, {}).get("expires_at", ""))
-            success(
-                f"TTL назначен: {email} → {days} дней (осталось: {exp})"
-            )
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _box_top("НАЗНАЧЕНИЕ TTL")
+            _box_row()
+            _box_ok(f"TTL назначен: {email} -> {days} дней (осталось: {exp})")
+            _box_bottom()
+            _pause()
 
         # ── 2: Продлить / изменить ────────────────────────────────────────
         elif ch == "2":
-            print()
             if not data:
-                warn("Нет TTL-пользователей")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("ПРОДЛЕНИЕ / ИЗМЕНЕНИЕ СРОКА")
+                _box_row()
+                _box_warn("Нет TTL-пользователей")
+                _box_bottom()
+                _pause()
                 continue
 
-            emails = list(data.keys())
-            _box_top("Выбор пользователя")
-            for i, e in enumerate(emails, 1):
-                rec  = data[e]
-                left = _ttl_expires_str(rec.get("expires_at", ""))
-                _box_row(f"  {DIM}[{NC}{BOLD}{i}{NC}{DIM}]{NC}  {e:<30}  осталось: {left}")
-            _box_row()
-            _box_bottom()
-
-            raw = input("  Номер пользователя: ").strip()
-            if not (raw.isdigit() and 1 <= int(raw) <= len(emails)):
-                warn("Неверный номер")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+            items = [
+                (f"{e:<30}  осталось: {_ttl_expires_str(data[e].get('expires_at', ''))}", e)
+                for e in data
+            ]
+            email = _ttl_pick(items, "ПРОДЛЕНИЕ СРОКА: ВЫБОР ПОЛЬЗОВАТЕЛЯ")
+            if not email:
                 continue
-            email = emails[int(raw) - 1]
 
-            print()
             presets = {"1": 1, "2": 3, "3": 7, "4": 14, "5": 30, "6": 90}
-            _box_top(f"Новый срок от текущего момента: {email}")
+            _box_top(f"НОВЫЙ СРОК ОТ ТЕКУЩЕГО МОМЕНТА: {email}")
+            _box_row()
             for k, v in presets.items():
                 _box_item(k, f"{v} дней с сейчас")
             _box_item("7", "Ввести количество дней")
             _box_bottom()
-            raw2 = input("  Выбор: ").strip()
+            raw2 = _box_ask("Выбор")
 
             if raw2 in presets:
                 days = presets[raw2]
             elif raw2 == "7":
-                d = input("  Дней (1–3650): ").strip()
-                if not (d.isdigit() and 1 <= int(d) <= 3650):
-                    warn("Неверное значение")
-                    input(f"{BLUE}Нажмите Enter...{NC}")
+                days = _ttl_ask_days(f"НОВЫЙ СРОК ДЛЯ: {email}")
+                if not days:
+                    info("Отмена")
+                    _pause()
                     continue
-                days = int(d)
             else:
-                warn("Отмена")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                info("Отмена")
+                _pause()
                 continue
 
             _ttl_set(email, days)
             # Если пользователь был заблокирован — снимаем блокировку
             if _ttl_is_blocked(email):
                 _ttl_unblock_user(email)
-                success(f"Блокировка снята, срок продлён: {email} → {days} дней")
+                _box_top("ПРОДЛЕНИЕ СРОКА")
+                _box_row()
+                _box_ok(f"Блокировка снята, срок продлён: {email} -> {days} дней")
+                _box_bottom()
             else:
                 data = _ttl_load()
                 exp  = _ttl_expires_str(data.get(email, {}).get("expires_at", ""))
-                success(f"Срок обновлён: {email} → {days} дней (осталось: {exp})")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("ПРОДЛЕНИЕ СРОКА")
+                _box_row()
+                _box_ok(f"Срок обновлён: {email} -> {days} дней (осталось: {exp})")
+                _box_bottom()
+            _pause()
 
         # ── 3: Снять TTL ──────────────────────────────────────────────────
         elif ch == "3":
-            print()
             if not data:
-                warn("Нет TTL-пользователей")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("СНЯТИЕ TTL")
+                _box_row()
+                _box_warn("Нет TTL-пользователей")
+                _box_bottom()
+                _pause()
                 continue
 
-            emails = list(data.keys())
-            _box_top("Выбор пользователя")
-            for i, e in enumerate(emails, 1):
+            items = []
+            for e in data:
                 left = _ttl_expires_str(data[e].get("expires_at", ""))
                 blk  = f"  {RED}[заблокирован]{NC}" if _ttl_is_blocked(e) else ""
-                _box_row(f"  {DIM}[{NC}{BOLD}{i}{NC}{DIM}]{NC}  {e:<30}  осталось: {left}{blk}")
-            _box_row()
-            _box_bottom()
-
-            raw = input("  Номер: ").strip()
-            if not (raw.isdigit() and 1 <= int(raw) <= len(emails)):
-                warn("Неверный номер")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                items.append((f"{e:<30}  осталось: {left}{blk}", e))
+            email = _ttl_pick(items, "СНЯТИЕ TTL: ВЫБОР ПОЛЬЗОВАТЕЛЯ")
+            if not email:
                 continue
-            email = emails[int(raw) - 1]
 
-            ans = input(
-                f"  {YELLOW}Сделать '{email}' постоянным (TTL будет снят, блокировка снята)? [y/N]:{NC} "
-            ).strip().lower()
-            if ans == "y":
+            _box_top("СНЯТИЕ TTL")
+            _box_row()
+            _box_kv("Пользователь", email)
+            _box_row()
+            _box_row(f"  {YELLOW}Станет постоянным: TTL и блокировка будут сняты.{NC}")
+            _box_bottom()
+            ans = _box_ask(f"Сделать '{email}' постоянным? [y/N]").lower()
+            if ans in ("y", "yes", "д", "да"):
                 # Снимаем блокировку если была
                 if _ttl_is_blocked(email):
                     _ttl_unblock_user(email)
                 _ttl_remove(email)
-                success(f"TTL снят: {email} теперь постоянный пользователь")
+                _box_top("СНЯТИЕ TTL")
+                _box_row()
+                _box_ok(f"TTL снят: {email} теперь постоянный пользователь")
+                _box_bottom()
             else:
                 info("Отмена")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── 4: Проверить прямо сейчас ─────────────────────────────────────
         elif ch == "4":
-            print()
             info("Проверка истёкших TTL-пользователей...")
             n = _ttl_check_and_expire()
+            _box_top("ПРОВЕРКА ИСТЁКШИХ")
+            _box_row()
             if n:
-                success(f"Заблокировано {n} пользователей с истёкшим сроком")
+                _box_ok(f"Заблокировано {n} пользователей с истёкшим сроком")
             else:
-                info("Истёкших пользователей не найдено")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_row(f"  {DIM}Истёкших пользователей не найдено{NC}")
+            _box_bottom()
+            _pause()
 
         # ── 5: Cron вкл/выкл ─────────────────────────────────────────────
         elif ch == "5":
-            print()
             if cron_ok:
-                ans = input(
-                    f"  {YELLOW}Отключить авто-проверку TTL? [y/N]:{NC} "
-                ).strip().lower()
-                if ans == "y":
+                ans = _box_ask("Отключить авто-проверку TTL? [y/N]").lower()
+                if ans in ("y", "yes", "д", "да"):
                     _ttl_remove_cron()
             else:
                 _ttl_install_cron()
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── 6: Заблокировать вручную ──────────────────────────────────────
         elif ch == "6":
-            print()
             # Показываем незаблокированных TTL-пользователей
             active_ttl = [
                 e for e in data
                 if not _ttl_is_blocked(e)
             ]
             if not active_ttl:
-                warn("Нет активных TTL-пользователей для блокировки")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("РУЧНАЯ БЛОКИРОВКА")
+                _box_row()
+                _box_warn("Нет активных TTL-пользователей для блокировки")
+                _box_bottom()
+                _pause()
                 continue
 
-            _box_top("Заблокировать пользователя")
-            for i, e in enumerate(active_ttl, 1):
-                left = _ttl_expires_str(data[e].get("expires_at", ""))
-                _box_row(f"  {DIM}[{NC}{BOLD}{i}{NC}{DIM}]{NC}  {e:<30}  осталось: {left}")
+            items = [
+                (f"{e:<30}  осталось: {_ttl_expires_str(data[e].get('expires_at', ''))}", e)
+                for e in active_ttl
+            ]
+            email = _ttl_pick(items, "БЛОКИРОВКА: ВЫБОР ПОЛЬЗОВАТЕЛЯ")
+            if not email:
+                continue
+
+            _box_top("РУЧНАЯ БЛОКИРОВКА")
             _box_row()
+            _box_kv("Пользователь", email)
+            _box_row()
+            _box_row(f"  {YELLOW}Xray откажет ему в соединении.{NC}")
             _box_bottom()
-
-            raw = input("  Номер пользователя: ").strip()
-            if not (raw.isdigit() and 1 <= int(raw) <= len(active_ttl)):
-                warn("Неверный номер")
-                input(f"{BLUE}Нажмите Enter...{NC}")
-                continue
-            email = active_ttl[int(raw) - 1]
-
-            ans = input(
-                f"  {YELLOW}Заблокировать '{email}'? Xray откажет ему в соединении. [y/N]:{NC} "
-            ).strip().lower()
-            if ans == "y":
+            ans = _box_ask(f"Заблокировать '{email}'? [y/N]").lower()
+            if ans in ("y", "yes", "д", "да"):
                 ok = _ttl_block_user(email, reason="manual")
+                _box_top("РУЧНАЯ БЛОКИРОВКА")
+                _box_row()
                 if ok:
-                    success(f"Пользователь {email} заблокирован. Продлите TTL [2] чтобы разблокировать.")
+                    _box_ok(f"Пользователь {email} заблокирован.")
+                    _box_row()
+                    _box_row(f"  {DIM}Продлите TTL [2] чтобы разблокировать.{NC}")
                 else:
-                    warn(f"Не удалось заблокировать: {email} не найден в базе пользователей")
+                    _box_warn(f"Не удалось заблокировать: {email} не найден в базе пользователей")
+                _box_bottom()
             else:
                 info("Отмена")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── 7: Разблокировать ─────────────────────────────────────────────
         elif ch == "7":
-            print()
             blocked_ttl = [
                 e for e in data
                 if _ttl_is_blocked(e)
             ]
             if not blocked_ttl:
-                info("Нет заблокированных пользователей")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("РАЗБЛОКИРОВКА")
+                _box_row()
+                _box_row(f"  {DIM}Нет заблокированных пользователей{NC}")
+                _box_bottom()
+                _pause()
                 continue
 
-            _box_top("Разблокировать пользователя")
-            for i, e in enumerate(blocked_ttl, 1):
-                rec  = data[e]
-                iso  = rec.get("expires_at", "")
+            items = []
+            for e in blocked_ttl:
+                iso  = data[e].get("expires_at", "")
                 exp_expired = _ttl_is_expired(iso)
                 left = _ttl_expires_str(iso)
                 left_c = f"{RED}{left}{NC}" if exp_expired else f"{YELLOW}{left}{NC}"
-                note = f"  {RED}срок истёк — рекомендуется продлить [2]{NC}" if exp_expired else ""
-                _box_row(f"  {DIM}[{NC}{BOLD}{i}{NC}{DIM}]{NC}  {e:<30}  {left_c}{note}")
-            _box_row()
-            _box_bottom()
-
-            raw = input("  Номер пользователя: ").strip()
-            if not (raw.isdigit() and 1 <= int(raw) <= len(blocked_ttl)):
-                warn("Неверный номер")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                note = f"  {RED}(срок истёк){NC}" if exp_expired else ""
+                items.append((f"{e:<30}  {left_c}{note}", e))
+            email = _ttl_pick(items, "РАЗБЛОКИРОВКА: ВЫБОР ПОЛЬЗОВАТЕЛЯ")
+            if not email:
                 continue
-            email = blocked_ttl[int(raw) - 1]
 
             # Предупреждаем если срок уже истёк
             rec = data.get(email, {})
             if _ttl_is_expired(rec.get("expires_at", "")):
-                warn(f"Срок действия {email} уже истёк. После разблокировки он снова")
-                warn("заблокируется при следующей проверке cron (каждые 30 мин).")
-                warn("Рекомендуется продлить срок через [2] или снять TTL через [3].")
-                ans = input(
-                    f"  {YELLOW}Всё равно разблокировать временно? [y/N]:{NC} "
-                ).strip().lower()
+                _box_top("РАЗБЛОКИРОВКА")
+                _box_row()
+                _box_warn(f"Срок действия {email} уже истёк.")
+                _box_row()
+                _box_row(f"  {DIM}После разблокировки он снова заблокируется при{NC}")
+                _box_row(f"  {DIM}следующей проверке cron (каждые 30 мин).{NC}")
+                _box_row(f"  {DIM}Рекомендуется продлить срок через [2] или снять TTL через [3].{NC}")
+                _box_bottom()
+                ans = _box_ask("Всё равно разблокировать временно? [y/N]").lower()
             else:
-                ans = input(
-                    f"  {YELLOW}Разблокировать '{email}'? [y/N]:{NC} "
-                ).strip().lower()
+                ans = _box_ask(f"Разблокировать '{email}'? [y/N]").lower()
 
-            if ans == "y":
+            if ans in ("y", "yes", "д", "да"):
                 # Сбрасываем флаг blocked в TTL-записи
                 if email in data:
                     data[email].pop("blocked", None)
                     _ttl_save(data)
                 ok = _ttl_unblock_user(email)
+                _box_top("РАЗБЛОКИРОВКА")
+                _box_row()
                 if ok:
-                    success(f"Пользователь {email} разблокирован")
+                    _box_ok(f"Пользователь {email} разблокирован")
                 else:
-                    warn(f"Не удалось разблокировать: {email} не найден в базе")
+                    _box_warn(f"Не удалось разблокировать: {email} не найден в базе")
+                _box_bottom()
             else:
                 info("Отмена")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         elif ch in ("q", "Q", ""):
             break
