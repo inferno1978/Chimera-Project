@@ -3088,19 +3088,96 @@ def _install_autoupdate_service() -> None:
         chmod 600 "$LOG" 2>/dev/null || true
         log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG" 2>/dev/null || true; }
 
+        # v3 (24.10.2026): атомарная замена бинарника tmp+mv — прямой cp
+        # поверх РАБОТАЮЩЕГО ELF падает ETXTBSY («Text file busy»), а
+        # конструкция «cp && chmod» не роняет set-e (&&-исключение), из-за
+        # чего обновление молча срывалось каждую ночь, а скрипт рапортовал
+        # ложный успех «обновлён vX → vX»; пост-проверка версии после
+        # замены + откат; SHA256 по digest ассета из того же GitHub API
+        # (checksums.txt в релизах XTLS не существует — прежний отдельный
+        # URL вечно давал 404 и верификация тихо отключалась);
+        # TG-уведомление об ошибках с анти-спамом (одна ошибка на версию).
+
         log "=== Проверка обновлений Xray-core ==="
         XRAY_BIN=$(command -v xray 2>/dev/null || echo /usr/local/bin/xray)
         [[ ! -x "$XRAY_BIN" ]] && log "ERROR: Xray не найден" && exit 1
+
+        INSTALLER=$(cat /var/lib/xray-installer/installer_path 2>/dev/null || echo "")
+        TG_STAMP="/var/lib/xray-installer/autoupdate_tg_stamp"
+
+        # Анти-спам TG: один и тот же вид ошибки для той же целевой версии
+        # отправляется ОДИН раз; успешное обновление сбрасывает штамп.
+        tg_error_once() {
+            local key="$1" text="$2" last=""
+            if [[ -s "$TG_STAMP" ]]; then
+                last=$(cat "$TG_STAMP" 2>/dev/null || true)
+            fi
+            if [[ "$last" == "$key" ]]; then
+                log "INFO: TG-ошибка [$key] уже отправлялась — не дублируем"
+                return 0
+            fi
+            if [[ -n "$INSTALLER" ]]; then
+                python3 "$INSTALLER" --tg-event xray_down \
+                    "🔴 Autoupdate: $text" 2>/dev/null || true
+            fi
+            mkdir -p /var/lib/xray-installer 2>/dev/null || true
+            echo "$key" > "$TG_STAMP" 2>/dev/null || true
+            return 0
+        }
+
+        # Атомарная замена бинарника: cp во временный файл рядом + mv
+        # (rename). rename(2) не трогает inode работающего процесса —
+        # ETXTBSY невозможен, окно отсутствия файла тоже (в отличие от
+        # unlink+cp). Источник: новый бинарник из zip или бэкап при откате.
+        xray_install_bin() {   # $1 = источник
+            local src="$1" tmp="${XRAY_BIN}.new"
+            if ! cp "$src" "$tmp" 2>/dev/null; then
+                log "ERROR: cp $src → $tmp не удался"
+                return 1
+            fi
+            if ! chmod 755 "$tmp" 2>/dev/null; then
+                rm -f "$tmp" 2>/dev/null || true
+                log "ERROR: chmod $tmp не удался"
+                return 1
+            fi
+            if ! mv -f "$tmp" "$XRAY_BIN" 2>/dev/null; then
+                rm -f "$tmp" 2>/dev/null || true
+                log "ERROR: mv $tmp → $XRAY_BIN не удался (замена бинарника)"
+                return 1
+            fi
+            return 0
+        }
 
         CURRENT_RAW=$("$XRAY_BIN" version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         CURRENT="v${CURRENT_RAW:-0.0.0}"
         log "Установлена: $CURRENT"
 
-        LATEST=$(curl -fsSL --connect-timeout 15 \
-            "https://api.github.com/repos/XTLS/Xray-core/releases/latest" \
-            2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('tag_name',''))" 2>/dev/null || true)
+        # Архитектура нужна до API-вызова: digest ищем для конкретного zip.
+        ARCH=$(uname -m)
+        case "$ARCH" in
+            x86_64)  XRAY_ARCH="64" ;;
+            aarch64) XRAY_ARCH="arm64-v8a" ;;
+            armv7*)  XRAY_ARCH="arm32-v7a" ;;
+            *) log "ERROR: Архитектура $ARCH не поддерживается" && exit 1 ;;
+        esac
+        ZIP_NAME="Xray-linux-${XRAY_ARCH}.zip"
+
+        # Один API-вызов отдаёт и тег, и sha256-digest каждого ассета.
+        API_JSON=$(curl -fsSL --connect-timeout 15 \
+            "https://api.github.com/repos/XTLS/Xray-core/releases/latest" 2>/dev/null || true)
+        LATEST=$(printf '%s' "$API_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('tag_name',''))" 2>/dev/null || true)
         [[ -z "$LATEST" ]] && log "WARN: Не удалось получить latest" && exit 0
-        log "Последняя: $LATEST"
+        ZIP_DIGEST=$(printf '%s' "$API_JSON" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for a in d.get('assets', []):
+        if a.get('name') == '${ZIP_NAME}':
+            print(a.get('digest', ''))
+            break
+except Exception:
+    pass" 2>/dev/null || true)
+        log "Последняя: $LATEST (digest: ${ZIP_DIGEST:-нет})"
 
         # Апгрейд — ТОЛЬКО если установленная версия СТАРШЕ stable-latest
         # (сравнение «старше», не «равно»). Прежняя проверка на равенство
@@ -3114,44 +3191,36 @@ def _install_autoupdate_service() -> None:
         [[ "$CUR_N" > "$LAT_N" ]] && log "INFO: Установленная $CURRENT новее stable-latest $LATEST — без изменений (авто-даунгрейд исключён)" && exit 0
 
         log "INFO: Обновление $CURRENT → $LATEST (установленная старше stable)"
-        ARCH=$(uname -m)
-        case "$ARCH" in
-            x86_64)  XRAY_ARCH="64" ;;
-            aarch64) XRAY_ARCH="arm64-v8a" ;;
-            armv7*)  XRAY_ARCH="arm32-v7a" ;;
-            *) log "ERROR: Архитектура $ARCH не поддерживается" && exit 1 ;;
-        esac
 
         mkdir -p "$BACKUP_DIR"
         BACKUP="${BACKUP_DIR}/xray_${CURRENT}_$(date +%Y%m%d%H%M%S)"
         cp "$XRAY_BIN" "$BACKUP" && chmod 755 "$BACKUP" || true
         ls -t "${BACKUP_DIR}"/xray_* 2>/dev/null | tail -n +6 | xargs rm -f 2>/dev/null || true
 
-        ZIP_NAME="Xray-linux-${XRAY_ARCH}.zip"
         ZIP_URL="https://github.com/XTLS/Xray-core/releases/download/${LATEST}/${ZIP_NAME}"
         ZIP_TMP=$(mktemp /tmp/xray_au.XXXXXX.zip)
         EXTRACT_DIR=$(mktemp -d /tmp/xray_au_ex.XXXXXX)
         trap 'rm -f "$ZIP_TMP" 2>/dev/null; rm -rf "$EXTRACT_DIR" 2>/dev/null' EXIT
 
-        curl -fsSL --connect-timeout 30 --retry 3 "$ZIP_URL" -o "$ZIP_TMP" 2>/dev/null || \
-            { log "ERROR: Ошибка загрузки"; exit 1; }
+        if ! curl -fsSL --connect-timeout 30 --retry 3 "$ZIP_URL" -o "$ZIP_TMP" 2>/dev/null; then
+            log "ERROR: Ошибка загрузки $ZIP_URL"
+            tg_error_once "dl:$LATEST" "не удалось скачать $ZIP_NAME ($LATEST) — обновление отменено"
+            exit 1
+        fi
 
-        CHKS_TMP=$(mktemp /tmp/xray_chk.XXXXXX.txt)
-        CHKS_URL="https://github.com/XTLS/Xray-core/releases/download/${LATEST}/checksums.txt"
-        if curl -fsSL --connect-timeout 10 "$CHKS_URL" -o "$CHKS_TMP" 2>/dev/null && [[ -s "$CHKS_TMP" ]]; then
-            EXPECTED=$(grep -E "^[0-9a-f]{64}[[:space:]]+\*?${ZIP_NAME}$" "$CHKS_TMP" | awk '{print $1}' || true)
-            rm -f "$CHKS_TMP"
-            if [[ -n "$EXPECTED" ]]; then
-                ACTUAL=$(sha256sum "$ZIP_TMP" | awk '{print $1}')
-                if [[ "$ACTUAL" != "$EXPECTED" ]]; then
-                    log "ERROR: SHA256 не совпал!"
-                    exit 1
-                fi
-                log "INFO: SHA256 OK"
+        # SHA256 по digest ассета из того же API-ответа (checksums.txt в
+        # релизах XTLS отсутствует — прежний URL всегда 404).
+        if [[ -n "$ZIP_DIGEST" ]]; then
+            EXPECTED="${ZIP_DIGEST#sha256:}"
+            ACTUAL=$(sha256sum "$ZIP_TMP" | awk '{print $1}')
+            if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+                log "ERROR: SHA256 не совпал! Ожидался $EXPECTED, получен $ACTUAL"
+                tg_error_once "sha:$LATEST" "SHA256 $ZIP_NAME ($LATEST) не совпал — обновление отменено"
+                exit 1
             fi
+            log "INFO: SHA256 OK (digest GitHub API)"
         else
-            rm -f "$CHKS_TMP" 2>/dev/null || true
-            log "WARN: checksums.txt недоступен — без верификации"
+            log "WARN: digest ассета в API недоступен — без верификации"
         fi
 
         unzip -o "$ZIP_TMP" -d "$EXTRACT_DIR" &>/dev/null || true
@@ -3162,11 +3231,21 @@ def _install_autoupdate_service() -> None:
         [[ -f /etc/xray/config.json ]] && CFG_PATH="/etc/xray/config.json"
         [[ -z "$CFG_PATH" && -f /usr/local/etc/xray/config.json ]] && CFG_PATH="/usr/local/etc/xray/config.json"
         if [[ -n "$CFG_PATH" ]]; then
-            "$NEW_BIN" run -test -config "$CFG_PATH" &>/dev/null || \
-                { log "ERROR: Тест конфига провален — откат"; exit 1; }
+            TEST_OUT=$("$NEW_BIN" run -test -config "$CFG_PATH" 2>&1) && TEST_RC=0 || TEST_RC=$?
+            if [[ "$TEST_RC" -ne 0 ]]; then
+                TEST_ERR=$(printf '%s' "$TEST_OUT" | grep -vE '^[[:space:]]*$' | tail -1 | cut -c1-150)
+                log "ERROR: Конфиг не прошёл тест новым бинарником $LATEST — обновление отменено (бинарник не заменялся): $TEST_ERR"
+                tg_error_once "cfg:$LATEST" "конфиг не прошёл тест бинарником $LATEST — обновление отменено. Причина: $TEST_ERR"
+                exit 1
+            fi
+            unset TEST_OUT
         fi
 
-        cp "$NEW_BIN" "$XRAY_BIN" && chmod 755 "$XRAY_BIN"
+        # Атомарная замена (см. xray_install_bin): прямой cp здесь падал
+        # ETXTBSY на работающем xray, && глотал ошибку — обновления не
+        # происходили, а отчёт об успехе отправлялся (кейс «v26.10.17 →
+        # v26.10.17» на всём флоте).
+        xray_install_bin "$NEW_BIN" || exit 1
 
         # Не перезатираем runetfreedom geo-файлы стандартными из zip XTLS.
         for DAT_FILE in "${EXTRACT_DIR}"/*.dat; do
@@ -3202,17 +3281,29 @@ def _install_autoupdate_service() -> None:
 
         if [[ "$XRAY_OK" -eq 0 ]]; then
             log "ERROR: Xray не запустился за 15 сек — откат к $CURRENT"
-            cp "$BACKUP" "$XRAY_BIN" && chmod 755 "$XRAY_BIN" || true
+            xray_install_bin "$BACKUP" || true
             systemctl reset-failed xray 2>/dev/null || true
             systemctl restart xray 2>/dev/null || true
             python3 "$(readlink -f "$0" 2>/dev/null || echo "$0")" --tg-event xray_down "🔴 Autoupdate ОШИБКА: Xray не запустился после $LATEST — откат к $CURRENT" 2>/dev/null || true
             exit 1
         fi
 
+        # Пост-проверка: бинарник обязан сообщать целевую версию — иначе
+        # это не успех (замена не произошла/не та сборка) и нужен откат.
         NEW_VER=$("$XRAY_BIN" version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-        log "OK: Обновлён $CURRENT → v${NEW_VER:-?}. Бэкап: $BACKUP"
-        INSTALLER=$(cat /var/lib/xray-installer/installer_path 2>/dev/null || echo "")
-        [[ -n "$INSTALLER" ]] && python3 "$INSTALLER" --tg-event xray_up "✅ Autoupdate: Xray обновлён $CURRENT → v${NEW_VER:-?}" 2>/dev/null || true
+        NEW_N=$(_norm "v${NEW_VER:-0.0.0}")
+        if [[ -z "$NEW_VER" || "$NEW_N" != "$LAT_N" ]]; then
+            log "ERROR: После замены бинарник сообщает v${NEW_VER:-?}, ожидалось $LATEST — откат к $CURRENT"
+            xray_install_bin "$BACKUP" || true
+            systemctl reset-failed xray 2>/dev/null || true
+            systemctl restart xray 2>/dev/null || true
+            tg_error_once "ver:$LATEST" "после обновления бинарник сообщил v${NEW_VER:-?} вместо $LATEST — откат к $CURRENT"
+            exit 1
+        fi
+
+        log "OK: Обновлён $CURRENT → v${NEW_VER}. Бэкап: $BACKUP"
+        rm -f "$TG_STAMP" 2>/dev/null || true
+        [[ -n "$INSTALLER" ]] && python3 "$INSTALLER" --tg-event xray_up "✅ Autoupdate: Xray обновлён $CURRENT → v${NEW_VER}" 2>/dev/null || true
     """).lstrip())
     agent.chmod(0o700)
 
