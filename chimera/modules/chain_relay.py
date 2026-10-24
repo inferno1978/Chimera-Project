@@ -1523,34 +1523,53 @@ def check_node_full_path(nd: dict,
 # =============================================================================
 #  ИНТЕРАКТИВНОЕ МЕНЮ (Режим B → E → H)
 # =============================================================================
+def _pause() -> None:
+    """Пауза после действия; EOF/Ctrl+C безопасны (канон icmp_gate._ig_pause)."""
+    core = _core_module()
+    DIM   = core.DIM
+    NC    = core.NC
+    try:
+        input(f"{DIM}Enter - назад в меню...{NC}")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
 def _offer_rebuild() -> None:
     """Предложить пересборку конфига Xray после изменения хопов/via."""
     core = _core_module()
-    warn = core.warn
     _rebuild = getattr(core, "_rebuild_and_restart_xray", None)
     if not callable(_rebuild):
         return
-    try:
-        ans = input("  Пересобрать конфиг Xray и перезапустить сейчас? [y/N]: ").strip().lower()
-        if ans == "y":
-            _rebuild("Xray активен — relay-хопы применены")
-    except Exception:
-        pass
+    ans = core._box_ask("Пересобрать конфиг Xray и перезапустить сейчас? [y/N]").lower()
+    if ans in ("y", "yes", "д", "да"):
+        _rebuild("Xray активен - relay-хопы применены")
 
 
 def _hop_from_link() -> Optional[dict]:
     """Новый хоп из vless:// ссылки (парсер ядра parse_vless_link)."""
     core = _core_module()
-    warn = core.warn
-    try:
-        link = input("  Вставьте VLESS-ссылку: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return None
+    DIM      = core.DIM
+    NC       = core.NC
+    _box_ask = core._box_ask
+    _box_bottom = core._box_bottom
+    _box_row = core._box_row
+    _box_top = core._box_top
+    _box_warn = core._box_warn
+
+    _box_top("⛓  ДОБАВЛЕНИЕ ХОПА: ИЗ VLESS-ССЫЛКИ")
+    _box_row()
+    _box_row(f"  {DIM}Вставьте vless:// ссылку хопа (entry-подключение к посреднику).{NC}")
+    _box_row(f"  {DIM}Все поля (host/port/uuid/pbk/sid/sni/fp/flow) подставятся сами.{NC}")
+    _box_bottom()
+    link = _box_ask("Вставьте VLESS-ссылку")
     if not link:
         return None
     parsed = core.parse_vless_link(link)
     if not parsed:
-        warn("Не удалось распарсить ссылку.")
+        _box_top("⛓  ДОБАВЛЕНИЕ ХОПА: ИЗ VLESS-ССЫЛКИ")
+        _box_row()
+        _box_warn("Не удалось распарсить ссылку.")
+        _box_bottom()
         return None
     return {
         "tag": "", "host": parsed["host"], "port": parsed["port"],
@@ -1567,22 +1586,36 @@ def _hop_from_link() -> Optional[dict]:
 def _hop_from_chain_node() -> Optional[dict]:
     """Новый хоп из существующей exit-ноды каскада (копия клиентских полей)."""
     core = _core_module()
+    DIM       = core.DIM
+    NC        = core.NC
+    _box_ask  = core._box_ask
+    _box_bottom = core._box_bottom
+    _box_item = core._box_item
+    _box_row  = core._box_row
+    _box_sep  = core._box_sep
+    _box_top  = core._box_top
+
     nodes = _chain_nodes_from_state()
     if not nodes:
-        core.warn("В каскаде нет exit-нод (state.json: chain_nodes пуст).")
+        _box_top("⛓  ДОБАВЛЕНИЕ ХОПА: ИЗ EXIT-НОДЫ")
+        _box_row()
+        _box_warn("В каскаде нет exit-нод (state.json: chain_nodes пуст).")
+        _box_bottom()
         return None
-    print()
-    for i, nd in enumerate(nodes):
-        print(f"    [{i+1}] {nd.get('host', '?')}:{nd.get('port', 443)}  "
-              f"proto={nd.get('proto', 'reality')}")
-    try:
-        ch = input("  Номер ноды (0 — отмена): ").strip()
-        idx = int(ch) - 1 if ch else -1
-    except ValueError:
-        idx = -2
-    if not (0 <= idx < len(nodes)):
+    _box_top("⛓  ДОБАВЛЕНИЕ ХОПА: ИЗ EXIT-НОДЫ")
+    _box_row()
+    _box_row(f"  {DIM}Хоп получит копию клиентских полей выбранной ноды.{NC}")
+    _box_row()
+    for i, nd in enumerate(nodes, 1):
+        _box_item(str(i), f"{nd.get('host', '?')}:{nd.get('port', 443)}  "
+                          f"{DIM}proto={nd.get('proto', 'reality')}{NC}")
+    _box_sep()
+    _box_item("Q", f"{DIM}Отмена (Enter){NC}")
+    _box_bottom()
+    ch = _box_ask("Номер ноды")
+    if not ch or not ch.isdigit() or not (1 <= int(ch) <= len(nodes)):
         return None
-    nd = nodes[idx]
+    nd = nodes[int(ch) - 1]
     return {
         "tag": "", "host": nd.get("host", ""), "port": nd.get("port", 443),
         "uuid": nd.get("uuid", ""), "pubkey": nd.get("pubkey", ""),
@@ -1614,18 +1647,31 @@ _HOP_FIELDS = [
 
 
 def _hop_manual(hop: Optional[dict] = None) -> Optional[dict]:
-    """Ручной ввод/редактирование полей хопа (по одному, Enter = сохранить)."""
+    """Ручной ввод/редактирование полей хопа (по одному, Enter = сохранить).
+    Канон экспертного диалога Task 11: легенда-рамка с подсказками полей,
+    затем EOF-безопасные промпты _box_ask между рамками."""
+    core = _core_module()
+    DIM          = core.DIM
+    NC           = core.NC
+    _box_ask     = core._box_ask
+    _box_bottom  = core._box_bottom
+    _box_kv      = core._box_kv
+    _box_row     = core._box_row
+    _box_top     = core._box_top
+
     h = dict(hop) if hop else {}
-    print(f"  {getattr(_core_module(), 'DIM', '')}"
-          f"Enter — оставить текущее значение.{getattr(_core_module(), 'NC', '')}")
+    _box_top("⛓  ПОЛЯ ХОПА  (ENTER = ОСТАВИТЬ ТЕКУЩЕЕ)")
+    _box_row()
+    for _key, _label, example in _HOP_FIELDS:
+        _box_kv(_label, example)
+    _box_row()
+    _box_row(f"  {DIM}Введите значения по очереди; пустой Enter - оставить как есть.{NC}")
+    _box_bottom()
     for key, label, example in _HOP_FIELDS:
         cur = h.get(key, "")
         if key == "port":
             cur = str(cur or 443)
-        try:
-            v = input(f"  {label} [{cur or example}]: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            return None
+        v = _box_ask(f"{label} [{cur or example}]")
         if v:
             h[key] = v
         elif key not in h:
@@ -1652,6 +1698,8 @@ def do_chain_relay_menu() -> None:
     _box_info = core._box_info
     _box_warn = core._box_warn
     _box_ok = core._box_ok
+    _box_kv = core._box_kv
+    _box_ask = core._box_ask
     info = core.info
     warn = core.warn
     success = core.success
@@ -1705,23 +1753,21 @@ def do_chain_relay_menu() -> None:
         _box_item_exit("0", "Назад")
         _box_bottom()
 
-        try:
-            ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            break
+        ch = _box_ask("Выбор").strip().lower()
         if ch in ("0", "q", ""):
             break
 
         # ── [A] Добавить хоп ─────────────────────────────────────────────
         elif ch == "a":
-            print()
+            _box_top("⛓  ДОБАВЛЕНИЕ ХОПА")
+            _box_row()
             _box_item("1", "Из VLESS-ссылки")
             _box_item("2", "Из exit-ноды каскада (копия полей)")
             _box_item("3", "Вручную по полям")
-            try:
-                src = input("  Источник [1/2/3]: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                continue
+            _box_sep()
+            _box_item("Q", f"{DIM}Отмена (Enter){NC}")
+            _box_bottom()
+            src = _box_ask("Источник [1/2/3]")
             hop = None
             if src == "1":
                 hop = _hop_from_link()
@@ -1735,143 +1781,194 @@ def do_chain_relay_menu() -> None:
                 continue
             # tag + comment
             default_tag = _slug_tag(hop.get("host", ""), hops)
-            try:
-                t = input(f"  Tag хопа [{default_tag}]: ").strip()
-                hop["tag"] = t or default_tag
-                c = input(f"  Комментарий []: ").strip()
-                if c:
-                    hop["comment"] = c
-            except (EOFError, KeyboardInterrupt):
-                continue
+            hop["tag"] = _box_ask("Tag хопа", default_tag)
+            c = _box_ask("Комментарий")
+            if c:
+                hop["comment"] = c
             errs = validate_hops(hops + [hop])
             if errs:
+                _box_top("⛓  ДОБАВЛЕНИЕ ХОПА")
+                _box_row()
                 for e in errs:
-                    warn(f"  ✗ {e}")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                    _box_warn(f"{e}")
+                _box_bottom()
+                _pause()
                 continue
             hops.append(hop)
             if save_relay_hops(hops):
-                success(f"  ✓ Хоп «{hop['tag']}» добавлен")
+                _box_top("⛓  ДОБАВЛЕНИЕ ХОПА")
+                _box_row()
+                _box_ok(f"Хоп «{hop['tag']}» добавлен")
+                _box_bottom()
                 _offer_rebuild()
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── [E] Изменить хоп ─────────────────────────────────────────────
         elif ch == "e" and hops:
-            try:
-                n = input("  Номер хопа (0 — отмена): ").strip()
-                idx = int(n) - 1 if n else -1
-            except ValueError:
-                idx = -2
-            if not (0 <= idx < len(hops)):
+            _box_top("⛓  ИЗМЕНЕНИЕ ХОПА")
+            _box_row()
+            for i, h in enumerate(hops, 1):
+                en = (f"{GREEN}вкл{NC}" if h.get("enabled", True)
+                      else f"{RED}выкл{NC}")
+                _box_item(str(i), f"{h.get('tag', '?')}  {h.get('host', '?')}:"
+                                  f"{h.get('port', 443)}  [{en}]")
+            _box_sep()
+            _box_item("Q", f"{DIM}Отмена (Enter){NC}")
+            _box_bottom()
+            n = _box_ask("Номер хопа")
+            if not n.isdigit() or not (1 <= int(n) <= len(hops)):
                 continue
+            idx = int(n) - 1
             hop = hops[idx]
             _cur = "вкл" if hop.get("enabled", True) else "выкл"
-            try:
-                mode = input(
-                    f"  [P] поля / [T] вкл-выкл [сейчас: {_cur}] / Enter-отмена: "
-                ).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                continue
+            _box_top(f"⛓  ХОП «{hop.get('tag', '?')}»")
+            _box_row()
+            _box_kv("Адрес", f"{hop.get('host', '?')}:{hop.get('port', 443)}")
+            _box_kv("Состояние", _cur)
+            _box_row()
+            _box_item("P", "Изменить поля")
+            _box_item("T", "Вкл/выкл хоп")
+            _box_sep()
+            _box_item("Q", f"{DIM}Отмена (Enter){NC}")
+            _box_bottom()
+            mode = _box_ask("[P] поля / [T] вкл-выкл").lower()
             if mode == "t":
                 hop["enabled"] = not hop.get("enabled", True)
                 if save_relay_hops(hops):
                     _st = "включён" if hop["enabled"] else "выключен"
-                    success(f"  ✓ Хоп «{hop.get('tag')}» {_st}")
+                    _box_top("⛓  ИЗМЕНЕНИЕ ХОПА")
+                    _box_row()
+                    _box_ok(f"Хоп «{hop.get('tag')}» {_st}")
+                    _box_bottom()
                     _offer_rebuild()
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _pause()
                 continue
             if mode != "p":
                 continue
-            print(f"\n  Редактирование «{hop.get('tag')}» — Enter = оставить")
             hop2 = _hop_manual(hop)
             if hop2 is None:
                 continue
             hop2["tag"] = hop.get("tag")       # tag не меняем здесь
             errs = validate_hops(hops[:idx] + [hop2] + hops[idx+1:])
             if errs:
+                _box_top("⛓  ИЗМЕНЕНИЕ ХОПА")
+                _box_row()
                 for e in errs:
-                    warn(f"  ✗ {e}")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                    _box_warn(f"{e}")
+                _box_bottom()
+                _pause()
                 continue
             hops[idx] = hop2
             if save_relay_hops(hops):
-                success(f"  ✓ Хоп «{hop2['tag']}» обновлён")
+                _box_top("⛓  ИЗМЕНЕНИЕ ХОПА")
+                _box_row()
+                _box_ok(f"Хоп «{hop2['tag']}» обновлён")
+                _box_bottom()
                 _offer_rebuild()
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── [D] Удалить хоп ──────────────────────────────────────────────
         elif ch == "d" and hops:
-            try:
-                n = input("  Номер хопа (0 — отмена): ").strip()
-                idx = int(n) - 1 if n else -1
-            except ValueError:
-                idx = -2
-            if not (0 <= idx < len(hops)):
+            _box_top("⛓  УДАЛЕНИЕ ХОПА")
+            _box_row()
+            for i, h in enumerate(hops, 1):
+                _box_item(str(i), f"{h.get('tag', '?')}  {h.get('host', '?')}:"
+                                  f"{h.get('port', 443)}")
+            _box_sep()
+            _box_item("Q", f"{DIM}Отмена (Enter){NC}")
+            _box_bottom()
+            n = _box_ask("Номер хопа")
+            if not n.isdigit() or not (1 <= int(n) <= len(hops)):
                 continue
+            idx = int(n) - 1
             tag = hops[idx].get("tag", "")
             # кто использует?
             used_by = [nd.get("host", "?") for nd in nodes if nd.get("via") == tag]
             used_by_hops = [h.get("tag", "?") for h in hops
                             if h.get("via") == tag and h.get("tag") != tag]
             if used_by or used_by_hops:
-                warn(f"  Хоп «{tag}» используется: exit-ноды: {', '.join(used_by) or '—'};"
-                     f" хопи: {', '.join(used_by_hops) or '—'}")
-                warn("  Сначала снимите зависимости (V / E).")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("⛓  УДАЛЕНИЕ ХОПА")
+                _box_row()
+                _box_warn(f"Хоп «{tag}» используется: exit-ноды: "
+                          f"{', '.join(used_by) or '-'}; хопи: "
+                          f"{', '.join(used_by_hops) or '-'}")
+                _box_row()
+                _box_row(f"  {YELLOW}Сначала снимите зависимости (V / E).{NC}")
+                _box_bottom()
+                _pause()
                 continue
-            try:
-                ok = input(f"  Удалить хоп «{tag}»? [y/N]: ").strip().lower() == "y"
-            except (EOFError, KeyboardInterrupt):
-                ok = False
+            _box_top("⛓  УДАЛЕНИЕ ХОПА")
+            _box_row()
+            _box_kv("Хоп", f"{tag}  ({hops[idx].get('host', '?')}:{hops[idx].get('port', 443)})")
+            _box_row()
+            _box_row(f"  {YELLOW}Хоп будет убран из конфига Xray и relay_hops.json.{NC}")
+            _box_bottom()
+            ok = _box_ask(f"Удалить хоп «{tag}»? [y/N]").lower() in ("y", "yes", "д", "да")
             if ok:
                 hops.pop(idx)
                 if save_relay_hops(hops):
-                    success(f"  ✓ Хоп «{tag}» удалён")
+                    _box_top("⛓  УДАЛЕНИЕ ХОПА")
+                    _box_row()
+                    _box_ok(f"Хоп «{tag}» удалён")
+                    _box_bottom()
                     _offer_rebuild()
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── [V] Назначить via ────────────────────────────────────────────
         elif ch == "v" and nodes:
-            try:
-                n = input("  Номер exit-ноды (0 — отмена): ").strip()
-                idx = int(n) - 1 if n else -1
-            except ValueError:
-                idx = -2
-            if not (0 <= idx < len(nodes)):
+            _box_top("⛓  VIA: ВЫБОР EXIT-НОДЫ")
+            _box_row()
+            for i, nd in enumerate(nodes, 1):
+                via = nd.get("via", "") or ""
+                via_s = (f"{CYAN}{via}{NC}" if via else f"{DIM}напрямую{NC}")
+                _box_item(str(i), f"{nd.get('host', '?')}:{nd.get('port', 443)}"
+                                  f"  ->  {via_s}")
+            _box_sep()
+            _box_item("Q", f"{DIM}Отмена (Enter){NC}")
+            _box_bottom()
+            n = _box_ask("Номер exit-ноды")
+            if not n.isdigit() or not (1 <= int(n) <= len(nodes)):
                 continue
+            idx = int(n) - 1
             nd = nodes[idx]
-            print(f"\n  Exit-нода: {nd.get('host')}:{nd.get('port')}")
             if not hops:
-                warn("  Хопов нет — сначала добавьте хоп (A).")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top(f"⛓  VIA ДЛЯ {nd.get('host', '?')}")
+                _box_row()
+                _box_warn("Хопов нет - сначала добавьте хоп (A).")
+                _box_bottom()
+                _pause()
                 continue
-            for j, h in enumerate(hops):
-                en = "" if h.get("enabled", True) else f" {RED}[выкл]{NC}"
-                print(f"    [{j+1}] {h.get('tag')}  {h.get('host')}:{h.get('port')}{en}")
-            print(f"    [0] Без хопа (напрямую)")
-            try:
-                v = input("  Через какой хоп [номер/0]: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                continue
+            _box_top(f"⛓  VIA ДЛЯ EXIT-НОДЫ: {nd.get('host')}:{nd.get('port')}")
+            _box_row()
+            for j, h in enumerate(hops, 1):
+                en = "" if h.get("enabled", True) else f"  {RED}[выкл]{NC}"
+                _box_item(str(j), f"{h.get('tag')}  {h.get('host')}:{h.get('port')}{en}")
+            _box_sep()
+            _box_item("0", f"{DIM}Без хопа (напрямую){NC}")
+            _box_item("Q", f"{DIM}Отмена (Enter){NC}")
+            _box_bottom()
+            v = _box_ask("Через какой хоп [номер/0]")
             if v == "":
                 continue
             if v == "0":
                 nd["via"] = ""
+            elif v.isdigit() and 1 <= int(v) <= len(hops):
+                nd["via"] = hops[int(v) - 1].get("tag", "")
             else:
-                try:
-                    vi = int(v) - 1
-                    if not (0 <= vi < len(hops)):
-                        raise ValueError
-                    nd["via"] = hops[vi].get("tag", "")
-                except ValueError:
-                    warn("  Некорректный выбор.")
-                    input(f"{BLUE}Нажмите Enter...{NC}")
-                    continue
+                _box_top(f"⛓  VIA ДЛЯ {nd.get('host', '?')}")
+                _box_row()
+                _box_warn("Некорректный выбор.")
+                _box_bottom()
+                _pause()
+                continue
             if _save_chain_nodes_via(nodes):
                 via_lbl = nd.get("via") or "напрямую"
-                success(f"  ✓ {nd.get('host')}: via = {via_lbl}")
+                _box_top("⛓  VIA НАЗНАЧЕНО")
+                _box_row()
+                _box_ok(f"{nd.get('host')}: via = {via_lbl}")
+                _box_bottom()
                 _offer_rebuild()
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── [T] Проверить цепочки ────────────────────────────────────────
         elif ch == "t":
@@ -1883,7 +1980,7 @@ def do_chain_relay_menu() -> None:
             if not hops:
                 _box_warn("Хопов нет — проверять нечего")
                 _box_bottom()
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _pause()
                 continue
             for h in hops:
                 ok, ms = check_hop_tcp(h)
@@ -1923,4 +2020,4 @@ def do_chain_relay_menu() -> None:
                         if r.get("detail"):
                             _box_row(f"    {DIM}↳ {r['detail'][:120]}{NC}")
             _box_bottom()
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()

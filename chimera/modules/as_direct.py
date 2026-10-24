@@ -640,6 +640,7 @@ def _as_suggest_server_asn() -> None:
     DIM                      = core.DIM
     GREEN                    = core.GREEN
     NC                       = core.NC
+    _box_ask                 = core._box_ask
     _box_bottom              = core._box_bottom
     _box_row                 = core._box_row
     _box_top                 = core._box_top
@@ -672,7 +673,7 @@ def _as_suggest_server_asn() -> None:
         _box_row(f"  Рекомендуется добавить этот AS в {GREEN}direct{NC},")
         _box_row(f"  чтобы трафик внутри сети хостера не шёл через VPN.")
         _box_bottom()
-        ans = input(f"  Добавить {BOLD}{asn}{NC} в direct? [y/N]: ").strip().lower()
+        ans = _box_ask(f"Добавить {BOLD}{asn}{NC} в direct? [y/N]").lower()
         if ans != "y":
             return
         info(f"Загрузка префиксов для {asn}...")
@@ -798,40 +799,48 @@ def _as_direct_cli_update() -> None:
     sys.exit(1 if errors else 0)
 
 
+def _pause() -> None:
+    """Пауза после действия; EOF/Ctrl+C безопасны (канон icmp_gate._ig_pause)."""
+    core = _core_module()
+    DIM                      = core.DIM
+    NC                       = core.NC
+    try:
+        input(f"{DIM}Enter - назад в меню...{NC}")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
 def _as_ask_action(asn: str = "") -> str:
     """
     Интерактивно спрашивает у пользователя, куда направлять трафик AS.
     Возвращает строку: "direct" | "proxy" | "block" | "" (отмена).
+    Рамочный список box_renderer (раньше был самодельный legacy-фрейм);
+    EOF/Ctrl+C или пустой ввод = отмена (диалог выдерживает пайп).
     """
     core = _core_module()
-    BOLD                     = core.BOLD
-    CYAN                     = core.CYAN
     DIM                      = core.DIM
     GREEN                    = core.GREEN
     NC                       = core.NC
     RED                      = core.RED
     YELLOW                   = core.YELLOW
-    import re as _re
-    _BW = 46  # внутренняя видимая ширина бокса
+    _box_ask                 = core._box_ask
+    _box_bottom              = core._box_bottom
+    _box_item                = core._box_item
+    _box_row                 = core._box_row
+    _box_sep                 = core._box_sep
+    _box_top                 = core._box_top
 
-    def _row(raw_text: str) -> str:
-        visible = _re.sub(r'\033\[[0-9;]*m', '', raw_text)
-        pad = _BW - len(visible)
-        return f"  {CYAN}║{NC}  {raw_text}{' ' * max(pad, 0)}  {CYAN}║{NC}"
-
-    _title = f"Куда направлять трафик{(' ' + asn) if asn else ' этого AS'}?"
-    _title_pad = _BW - len(_title)
-    print()
-    print(f"  {CYAN}╔{'═' * (_BW + 4)}╗{NC}")
-    print(f"  {CYAN}║{NC}  {BOLD}{_title}{NC}{' ' * max(_title_pad, 0)}  {CYAN}║{NC}")
-    print(f"  {CYAN}╠{'═' * (_BW + 4)}║{NC}")
-    print(_row(f"{GREEN}[1] direct{NC}  — напрямую, минуя VPN"))
-    print(_row(f"{YELLOW}[2] proxy{NC}   — через VPN-туннель    "))
-    print(_row(f"{RED}[3] block{NC}   — заблокировать        "))
-    print(_row(f"{DIM}[Q] Отмена{NC}                          "))
-    print(f"  {CYAN}╚{'═' * (_BW + 4)}╝{NC}")
-    print()
-    ch = input(f"  {CYAN}Выбор [1/2/3/Q]:{NC} ").strip().lower()
+    _box_top(f"ДЕЙСТВИЕ ДЛЯ {asn}" if asn else "ДЕЙСТВИЕ ДЛЯ AS")
+    _box_row()
+    _box_row(f"  {DIM}Куда направлять трафик этого AS?{NC}")
+    _box_row()
+    _box_item("1", f"{GREEN}direct{NC}  - напрямую, минуя VPN")
+    _box_item("2", f"{YELLOW}proxy{NC}   - через VPN-туннель")
+    _box_item("3", f"{RED}block{NC}   - заблокировать")
+    _box_sep()
+    _box_item("Q", f"{DIM}Отмена (Enter){NC}")
+    _box_bottom()
+    ch = _box_ask("Выбор [1/2/3/Q]").lower()
     if ch == "1":   return "direct"
     if ch == "2":   return "proxy"
     if ch == "3":   return "block"
@@ -853,27 +862,71 @@ def _as_action_label(action: str) -> str:
     }.get(action, f"{DIM}{action}{NC}")
 
 
-def do_manage_as_direct() -> None:
-    """Меню управления уже добавленными AS-маршрутами (изменить действие / удалить / обновить)."""
+def _pick_as_entry(entries: list, title: str):
+    """
+    Рамочный выбор AS из активного списка (канон пикера awg_diagnose /
+    entry_mirrors). Принимает номер строки или сам ASN (AS123 / 123).
+    Enter/Q/EOF = отмена. Возвращает entry или None.
+    """
     core = _core_module()
-    ASN_CACHE_DB             = core.ASN_CACHE_DB
-    ASN_CACHE_MAX_AGE_DAYS   = core.ASN_CACHE_MAX_AGE_DAYS
-    BLUE                     = core.BLUE
     BOLD                     = core.BOLD
-    CYAN                     = core.CYAN
     DIM                      = core.DIM
-    GREEN                    = core.GREEN
     NC                       = core.NC
-    CYAN = core.CYAN
-    NC = core.NC
     RED                      = core.RED
-    YELLOW                   = core.YELLOW
-    _asn_cache_info          = core._asn_cache_info
+    _box_ask                 = core._box_ask
     _box_bottom              = core._box_bottom
     _box_item                = core._box_item
     _box_row                 = core._box_row
     _box_sep                 = core._box_sep
     _box_top                 = core._box_top
+
+    _box_top(title)
+    _box_row()
+    for i, e in enumerate(entries, 1):
+        _box_item(str(i), f"{BOLD}{e['asn']}{NC}  [{_as_action_label(e['action'])}]")
+    _box_sep()
+    _box_item("Q", f"{DIM}Отмена (Enter){NC}")
+    _box_bottom()
+    raw = _box_ask("Номер или ASN (Enter = отмена)")
+    if not raw or raw.lower() in ("q", "й"):
+        return None
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(entries):
+            return entries[idx]
+    asn = _as_normalize(raw)
+    match = next((e for e in entries if e["asn"] == asn), None)
+    if match:
+        return match
+    _box_top(title)
+    _box_row()
+    _box_row(f"  {RED}Не найдено: {raw} - введите номер строки или ASN.{NC}")
+    _box_bottom()
+    return None
+
+
+def do_manage_as_direct() -> None:
+    """Меню управления уже добавленными AS-маршрутами (изменить действие / удалить / обновить)."""
+    core = _core_module()
+    ASN_CACHE_DB             = core.ASN_CACHE_DB
+    ASN_CACHE_MAX_AGE_DAYS   = core.ASN_CACHE_MAX_AGE_DAYS
+    BOLD                     = core.BOLD
+    CYAN                     = core.CYAN
+    DIM                      = core.DIM
+    GREEN                    = core.GREEN
+    NC                       = core.NC
+    RED                      = core.RED
+    YELLOW                   = core.YELLOW
+    _asn_cache_info          = core._asn_cache_info
+    _box_ask                 = core._box_ask
+    _box_bottom              = core._box_bottom
+    _box_item                = core._box_item
+    _box_kv                  = core._box_kv
+    _box_ok                  = core._box_ok
+    _box_row                 = core._box_row
+    _box_sep                 = core._box_sep
+    _box_top                 = core._box_top
+    _box_warn                = core._box_warn
     _log_change              = core._log_change
     _show_xray_routing_rules = core._show_xray_routing_rules
     info                     = core.info
@@ -930,45 +983,40 @@ def do_manage_as_direct() -> None:
         _box_item("Q", f"Назад")
         _box_bottom()
 
-        ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+        ch = _box_ask("Выбор").strip().lower()
 
-        # ── [1] Изменить действие ────────────────────────────────────────────
         if ch == "1":
             if not entries:
-                warn("Нет активных AS")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("ИЗМЕНЕНИЕ ДЕЙСТВИЯ AS")
+                _box_row()
+                _box_row(f"  {YELLOW}Нет активных AS - добавьте через GeoIP → [6].{NC}")
+                _box_bottom()
+                _pause()
                 continue
-            print()
-            _box_row("  Активные AS:")
-            for i, e in enumerate(entries, 1):
-                _box_row(f"    {i}. {BOLD}{e['asn']}{NC}  [{_as_action_label(e['action'])}]")
-            _box_bottom()
-            raw = input(f"  Введите ASN для смены действия: ").strip()
-            if not raw:
-                continue
-            asn = _as_normalize(raw)
-            entry_match = next((e for e in entries if e["asn"] == asn), None)
+            entry_match = _pick_as_entry(entries, "ИЗМЕНЕНИЕ ДЕЙСТВИЯ AS")
             if not entry_match:
-                warn(f"{asn} не найден в активном списке")
-                input(f"{BLUE}Нажмите Enter...{NC}")
                 continue
+            asn = entry_match["asn"]
             info(f"Текущее действие для {asn}: {_as_action_label(entry_match['action'])}")
             action = _as_ask_action(asn)
             if not action:
                 info("Отмена")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _pause()
                 continue
             if action == entry_match["action"]:
                 info(f"Действие не изменилось ({action})")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _pause()
                 continue
             cidrs = _as_direct_load_from_file(asn)
             if not cidrs:
-                info(f"Кеш для {asn} не найден — загружаем из RIPE...")
+                info(f"Кеш для {asn} не найден - загружаем из RIPE...")
                 cidrs = _fetch_prefixes_for_asn(asn)
                 if not cidrs:
-                    warn(f"Не удалось получить префиксы для {asn}")
-                    input(f"{BLUE}Нажмите Enter...{NC}")
+                    _box_top("ИЗМЕНЕНИЕ ДЕЙСТВИЯ AS")
+                    _box_row()
+                    _box_warn(f"Не удалось получить префиксы для {asn}")
+                    _box_bottom()
+                    _pause()
                     continue
                 _as_direct_save(asn, cidrs)
             ok = _as_direct_apply_to_xray(asn, cidrs, action)
@@ -977,30 +1025,39 @@ def do_manage_as_direct() -> None:
                 entry_match["action"] = action
                 _as_direct_list_save(entries)
                 _log_change("as_routing", f"{asn}: {old_action} → {action}")
-                success(f"{asn}: действие изменено на {_as_action_label(action)}")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("ИЗМЕНЕНИЕ ДЕЙСТВИЯ AS")
+                _box_row()
+                _box_ok(f"{asn}: действие изменено на {_as_action_label(action)}")
+                _box_bottom()
+            _pause()
 
         # ── [2] Обновить из кеша ─────────────────────────────────────────────
         elif ch == "2":
             if not entries:
-                warn("Нет активных AS")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("ОБНОВЛЕНИЕ ПРЕФИКСОВ AS (ИЗ КЕША)")
+                _box_row()
+                _box_row(f"  {YELLOW}Нет активных AS - добавьте через GeoIP → [6].{NC}")
+                _box_bottom()
+                _pause()
                 continue
             for entry in entries:
                 asn    = entry["asn"]
                 action = entry.get("action", "direct")
                 cidrs  = _as_direct_load_from_file(asn)
                 if not cidrs:
-                    warn(f"  Кеш для {asn} пуст — пропуск (используйте опцию 3)")
+                    warn(f"  Кеш для {asn} пуст - пропуск (используйте опцию 3)")
                     continue
                 _as_direct_apply_to_xray(asn, cidrs, action)
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── [3] Обновить из RIPE ─────────────────────────────────────────────
         elif ch == "3":
             if not entries:
-                warn("Нет активных AS")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("ОБНОВЛЕНИЕ ПРЕФИКСОВ AS (ИЗ RIPE)")
+                _box_row()
+                _box_row(f"  {YELLOW}Нет активных AS - добавьте через GeoIP → [6].{NC}")
+                _box_bottom()
+                _pause()
                 continue
             for entry in entries:
                 asn    = entry["asn"]
@@ -1012,34 +1069,31 @@ def do_manage_as_direct() -> None:
                     continue
                 _as_direct_save(asn, cidrs)
                 _as_direct_apply_to_xray(asn, cidrs, action)
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── [4] Удалить AS ───────────────────────────────────────────────────
         elif ch == "4":
             if not entries:
-                warn("Нет активных AS")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("УДАЛЕНИЕ AS")
+                _box_row()
+                _box_row(f"  {YELLOW}Нет активных AS - удалять нечего.{NC}")
+                _box_bottom()
+                _pause()
                 continue
-            print()
-            _box_row("  Активные AS:")
-            for i, e in enumerate(entries, 1):
-                _box_row(f"    {i}. {BOLD}{e['asn']}{NC}  [{_as_action_label(e['action'])}]")
+            entry_match = _pick_as_entry(entries, "УДАЛЕНИЕ AS")
+            if not entry_match:
+                continue
+            asn = entry_match["asn"]
+            _box_top("УДАЛЕНИЕ AS")
+            _box_row()
+            _box_kv("AS", f"{BOLD}{asn}{NC}")
+            _box_kv("Действие", _as_action_label(entry_match.get("action", "direct")))
+            _box_row()
+            _box_row(f"  {YELLOW}AS будет убран из Xray routing, активного списка{NC}")
+            _box_row(f"  {YELLOW}и кеша префиксов.{NC}")
             _box_bottom()
-            raw = input(f"  Введите ASN для удаления: ").strip()
-            if not raw:
-                continue
-            asn = _as_normalize(raw)
-            _asn_ok, _asn_err = _as_validate(asn)
-            if not _asn_ok:
-                warn(f"Неверный ASN {raw!r}: {_asn_err}")
-                input(f"{BLUE}Нажмите Enter...{NC}")
-                continue
-            if not any(e["asn"] == asn for e in entries):
-                warn(f"{asn} не найден в активном списке")
-                input(f"{BLUE}Нажмите Enter...{NC}")
-                continue
-            ans = input(f"  {YELLOW}Удалить {asn} из Xray и активного списка? [y/N]:{NC} ").strip().lower()
-            if ans == "y":
+            ans = _box_ask(f"Удалить {BOLD}{asn}{NC} из Xray и активного списка? [y/N]").lower()
+            if ans in ("y", "yes", "д", "да"):
                 _as_direct_remove_from_xray(asn)
                 entries = [e for e in entries if e["asn"] != asn]
                 _as_direct_list_save(entries)
@@ -1048,67 +1102,92 @@ def do_manage_as_direct() -> None:
                     _as_direct_file(asn).unlink(missing_ok=True)
                 except Exception:
                     pass
-                success(f"{asn} удалён")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("УДАЛЕНИЕ AS")
+                _box_row()
+                _box_ok(f"{asn} удалён (routing + список + кеш).")
+                _box_bottom()
+            _pause()
 
         # ── [5] Настроить timer ──────────────────────────────────────────────
         elif ch == "5":
-            print()
-            try:
-                h_raw  = input("  Час запуска (0-23) [5]: ").strip()
-                m_raw  = input("  Минута (0-59)  [0]: ").strip()
-                hour   = int(h_raw) if h_raw else 5
-                minute = int(m_raw) if m_raw else 0
-                if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                    raise ValueError
-            except ValueError:
-                warn("Неверный формат — используем 05:00")
-                hour, minute = 5, 0
+            _box_top("АВТООБНОВЛЕНИЕ AS-ПРЕФИКСОВ: ВРЕМЯ ЗАПУСКА")
+            _box_row()
+            _box_kv("Час запуска", "0-23 (Enter = 5)")
+            _box_kv("Минута", "0-59 (Enter = 0)")
+            _box_row()
+            _box_row(f"  {DIM}systemd timer xray-as-direct.timer, ежедневный запуск.{NC}")
+            _box_bottom()
+            hour, minute = 5, 0
+            for _attempt in range(5):
+                h_raw = _box_ask("Час запуска (0-23)", "5")
+                m_raw = _box_ask("Минута (0-59)", "0")
+                try:
+                    _h = int(h_raw)
+                    _m = int(m_raw)
+                    if not (0 <= _h <= 23 and 0 <= _m <= 59):
+                        raise ValueError
+                except ValueError:
+                    _box_top("АВТООБНОВЛЕНИЕ AS-ПРЕФИКСОВ: ВРЕМЯ ЗАПУСКА")
+                    _box_row()
+                    _box_warn("Неверный формат - нужны числа: час 0-23, минута 0-59.")
+                    _box_bottom()
+                    continue
+                hour, minute = _h, _m
+                break
+            else:
+                _box_top("АВТООБНОВЛЕНИЕ AS-ПРЕФИКСОВ: ВРЕМЯ ЗАПУСКА")
+                _box_row()
+                _box_warn("Ввод так и не состоялся - использую 05:00.")
+                _box_bottom()
             _as_direct_install_timer(hour, minute)
             warn("ВАЖНО: timer запускает: " + str(Path(sys.argv[0]).resolve()) + " --update-as-direct")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── [6] Удалить timer ────────────────────────────────────────────────
         elif ch == "6":
-            ans = input(f"  {YELLOW}Отключить авто-обновление AS-routing? [y/N]:{NC} ").strip().lower()
-            if ans == "y":
+            ans = _box_ask("Отключить авто-обновление AS-routing? [y/N]").lower()
+            if ans in ("y", "yes", "д", "да"):
                 _as_direct_remove_timer()
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── [7] Показать префиксы ────────────────────────────────────────────
         elif ch == "7":
             if not entries:
-                warn("Нет активных AS")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_top("ПРЕФИКСЫ AS")
+                _box_row()
+                _box_row(f"  {YELLOW}Нет активных AS - смотреть нечего.{NC}")
+                _box_bottom()
+                _pause()
                 continue
-            print()
             default_asn = entries[0]["asn"]
-            raw = input(f"  ASN для просмотра [{default_asn}]: ").strip()
+            raw = _box_ask("ASN для просмотра", default_asn)
             asn = _as_normalize(raw) if raw else default_asn
             cidrs = _as_direct_load_from_file(asn)
-            print()
+            _box_top(f"ПРЕФИКСЫ {asn}")
+            _box_row()
             if cidrs:
                 action = _as_direct_list_get_action(asn)
-                print(f"  {CYAN}{asn}{NC} [{_as_action_label(action)}]: {len(cidrs)} префиксов")
+                _box_row(f"  {CYAN}{asn}{NC} [{_as_action_label(action)}]: {len(cidrs)} префиксов")
+                _box_row()
                 for c in cidrs[:20]:
-                    print(f"    {c}")
+                    _box_row(f"    {c}")
                 if len(cidrs) > 20:
-                    print(f"    {DIM}... и ещё {len(cidrs) - 20} префиксов{NC}")
+                    _box_row(f"    {DIM}... и ещё {len(cidrs) - 20} префиксов{NC}")
             else:
-                warn(f"Кеш для {asn} пуст или не существует")
-            print()
-            input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_warn(f"Кеш для {asn} пуст или не существует")
+            _box_bottom()
+            _pause()
 
         # ── [8] Просмотр routing-правил ──────────────────────────────────────
         elif ch == "8":
             _show_xray_routing_rules()
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── [9] Устаревшие AS (патч: задача #7) ──────────────────────────────
         elif ch == "9":
             if not entries:
                 warn("Нет активных AS")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _pause()
                 continue
             _stale_days = 30
             _now = time.time()
@@ -1129,7 +1208,7 @@ def do_manage_as_direct() -> None:
             if not _found_stale:
                 _box_row(f"  {GREEN}Все AS актуальны (кеш свежее {_stale_days} дней){NC}")
             _box_bottom()
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         # ── [C] Состояние SQLite-кэша ────────────────────────────────────────
         elif ch == "c":
@@ -1164,7 +1243,7 @@ def do_manage_as_direct() -> None:
                 _box_row(f"  {DIM}Жёлтым выделены записи старше {ASN_CACHE_MAX_AGE_DAYS} дней.{NC}")
                 _box_row(f"  {DIM}Сброс отдельной записи: python3 {sys.argv[0]} --clear-asn-cache <ASN|all>{NC}")
             _box_bottom()
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
 
         elif ch in ("q", "Q", ""):
             break
