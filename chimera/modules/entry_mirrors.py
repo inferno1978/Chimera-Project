@@ -127,6 +127,7 @@ def _err(msg: str)     -> None: print(f"{RED}[ERR]{NC}   {msg}");   _log("ERR", 
 from chimera.modules.box_renderer import (
     _box_top, _box_sep, _box_bottom, _box_row, _box_item, _box_item_exit,
     _box_back, _box_info, _box_warn, _box_ok, _box_link, _box_desc,
+    _box_kv, _box_ask, _box_narrow,
 )
 
 # ── Делегирование в _core.py (без circular import, без дублирования) ──────────
@@ -193,17 +194,34 @@ def _probe(host: str, port: int) -> tuple[bool, Optional[int]]:
     except Exception:
         return False, None
 
-def probe_all(quiet: bool = False) -> None:
+def probe_all(quiet: bool = False, boxed: bool = False) -> None:
     """Проверяет все mirror, пишет результат в state. Вызывается из меню
-    и из cron (`python3 -m chimera.modules.entry_mirrors probe`)."""
+    и из cron (`python3 -m chimera.modules.entry_mirrors probe`).
+
+    boxed=True — вывод рамками box_renderer (путь из меню [4]); cron-вызов
+    (quiet=True) и старые вызовы без параметров не меняются."""
     data = _load()
+    if boxed:
+        _box_top("🔎  ПРОВЕРКА ДОСТУПНОСТИ MIRROR")
+        _box_row()
     for m in data["mirrors"]:
         ok, latency_ms = _probe(m["host"], m["port"])
         m["last_check"] = {"ok": ok, "ts": int(time.time()), "latency_ms": latency_ms}
         if not quiet:
-            status = f"{GREEN}✓ {latency_ms}ms{NC}" if ok else f"{RED}✗ недоступен{NC}"
-            print(f"  {m['label']:<24} {m['host']}:{m['port']}  {status}")
+            if boxed:
+                icon = "✅" if ok else "❌"
+                detail = f"{GREEN}{latency_ms}ms{NC}" if ok else f"{RED}нет TCP{NC}"
+                _box_row(f"  {icon}  {WHITE}{_box_narrow(m['label'])}{NC}"
+                         f"  {DIM}{_box_narrow(str(m['host']))}:{m['port']}{NC}  {detail}")
+            else:
+                status = f"{GREEN}✓ {latency_ms}ms{NC}" if ok else f"{RED}✗ недоступен{NC}"
+                print(f"  {m['label']:<24} {m['host']}:{m['port']}  {status}")
     _save(data)
+    if boxed:
+        if not data["mirrors"]:
+            _box_row(f"  {DIM}Mirror-нод нет - добавьте через [1].{NC}")
+        _box_row()
+        _box_bottom()
 
 # ══════════════════════════════════════════════════════════════════════════
 #  ПУБЛИЧНЫЙ API — единственная точка интеграции с subscription.py
@@ -252,7 +270,7 @@ def _status_str(m: dict) -> str:
 def _list_mirrors() -> None:
     data = _load()
     if not data["mirrors"]:
-        _box_row(f"  {DIM}Mirror-нод нет — добавьте через [1].{NC}")
+        _box_row(f"  {DIM}Mirror-нод нет - добавьте через [1].{NC}")
         return
     for i, m in enumerate(data["mirrors"], 1):
         _box_row(f"  {DIM}[{i}]{NC}  {WHITE}{m['label']}{NC}  {_status_str(m)}")
@@ -293,58 +311,113 @@ def _parse_vless_link(link: str) -> Optional[dict]:
     except Exception:
         return None
 
-def _add_mirror() -> None:
-    print()
-    print(f"  {BOLD}Добавление entry mirror{NC}")
-    print(f"  {DIM}(отдельно установленный этим же инсталлятором VLESS+REALITY-сервер,")
-    print(f"   с ТЕМИ ЖЕ UUID в users.json, что и на основном сервере){NC}")
-    print()
+# ── UI-хелперы (канон стилизации AWG TUI / icmp_gate) ────────────────────────
+def _pause() -> None:
+    """Пауза после действия; EOF/Ctrl+C безопасны (канон icmp_gate._ig_pause)."""
     try:
-        raw_link = input(
-            f"  {CYAN}Вставьте vless:// ссылку с mirror-сервера{NC}"
-            f"  {DIM}(или Enter, чтобы ввести поля вручную): {NC}"
-        ).strip()
-    except (KeyboardInterrupt, EOFError):
-        print(); return
+        input(f"{DIM}Enter - назад в меню...{NC}")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+def _add_err(msg: str) -> None:
+    """Компактный результат-бокс об ошибке добавления mirror."""
+    _box_top("➕  ДОБАВЛЕНИЕ ENTRY MIRROR")
+    _box_row()
+    _box_row(f"  {RED}❌  {msg}{NC}")
+    _box_bottom()
+
+def _ask_port(default: str) -> Optional[int]:
+    """Ввод порта с валидацией (число 1-65535), EOF-безопасно.
+    До 5 попыток; None — ввод так и не состоялся (диалог отменяется)."""
+    for _ in range(5):
+        raw = _box_ask("Порт", default) or default
+        try:
+            port = int(raw)
+            if 1 <= port <= 65535:
+                return port
+        except ValueError:
+            pass
+        _box_top("➕  ПОРТ MIRROR")
+        _box_row()
+        _box_row(f"  {RED}❌  Порт должен быть числом 1-65535.{NC}")
+        _box_row()
+        _box_row(f"  {DIM}Повторите ввод (Enter = {default}).{NC}")
+        _box_bottom()
+    return None
+
+def _add_mirror() -> None:
+    _box_top("➕  ДОБАВЛЕНИЕ ENTRY MIRROR")
+    _box_row()
+    _box_row(f"  {DIM}Mirror - отдельно установленный этим же инсталлятором{NC}")
+    _box_row(f"  {DIM}VLESS+REALITY-сервер, в users.json которого прописаны{NC}")
+    _box_row(f"  {DIM}ТЕ ЖЕ UUID, что и на основном сервере.{NC}")
+    _box_row()
+    _box_row(f"  {DIM}Шаг 1 - вставьте vless:// ссылку с mirror-сервера (её{NC}")
+    _box_row(f"  {DIM}отдаёт меню ссылок на самом mirror): все поля подставятся{NC}")
+    _box_row(f"  {DIM}автоматически. Enter - ввести поля вручную.{NC}")
+    _box_bottom()
+
+    raw_link = _box_ask("Вставьте vless:// ссылку (Enter = вручную)")
 
     parsed = _parse_vless_link(raw_link) if raw_link else None
     if raw_link and not parsed:
-        _warn(
-            "Не похоже на REALITY-ссылку (нужны security=reality, pbk и sni "
-            "в query) — переключаюсь на ввод полями."
-        )
+        _box_top("➕  ДОБАВЛЕНИЕ ENTRY MIRROR")
+        _box_row()
+        _box_warn("Не похоже на REALITY-ссылку (нужны security=reality, pbk и sni в query) - переключаюсь на ввод полями.")
+        _box_bottom()
 
-    try:
-        label_hint = f" [{parsed['label']}]" if parsed and parsed.get("label") else ""
-        label = input(f"  {CYAN}Название (для себя, например 'EU-2 Hetzner'){label_hint}: {NC}").strip()
-        if not label and parsed:
-            label = parsed.get("label", "")
-        if not label:
-            print(f"  {RED}✗{NC}  Название обязательно."); return
+    # Название (единственное обязательное поле без значения по умолчанию)
+    label_hint = parsed["label"] if parsed and parsed.get("label") else ""
+    label = _box_ask("Название (для себя, например 'EU-2 Hetzner')", label_hint)
+    if not label:
+        _add_err("Название обязательно.")
+        return
 
-        if parsed:
-            host = input(f"  {CYAN}IP или домен [{parsed['host']}]: {NC}").strip() or parsed["host"]
-            port_raw = input(f"  {CYAN}Порт [{parsed['port']}]: {NC}").strip()
-            port = int(port_raw) if port_raw else parsed["port"]
-            sni = input(f"  {CYAN}SNI [{parsed['sni']}]: {NC}").strip() or parsed["sni"]
-            pbk = input(f"  {CYAN}Public Key (pbk) [{parsed['pbk'][:12]}…]: {NC}").strip() or parsed["pbk"]
-            sid = input(f"  {CYAN}Short ID (sid) [{parsed['sid'] or 'пусто'}]: {NC}").strip() or parsed["sid"]
-            fp  = input(f"  {CYAN}Fingerprint [{parsed['fp']}]: {NC}").strip() or parsed["fp"]
-        else:
-            host = input(f"  {CYAN}IP или домен: {NC}").strip()
-            if not host:
-                print(f"  {RED}✗{NC}  Host обязателен."); return
-            port_raw = input(f"  {CYAN}Порт [443]: {NC}").strip()
-            port = int(port_raw) if port_raw else 443
-            sni = input(f"  {CYAN}SNI (reality_dest / domain маскировки): {NC}").strip()
-            pbk = input(f"  {CYAN}Public Key (pbk): {NC}").strip()
-            sid = input(f"  {CYAN}Short ID (sid, можно пусто): {NC}").strip()
-            fp  = input(f"  {CYAN}Fingerprint [chrome]: {NC}").strip() or "chrome"
-    except (KeyboardInterrupt, EOFError):
-        print(); return
+    # Поля: из ссылки (подтверждение по Enter) или вручную с подсказками
+    if parsed:
+        _box_top("➕  ПАРАМЕТРЫ ИЗ ССЫЛКИ  (ENTER = КАК ЕСТЬ)")
+        _box_row()
+        _box_kv("IP или домен", _box_narrow(parsed["host"]))
+        _box_kv("Порт", str(parsed["port"]))
+        _box_kv("SNI", _box_narrow(parsed["sni"]))
+        _box_kv("Public Key (pbk)", parsed["pbk"][:18] + "...")
+        _box_kv("Short ID (sid)", _box_narrow(parsed["sid"]) or "(пусто)")
+        _box_kv("Fingerprint", parsed["fp"])
+        _box_bottom()
+        host = _box_ask("IP или домен", parsed["host"])
+        port = _ask_port(str(parsed["port"]))
+        sni  = _box_ask("SNI", parsed["sni"])
+        pbk  = _box_ask("Public Key (pbk)", parsed["pbk"])
+        sid  = _box_ask("Short ID (sid)", parsed["sid"])
+        fp   = _box_ask("Fingerprint", parsed["fp"])
+    else:
+        _box_top("➕  ПАРАМЕТРЫ MIRROR  (ВРУЧНУЮ)")
+        _box_row()
+        _box_kv("IP или домен", "адрес mirror-сервера")
+        _box_kv("Порт", "порт VLESS+REALITY, обычно 443")
+        _box_kv("SNI", "reality_dest / домен маскировки")
+        _box_kv("Public Key (pbk)", "публичный ключ REALITY mirror")
+        _box_kv("Short ID (sid)", "hex-id, можно пусто")
+        _box_kv("Fingerprint", "отпечаток TLS (chrome, firefox, ...)")
+        _box_row()
+        _box_row(f"  {DIM}IP, SNI и Public Key обязательны.{NC}")
+        _box_bottom()
+        host = _box_ask("IP или домен")
+        port = _ask_port("443")
+        sni  = _box_ask("SNI (reality_dest / домен маскировки)")
+        pbk  = _box_ask("Public Key (pbk)")
+        sid  = _box_ask("Short ID (sid, можно пусто)")
+        fp   = _box_ask("Fingerprint", "chrome")
 
+    if not host:
+        _add_err("Host обязателен.")
+        return
+    if port is None:
+        _add_err("Порт не введён.")
+        return
     if not (sni and pbk):
-        print(f"  {RED}✗{NC}  SNI и Public Key обязательны."); return
+        _add_err("SNI и Public Key обязательны.")
+        return
 
     data = _load()
     mirror = {
@@ -357,43 +430,79 @@ def _add_mirror() -> None:
     }
     data["mirrors"].append(mirror)
     _save(data)
-    _ok(f"Mirror «{label}» добавлен. Проверяю доступность…")
+    _log("OK", f"Mirror '{label}' добавлен")
     ok, latency_ms = _probe(host, port)
     mirror["last_check"] = {"ok": ok, "ts": int(time.time()), "latency_ms": latency_ms}
     _save(data)
+
+    _box_top("➕  ДОБАВЛЕНИЕ ENTRY MIRROR")
+    _box_row()
+    _box_ok(_box_narrow(f"Mirror «{label}» добавлен. Проверяю доступность..."))
+    _box_row()
     if ok:
-        _ok(f"Доступен, {latency_ms}ms.")
+        _box_ok(f"Доступен по TCP, {latency_ms}ms.")
+        _log("OK", f"Mirror '{label}': доступен, {latency_ms}ms")
     else:
-        _warn("Недоступен по TCP — проверьте адрес/порт/файрвол на той стороне.")
+        _box_warn("Недоступен по TCP - проверьте адрес/порт/файрвол на той стороне.")
+        _log("WARN", f"Mirror '{label}': недоступен по TCP")
+    _box_bottom()
 
 def _pick_mirror(data: dict, prompt: str) -> Optional[dict]:
+    """Рамочный выбор mirror из списка (канон выбора carrier в awg_diagnose).
+    EOF/Ctrl+C или пустой ввод = отмена."""
     if not data["mirrors"]:
-        print(f"  {DIM}Список пуст.{NC}")
+        _box_top("🪞  ВЫБОР MIRROR")
+        _box_row()
+        _box_row(f"  {DIM}Mirror-нод нет - добавьте через [1].{NC}")
+        _box_bottom()
         return None
+    _box_top("🪞  ВЫБОР MIRROR")
+    _box_row()
+    _box_row(f"  {DIM}{_box_narrow(prompt)} (Enter = отмена):{NC}")
+    _box_row()
     for i, m in enumerate(data["mirrors"], 1):
-        print(f"  {DIM}[{i}]{NC}  {m['label']}  ({m['host']}:{m['port']})")
-    try:
-        raw = input(f"  {CYAN}{prompt}: {NC}").strip()
-    except (KeyboardInterrupt, EOFError):
-        print(); return None
-    if not raw:
+        _box_item(str(i) if i < 10 else "0",
+                  f"{_box_narrow(m['label'])}  {DIM}{_box_narrow(str(m['host']))}:{m['port']}{NC}")
+    _box_item("Q", "Отмена (Enter)")
+    _box_bottom()
+    raw = _box_ask("Выбор")
+    if not raw or raw.lower() in ("q", "й"):
         return None
     try:
         idx = int(raw) - 1
-        return data["mirrors"][idx]
-    except (ValueError, IndexError):
-        print(f"  {RED}✗{NC}  Неверный номер."); return None
+        if 0 <= idx < len(data["mirrors"]):
+            return data["mirrors"][idx]
+    except ValueError:
+        pass
+    _box_top("🪞  ВЫБОР MIRROR")
+    _box_row()
+    _box_row(f"  {RED}❌  Неверный номер.{NC}")
+    _box_bottom()
+    return None
 
 def _remove_mirror() -> None:
     data = _load()
     m = _pick_mirror(data, "Номер mirror для удаления")
     if not m:
         return
-    confirm = input(f"  {YELLOW}Удалить «{m['label']}»? (y/N): {NC}").strip().lower()
-    if confirm == "y":
-        data["mirrors"] = [x for x in data["mirrors"] if x["id"] != m["id"]]
-        _save(data)
-        _ok("Удалён.")
+    _box_top("🗑️  УДАЛЕНИЕ MIRROR")
+    _box_row()
+    _box_kv("Mirror", _box_narrow(m["label"]))
+    _box_kv("Адрес", f"{m['host']}:{m['port']}")
+    _box_kv("SNI", _box_narrow(m["sni"]))
+    _box_row()
+    _box_row(f"  {YELLOW}Mirror пропадёт из подписки всех пользователей.{NC}")
+    _box_bottom()
+    confirm = _box_ask(f"Точно удалить «{_box_narrow(m['label'])}»? [y/N]").lower()
+    if confirm not in ("y", "yes", "д", "да"):
+        return
+    data["mirrors"] = [x for x in data["mirrors"] if x["id"] != m["id"]]
+    _save(data)
+    _log("OK", f"Mirror '{m['label']}' удалён")
+    _box_top("🗑️  УДАЛЕНИЕ MIRROR")
+    _box_row()
+    _box_ok(_box_narrow(f"Mirror «{m['label']}» удалён."))
+    _box_bottom()
 
 def _toggle_mirror() -> None:
     data = _load()
@@ -402,22 +511,48 @@ def _toggle_mirror() -> None:
         return
     m["enabled"] = not m.get("enabled", True)
     _save(data)
-    _ok(f"«{m['label']}»: {'включён' if m['enabled'] else 'выключен'}.")
+    _log("OK", f"Mirror '{m['label']}': {'включён' if m['enabled'] else 'выключен'}")
+    _box_top("🔀  ВКЛ/ВЫКЛ MIRROR")
+    _box_row()
+    icon = "✅" if m["enabled"] else "⭕"
+    state = f"{GREEN}включён{NC}" if m["enabled"] else f"{DIM}выключен{NC}"
+    _lbl = _box_narrow(f"«{m['label']}»")
+    _box_row(f"  {icon}  {_lbl} - {state}.")
+    _box_row()
+    _box_row(f"  {DIM}Выключенные mirror не попадают в подписки пользователей.{NC}")
+    _box_bottom()
 
 def _show_links() -> None:
     users = _load_all_users()
     active_users = [u for u in users if not u.get("disabled") and u.get("uuid")]
+    _box_top("🔗  MIRROR-ССЫЛКИ ПО ПОЛЬЗОВАТЕЛЯМ")
+    _box_row()
     if not active_users:
-        print(f"  {DIM}Нет активных пользователей.{NC}")
+        _box_row(f"  {DIM}Нет активных пользователей.{NC}")
+        _box_bottom()
         return
+    _box_row(f"  {DIM}Ссылки всех включённых mirror для каждого пользователя{NC}")
+    _box_row(f"  {DIM}(основной сервер в подписке и так есть).{NC}")
+    _box_row()
+    shown = 0
     for u in active_users:
         uris = get_mirror_uris(u["uuid"], only_healthy=False)
         if not uris:
             continue
         label = u.get("email", u.get("name", "?"))
-        print(f"\n  {BOLD}{WHITE}{label}{NC}")
+        _box_row(f"  {BOLD}{WHITE}{_box_narrow(str(label))}{NC}"
+                 f"  {DIM}- {len(uris)} mirror:{NC}")
         for uri in uris:
             _box_link(uri)
+        _box_row()
+        shown += 1
+    if not shown:
+        _box_row(f"  {DIM}Ни у одного пользователя пока нет mirror-ссылок -{NC}")
+        _box_row(f"  {DIM}добавьте mirror через [1].{NC}")
+        _box_row()
+    _box_bottom()
+    from chimera.modules.box_renderer import _print_link_warning
+    _print_link_warning(is_vless=True)
 
 def do_entry_mirrors_menu() -> None:
     while True:
@@ -458,21 +593,18 @@ def do_entry_mirrors_menu() -> None:
         _box_back()
         _box_bottom()
 
-        try:
-            ch = input(f"{CYAN}Выбор: {NC}").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            return
+        ch = _box_ask("Выбор").lower()
 
         if ch == "1":
-            _add_mirror(); input(f"\n{DIM}Enter…{NC}")
+            _add_mirror(); _pause()
         elif ch == "2":
-            _remove_mirror(); input(f"\n{DIM}Enter…{NC}")
+            _remove_mirror(); _pause()
         elif ch == "3":
-            _toggle_mirror(); input(f"\n{DIM}Enter…{NC}")
+            _toggle_mirror(); _pause()
         elif ch == "4":
-            print(); probe_all(); input(f"\n{DIM}Enter…{NC}")
+            probe_all(boxed=True); _pause()
         elif ch == "5":
-            _show_links(); input(f"\n{DIM}Enter…{NC}")
+            _show_links(); _pause()
         elif ch in ("q", "0", ""):
             return
 
