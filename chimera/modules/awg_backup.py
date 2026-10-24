@@ -278,16 +278,29 @@ def do_manage_awg_backup() -> None:
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
 
         if ch == "b":
-            label = input(f"{CYAN}Метка backup (пусто = без метки): {NC}").strip()
+            # Рамочный диалог создания бэкапа (раньше — плоский input())
+            print()
+            _box_top("СОЗДАНИЕ BACKUP")
+            _box_row()
+            _box_row(f"  {DIM}Снимок state и конфигов AWG; метка попадает{NC}")
+            _box_row(f"  {DIM}в имя файла архива.{NC}")
+            _box_bottom()
+            label = core._box_ask("Метка backup (пусто = без метки)")
             awgs_backup_create(label=label)
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "r":
-            num_str = input(f"{CYAN}Номер backup для restore: {NC}").strip()
+            print()
+            _box_top("ВОССТАНОВЛЕНИЕ ИЗ BACKUP")
+            _box_row()
+            _box_row(f"  {core.YELLOW}Текущее состояние AWG будет заменено{NC}")
+            _box_row(f"  {DIM}содержимым выбранного архива (конфиги, state, пиры).{NC}")
+            _box_bottom()
+            num_str = core._box_ask("Номер backup для restore")
             try:
                 num = int(num_str)
                 if 1 <= num <= len(backups):
-                    confirm = input(f"{core.YELLOW}Восстановить '{backups[num-1].name}'? "
-                                    f"Текущее состояние будет заменено! [y/N]: {NC}").strip().lower()
+                    confirm = core._box_ask(
+                        f"Восстановить '{backups[num-1].name}'? [y/N]").lower()
                     if confirm in ("y", "yes", "д", "да"):
                         awgs_backup_restore(backups[num-1])
                 else:

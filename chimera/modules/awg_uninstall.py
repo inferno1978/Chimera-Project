@@ -417,17 +417,20 @@ def do_awg_uninstall_menu() -> None:
 
     if not awgs_state_is_installed():
         warn("Standalone AWG не установлен. Удалять нечего.")
-        ch = input(f"{CYAN}Всё равно продолжить (для очистки осиротевших файлов)? [y/N]: {NC}").strip().lower()
+        ch = core._box_ask("Всё равно продолжить (для очистки осиротевших файлов)? [y/N]").lower()
         if ch not in ("y", "yes", "д", "да"):
             return
     else:
-        ch = input(f"{RED}Точно удалить standalone AWG? [y/N]: {NC}").strip().lower()
+        try:
+            ch = input(f"{RED}Точно удалить standalone AWG? [y/N]: {NC}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ch = ""
         if ch not in ("y", "yes", "д", "да"):
             info("Отмена")
             return
 
     # Спрашиваем про backup'ы
-    keep_ch = input(f"{CYAN}Сохранить backup'ы (для возможного restore)? [Y/n]: {NC}").strip().lower()
+    keep_ch = core._box_ask("Сохранить backup'ы (для возможного restore)? [Y/n]").lower()
     keep_backups = keep_ch not in ("n", "no", "н", "нет")
 
     print()

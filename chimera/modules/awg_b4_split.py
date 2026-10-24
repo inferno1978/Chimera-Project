@@ -1850,7 +1850,10 @@ def do_manage_awg_b4_split() -> None:
 def _menu_sets() -> None:
     """Чекбоксы сетов b4 (выбранные И enabled в b4 участвуют)."""
     core = _core()
-    CYAN, GREEN, DIM, NC, YELLOW = core.CYAN, core.GREEN, core.DIM, core.NC, core.YELLOW
+    _box_top, _box_row, _box_bottom = (
+        core._box_top, core._box_row, core._box_bottom)
+    CYAN, GREEN, DIM, NC, YELLOW, RED = (core.CYAN, core.GREEN, core.DIM,
+                                         core.NC, core.YELLOW, core.RED)
     while True:
         import os
         os.system("clear")
@@ -1858,21 +1861,23 @@ def _menu_sets() -> None:
         sets = detect_sets()
         st = state_load()
         sel = set(st.get("set_ids") or [])
-        print(f"  {YELLOW}СЕТЫ B4 (выбор для сплита){NC}")
-        print(f"  {DIM}Участвуют: выбранные здесь И включённые в b4. "
-              f"«0 доменов» — стратегия без своего списка (для сплита бесполезна).{NC}\n")
+        # Рамочный экран-чеклист (раньше — плоские print-строки)
+        _box_top("СЕТЫ B4 • ВЫБОР ДЛЯ СПЛИТА")
+        _box_row()
+        _box_row(f"  {DIM}Участвуют: выбранные здесь И включённые в b4.{NC}")
+        _box_row(f"  {DIM}«0 доменов» — стратегия без своего списка (для сплита бесполезна).{NC}")
+        _box_row()
         for i, s in enumerate(sets, 1):
             mark = f"{GREEN}[x]{NC}" if s["id"] in sel else "[ ]"
             en = f"{GREEN}●{NC}" if s["enabled"] else f"{RED}○{NC}"
             dc = s["domain_count"]
             dc_s = (f"{GREEN}{dc}{NC} дом." if dc else f"{DIM}0 дом.{NC}")
-            print(f"  {i:>2}. {mark} {en} {s['name']:<28} {dc_s}")
-        print(f"\n  {DIM}номер/диапазон (1,3-5) = toggle, a = все, n = ничего, "
-              f"s = сохранить, q = выход{NC}")
-        try:
-            v = input(f"{CYAN}Выбор:{NC} ").strip().lower()
-        except (KeyboardInterrupt, EOFError):
-            return
+            _box_row(f"  [{i}] {mark} {en} {s['name']}  {dc_s}")
+        _box_row()
+        _box_row(f"  {DIM}номер/диапазон (1,3-5) = toggle, a = все, n = ничего,{NC}")
+        _box_row(f"  {DIM}s = сохранить и выйти, q = выход без сохранения{NC}")
+        _box_bottom()
+        v = core._box_ask("Выбор").lower()
         if v in ("q", ""):
             return
         if v == "s":
@@ -1917,24 +1922,27 @@ def _menu_sets() -> None:
 
 def _menu_extra_domains() -> None:
     core = _core()
-    CYAN, DIM, NC = core.CYAN, core.DIM, core.NC
+    _box_top, _box_row, _box_bottom = (
+        core._box_top, core._box_row, core._box_bottom)
+    DIM, NC = core.DIM, core.NC
     while True:
         import os
         os.system("clear")
         print()
         st = state_load()
-        print(f"  ДОПОЛНИТЕЛЬНЫЕ ДОМЕНА (поверх сетов b4)\n")
+        # Рамочный экран доменов (раньше — плоские print-строки)
+        _box_top("ДОПОЛНИТЕЛЬНЫЕ ДОМЕНА (ПОВЕРХ СЕТОВ B4)")
+        _box_row()
         doms = st.get("extra_domains") or []
         if doms:
             for d in doms:
-                print(f"    - {d}")
+                _box_row(f"    - {d}")
         else:
-            print(f"  {DIM}(пусто){NC}")
-        print(f"\n  {DIM}домен = добавить, 'del <домен>' = убрать, q = выход{NC}")
-        try:
-            v = input(f"{CYAN}Ввод:{NC} ").strip()
-        except (KeyboardInterrupt, EOFError):
-            return
+            _box_row(f"  {DIM}(пусто){NC}")
+        _box_row()
+        _box_row(f"  {DIM}домен = добавить, 'del <домен>' = убрать, q = выход{NC}")
+        _box_bottom()
+        v = core._box_ask("Ввод")
         if v in ("q", ""):
             return
         if v.lower().startswith("del "):
@@ -1944,7 +1952,7 @@ def _menu_extra_domains() -> None:
         else:
             d = _normalize_domain(v)
             if not d:
-                print("  [!] не похоже на домен")
+                core.warn("не похоже на домен")
                 continue
             if d not in doms:
                 doms.append(d)
@@ -1954,30 +1962,41 @@ def _menu_extra_domains() -> None:
 
 def _menu_full_status() -> None:
     core = _core()
+    _box_top, _box_row, _box_sep, _box_bottom = (
+        core._box_top, core._box_row, core._box_sep, core._box_bottom)
     DIM, NC = core.DIM, core.NC
     s = status_info()
+    # Рамочный экран живого состояния (раньше — плоские print-строки);
+    # _box_row сам переносит длинные iptables/nft-строки по словам
     print()
-    print(f"  {DIM}── живые правила ──{NC}")
+    _box_top("B4-СPLИТ • ЖИВОЕ СОСТОЯНИЕ")
+    _box_row()
+    _box_row(f"  {DIM}── живые правила ──{NC}")
     r = _bash("iptables -t mangle -S PREROUTING | grep -E 'awg0' | head -5")
     for line in (r.stdout or "").strip().splitlines():
-        print(f"    {line}")
+        _box_row(f"    {line}")
     r = _bash(f"iptables -t nat -S PREROUTING | grep '{_RULE_COMMENT}'")
-    print(f"\n  {DIM}── DNS-редирект ──{NC}")
-    for line in (r.stdout or "").strip().splitlines() or ["    (нет)"]:
-        print(f"    {line}")
+    _box_sep()
+    _box_row(f"  {DIM}── DNS-редирект ──{NC}")
+    for line in (r.stdout or "").strip().splitlines() or ["(нет)"]:
+        _box_row(f"    {line}")
     r = _run(["nft", "list", "table", "inet", _NFT_TABLE], capture=True)
-    print(f"\n  {DIM}── nft {(_NFT_TABLE)} ──{NC}")
+    _box_sep()
+    _box_row(f"  {DIM}── nft {_NFT_TABLE} ──{NC}")
     for line in (r.stdout or "").strip().splitlines():
-        print(f"    {line}")
-    print(f"\n  {DIM}── выбранные сеты ──{NC}")
+        _box_row(f"    {line}")
+    _box_sep()
+    _box_row(f"  {DIM}── выбранные сеты ──{NC}")
     for x in s["sets"]:
-        print(f"    {x['name']} ({x['domain_count']} дом., "
-              f"{'on' if x['enabled'] else 'OFF'})")
+        _box_row(f"    {x['name']} ({x['domain_count']} дом., "
+                 f"{'on' if x['enabled'] else 'OFF'})")
     ls = s["last_stats"]
     if ls:
-        print(f"\n  {DIM}── последний тик ──{NC}")
+        _box_sep()
+        _box_row(f"  {DIM}── последний тик ──{NC}")
         for k in ("ts", "domains", "ips", "sys_failed", "qlog_ips",
                   "applied", "skipped"):
             if k in ls:
-                print(f"    {k}: {ls[k]}")
+                _box_row(f"    {k}: {ls[k]}")
+    _box_bottom()
 

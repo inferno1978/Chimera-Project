@@ -91,7 +91,7 @@ from chimera.modules.box_renderer import (
     _box_row, _box_row_auto, _box_link, _box_top, _box_sep, _box_bottom,
     _box_item, _box_item_exit, _box_back, _box_desc, _box_kv,
     _box_wrap_msg, _box_info, _box_warn, _box_ok, _box_dim, _box_input,
-    _submenu_header, _submenu_item, _submenu_back,
+    _box_ask, _submenu_header, _submenu_item, _submenu_back,
 )
 import chimera.modules.box_renderer as _br
 _BOX_W = _br._BOX_W  # алиас для совместимости с кодом в _core.py

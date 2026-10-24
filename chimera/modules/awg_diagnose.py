@@ -364,15 +364,19 @@ def do_awg_diagnose_menu() -> None:
     )
 
     print()
-    info("Запуск диагностики AmneziaWG standalone...")
-    print()
-
-    # Спрашиваем carrier для сравнения
-    print(f"{CYAN}Сравнить с оператором?{NC} (Enter = пропустить)")
+    # Выбор carrier для сравнения — рамочный список (канон
+    # _awgs_prompt_protocol_version; до кейса стилизации был плоский print).
     presets = awgs_presets_list()
+    _box_top("СРАВНЕНИЕ С ОПЕРАТОРОМ (CARRIER)")
+    _box_row()
+    _box_row(f"  {DIM}Сравнит текущие параметры обфускации с профилем{NC}")
+    _box_row(f"  {DIM}оператора и покажет отличия в отчёте ниже.{NC}")
+    _box_row()
     for i, p in enumerate(presets, 1):
-        print(f"  [{i}] {p}")
-    carrier_ch = input(f"{CYAN}Выбор: {NC}").strip()
+        _box_item(str(i) if i < 10 else "0", p)
+    _box_item("Q", "Пропустить сравнение (Enter)")
+    _box_bottom()
+    carrier_ch = core._box_ask("Выбор")
     carrier = ""
     if carrier_ch:
         try:
@@ -381,6 +385,8 @@ def do_awg_diagnose_menu() -> None:
                 carrier = presets[idx]
         except ValueError:
             pass
+
+    info("Запуск диагностики AmneziaWG standalone...")
 
     report = awgs_diagnose_full(carrier=carrier)
 
