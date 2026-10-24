@@ -1478,5 +1478,247 @@ class TestAutoupdateScript(unittest.TestCase):
             "ожидалась загрузка v26.10.1 (числовое сравнение разрядов)")
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  v3 (24.10.2026): атомарная замена бинарника — регрессия живого бага флота
+#  «✅ Autoupdate: Xray обновлён v26.10.17 → v26.10.17» (ложный успех):
+#  cp поверх работающего ELF падает ETXTBSY, «cp && chmod» не роняет
+#  set-e → скрипт продолжал и рапортовал успех со старым бинарником.
+# ═════════════════════════════════════════════════════════════════════════════
+class TestAutoupdateScriptV3(TestAutoupdateScript):
+    """Поведенческие тесты фикса: атомарная замена, пост-проверка версии,
+    откат при несоответствии, честная отмена при провале теста конфига,
+    анти-спам TG-ошибок, SHA256 по digest ассета из GitHub API.
+
+    Хэлпер _run_v3 расширяет песочницу родителя: curl теперь раздаёт
+    ИСПОДНИЙ zip c фейковым xray (запечённая версия/поведение run -test),
+    API-ответ содержит digest ассета, а константы скрипта (LOG/BACKUP_DIR/
+    TG_STAMP/пути конфига) заворачиваются в tmp-песочницу.
+    """
+
+    LATEST = "v26.3.27"
+
+    # ── песочница v3 ───────────────────────────────────────────────────
+
+    def _make_zip(self, path, ver: str, config_ok: bool) -> bytes:
+        """Собирает zip c фейковым xray: version → запечённая версия,
+        run -test → exit 0/1 (по config_ok)."""
+        run_body = ("exit 0" if config_ok else
+                    'echo "Failed to start: geodata EOF (fake)" >&2; exit 1')
+        fake = (
+            "#!/bin/sh\n"
+            "case \"$1\" in\n"
+            f"  version) echo \"Xray {ver} (fake zip binary)\";;\n"
+            f"  run) {run_body};;\n"
+            "esac\n"
+        )
+        import zipfile
+        zi = zipfile.ZipInfo("xray")
+        zi.external_attr = 0o100755 << 16
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr(zi, fake)
+        return Path(path).read_bytes()
+
+    def _run_v3(self, script: str, installed: str, zip_ver: str = None,
+                config_ok: bool = True, keep_sandbox=None):
+        """Прогон скрипта в песочнице v3.
+
+        zip_ver=None — curl валит загрузку zip (путь ошибки download);
+        иначе zip раздаётся c фейковым бинарником запечённой версии.
+        keep_sandbox: (sbx, tg_stamp) от прошлого прогона — для теста
+        анти-спама (штамп TG переживает прогоны).
+        """
+        import os
+        import subprocess as sp
+
+        if keep_sandbox:
+            sbx, tg_stamp, cfg_path = keep_sandbox
+        else:
+            sbx = Path(tempfile.mkdtemp(prefix="xau_v3_"))
+            tg_stamp = sbx / "tg_stamp"
+            cfg_path = sbx / "config.json"
+        log_path = sbx / "autoupdate.log"
+        backups = sbx / "backups"
+        bin_dir = sbx / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        cfg_path.write_text("{}\n")
+
+        curl_calls = sbx / "curl_calls.txt"
+        systemctl_calls = sbx / "systemctl_calls.txt"
+        api_json_path = sbx / "api.json"
+        zip_path = sbx / "xray.zip"
+
+        if zip_ver is not None:
+            zip_bytes = self._make_zip(zip_path, zip_ver, config_ok)
+            import hashlib
+            digest = hashlib.sha256(zip_bytes).hexdigest()
+            api_json_path.write_text(
+                '{"tag_name": "%s", "assets": [{"name": "Xray-linux-64.zip",'
+                ' "digest": "sha256:%s"}]}' % (self.LATEST, digest))
+        else:
+            api_json_path.write_text('{"tag_name": "%s"}' % self.LATEST)
+
+        (bin_dir / "xray").write_text(
+            "#!/bin/sh\n"
+            f"echo 'Xray {installed} (fake installed)'\n")
+        (bin_dir / "xray").chmod(0o755)
+
+        (bin_dir / "curl").write_text(textwrap.dedent(f"""\
+            #!/bin/sh
+            url=""; dest=""
+            prev=""
+            for a in "$@"; do
+              case "$a" in http*) url="$a";; esac
+              if [ "$prev" = "-o" ]; then dest="$a"; fi
+              prev="$a"
+            done
+            echo "$url" >> "{curl_calls}"
+            case "$url" in
+              *releases/latest*) cat "{api_json_path}"; exit 0;;
+              *releases/download/*)
+                if [ -f "{zip_path}" ] && [ -n "$dest" ]; then
+                  cat "{zip_path}" > "$dest"; exit 0
+                fi
+                exit 1;;
+              *) exit 1;;
+            esac
+        """))
+        (bin_dir / "curl").chmod(0o755)
+
+        (bin_dir / "systemctl").write_text(
+            "#!/bin/sh\n"
+            f'echo "systemctl $*" >> "{systemctl_calls}"\n'
+            "exit 0\n")
+        (bin_dir / "systemctl").chmod(0o755)
+
+        sandboxed = script.replace(
+            'LOG="/var/log/xray-autoupdate.log"', f'LOG="{log_path}"'
+        ).replace(
+            'BACKUP_DIR="/var/backups/xray/binaries"',
+            f'BACKUP_DIR="{backups}"'
+        ).replace(
+            'TG_STAMP="/var/lib/xray-installer/autoupdate_tg_stamp"',
+            f'TG_STAMP="{tg_stamp}"'
+        ).replace(
+            "/etc/xray/config.json", str(cfg_path)
+        ).replace(
+            "/usr/local/etc/xray/config.json", str(cfg_path))
+        script_path = sbx / "xray-autoupdate.sh"
+        script_path.write_text(sandboxed)
+        script_path.chmod(0o755)
+
+        env = dict(os.environ)
+        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        proc = sp.run(["bash", str(script_path)], env=env,
+                      capture_output=True, text=True, timeout=90)
+
+        log_text = log_path.read_text() if log_path.exists() else ""
+        bin_out = sp.run([str(bin_dir / "xray"), "version"],
+                         capture_output=True, text=True, timeout=10).stdout
+        stamp = (tg_stamp.read_text().strip()
+                 if tg_stamp.exists() else "")
+        result = {
+            "rc": proc.returncode,
+            "log": log_text,
+            "bin_version": bin_out.strip(),
+            "tg_stamp": stamp,
+        }
+        if not keep_sandbox:
+            shutil.rmtree(sbx, ignore_errors=True)
+        return result
+
+    # ── исходники: атомарная замена и живой digest ─────────────────────
+
+    def test_atomic_replace_no_bare_cp_over_running_binary(self):
+        """Регрессия флота: голый cp поверх работающего ELF (ETXTBSY)
+        внутри «cp && chmod» больше не существует — только tmp+mv."""
+        script = self._capture_script()
+        self.assertNotIn('cp "$NEW_BIN" "$XRAY_BIN" && chmod',
+                         script)
+        self.assertNotIn('cp "$BACKUP" "$XRAY_BIN" && chmod',
+                         script)
+        self.assertIn("xray_install_bin", script)
+        self.assertIn('mv -f "$tmp" "$XRAY_BIN"', script)
+
+    def test_digest_verification_no_dead_checksums_url(self):
+        """checksums.txt в релизах XTLS не существует (вечный 404) —
+        верификация теперь по digest ассета из того же API-ответа.
+        (Слово может встречаться в комментариях — мёртвого URL нет.)"""
+        script = self._capture_script()
+        self.assertNotIn("/checksums.txt", script)
+        self.assertNotIn("CHKS_URL", script)
+        self.assertIn("ZIP_DIGEST", script)
+        self.assertIn('${ZIP_DIGEST#sha256:}', script)
+
+    # ── happy path: бинарник РЕАЛЬНО заменяется ────────────────────────
+
+    def test_update_actually_replaces_binary(self):
+        """Флот-кейс: 1.2.3 → 26.3.27. Прежний код рапортовал успех со
+        старым бинарником; теперь бинарник обязан физически замениться."""
+        script = self._capture_script()
+        r = self._run_v3(script, installed="1.2.3", zip_ver="26.3.27")
+        self.assertEqual(r["rc"], 0, r["log"])
+        self.assertIn("OK: Обновлён v1.2.3 → v26.3.27", r["log"])
+        # бинарник в PATH заменён на версию из zip
+        self.assertIn("Xray 26.3.27", r["bin_version"])
+        self.assertIn("SHA256 OK (digest GitHub API)", r["log"])
+        self.assertNotIn("ERROR", r["log"])
+
+    def test_update_swallows_no_failure_when_version_wrong(self):
+        """Пост-проверка: zip-бинарник сообщил НЕ ту версию → откат
+        к бэкапу, rc=1, ложного «OK: Обновлён» нет (регрессия
+        «обновлён v26.10.17 → v26.10.17»)."""
+        script = self._capture_script()
+        r = self._run_v3(script, installed="1.2.3", zip_ver="9.9.9")
+        self.assertEqual(r["rc"], 1)
+        self.assertIn("ERROR: После замены бинарник сообщает v9.9.9",
+                      r["log"])
+        self.assertIn("откат к v1.2.3", r["log"])
+        self.assertNotIn("OK: Обновлён", r["log"])
+        # откат вернул старый бинарник
+        self.assertIn("Xray 1.2.3", r["bin_version"])
+
+    def test_config_test_fail_cancels_without_replacing(self):
+        """RU-кейс: конфиг не парсится новым бинарником → честная отмена
+        ДО замены, TG-штамп cfg:<версия>, бинарник не тронут."""
+        script = self._capture_script()
+        r = self._run_v3(script, installed="1.2.3", zip_ver="26.3.27",
+                         config_ok=False)
+        self.assertEqual(r["rc"], 1)
+        self.assertIn("Конфиг не прошёл тест новым бинарником v26.3.27",
+                      r["log"])
+        self.assertIn("geodata EOF", r["log"])
+        self.assertIn("cfg:v26.3.27", r["tg_stamp"])
+        self.assertIn("Xray 1.2.3", r["bin_version"],
+                      "бинарник не должен заменяться при провале теста")
+        self.assertNotIn("OK: Обновлён", r["log"])
+
+    def test_download_fail_writes_tg_stamp(self):
+        """Ошибка загрузки → TG-штамп dl:<версия> (анти-спам-ключ)."""
+        script = self._capture_script()
+        r = self._run_v3(script, installed="1.2.3", zip_ver=None)
+        self.assertEqual(r["rc"], 1)
+        self.assertIn("ERROR: Ошибка загрузки", r["log"])
+        self.assertIn("dl:v26.3.27", r["tg_stamp"])
+
+    def test_tg_error_throttled_per_version(self):
+        """Анти-спам: повторная та же ошибка не дублируется в TG —
+        вторая ночь с той же поломкой молчит в лог."""
+        script = self._capture_script()
+        sbx = Path(tempfile.mkdtemp(prefix="xau_thr_"))
+        tg_stamp = sbx / "tg_stamp"
+        cfg_path = sbx / "config.json"
+        try:
+            r1 = self._run_v3(script, installed="1.2.3", zip_ver=None,
+                              keep_sandbox=(sbx, tg_stamp, cfg_path))
+            self.assertEqual(r1["rc"], 1)
+            self.assertNotIn("не дублируем", r1["log"])
+            r2 = self._run_v3(script, installed="1.2.3", zip_ver=None,
+                              keep_sandbox=(sbx, tg_stamp, cfg_path))
+            self.assertEqual(r2["rc"], 1)
+            self.assertIn("уже отправлялась — не дублируем", r2["log"])
+        finally:
+            shutil.rmtree(sbx, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
