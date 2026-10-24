@@ -27,6 +27,11 @@ Failover-мониторинг exit-нод + авто-фолбэк (Режим B 
 Доступ к helpers ядра (success/warn/info, _run, _box_*, цвета, STATE_FILE,
 _nodes_from_state, _speed_test_node_latency, switch_mode_ab) — через
 importlib (lazy binding), как и в других извлечённых модулях.
+
+UI-канон (окт.2026, третья партия стилизации): все диалоги — рамки
+box_renderer, ввод/паузы EOF-безопасны (диалоги выдерживают пайп /
+</dev/null — EOF = значение по умолчанию / отмена, канон icmp_gate и
+as_direct): _fo_pause/_box_ask/_box_input, формы и логи в рамках.
 ───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -60,6 +65,95 @@ def _core_module():
     """
     import importlib
     return importlib.import_module("chimera._core")
+
+
+# =============================================================================
+#  UI-ХЕЛПЕРЫ (канон box_renderer; EOF-безопасность — icmp_gate._ig_pause)
+# =============================================================================
+def _fo_pause() -> None:
+    """Пауза после действия; EOF/Ctrl+C безопасны (канон icmp_gate._ig_pause)."""
+    core = _core_module()
+    DIM   = core.DIM
+    NC    = core.NC
+    try:
+        input(f"{DIM}Enter - назад в меню...{NC}")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def _fo_warn_box(msg: str) -> None:
+    """Мини-бокс с предупреждением (канон «карточка ошибки» as_direct)."""
+    core = _core_module()
+    _box_top    = core._box_top
+    _box_warn   = core._box_warn
+    _box_bottom = core._box_bottom
+    print()
+    _box_top()
+    _box_warn(msg)
+    _box_bottom()
+
+
+def _fo_show_log(log_path: Path, title: str, tail: int = 30) -> None:
+    """Рамочный просмотр хвоста лога (общий для failover/auto-fallback)."""
+    core = _core_module()
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_bottom = core._box_bottom
+    _box_warn   = core._box_warn
+    DIM = core.DIM
+    NC  = core.NC
+    print()
+    _box_top(title)
+    if log_path.exists():
+        lines = [l for l in log_path.read_text(errors="replace").splitlines()
+                 if l.strip()]
+        if lines:
+            for line in lines[-tail:]:
+                _box_row(f"  {DIM}{line[:94]}{NC}")
+        else:
+            _box_row(f"  {DIM}(лог пуст){NC}")
+    else:
+        _box_warn("Лог не найден — watchdog ещё ничего не писал")
+    _box_bottom()
+    _fo_pause()
+
+
+def _fo_ask_telegram() -> tuple:
+    """Рамочная форма алертов watchdog → (token, chat).
+
+    Enter/EOF в token = без алертов (канон hysteria2: default на EOF).
+    """
+    core = _core_module()
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_bottom = core._box_bottom
+    _box_input  = core._box_input
+    _box_kv     = core._box_kv
+    _box_desc   = core._box_desc
+    DIM         = core.DIM
+    NC          = core.NC
+
+    _box_top("TELEGRAM-АЛЕРТЫ WATCHDOG")
+    _box_desc("Watchdog проверяет exit-ноды каждую минуту (cron) и присылает "
+              "в Telegram сообщение при падении/восстановлении ноды.")
+    _box_kv("Bot Token", "пусто = без алертов (молчаливый режим)")
+    _box_kv("Chat ID", "нужен, только если введён token")
+    tg_token = _box_input("Telegram Bot Token (Enter = без алертов)")
+    tg_chat = ""
+    if tg_token:
+        tg_chat = _box_input("Telegram Chat ID", reopen=False)
+    else:
+        _box_row(f"  {DIM}Алерты отключены — watchdog работает молча{NC}")
+        _box_bottom()
+    return tg_token, tg_chat
+
+
+def _fo_confirm_install(what: str) -> bool:
+    """y/N-подтверждение установки watchdog; EOF/Ctrl+C = НЕТ (пайп-безопасно)."""
+    core = _core_module()
+    _box_ask = core._box_ask
+    ans = _box_ask(f"{what}? [y/N]").strip().lower()
+    return ans in ("y", "yes", "д", "да")
 
 
 # =============================================================================
@@ -186,9 +280,13 @@ def do_failover_status() -> None:
     _speed_test_node_latency = core._speed_test_node_latency
     _box_top                = core._box_top
     _box_row                = core._box_row
+    _box_sep                = core._box_sep
     _box_bottom             = core._box_bottom
     _box_item               = core._box_item
+    _box_back               = core._box_back
     _box_warn               = core._box_warn
+    _box_ok                 = core._box_ok
+    _box_ask                = core._box_ask
     BLUE = core.BLUE
     CYAN = core.CYAN
     DIM = core.DIM
@@ -196,9 +294,6 @@ def do_failover_status() -> None:
     NC = core.NC
     RED = core.RED
     YELLOW = core.YELLOW
-    CYAN, NC, GREEN, YELLOW, RED, DIM, BLUE = (
-        core.CYAN, core.NC, core.GREEN, core.YELLOW, core.RED, core.DIM, core.BLUE
-    )
 
     # ── AWG-режим: failover нод не применим ──────────────────────────────────
     try:
@@ -211,7 +306,7 @@ def do_failover_status() -> None:
                 _box_row(f"  {DIM}Мониторинг туннеля awg0 выполняется через AWG Watchdog.{NC}")
                 _box_row(f"  {DIM}Меню → Безопасность → [W] AWG Tunnel Watchdog{NC}")
                 _box_bottom()
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _fo_pause()
                 return
     except Exception:
         pass
@@ -242,9 +337,9 @@ def do_failover_status() -> None:
         _box_item("1", f"{'Отключить' if cron_active else 'Включить'} watchdog")
         _box_item("2", f"Проверить все ноды прямо сейчас")
         _box_item("3", f"Показать лог ({_FAILOVER_LOG})")
-        _box_item("Q", f"Назад")
+        _box_back()
         _box_bottom()
-        ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+        ch = _box_ask("Выбор [1/2/3/Q]").strip().lower()
 
         if ch == "1":
             if cron_active:
@@ -258,15 +353,15 @@ def do_failover_status() -> None:
                 except Exception:
                     nodes = []
                 if not nodes:
-                    warn("Ноды не найдены — установите Режим B")
-                    input(f"{BLUE}Нажмите Enter...{NC}")
+                    _fo_warn_box("Ноды не найдены — установите Режим B")
+                    _fo_pause()
                     continue
-                tg_token = input("  Telegram Bot Token (Enter = без алертов): ").strip()
-                tg_chat  = ""
-                if tg_token:
-                    tg_chat = input("  Telegram Chat ID: ").strip()
-                _failover_install(nodes, tg_token, tg_chat)
-            input(f"{BLUE}Нажмите Enter...{NC}")
+                tg_token, tg_chat = _fo_ask_telegram()
+                if _fo_confirm_install("Установить watchdog (cron каждую минуту)"):
+                    _failover_install(nodes, tg_token, tg_chat)
+                else:
+                    info("Отмена — watchdog не установлен")
+            _fo_pause()
 
         elif ch == "2":
             try:
@@ -274,37 +369,43 @@ def do_failover_status() -> None:
             except Exception:
                 nodes = []
             if not nodes:
-                warn("Ноды не найдены")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _fo_warn_box("Ноды не найдены — установите Режим B")
+                _fo_pause()
                 continue
             print()
+            _box_top("ПРОВЕРКА EXIT-НОД ПРЯМО СЕЙЧАС")
+            _box_row(f"  {DIM}TCP-проба каждой ноды с замером задержки{NC}")
+            _box_row(f"  {'─'*60}")
             new_state = {}
+            up = 0
             for nd in nodes:
                 host = nd["host"]
                 port = nd.get("port", 443)
-                info(f"  Проверка {host}:{port} ...")
                 lat = _speed_test_node_latency(host, port)
                 st  = "up" if "мс" in lat else "down"
                 colour = GREEN if st == "up" else RED
-                print(f"    {CYAN}{host}:{port}{NC} → {colour}{st}{NC}  {lat}")
+                mark = "✓" if st == "up" else "✗"
+                _box_row(f"  {colour}{mark}{NC} {CYAN}{host}:{port}{NC}"
+                         f" → {colour}{st}{NC}  {DIM}{lat}{NC}")
+                if st == "up":
+                    up += 1
                 new_state[host] = {
                     "status": st, "host": host,
                     "last_check": time.time(), "changed_at": time.time()
                 }
             _failover_save(new_state)
-            print()
-            success("Проверка завершена")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _box_sep()
+            if up:
+                _box_ok(f"Живых нод: {up} из {len(nodes)}")
+            else:
+                _box_warn("Все ноды недоступны")
+            _box_bottom()
+            _fo_pause()
 
         elif ch == "3":
-            if _FAILOVER_LOG.exists():
-                lines = _FAILOVER_LOG.read_text().splitlines()[-30:]
-                print('\n'.join(lines))
-            else:
-                warn("Лог пуст")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _fo_show_log(_FAILOVER_LOG, "ЛОГ FAILOVER WATCHDOG")
 
-        elif ch in ("q", "Q", ""):
+        elif ch in ("q", "0", ""):
             break
         else:
             warn("Неверный выбор")
@@ -482,16 +583,15 @@ def do_manage_auto_fallback() -> None:
     _box_row    = core._box_row
     _box_bottom = core._box_bottom
     _box_item   = core._box_item
+    _box_back   = core._box_back
     _box_warn   = core._box_warn
+    _box_ask    = core._box_ask
     BLUE = core.BLUE
     CYAN = core.CYAN
     DIM = core.DIM
     GREEN = core.GREEN
     NC = core.NC
     YELLOW = core.YELLOW
-    CYAN, NC, GREEN, YELLOW, DIM, BLUE = (
-        core.CYAN, core.NC, core.GREEN, core.YELLOW, core.DIM, core.BLUE
-    )
 
     # ── AWG-режим: авто-фолбэк на ноды не применим ──────────────────────────
     try:
@@ -504,7 +604,7 @@ def do_manage_auto_fallback() -> None:
                 _box_row(f"  {DIM}Для мониторинга и восстановления AWG-туннеля используйте:{NC}")
                 _box_row(f"  {DIM}Меню → Безопасность → [W] AWG Tunnel Watchdog{NC}")
                 _box_bottom()
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _fo_pause()
                 return
     except Exception:
         pass
@@ -538,15 +638,15 @@ def do_manage_auto_fallback() -> None:
         _box_item("2", f"{'Отключить' if cron_active else 'Установить'} watchdog-cron")
         if fallback_active:
             _box_item("3", f"{YELLOW}Принудительно вернуться в Режим B прямо сейчас{NC}")
-        _box_item("L", f"Показать лог фолбэка ({_AUTO_FALLBACK_LOGFILE})")
-        _box_item("Q", f"Назад")
+        _box_item("L", f"Показать лог фолбэка")
+        _box_back()
 
         _box_bottom()
-        ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+        ch = _box_ask("Выбор [1/2/L/Q]").strip().lower()
 
         if ch == "1":
             _auto_fallback_set_flag(not flag_enabled)
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _fo_pause()
 
         elif ch == "2":
             if cron_active:
@@ -555,25 +655,26 @@ def do_manage_auto_fallback() -> None:
                 success("Auto-fallback watchdog отключён.")
             else:
                 if install_mode != "B":
-                    warn("Авто-фолбэк актуален только при Режиме B.")
-                    input(f"{BLUE}Нажмите Enter...{NC}")
+                    _fo_warn_box("Авто-фолбэк актуален только при Режиме B")
+                    _fo_pause()
                     continue
                 try:
                     nodes = _nodes_from_state(json.loads(STATE_FILE.read_text()))
                 except Exception:
                     nodes = []
                 if not nodes:
-                    warn("Ноды не найдены — установите Режим B.")
-                    input(f"{BLUE}Нажмите Enter...{NC}")
+                    _fo_warn_box("Ноды не найдены — установите Режим B")
+                    _fo_pause()
                     continue
-                tg_token = input("  Telegram Bot Token (Enter = без алертов): ").strip()
-                tg_chat = ""
-                if tg_token:
-                    tg_chat = input("  Telegram Chat ID: ").strip()
-                _auto_fallback_install(nodes, tg_token, tg_chat)
-                # Включаем флаг автоматически при установке watchdog
-                _auto_fallback_set_flag(True)
-            input(f"{BLUE}Нажмите Enter...{NC}")
+                tg_token, tg_chat = _fo_ask_telegram()
+                if _fo_confirm_install(
+                        "Установить авто-фолбэк watchdog (cron каждую минуту)"):
+                    _auto_fallback_install(nodes, tg_token, tg_chat)
+                    # Включаем флаг автоматически при установке watchdog
+                    _auto_fallback_set_flag(True)
+                else:
+                    info("Отмена — watchdog не установлен")
+            _fo_pause()
 
         elif ch == "3" and fallback_active:
             info("Принудительный возврат в Режим B...")
@@ -586,14 +687,9 @@ def do_manage_auto_fallback() -> None:
             switch_mode_ab()   # текущий режим A → переключит в B
 
         elif ch == "l":
-            if _AUTO_FALLBACK_LOGFILE.exists():
-                lines = _AUTO_FALLBACK_LOGFILE.read_text().splitlines()[-40:]
-                print("\n".join(lines))
-            else:
-                warn("Лог пуст.")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _fo_show_log(_AUTO_FALLBACK_LOGFILE, "ЛОГ АВТО-ФОЛБЭКА", tail=40)
 
-        elif ch in ("q", "Q", ""):
+        elif ch in ("q", "0", ""):
             break
         else:
             warn("Неверный выбор.")
