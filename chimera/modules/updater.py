@@ -73,6 +73,7 @@ if __name__ == "__main__":
 
 from chimera.modules.box_renderer import (
     _box_top, _box_row, _box_sep, _box_bottom, _box_item, _box_back,
+    _box_kv, _box_desc, _box_info, _box_warn, _box_ok, _box_dim, _box_ask,
     RED, GREEN, BLUE, CYAN, YELLOW, BOLD, DIM, NC,
 )
 
@@ -167,6 +168,31 @@ def _ok(msg: str)    -> None: print(f"  {GREEN}✓{NC} {msg}")
 def _info(msg: str)  -> None: print(f"  {CYAN}[i]{NC} {msg}")
 def _warn(msg: str)  -> None: print(f"  {YELLOW}⚠{NC} {msg}")
 def _err(msg: str)   -> None: print(f"  {RED}✗{NC} {msg}")
+
+
+def _pause() -> None:
+    """Пауза после действия; EOF/Ctrl+C безопасны (канон icmp_gate._ig_pause).
+
+    Используется вместо голого input(«Нажмите Enter...») — диалоги
+    обновления обязаны выдерживать пайп (UI-smoke, cron-отладка).
+    """
+    try:
+        input(f"{DIM}Enter - назад в меню...{NC}")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def _upd_confirm(prompt: str) -> bool:
+    """y/N-подтверждение (д/да поддерживаются); EOF/Ctrl+C = НЕТ.
+
+    Обновление/перезапуск TUI — действия с последствиями: под пайпом
+    (</dev/null) обязаны отменяться, а не срабатывать по умолчанию.
+    """
+    try:
+        ans = input(f"{CYAN}{prompt}{NC} [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return ans in ("y", "yes", "д", "да")
 
 
 # ── Кэш состояния ────────────────────────────────────────────────────────────
@@ -540,7 +566,7 @@ def do_update_interactive() -> None:
         _box_row(f"  {CYAN}README → «Быстрый старт»: блок безопасной установки{NC}")
         _box_row(f"  {DIM}(проверка подписи Ed25519 перед запуском — docs/faq/BOOTSTRAP_SECURITY.md){NC}")
         _box_bottom()
-        input(f"{BLUE}Нажмите Enter...{NC}")
+        _pause()
         return
 
     _box_row(f"  Установка: {CYAN}{repo}{NC}")
@@ -549,27 +575,27 @@ def do_update_interactive() -> None:
              f"  {DIM}@ {(info.get('local') or '?')[:9]}{NC}")
 
     if info.get("error") == "detached-head":
+        _box_warn("git в состоянии detached HEAD — обновление только вручную.")
         _box_bottom()
-        _warn("git в состоянии detached HEAD — обновление только вручную.")
-        input(f"{BLUE}Нажмите Enter...{NC}")
+        _pause()
         return
     if info.get("error") == "fetch-failed":
-        _box_bottom()
-        _warn("git fetch не удался, текст ошибки git:")
+        _box_warn("git fetch не удался, текст ошибки git:")
         err_text = (info.get("fetch_err") or "").strip()
         if err_text:
             for line in err_text.splitlines()[:3]:
-                _warn(f"    {line.strip()[:150]}")
+                _box_row(f"  {DIM}{line.strip()[:90]}{NC}")
         else:
-            _warn("    (текст ошибки недоступен)")
-        _warn("сеть/CF/credentials → повторите позже; вручную проверить:")
-        _warn(f"    git -C {repo} fetch origin")
-        input(f"{BLUE}Нажмите Enter...{NC}")
+            _box_row(f"  {DIM}(текст ошибки недоступен){NC}")
+        _box_warn("сеть/CF/credentials → повторите позже; вручную проверить:")
+        _box_row(f"  {CYAN}git -C {repo} fetch origin{NC}")
+        _box_bottom()
+        _pause()
         return
     if info.get("error"):
+        _box_warn(f"Не удалось сравнить с origin: {info.get('error')}")
         _box_bottom()
-        _warn(f"Не удалось сравнить с origin: {info.get('error')}")
-        input(f"{BLUE}Нажмите Enter...{NC}")
+        _pause()
         return
 
     branch = info.get("branch")
@@ -581,23 +607,23 @@ def do_update_interactive() -> None:
         _box_row(f"  Ветка:     {CYAN}{branch}{NC}  {DIM}(origin){NC}")
 
     if ahead > 0:
-        _box_bottom()
-        _warn(f"Локальная ветка опережает origin/{remote_branch} на {ahead} коммит(ов) —")
-        _warn("автообновление отключено (политика ff-only). Разберитесь")
-        _warn(f"вручную: git log --oneline origin/{remote_branch}..HEAD")
+        _box_warn(f"Локальная ветка опережает origin/{remote_branch} на {ahead} коммит(ов) —")
+        _box_warn("автообновление отключено (политика ff-only). Разберитесь")
+        _box_warn(f"вручную: git log --oneline origin/{remote_branch}..HEAD")
         if behind > 0:
-            _warn("Ветка дивергентна (есть и локальные, и новые удалённые")
-            _warn("коммиты) — обычно это след force-push/перезаписи истории")
-            _warn("origin. Самое простое — переустановка свежим bootstrap.sh")
-            _warn("(README → «CHIMERA SECURE INSTALL»); если локальные правки")
-            _warn(f"не нужны: git reset --hard origin/{remote_branch}")
-        input(f"{BLUE}Нажмите Enter...{NC}")
+            _box_warn("Ветка дивергентна (есть и локальные, и новые удалённые")
+            _box_warn("коммиты) — обычно это след force-push/перезаписи истории")
+            _box_warn("origin. Самое простое — переустановка свежим bootstrap.sh")
+            _box_warn("(README → «CHIMERA SECURE INSTALL»); если локальные правки")
+            _box_warn(f"не нужны: git reset --hard origin/{remote_branch}")
+        _box_bottom()
+        _pause()
         return
 
     if behind == 0:
+        _box_ok(f"У вас последняя версия (v{_current_version()}, {info.get('local')[:9]}).")
         _box_bottom()
-        _ok(f"У вас последняя версия (v{_current_version()}, {info.get('local')[:9]}).")
-        input(f"{BLUE}Нажмите Enter...{NC}")
+        _pause()
         return
 
     # ── Позади origin: показываем что приедет ────────────────────────────────
@@ -616,8 +642,7 @@ def do_update_interactive() -> None:
     print()
 
     remote_short = (info.get("remote") or "?")[:9]
-    ans = input(f"{YELLOW}Обновиться до {remote_short}? [y/N]:{NC} ").strip().lower()
-    if ans != "y":
+    if not _upd_confirm(f"Обновиться до {remote_short}"):
         return
 
     # ── Грязное дерево: stash / discard / отмена ─────────────────────────────
@@ -628,27 +653,29 @@ def do_update_interactive() -> None:
               f"pull либо не заденет их, либо откажется с понятной ошибкой")
     if tree["dirty"]:
         print()
-        _warn("Рабочее дерево содержит незакоммиченные правки tracked-файлов:")
+        _box_top("НЕЗАКОММИЧЕННЫЕ ПРАВКИ TRACKED-ФАЙЛОВ")
+        _box_desc("git pull --ff-only не пойдёт поверх грязного дерева. "
+                  "Спрячьте правки в stash (рекомендуется) или отбросьте их.")
         for e in tree["entries"][:10]:
-            print(f"    {e}")
+            _box_row(f"  {YELLOW}{e[:88]}{NC}")
         if len(tree["entries"]) > 10:
-            _info(f"… и ещё {len(tree['entries']) - 10}")
-        print()
-        print(f"  {CYAN}[s]{NC} спрятать в stash → обновить → вернуть (рекомендуется)")
-        print(f"  {CYAN}[d]{NC} отбросить правки tracked-файлов и обновить")
-        print(f"  {CYAN}[a]{NC} отмена (по умолчанию)")
-        choice = input(f"{CYAN}Выбор [a]:{NC} ").strip().lower()
+            _box_row(f"  {DIM}… и ещё {len(tree['entries']) - 10}{NC}")
+        _box_item("S", "спрятать в stash → обновить → вернуть (рекомендуется)")
+        _box_item("D", "отбросить правки tracked-файлов и обновить")
+        _box_item("A", "отмена (по умолчанию)")
+        _box_bottom()
+        choice = _box_ask("Выбор [a]").strip().lower() or "a"
         if choice == "s":
             r = _git(["stash", "push", "-m", "chimera-update-auto"], repo)
             if r.returncode != 0:
                 _err("git stash не удался — обновление отменено.")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _pause()
                 return
         elif choice == "d":
             r = _git(["checkout", "--", "."], repo)
             if r.returncode != 0:
                 _err("git checkout -- . не удался — обновление отменено.")
-                input(f"{BLUE}Нажмите Enter...{NC}")
+                _pause()
                 return
         else:
             _info("Отмена — ничего не изменено.")
@@ -661,13 +688,16 @@ def do_update_interactive() -> None:
     pull = _git_retry(["pull", "--ff-only", "--quiet", "origin", remote_branch],
                       repo, timeout=FETCH_TIMEOUT)
     if pull.returncode != 0:
-        _err("git pull --ff-only не удался (divergent?):")
-        print(f"    {YELLOW}{(pull.stderr or pull.stdout or '').strip()[:300]}{NC}")
-        _info("Установка НЕ изменена. Разберитесь вручную:")
-        _info(f"    git -C {repo} status && git -C {repo} pull --ff-only")
+        print()
+        _box_top("ОШИБКА ОБНОВЛЕНИЯ")
+        _box_warn("git pull --ff-only не удался (divergent?):")
+        _box_row(f"  {YELLOW}{(pull.stderr or pull.stdout or '').strip()[:88]}{NC}")
+        _box_info("Установка НЕ изменена. Разберитесь вручную:")
+        _box_row(f"  {CYAN}git -C {repo} status && git -C {repo} pull --ff-only{NC}")
+        _box_bottom()
         if tree["dirty"] and choice == "s":  # вернуть stash при неудаче
             _git(["stash", "pop"], repo)
-        input(f"{BLUE}Нажмите Enter...{NC}")
+        _pause()
         return
 
     # stash pop после успешного pull
@@ -681,17 +711,19 @@ def do_update_interactive() -> None:
     new_head = _head(repo) or "?"
     new_version = _current_version()
     update_info(refresh=True)  # обновить кэш: теперь behind=0
-    _ok(f"Обновлено: {old_version} → {new_version}  @{new_head[:9]}")
-    _remember_session_head()
     print()
+    _box_top("РЕЗУЛЬТАТ ОБНОВЛЕНИЯ")
+    _box_ok(f"Обновлено: {old_version} → {new_version}  @{new_head[:9]}")
     if old_version != new_version:
-        _info(f"Версия проекта изменилась: v{old_version} → v{new_version}")
-    print()
-    input(f"{BLUE}Нажмите Enter...{NC}")
+        _box_info(f"Версия проекта изменилась: v{old_version} → v{new_version}")
+    else:
+        _box_dim("Версия проекта не изменилась (правки без релиза)")
+    _box_bottom()
+    _remember_session_head()
+    _pause()
 
     # ── Предложение перезапустить TUI ────────────────────────────────────────
-    if input(f"{YELLOW}Перезапустить TUI сейчас (подхватит новый код)? [y/N]:{NC} "
-             ).strip().lower() == "y":
+    if _upd_confirm("Перезапустить TUI сейчас (подхватит новый код)"):
         _restart_tui(repo)
 
 
@@ -816,7 +848,7 @@ def do_manage_update() -> None:
         _box_row()
         _box_sep()
         _box_item("1", "🔍  Проверить и обновить сейчас (git fetch + pull --ff-only)")
-        _box_item("2", f"{'🌙' if cron_on else '🌙'}  Ночное автообновление: "
+        _box_item("2", f"🌙  Ночное автообновление: "
                        f"{'выключить' if cron_on else 'включить'}")
         _box_item("3", f"👁  Фоновая проверка при старте: "
                        f"{'выключить' if auto_on else 'включить'}")
@@ -840,31 +872,31 @@ def do_manage_update() -> None:
                 print()
         elif ch == "2":
             if cron_enabled():
-                if input(f"{YELLOW}Выключить ночное автообновление? [y/N]:{NC} "
-                         ).strip().lower() == "y":
+                if _upd_confirm("Выключить ночное автообновление"):
                     _ok("выключено") if manage_cron(False) else \
                         _err("не удалось снять cron-файл")
             else:
-                if input(f"{YELLOW}Включить ночное автообновление (04:30, "
-                         f"ff-only)? [y/N]:{NC} ").strip().lower() == "y":
+                if _upd_confirm("Включить ночное автообновление (04:30, ff-only)"):
                     _ok(f"включено: {CRON_SCHEDULE} → {LOG_FILE}") if \
                         manage_cron(True) else _err("не удалось записать cron-файл")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
         elif ch == "3":
             set_autocheck(not autocheck_enabled())
             _info(f"фоновая проверка: {'вкл' if autocheck_enabled() else 'выкл'}")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+            _pause()
         elif ch == "l":
             print()
+            _box_top("ЛОГ АВТООБНОВЛЕНИЙ")
             if LOG_FILE.exists():
-                print(f"  {DIM}— последние 30 записей {LOG_FILE} —{NC}")
+                _box_row(f"  {DIM}— последние 30 записей —{NC}")
                 lines = LOG_FILE.read_text(encoding="utf-8",
                                            errors="replace").splitlines()
                 for line in lines[-30:]:
-                    print(f"  {line}")
+                    _box_row(f"  {DIM}{line[:92]}{NC}")
             else:
-                _info("лог пуст — автообновления ещё не было")
-            input(f"{BLUE}Нажмите Enter...{NC}")
+                _box_info("лог пуст — автообновления ещё не было")
+            _box_bottom()
+            _pause()
         else:
             _warn("Неверный выбор.")
             time.sleep(1)

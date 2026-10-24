@@ -84,6 +84,7 @@ BLUE=_C['BLUE']; BOLD=_C['BOLD']; DIM=_C['DIM']; WHITE=_C['WHITE']; NC=_C['NC']
 from chimera.modules.box_renderer import (
     _box_top, _box_sep, _box_bottom, _box_row, _box_item,
     _box_back, _box_info, _box_warn, _box_desc,
+    _box_ok, _box_kv, _box_dim, _box_ask, _box_input,
 )
 
 _DNSCRYPT_CONF = Path("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
@@ -99,6 +100,28 @@ def _info(msg):  print(f"{CYAN}[INFO]{NC}  {msg}")
 def _ok(msg):    print(f"{GREEN}[OK]{NC}    {msg}")
 def _warn(msg):  print(f"{YELLOW}[WARN]{NC}  {msg}")
 def _err(msg):   print(f"{RED}[ERR]{NC}   {msg}")
+
+
+def _dc_pause() -> None:
+    """Пауза после действия; EOF/Ctrl+C безопасны (канон icmp_gate._ig_pause)."""
+    try:
+        input(f"{DIM}Enter - назад в меню...{NC}")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def _dc_confirm_yes(prompt: str) -> bool:
+    """[Y/n]-подтверждение: Enter = да; EOF/Ctrl+C = НЕТ (пайп-безопасно).
+
+    Семантика прежних экранов dnscrypt (Enter = применить) сохранена для
+    живого ввода; под пайпом/</dev/null — отмена, применение конфига по
+    EOF недопустимо (UI-smoke не должен трогать /etc/dnscrypt-proxy).
+    """
+    try:
+        raw = input(f"{CYAN}{prompt}{NC} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return raw in ("", "y", "yes", "д", "да")
 
 # =============================================================================
 # ПОЛНЫЙ СПИСОК СЕРВЕРОВ — 245 шт., 51 страна
@@ -1079,30 +1102,26 @@ def _screen_preset() -> None:
     _box_row(f"  {BOLD}Версия:{NC} {_version_header_line()}")
     _box_row()
     _box_row(f"  {DIM}Yandex DNS ИСКЛЮЧЁН (утечка).{NC}")
-    _box_row(f" {DIM}: moscow/CF/GG исключены — гео-резистентность.{NC}")
-    _box_row(f" {DIM}: синк с живым списком — 37 мёртвых вон (кладбище), +90 живых; dnscry.pt-источники удалены.{NC}")
+    _box_row(f"  {DIM}dnscry.pt-moscow/CF/GG исключены — гео-резистентность.{NC}")
+    _box_row(f"  {DIM}Синк с живым списком — 37 мёртвых вон (кладбище), +90 живых; dnscry.pt-источники удалены.{NC}")
     _box_row(f"  {DIM}После применения — тест цепочки xray → AGH → dnscrypt + откат/экстренный фолбэк при провале.{NC}")
     _box_row()
     _box_warn("Бэкап конфига будет создан перед изменением.")
     _box_row(f"  {GREEN}resolv.conf: временно 9.9.9.9/77.88.8.8, восстановление гарантировано.{NC}")
     _box_bottom()
     print()
-    try:
-        confirm = input(f"{CYAN}Применить пресет? [Y/n]: {NC}").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        confirm = "n"
-    if confirm not in ("", "y", "yes", "д", "да"):
-        return
-    _info(f"Записываю конфиг ({len(_SERVER_NAMES)} серверов, {len(_ANON_ROUTES)} маршрутов)...")
-    _safe_apply_preset(_SERVER_NAMES, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True)
-    print()
-    input(f"{BLUE}Нажмите Enter...{NC}")
+    if _dc_confirm_yes("Применить пресет? [Y/n]:"):
+        _info(f"Записываю конфиг ({len(_SERVER_NAMES)} серверов, {len(_ANON_ROUTES)} маршрутов)...")
+        _safe_apply_preset(_SERVER_NAMES, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True)
+    _dc_pause()
 
 
 def _screen_rtt_select() -> None:
     if not _DNSCRYPT_BIN.exists():
-        _warn("DNSCrypt-proxy не установлен")
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        _box_top("⚠  RTT-ЗАМЕР")
+        _box_warn("DNSCrypt-proxy не установлен")
+        _box_bottom()
+        _dc_pause()
         return
     os.system("clear")
     print()
@@ -1146,7 +1165,7 @@ def _screen_rtt_select() -> None:
     print()
     try:
         raw = input(f"{CYAN}Введите номера через запятую (например: 1,3,7) или Q:{NC} ").strip()
-    except KeyboardInterrupt:
+    except (EOFError, KeyboardInterrupt):
         return
     if not raw or raw.lower() == "q":
         return
@@ -1169,23 +1188,23 @@ def _screen_rtt_select() -> None:
     if errors:
         _warn(f"Пропущены: {', '.join(errors)}")
     if not chosen:
-        _warn("Ни одного сервера не выбрано")
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        _box_top("ВЫБОР СЕРВЕРОВ")
+        _box_warn("Ни одного сервера не выбрано")
+        _box_bottom()
+        _dc_pause()
         return
     print()
-    _info(f"Выбрано {len(chosen)} серверов:")
+    _box_top(f"ВЫБРАННЫЕ СЕРВЕРЫ ({len(chosen)})")
     for n in chosen:
-        print(f"  {GREEN}•{NC} {n}")
-    print()
-    try:
-        confirm = input(f"{CYAN}Применить? [Y/n]: {NC}").strip().lower()
-    except KeyboardInterrupt:
-        return
-    if confirm not in ("", "y", "yes", "д", "да"):
-        return
-    _safe_apply_preset(chosen, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True)
-    print()
-    input(f"{BLUE}Нажмите Enter...{NC}")
+        ms = rtt_map.get(n)
+        rtt_txt = f"{ms:.0f} мс" if ms is not None and ms < 9999 else "недоступен"
+        _box_row(f"  {GREEN}✓{NC} {CYAN}{n}{NC}  {DIM}{rtt_txt}{NC}")
+    _box_desc("Выбранные серверы будут прописаны в server_names "
+              "(остальные параметры пресета — без изменений).")
+    _box_bottom()
+    if _dc_confirm_yes("Применить? [Y/n]:"):
+        _safe_apply_preset(chosen, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True)
+    _dc_pause()
 
 
 # Параметры для ручной настройки: (key, label, type, description)
@@ -1315,13 +1334,13 @@ def _screen_manual_params() -> None:
         # P — применить пресет.
         if rl == "p":
             _safe_apply_preset(_SERVER_NAMES, _SECURITY_PARAMS, _ANON_ROUTES, extra_sources=True)
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            _dc_pause()
             continue
 
         # R — перезапуск без изменений.
         if rl == "r":
             _restart_dnscrypt()
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            _dc_pause()
             continue
 
         # Число — выбор параметра по номеру.
@@ -1336,37 +1355,52 @@ def _screen_manual_params() -> None:
                     new_val = _toggle_bool(current_val)
                     _info(f"Переключаю: {key} = {current_val} → {new_val}")
                     _apply_single_param(key, new_val)
-                    input(f"\n{BLUE}Нажмите Enter...{NC}")
+                    _dc_pause()
                     continue
 
                 elif ptype == "int":
-                    _info(f"Текущее: {key} = {current_val}")
-                    try:
-                        new_val = input(f"{CYAN}Новое значение (число):{NC} ").strip()
-                    except KeyboardInterrupt:
-                        continue
+                    os.system("clear")
+                    print()
+                    _box_top(f"ПАРАМЕТР: {label.upper()}")
+                    _box_kv("Ключ", key)
+                    _box_kv("Текущее", current_val)
+                    _box_kv("Тип", "целое число")
+                    _box_desc(desc)
+                    new_val = _box_input("Новое значение (Enter = отмена)")
                     if not new_val:
+                        _box_dim("Отмена — значение не изменено")
+                        _box_bottom()
+                        _dc_pause()
                         continue
-                    try:
-                        int(new_val)
-                    except ValueError:
-                        _warn("Нужно целое число")
-                        input(f"\n{BLUE}Нажмите Enter...{NC}")
+                    if not re.fullmatch(r"-?\d+", new_val):
+                        _box_warn(f"Нужно целое число, получено: «{new_val[:40]}»")
+                        _box_bottom()
+                        _dc_pause()
                         continue
                     _apply_single_param(key, new_val)
-                    input(f"\n{BLUE}Нажмите Enter...{NC}")
+                    _box_bottom()
+                    _dc_pause()
                     continue
 
                 elif ptype == "str":
-                    _info(f"Текущее: {key} = {current_val}")
-                    try:
-                        new_val = input(f"{CYAN}Новое значение:{NC} ").strip()
-                    except KeyboardInterrupt:
-                        continue
+                    os.system("clear")
+                    print()
+                    _box_top(f"ПАРАМЕТР: {label.upper()}")
+                    _box_kv("Ключ", key)
+                    _box_kv("Текущее", current_val)
+                    _box_kv("Тип", "строка")
+                    _box_desc(desc)
+                    if key == "lb_strategy":
+                        _box_dim("Варианты: p2 / ph / random / fastest_addr")
+                    new_val = _box_input("Новое значение (Enter = отмена)")
                     if not new_val:
+                        _box_dim("Отмена — значение не изменено")
+                        _box_bottom()
+                        _dc_pause()
                         continue
                     _apply_single_param(key, new_val)
-                    input(f"\n{BLUE}Нажмите Enter...{NC}")
+                    _box_bottom()
+                    _dc_pause()
                     continue
 
             else:
@@ -1380,11 +1414,14 @@ def _screen_manual_params() -> None:
             key, value = m.group(1), m.group(2).strip()
             known_keys = {p[0] for p in _PARAMS_TO_EDIT} | {"server_names", "listen_addresses"}
             if key not in known_keys:
-                _warn(f"Неизвестный параметр: {key}")
-                input(f"\n{BLUE}Нажмите Enter...{NC}")
+                _box_top("ПРЯМОЙ ВВОД KEY=VALUE")
+                _box_warn(f"Неизвестный параметр: {key}")
+                _box_dim("Разрешены только параметры списка + server_names/listen_addresses")
+                _box_bottom()
+                _dc_pause()
                 continue
             _apply_single_param(key, value)
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            _dc_pause()
             continue
 
         _warn("Неверный ввод. Введите номер, P, R, Q или key=value")
@@ -1404,7 +1441,7 @@ def _screen_status() -> None:
     if not content:
         _box_row(f"  Конфиг:          {RED}не найден{NC}")
         _box_bottom()
-        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        _dc_pause()
         return
     listen = _get_listen_addresses(content)
     _box_row(f"  Listen:          {CYAN}{listen}{NC}")
@@ -1448,7 +1485,7 @@ def _screen_status() -> None:
     else:
         _box_row(f"  Источники:       {DIM}только public-resolvers{NC}")
     _box_bottom()
-    input(f"\n{BLUE}Нажмите Enter...{NC}")
+    _dc_pause()
 
 
 # =============================================================================
@@ -1509,7 +1546,7 @@ def do_dnscrypt_advanced_menu() -> None:
                 run_pool_sync_now(interactive=True)
             except Exception as e:
                 _warn(f"pool-sync недоступен: {e}")
-            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            _dc_pause()
         elif ch == "6":
             try:
                 from chimera.modules.dnscrypt_update import do_dnscrypt_update_menu
