@@ -1,9 +1,11 @@
-# Chimera Project 
+<h1 align="center">Chimera Project</h1>
 
-[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](https://git.chimeraprodvpn.online/inferno1978/chimera)
-[![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://git.chimeraprodvpn.online/inferno1978/chimera/src/branch/main/LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
+<p align="center">
+  <a href="https://git.chimeraprodvpn.online/inferno1978/chimera"><img src="https://img.shields.io/badge/version-5.0.0-blue.svg" alt="Version"></a>
+  <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.10%2B-green.svg" alt="Python"></a>
+  <a href="https://git.chimeraprodvpn.online/inferno1978/chimera/src/branch/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-orange.svg" alt="License"></a>
+  <a href="https://ubuntu.com"><img src="https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg" alt="Platform"></a>
+</p>
 
 <p align="center">
   <img src="assets/chimera_poster.png" alt="CHIMERA — Multi-Protocol Anti-DPI & Free Internet Engine" width="720">
