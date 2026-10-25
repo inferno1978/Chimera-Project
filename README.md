@@ -5,6 +5,12 @@
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](https://git.chimeraprodvpn.online/inferno1978/chimera/src/branch/main/LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg)](https://ubuntu.com)
 
+<p align="center">
+  <img src="assets/chimera_poster.png" alt="CHIMERA — Multi-Protocol Anti-DPI & Free Internet Engine" width="720">
+</p>
+
+> 🎨 **Эмблема проекта.** Геральдическая химера рвёт кольцо цепей, а молния её львиной головы рушит башню всевидящего ока с клеймом «ТСПУ» — столько голов, сколько нужно: каждый протокол держит свой путь к свободному интернету. По углам медальона: маяк со свободными птицами — «Mare Liberum», свободное море как цель проекта; врата под три стука — port knocking; туннель под решёткой — туннельные транспорты сквозь блокады; маска, проходящая мимо ока — маскировка REALITY. Файл: [`assets/chimera_poster.png`](assets/chimera_poster.png).
+
 **Multi-Protocol Anti-DPI Installer** — мульти-протокольный установщик для обхода цензуры: VLESS REALITY/xHTTP, Hysteria2, AmneziaWG, TrustTunnel, MTProto, NaiveProxy, Mieru, FPTN, Slipgate и др. Полная автоматизация: от установки до мониторинга, с кластеризацией, балансировкой, веб-панелью и REST API.
 
 > **Почему Chimera?** Проект вырос из простого VLESS-installer в мульти-протокольный комбайн: 9+ протоколов, 143 модуля, 25 категорий — как мифическая химера, собранная из частей разных животных. Каждая «голова» (протокол) нужна для своего сценария: VLESS — основной, AmneziaWG — устойчивый к DPI, Hysteria2 — быстрый UDP, TrustTunnel — AdGuard VPN protocol, и т.д. Если цензор блокирует один протокол, химера «выращивает новую голову». Подробное обоснование — в CHANGELOG  
@@ -361,12 +367,6 @@ Chimera-Project/
 ```
 
 > 📋 **Полная карта по 25 категориям** с описанием каждого файла — в [`PROJECT_MAP.md`](PROJECT_MAP.md).
-
-<p align="center">
-  <img src="assets/chimera_poster.png" alt="CHIMERA — Multi-Protocol Anti-DPI & Free Internet Engine" width="720">
-</p>
-
-> 🎨 **Эмблема проекта.** Геральдическая химера рвёт кольцо цепей, а молния её львиной головы рушит башню всевидящего ока с клеймом «TSPU» — столько голов, сколько нужно: каждый протокол держит свой путь к свободному интернету. По углам медальона: маяк со свободными птицами — «Mare Liberum», свободное море как цель проекта; врата под три стука — port knocking; туннель под решёткой — туннельные транспорты сквозь блокады; маска, проходящая мимо ока — маскировка REALITY. Файл: [`assets/chimera_poster.png`](assets/chimera_poster.png).
 
 ## 🏗️ Архитектура
 
