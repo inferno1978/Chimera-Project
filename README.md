@@ -1,15 +1,15 @@
-<h1 align="center">Chimera Project</h1>
+<div align="center">
 
-<p align="center">
-  <a href="https://git.chimeraprodvpn.online/inferno1978/chimera"><img src="https://img.shields.io/badge/version-5.0.0-blue.svg" alt="Version"></a>
-  <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.10%2B-green.svg" alt="Python"></a>
-  <a href="https://git.chimeraprodvpn.online/inferno1978/chimera/src/branch/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-orange.svg" alt="License"></a>
-  <a href="https://ubuntu.com"><img src="https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-lightgrey.svg" alt="Platform"></a>
-</p>
+# Chimera Project
 
-<p align="center">
-  <img src="assets/chimera_poster.png" alt="CHIMERA — Multi-Protocol Anti-DPI & Free Internet Engine" width="720">
-</p>
+[![Version](assets/badges/version.svg)](https://git.chimeraprodvpn.online/inferno1978/chimera)
+[![Python](assets/badges/python.svg)](https://python.org)
+[![License](assets/badges/license.svg)](https://git.chimeraprodvpn.online/inferno1978/chimera/src/branch/main/LICENSE)
+[![Platform](assets/badges/platform.svg)](https://ubuntu.com)
+
+<img src="assets/chimera_poster.png" alt="CHIMERA — Multi-Protocol Anti-DPI & Free Internet Engine" width="720">
+
+</div>
 
 > 🎨 **Эмблема проекта.** Геральдическая химера рвёт кольцо цепей, а молния её львиной головы рушит башню всевидящего ока с клеймом «ТСПУ» — столько голов, сколько нужно: каждый протокол держит свой путь к свободному интернету. По углам медальона: маяк со свободными птицами — «Mare Liberum», свободное море как цель проекта; врата под три стука — port knocking; туннель под решёткой — туннельные транспорты сквозь блокады; маска, проходящая мимо ока — маскировка REALITY. Файл: [`assets/chimera_poster.png`](assets/chimera_poster.png).
 
@@ -292,7 +292,7 @@ Chimera-Project/
 │   ├── GITHUB_BYPASS_FAQ.md     #   GitHub Bypass (b4) — частичные блокировки GitHub (сет GitHub-Fat-v1)
 │   ├── NNM_BYPASS_FAQ.md       #   NNM-Club Bypass (b4) — SNI-блок за Cloudflare (сет NNM-Fat-v1)
 │   └── OWN_DOH_FAQ.md          #   Собственные DoH-резолверы в сетах b4 (миграция с Cloudflare)
-├── assets/                      # Статика: эмблема проекта (chimera_poster.png), WPP (логотип, флаги)
+├── assets/                      # Статика: эмблема (chimera_poster.png), бейджи (badges/*.svg), WPP (логотип, флаги)
 ├── vendor/
 │   └── b4/                      #   Исходники b4 v1.81.0 (апстрим DanielLavrushin/b4): src, installer, toolkit
 │       └── set-artifacts/       #   Готовые сеты: 6 артефактных пар Fat+Heavy (NNM, GitHub, XHamster, XVideos, Meta, YT-Nocookie; 4 пары добавлены 06.09) + vps-prodcdn/ (8 сетов VPS cdn-vps — Heavy-схема с эскалацией всем сетам, DNS не тронут, этап 1) + vps-vpn/ (8 сетов VPS vpn-node — то же, вторая нода) + верификации (MCP-кейсы); dns-блоки роутерных = свои DoH (см. OWN_DOH_FAQ)
