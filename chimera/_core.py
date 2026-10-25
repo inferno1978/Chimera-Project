@@ -3862,6 +3862,9 @@ def _release_prev_vless_port(prev_port: int) -> None:
     Смена порта через меню (reconfigure.py) закрывала старый порт, полная
     переустановка — нет. Теперь семантика едина: порт сменился — старый
     закрыт (UFW-правило + запись port_registry).
+     (port-follow) + перенос зависимых модулей на новый порт: port hopping
+    (NAT REDIRECT + real_port) и port knocking (ports + цепочки) — тот же
+    набор хуков, что и в reconfigure.do_reconfigure().
     22/80 не трогаем (SSH lockout / certbot ACME), текущий порт тоже.
     """
     if not prev_port or prev_port in (22, 80, SERVER_PORT):
@@ -3878,6 +3881,25 @@ def _release_prev_vless_port(prev_port: int) -> None:
                     "освобождён при переустановке")
     except Exception as e:
         warn(f"Не удалось освободить старый порт {prev_port}: {e}")
+    #  (port-follow): зависимые модули следуют за портом Xray — та же
+    # семантика, что и в reconfigure.do_reconfigure(). Раньше полная
+    # переустановка со сменой порта оставляла port hopping (NAT REDIRECT
+    # на мёртвый порт) и port knocking (цепочки/state на мёртвом порту)
+    # висящими на старом порте.
+    try:
+        from chimera.modules.port_hopping import ph_follow_port
+        if ph_follow_port(SERVER_PORT):
+            success(f"Port hopping следует за портом :{SERVER_PORT} "
+                    f"(NAT-правила пересозданы)")
+    except Exception as e:
+        warn(f"Port hopping: не удалось перенести на порт {SERVER_PORT}: {e}")
+    try:
+        from chimera.modules.port_knocking import pk_follow_port
+        if pk_follow_port(SERVER_PORT, prev_port):
+            success(f"Port knocking следует за портом :{SERVER_PORT} "
+                    f"(цепочки пересозданы)")
+    except Exception as e:
+        warn(f"Port knocking: не удалось перенести на порт {SERVER_PORT}: {e}")
 
 
 def do_full_install() -> None:

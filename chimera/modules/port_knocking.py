@@ -734,6 +734,65 @@ def _pk_remove() -> bool:
     return True
 
 
+# ── Port-follow (смена порта Xray) ────────────────────────────────────────────
+def pk_follow_port(new_port: int, old_port: int) -> bool:
+    """ (port-follow): переносит port knocking на новый порт Xray.
+
+    Вызывается из reconfigure.do_reconfigure() при смене server_port и из
+    _core._release_prev_vless_port() при полной переустановке со сменой
+    порта. Раньше state port_knocking.json оставался на СТАРОМ порте:
+    стук принимался на мёртвый порт (бесполезен), новый порт оставался
+    без knocking-защиты (кейс RU-1: enabled=true, ports=[9443] при xray
+    на 443, при том что живые цепочки вообще отсутствовали).
+
+    Что делает (только если knocking ВКЛЮЧЁН и old_port есть в ports):
+      • заменяет old_port → new_port в списке ports (позиция сохраняется,
+        дубликаты исключаются, порты других сервисов не трогаются);
+      • state сохраняется ДО _pk_install: внутренний _pk_remove() читает
+        state с диска и восстанавливает UFW для списка портов из него —
+        при сохранённых НОВЫХ портах мёртвый old_port НЕ переоткрывается
+        в UFW (его только что закрыл reconfigure/port_registry);
+      • _pk_install() полностью пересоздаёт правила (цепочки + ipset) —
+        заодно лечит «enabled=true, а живых правил нет» (правила могли
+        быть потеряны внешней пересборкой файрволла).
+
+    Возвращает True если перенос выполнен; False — нечего переносить
+    (выключен / порты совпадают / old_port не в списке) или install упал.
+    """
+    state = _pk_state_load()
+    if not state.get("enabled"):
+        return False
+    try:
+        new_port = int(new_port)
+        old_port = int(old_port)
+        ports = [int(p) for p in (state.get("ports") or [])]
+    except (TypeError, ValueError):
+        return False
+    if not old_port or old_port == new_port or old_port not in ports:
+        return False
+    # Замена old→new с дедупликацией (new уже мог быть в списке)
+    new_ports: list = []
+    for p in ports:
+        q = new_port if p == old_port else p
+        if q not in new_ports:
+            new_ports.append(q)
+    if new_ports == ports:
+        return False
+    state["ports"] = new_ports
+    _log("INFO", f"follow_port: {old_port} → {new_port} "
+                 f"(ports={new_ports})")
+    #  ДО _pk_install (см. докстринг): _pk_remove внутри прочтёт с диска
+    # уже новые порты и не переоткроет мёртвый old_port в UFW.
+    _pk_state_save(state)
+    if not _pk_install(state):
+        _err(f"Port knocking: не удалось пересоздать правила на порт "
+             f"{new_port}")
+        return False
+    _success(f"Port knocking следует за портом Xray: {old_port} → "
+             f"{new_port} (правила пересозданы, ports={new_ports})")
+    return True
+
+
 # ── Status ──────────────────────────────────────────────────────────────────────
 def _pk_is_active() -> bool:
     """Активен ли модуль сейчас (есть ли правила с нашим тегом в iptables

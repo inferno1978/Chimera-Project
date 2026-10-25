@@ -9,6 +9,9 @@ chimera/modules/reconfigure.py
       - патчит Xray ``config.json`` (порт + TLS-сертификаты + Stats API);
       - патчит nginx ``*.conf`` (домен + listen-порты);
       - обновляет UFW (открывает новый порт, закрывает старый);
+      - (port-follow) переносит за новым портом зависимые модули:
+        ingress-блокировку РФ, port hopping (NAT REDIRECT + real_port),
+        port knocking (ports + пересоздание цепочек) — автоматически;
       - перезаписывает ``state.json`` и мутирует глобальные переменные
         ``PARAM_DOMAIN``/``SERVER_PORT``/``XHTTP_PORT``/``PROTOCOL_MODE``
         в ``chimera._core``.
@@ -352,6 +355,31 @@ def do_reconfigure() -> None:
             warn(f"Ingress-блокировка РФ: не удалось перенести на порт "
                  f"{new_port}: {e}")
             warn("Перепримените вручную: меню → [G] → отключить и включить")
+        # (port-follow): port hopping и port knocking следуют за портом
+        # Xray автоматически. Раньше здесь был только WARN «проверьте
+        # port hopping вручную» — NAT-правила REDIRECT и knocking-цепочки
+        # жили на старом (мёртвом) порту, новый порт оставался без
+        # hopping-диапазона и без knocking-защиты.
+        try:
+            from chimera.modules.port_hopping import ph_follow_port
+            if ph_follow_port(new_port):
+                success(f"Port hopping следует за портом :{new_port} "
+                        f"(NAT-правила пересозданы)")
+        except ImportError:
+            pass
+        except Exception as e:
+            warn(f"Port hopping: не удалось перенести на порт {new_port}: {e}")
+            warn("Перепримените вручную: меню → ⚡ Port Hopping → [1]")
+        try:
+            from chimera.modules.port_knocking import pk_follow_port
+            if pk_follow_port(new_port, old_port):
+                success(f"Port knocking следует за портом :{new_port} "
+                        f"(цепочки пересозданы)")
+        except ImportError:
+            pass
+        except Exception as e:
+            warn(f"Port knocking: не удалось перенести на порт {new_port}: {e}")
+            warn("Перепримените вручную: меню → Безопасность → Port knocking")
 
     # --- Обновить state.json ---
     try:
@@ -454,14 +482,9 @@ def _vless_reconfigure_ufw_port_change(core, new_port: int, old_port: int) -> No
                        legacy_comments=_LEGACY_COMMENTS)
         port_unregister(SERVICE_VLESS, old_port, "tcp")
         # →: зависимые модули держат ссылку на СТАРЫЙ порт.
-        # ingress_geoip теперь переносится автоматически (см. хук в
-        # do_reconfigure); port hopping — остаётся ручной проверкой.
-        try:
-            core.warn(f"Порт Xray изменён {old_port} → {new_port}: проверьте "
-                      "port hopping (если включён) — его правила ссылаются "
-                      "на старый порт")
-        except Exception:
-            pass
+        # ingress_geoip / port hopping / port knocking теперь переносятся
+        # автоматически (хуки port-follow в do_reconfigure — сразу после
+        # этого вызова).
     except Exception:
         # Fallback: старый код (прямой ufw allow/delete).
         _run(["ufw", "allow", str(new_port), "comment", "VLESS reconfigure"],

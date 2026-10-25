@@ -38,6 +38,11 @@ Port Hopping — приём подключений на диапазон пор�
 Публичное API:
     do_port_hopping_menu()   — интерактивное меню
     ph_status() -> dict      — текущее состояние (для health/status команд)
+    ph_follow_port(p) -> bool — (port-follow) перенос real_port при смене
+                                порта Xray (reconfigure/переустановка):
+                                NAT-правила пересоздаются на новый порт,
+                                state/persist обновляются; при конфликте
+                                «порт внутри диапазона» — disable + WARN
 ───────────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -467,6 +472,60 @@ def ph_status() -> dict:
         "range_end": ph.get("range_end", 20000),
         "proto": ph.get("proto", "tcp"),
     }
+
+
+def ph_follow_port(new_port: int) -> bool:
+    """ (port-follow): переносит port hopping на новый порт Xray.
+
+    Вызывается из reconfigure.do_reconfigure() при смене server_port и из
+    _core._release_prev_vless_port() при полной переустановке со сменой
+    порта. Раньше при смене порта здесь был только WARN «проверьте port
+    hopping вручную»: NAT-правило REDIRECT продолжало смотреть на СТАРЫЙ
+    порт — hopping-клиенты редиректились на мёртвый порт (кейс RU-1:
+    9443→443, REDIRECT 10000:20000 → 9443 при xray на 443).
+
+    Что делает (только если hopping ВКЛЮЧЁН и real_port ≠ new_port):
+      • пересоздаёт NAT REDIRECT-правила на новый real_port (атомарно:
+        _remove_rules по комментарию → _add_rules; диапазон/протокол
+        не меняются — UFW-диапазон не трогаем, он от real_port не зависит);
+      • обновляет port_hopping.json (real_port) + persist: systemd-сервис
+        и rules.v4 теперь смотрят на новый порт.
+
+    Конфликт «новый порт внутри диапазона» — та же валидация, что в меню
+    [1] («диапазон включает реальный порт — конфликт»): hopping ОТКЛЮЧАЕТСЯ
+    с WARN (правила на старый порт удаляются — редирект в мёртвый порт
+    хуже отказа), пользователь перенастроит диапазон через меню.
+    Возвращает False (перенос не выполнялся).
+
+    Возвращает True если перенос на new_port выполнен.
+    """
+    ph = _load_ph()
+    if not ph.get("enabled"):
+        return False
+    try:
+        old_real = int(ph.get("real_port") or 0)
+        rs = int(ph.get("range_start") or 0)
+        re_ = int(ph.get("range_end") or 0)
+    except (TypeError, ValueError):
+        return False
+    new_port = int(new_port)
+    if not old_real or old_real == new_port or not rs or not re_:
+        return False
+    if rs <= new_port <= re_:
+        _warn(f"Port hopping: новый порт Xray {new_port} попадает в диапазон "
+              f"{rs}-{re_} — hopping отключён, перенастройте диапазон "
+              f"(меню ⚡ Port Hopping → [1])")
+        _disable_hopping()
+        return False
+    proto = ph.get("proto", "tcp")
+    if not _enable_hopping(rs, re_, new_port, proto):
+        _err(f"Port hopping: не удалось пересоздать правила на порт {new_port}")
+        return False
+    _ok(f"Port hopping следует за портом Xray: real_port "
+        f"{old_real} → {new_port} (NAT-правила пересозданы)")
+    _log("INFO", f"follow_port: real_port {old_real} → {new_port} "
+                 f"({rs}-{re_}, {proto})")
+    return True
 
 
 def do_port_hopping_menu() -> None:
