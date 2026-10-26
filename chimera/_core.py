@@ -2859,8 +2859,11 @@ def _build_exit_xhttp_outbound_settings(nd: dict) -> dict:
 def do_change_domain_strategy() -> None:
     """
     Изменить стратегию исходящих соединений (domainStrategy) без переустановки.
-    Доступно из главного меню [O] для любого режима (A и B).
-    Патчит живой config.json и сохраняет в state.json.
+    Доступно: Настройки сети → 6 (любой режим, A и B).
+    Патчит живой config.json (freedom-outbound'ы + dns.queryStrategy +
+    v4-only-чистка dns.servers) и сохраняет в state.json.
+    routing.domainStrategy НЕ трогается — это другая настройка
+    (AsIs/IPIfNonMatch/IPOnDemand), см. modules/domain_strategy.py.
     """
     global PARAM_DOMAIN_STRATEGY
 
@@ -2905,8 +2908,10 @@ def do_change_domain_strategy() -> None:
     _box_row(f"  {DIM}Текущая стратегия:{NC} {CYAN}{_cur_label}{NC}")
 
     # Показываем IPv6 статус
-    if IS_IPV6_AVAILABLE or IPV6_PREFLIGHT:
-        _box_row(f"   {GREEN}ℹ IPv6 обнаружен на сервере{NC}")
+    if IS_IPV6_AVAILABLE:
+        _box_row(f"   {GREEN}ℹ IPv6 доступен на сервере{NC}")
+    elif IPV6_PREFLIGHT:
+        _box_row(f"   {YELLOW}⚠ IPv6-адрес в state ({IPV6_PREFLIGHT}), но связности НЕТ — рекомендуется 4 (UseIPv4){NC}")
 
     _ds_opts = {
         "1": ("UseIPv6v4", "UseIPv6v4 — сначала IPv6, fallback IPv4 (рекомендуется при IPv6)"),
@@ -2937,17 +2942,24 @@ def do_change_domain_strategy() -> None:
         except Exception as e:
             warn(f"Не удалось сохранить в state.json: {e}")
 
-    # Патчим живой config.json напрямую
+    # Патчим живой config.json напрямую (чистый хелпер + лог изменений).
+    # routing.domainStrategy осознанно НЕ трогаем: это AsIs/IPIfNonMatch/
+    # IPOnDemand (семантика правил), а не IPv4/IPv6-приоритет. Прежний код
+    # писал туда Use*-значение: Xray молча принимает его как AsIs →
+    # ip/geoip-правила перестают матчить домены (баг, стенд 2026-10-26).
     if _cfg_f.exists():
         try:
             _c2 = json.loads(_cfg_f.read_text())
-            _c2.setdefault("routing", {})["domainStrategy"] = new_ds
-            # Обновляем domainStrategy во всех freedom-outbound (direct)
-            for _ob in _c2.get("outbounds", []):
-                if _ob.get("protocol") == "freedom" and _ob.get("tag") not in ("xray-stats-api",):
-                    _ob.setdefault("settings", {})["domainStrategy"] = new_ds
+            from chimera.modules.domain_strategy import (
+                apply_domain_strategy_to_config,
+            )
+            _changes = apply_domain_strategy_to_config(_c2, new_ds)
             _cfg_f.write_text(json.dumps(_c2, indent=2, ensure_ascii=False))
             success(f"domainStrategy изменена → {new_ds_desc}")
+            for _ch in _changes:
+                info(f"   • {_ch}")
+            if not _changes:
+                info("   Конфиг уже соответствовал выбранной стратегии.")
         except Exception as e2:
             warn(f"Не удалось обновить config.json: {e2}")
             return
