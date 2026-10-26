@@ -1614,9 +1614,14 @@ def lb_menu() -> None:
         box_row(f"  устоявшиеся прилипают к слоту (connmark). Exit-ноды не меняются.")
         box_row()
         on = info["on"]
-        box_row(f"  Режим: {'ВКЛ' if on else 'выкл'}"
-                f"{f', стратегия {CYAN}{info['strategy']}{NC}' if on else ''}"
-                f"{f', закреплён {GREEN}{info['pinned']}{NC}' if on and info['pinned'] else ''}")
+        # Куски собираются ОТДЕЛЬНО от внешней f-строки: вложенная
+        # f', … {info['strategy']} …' (одинарный разделитель + одинарные
+        # же ключи внутри выражения) легальна только с Python 3.12
+        # (PEP 701) — на 3.10/3.11 SyntaxError на импорте модуля.
+        strategy_s = f", стратегия {CYAN}{info['strategy']}{NC}" if on else ""
+        pinned_s = (f", закреплён {GREEN}{info['pinned']}{NC}"
+                    if on and info["pinned"] else "")
+        box_row(f"  Режим: {'ВКЛ' if on else 'выкл'}{strategy_s}{pinned_s}")
         sel = info.get("exits_selected") or []
         if sel:
             box_row(f"  Состав: {CYAN}{', '.join(sel)}{NC} "

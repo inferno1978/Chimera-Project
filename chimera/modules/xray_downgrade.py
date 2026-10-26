@@ -97,6 +97,15 @@ GATE_ERA_FIRST  = (26, 7, 11)   # ""/unset → дефолт-гейт 26.3.27
 GATE_ERA_LAST   = (26, 7, 28)   # последний релиз перед MLKEM-эпохой
 GATE_ERA_VALUE  = "1.8.0"       # порог: sing-box [1,8,1] и mihomo [1,8,2] проходят
 
+# Отображение пустого minClientVer («гейт выкл») в f-string'ах. Именно
+# константой, а не литералом '""' внутри {…}: бэкслеш и кавычка-
+# разделитель в ВЫРАЖЕНИИ f-строки легальны только с Python 3.12
+# (PEP 701); на заявленном минимуме 3.10/3.11 (INSTALL.md) это
+# SyntaxError на импорте модуля — пункт меню 5c целиком мёртв
+# (кейс юзера на Python 3.10: f-string expression part cannot
+# include a backslash, строка 495).
+EMPTY_MCV_DISPLAY = '""'
+
 # Цели даунгрейда — ровно три («много не нужно»).
 DOWNGRADE_TARGETS: List[Dict[str, Any]] = [
     {
@@ -491,7 +500,7 @@ def sync_min_client_ver_for_core(version_str: Any, *,
 
     if current == required:
         if verbose:
-            core.info(f"minClientVer = {current or '\"\"'} — уже соответствует "
+            core.info(f"minClientVer = {current or EMPTY_MCV_DISPLAY} — уже соответствует "
                       f"эпохе {era_label(era)} ({version_str})")
         return False
 
@@ -500,7 +509,7 @@ def sync_min_client_ver_for_core(version_str: Any, *,
             core.warn(f"minClientVer = {current!r} (кастомное) — под эпоху "
                       f"{era_label(era)} не подгоняю, значение оставлено. "
                       f"Сменить: пункт [5b]. Требуемое для эпохи: "
-                      f"{required or '\"\"'}")
+                      f"{required or EMPTY_MCV_DISPLAY}")
         return False
 
     # Эпоха-управляемое значение — мигрируем: сначала state (источник
@@ -515,7 +524,7 @@ def sync_min_client_ver_for_core(version_str: Any, *,
         for f in report["files"]:
             if f["status"] == "ok":
                 core.success(f"{f['path']}: minClientVer → "
-                             f"{required or '\"\"'} ({f['patched_inbounds']} "
+                             f"{required or EMPTY_MCV_DISPLAY} ({f['patched_inbounds']} "
                              "REALITY-инбаунд(ов))")
             elif f["status"] == "test_failed":
                 core.warn(f"{f['path']}: тест конфига провалился, файл "
@@ -527,7 +536,7 @@ def sync_min_client_ver_for_core(version_str: Any, *,
             core.info("Живых конфигов Xray не найдено — значение сохранено "
                       "в state.json, применится при перегенерации [5b]")
         if saved:
-            core.success(f"state.json: min_client_ver → {required or '\"\"'} "
+            core.success(f"state.json: min_client_ver → {required or EMPTY_MCV_DISPLAY} "
                          f"(эпоха {era_label(era)}), переживёт rebuild/ротации")
     return True
 
@@ -597,7 +606,7 @@ def do_xray_downgrade_interactive() -> None:
     _box_top("⬇️  ДАУНГРЕЙД ЯДРА XRAY-CORE")
     _box_row()
     _box_row(f"  Текущее ядро: {CYAN}{cur_ver}{NC} — {era_label(cur_era)}")
-    _box_row(f"  minClientVer (state.json): {CYAN}{mcv or '\"\"'}{NC}")
+    _box_row(f"  minClientVer (state.json): {CYAN}{mcv or EMPTY_MCV_DISPLAY}{NC}")
     if cur_era == "gate" and mcv != GATE_ERA_VALUE:
         _box_row(f"  {YELLOW}⚠  эпоха гейта без \"{GATE_ERA_VALUE}\" — дефолт-гейт "
                  f"26.3.27 валит sing-box/mihomo{NC}")
@@ -620,7 +629,7 @@ def do_xray_downgrade_interactive() -> None:
         for line in t["notes"]:
             _box_row(f"      {DIM}{line}{NC}")
         _box_row(f"      Конфиг после даунгрейда: minClientVer="
-                 f"{BOLD}{t['min_client_ver'] or '\"\"'}{NC}")
+                 f"{BOLD}{t['min_client_ver'] or EMPTY_MCV_DISPLAY}{NC}")
         _box_row("      Клиенты после даунгрейда:")
         for cname, cst in t["clients"]:
             _box_row(f"       • {cname}: {cst}")
@@ -661,7 +670,7 @@ def do_xray_downgrade_interactive() -> None:
     print(f"  Бинарник будет заменён (бэкап: /var/backups/xray/binaries/,")
     print(f"  при провале теста конфига — автоматический откат).")
     print(f"  Конфиг подгонится под эпоху: minClientVer → "
-          f"{BOLD}{target['min_client_ver'] or '\"\"'}{NC}.")
+          f"{BOLD}{target['min_client_ver'] or EMPTY_MCV_DISPLAY}{NC}.")
     print(f"  {DIM}Вернуть актуальное ядро — пункт [5] Обновить Xray-core; "
           f"minClientVer{NC}")
     print(f"  {DIM}мигрирует обратно автоматически.{' ' * 24}{NC}")
@@ -753,7 +762,7 @@ def do_xray_downgrade_interactive() -> None:
     _box_row()
     _box_row(f"  Ядро: {CYAN}{cur_ver}{NC} → {GREEN}{new_ver}{NC} "
              f"({era_label(era_for_version(new_ver))})")
-    _box_row(f"  minClientVer: {GREEN}{target['min_client_ver'] or '\"\"'}{NC} "
+    _box_row(f"  minClientVer: {GREEN}{target['min_client_ver'] or EMPTY_MCV_DISPLAY}{NC} "
              "(state.json + все REALITY-инбаунды живых конфигов)")
     _box_row()
     _box_row("  Теперь работают клиенты:")

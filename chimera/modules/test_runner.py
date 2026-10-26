@@ -126,6 +126,8 @@ TEST_GROUPS: dict[str, dict] = {
             "scheduler", "traffic_history", "connection_audit",
             "ipset_persist", "system_deps", "xray_safe_apply",
             "network_bench", "mtu_tuning", "geo_files",
+            # Гард совместимости исходников с Python 3.10/3.11 (PEP 701)
+            "py_compat",
         ],
     },
     "9": {
