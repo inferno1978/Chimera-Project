@@ -1,0 +1,55 @@
+# CD Химеры: тег v* → проверка артефактов → Forgejo Release.
+# Подпись bootstrap.sh остаётся РУЧНОЙ у владельца (приватный ключ офлайн,
+# в CI не попадает — красная линия); CI верифицирует публичным ключом,
+# закреплённым в README/INSTALL/docs/faq/BOOTSTRAP_SECURITY.md.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    if: github.repository == 'inferno1978/chimera'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout тега
+        run: |
+          git clone --depth 1 --branch '${{ github.ref_name }}' http://127.0.0.1:3000/inferno1978/chimera.git .
+          echo "тег ${{ github.ref_name }} @ $(git rev-parse --short HEAD)"
+
+      - name: Верификация артефактов (sha256 + ed25519)
+        run: |
+          set -e
+          sha256sum -c bootstrap.sh.sha256
+          printf '%s\n' '-----BEGIN PUBLIC KEY-----' \
+            'MCowBQYDK2VwAyEA+6KSAskfo+LBzW/io8q376wAULspfGTik674H1o8Gu4=' \
+            '-----END PUBLIC KEY-----' > /tmp/bootstrap.pub
+          openssl pkeyutl -verify -pubin -inkey /tmp/bootstrap.pub \
+            -rawin -in bootstrap.sh -sigfile bootstrap.sh.sig
+
+      - name: Gate перед релизом (python 3.10)
+        run: bash scripts/ci_suite.sh python3.10 gate
+
+      - name: Создание Release + артефакты
+        env:
+          FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -e
+          TAG='${{ github.ref_name }}'
+          python3 scripts/release_notes.py "$TAG" /tmp/rel.json
+          REL=$(curl -s -X POST \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d @/tmp/rel.json \
+            http://127.0.0.1:3000/api/v1/repos/inferno1978/chimera/releases)
+          RELID=$(printf '%s' "$REL" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          echo "Release id=$RELID"
+          for f in bootstrap.sh bootstrap.sh.sig bootstrap.sh.sha256; do
+            curl -s -X POST \
+              -H "Authorization: token $FORGEJO_TOKEN" \
+              -F "attachment=@$f" \
+              "http://127.0.0.1:3000/api/v1/repos/inferno1978/chimera/releases/$RELID/assets?name=$f" \
+              | python3 -c "import json,sys; d=json.load(sys.stdin); print('attach:', d.get('name'), d.get('browser_download_url'))"
+          done

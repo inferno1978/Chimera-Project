@@ -1,0 +1,57 @@
+# CI Химеры на ЗЕРКАЛЕ GitHub (бесплатные раннеры публичного репо).
+# Запускается зеркальным синком с origin после пуша (лаг минуты).
+# Guard по имени репо: на Forgejo (где .github/workflows тоже читается)
+# эти джобы скипаются — там свой .forgejo/workflows/ci.yml.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  static:
+    if: github.repository == 'inferno1978/Chimera-Project'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static (python 3.12: compileall + PEP 701 скан + full_test + гард)
+        run: bash scripts/ci_suite.sh python3 static
+
+  gate:
+    if: github.repository == 'inferno1978/Chimera-Project'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Gate (python ${{ matrix.python }}, полный список — чистые раннеры)
+        run: |
+          ls tests/test_*.py | sed 's|^tests/|tests.|; s|\.py$||' > /tmp/gate_list.txt
+          bash scripts/ci_suite.sh python gate /tmp/gate_list.txt
+
+  full-report:
+    # только вручную (workflow_dispatch): полный отчёт по всем 300+ модулям,
+    # для триажа новых красных; пушам достаточно static + gate
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'inferno1978/Chimera-Project'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Full report (не блокирующий — триаж новых красных)
+        continue-on-error: true
+        run: bash scripts/ci_suite.sh python full

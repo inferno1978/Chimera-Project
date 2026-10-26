@@ -1,0 +1,41 @@
+# CI Химеры на origin (Forgejo, раннер ci-de — host-режим на хосте Forgejo).
+# Авторитетный гейт: то, что здесь красное, — красное.
+# Зеркало GitHub гоняет свою копию в .github/workflows/ci.yml (там guard
+# по имени репозитория, чтобы эти же файлы не дублировались здесь).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 3 * * *'   # nightly full-отчёт (не блокирующий)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'gate | full'
+        default: gate
+        type: string
+
+jobs:
+  ci:
+    # защита от двойного запуска: этот файл — только для origin-репо
+    if: github.repository == 'inferno1978/chimera'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        run: |
+          git clone --depth 1 http://127.0.0.1:3000/inferno1978/chimera.git .
+          echo "HEAD=$(git rev-parse HEAD) (событие: ${{ github.sha }})"
+          [ "$(git rev-parse HEAD)" = "${{ github.sha }}" ] || echo "WARN: HEAD != event sha (dispatch на старом main?)"
+
+      - name: Static (python 3.12: compileall + PEP 701 скан + full_test + гард)
+        run: bash scripts/ci_suite.sh python3 static
+
+      - name: Gate (python 3.10 — заявленный минимум INSTALL.md)
+        if: ${{ github.event_name != 'schedule' && inputs.mode != 'full' }}
+        run: bash scripts/ci_suite.sh python3.10 gate
+
+      - name: Full report (python 3.10, не блокирующий)
+        if: ${{ github.event_name == 'schedule' || inputs.mode == 'full' }}
+        run: bash scripts/ci_suite.sh python3.10 full
