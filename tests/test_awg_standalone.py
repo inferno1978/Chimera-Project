@@ -528,6 +528,35 @@ class TestAwgsNatHelperV545(unittest.TestCase):
         self.assertIn("up)", body)
         self.assertIn("down)", body)
 
+    def test_nat_helper_enforces_ip_forward(self):
+        """fix 26.10 (cascade-exit «чёрная дыра»): up сам ставит ip_forward=1.
+
+        E2E ee1: 99-vless-performance.conf (лексически ПОСЛЕДИЙ) гасил
+        форвардинг после ребута — туннели живы, MASQUERADE на месте,
+        данные не идут. Юнит стартует после awg-quick@awg0 — up обязан
+        удостовать активное значение на любом порядке установки модулей.
+        """
+        from chimera.modules.awg_standalone import awgs_build_nat_helper_body
+        body = awgs_build_nat_helper_body("10.66.66.0/24", "awg0")
+        self.assertIn("sysctl -q -w net.ipv4.ip_forward=1", body)
+        # sysctl — ПЕРВОЙ командой up (до NAT: правила без форвардинга бесполезны)
+        self.assertIn("up)   sysctl -q -w net.ipv4.ip_forward=1; ", body)
+        # широкая MASQUERADE 172.16.0.0/12 — транзит каскада с любой подсети
+        self.assertIn(
+            "-t nat -A POSTROUTING -s 172.16.0.0/12 -o $WAN -j MASQUERADE", body)
+        self.assertIn(
+            "-C POSTROUTING -s 172.16.0.0/12 -o $WAN -j MASQUERADE", body)
+        # down: симметричное удаление широкого правила
+        self.assertIn(
+            "-D POSTROUTING -s 172.16.0.0/12 -o $WAN -j MASQUERADE", body)
+
+    def test_nat_helper_v6_forwarding_sysctl(self):
+        """fix 26.10: v6-часть up тоже ставит v6-forwarding."""
+        from chimera.modules.awg_standalone import awgs_build_nat_helper_body
+        body = awgs_build_nat_helper_body("10.66.66.0/24", "awg0", "fd00::/64")
+        self.assertIn("sysctl -q -w net.ipv6.conf.all.forwarding=1", body)
+        self.assertIn("sysctl -q -w net.ipv4.ip_forward=1", body)
+
 
 class TestUninstallNatParityV545(unittest.TestCase):
     """uninstall удаляет NAT правилА теми же спеками, что ставил.

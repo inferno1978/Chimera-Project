@@ -255,6 +255,16 @@ def apply_network_optimizations() -> None:
     TOTAL_RAM   = core.TOTAL_RAM
     TOTAL_CPU   = core.TOTAL_CPU
     INSTALL_MODE = getattr(core, "INSTALL_MODE", "A")
+    # fix 26.10 (cascade-exit «чёрная дыра»): ip_forward НЕ опускается ниже
+    # активного значения. 99-vless-performance.conf лексически ПОСЛЕДИЙ
+    # среди 99-awg-*.conf — его `else 0` побеждал при загрузке и гасил
+    # форвардинг AWG-exit-ноды (туннели живы, MASQUERADE на месте —
+    # данные не форвардятся). Preserve-if-1 + Mode B → 1.
+    try:
+        _ipfwd_keep = Path("/proc/sys/net/ipv4/ip_forward"
+                           ).read_text().strip() == "1"
+    except Exception:
+        _ipfwd_keep = False
     OPTIMIZER_CONF = core.OPTIMIZER_CONF
     LIMITS_CONF    = core.LIMITS_CONF
     SYSTEMD_CONF   = core.SYSTEMD_CONF
@@ -328,15 +338,16 @@ def apply_network_optimizations() -> None:
         net.ipv4.tcp_keepalive_probes = 6
         net.ipv4.tcp_fin_timeout = 30
         # BUGFIX: Режим B (каскадный прокси) требует ip_forward=1 для маршрутизации.
-        # Значение подставляется динамически в зависимости от режима установки.
-        net.ipv4.ip_forward = {1 if INSTALL_MODE == "B" else 0}
+        # BUGFIX-2 (fix 26.10): см. _ipfwd_keep выше — не опускать ниже активного,
+        # иначе лексический порядок sysctl.d гасит форвардинг exit-нод после ребута.
+        net.ipv4.ip_forward = {1 if (INSTALL_MODE == "B" or _ipfwd_keep) else 0}
         net.ipv6.conf.all.disable_ipv6 = 0
         net.ipv6.conf.default.disable_ipv6 = 0
         net.ipv6.conf.lo.disable_ipv6 = 0
         net.ipv6.conf.all.accept_ra = 2
         net.ipv6.conf.default.accept_ra = 2
         # BUGFIX: должен совпадать с ip_forward — иначе диагностика (--check) сообщает ошибку
-        net.ipv6.conf.all.forwarding = {1 if INSTALL_MODE == "B" else 0}
+        net.ipv6.conf.all.forwarding = {1 if (INSTALL_MODE == "B" or _ipfwd_keep) else 0}
         net.ipv6.conf.all.use_tempaddr = 2
         net.ipv6.conf.default.use_tempaddr = 2
         net.ipv6.conf.all.temp_prefered_lft = 86400

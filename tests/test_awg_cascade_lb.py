@@ -1211,5 +1211,201 @@ class TestSelectionIntegration(_LbTestBase):
         self.assertEqual(sorted(saved["lb"]["alive"]), ["de", "pl1"])
 
 
+# ── fix 26.10: капасити-множители + v6-состав + легаси-TCPMSS ────────────────
+
+class TestWeightMult(_LbTestBase):
+    """weight_mult: доля ∝ метрика × множитель (метрика не видит аплинк)."""
+
+    _PROBES_EQUAL = {
+        "a": {"alive": True, "rtt_ms": 40.0, "loss_pct": 0.0,
+              "tx_rate_bps": 0, "age": 5},
+        "b": {"alive": True, "rtt_ms": 40.0, "loss_pct": 0.0,
+              "tx_rate_bps": 0, "age": 5},
+    }
+
+    def test_mult_scales_share(self):
+        lb = {"metrics_ema": {}, "weight_mult": {"a": 3.0}}
+        bal = self.lb.lb_balance_shares(lb, "leastping", dict(self._PROBES_EQUAL))
+        sh = bal["shares"]
+        self.assertAlmostEqual(sh["a"], 0.75, places=2)
+        self.assertAlmostEqual(sh["b"], 0.25, places=2)
+
+    def test_zero_mult_excludes_slot(self):
+        # доля 0 < SHARE_FLOOR(0.5%) → слот вне ротации, остаток renorm
+        lb = {"metrics_ema": {}, "weight_mult": {"a": 0.0}}
+        probes = dict(self._PROBES_EQUAL)
+        probes["c"] = {"alive": True, "rtt_ms": 40.0, "loss_pct": 0.0,
+                       "tx_rate_bps": 0, "age": 5}
+        bal = self.lb.lb_balance_shares(lb, "leastping", probes)
+        self.assertEqual(set(bal["shares"]), {"b", "c"})
+        self.assertAlmostEqual(sum(bal["shares"].values()), 1.0, places=6)
+
+    def test_bad_mult_values_ignored(self):
+        # мусор в конфиге не ломает расчёт: невалидное значение = 1.0
+        lb = {"metrics_ema": {}, "weight_mult": {"a": "junk", "b": None}}
+        bal = self.lb.lb_balance_shares(lb, "leastping", dict(self._PROBES_EQUAL))
+        self.assertAlmostEqual(bal["shares"]["a"], 0.5, places=2)
+        self.assertAlmostEqual(bal["shares"]["b"], 0.5, places=2)
+
+    def test_status_info_reports_mult(self):
+        st = self._lb_state(n=2)
+        st["lb"] = {"weight_mult": {"de": 1.8, "fi1": 1.4}}
+        info = self.lb.lb_status_info(st)
+        self.assertEqual(info["weight_mult"], {"de": 1.8, "fi1": 1.4})
+        by_name = {s["name"]: s for s in info["slots"]}
+        self.assertEqual(by_name["de"]["weight_mult"], 1.8)
+        self.assertEqual(by_name["fi1"]["weight_mult"], 1.4)
+
+
+class TestV6ExitsFilter(_LbTestBase):
+    """v6_exits: v6-хвост/инфраструктура только по v6-способным слотам."""
+
+    def setUp(self):
+        super().setUp()
+        self._use_rec_run()
+
+    def test_v6_tail_only_capable_slots(self):
+        st = self._lb_state(n=3, v6=True, strategy="random")
+        st["lb"] = {"v6_exits": ["fi1"]}
+        self._write_state(st)
+        self.assertTrue(self.lb.lb_dispatcher_install())
+        # v6-хвост: единственный способный слот fi1 (awg2, марка 0x8202) —
+        # catch-all БЕЗ statistic
+        self.assertTrue(self.rec.has(
+            "ip6tables", "-t", "mangle", "-A", "awg_lb6",
+            "-j", "MARK", "--set-mark", "0x8202"))
+        v6_stat = [c for c in self.rec.calls
+                   if c and c[0] == "ip6tables" and "statistic" in c]
+        self.assertFalse(v6_stat)
+        # v6-инфраструктура только на awg2 (per-slot через bash — bash_has)
+        self.assertTrue(self.rec.bash_has("-A POSTROUTING -o awg2 -j MASQUERADE"))
+        # неспособные слоты зачищаются от v6-инфраструктуры (_while_del → bash)
+        self.assertTrue(self.rec.bash_has(
+            "ip6tables -t nat -D POSTROUTING -o awg1 -j MASQUERADE"))
+        # v4-хвост НЕ фильтруется (все 3 слота)
+        v4_marks = [c for c in self.rec.calls
+                    if c and c[0] == "iptables" and "--set-mark" in c]
+        self.assertTrue(any("0x8201" in c for c in v4_marks))
+        self.assertTrue(any("0x8203" in c for c in v4_marks))
+
+    def test_v6_shares_renormalized_to_filtered_set(self):
+        # доли полного состава {de:.3, fi1:.3, nl1:.25, pl1:.15};
+        # v6-способные de+nl1 → перенормировка 0.3/0.55=0.5455 у de
+        st = self._lb_state(n=4, v6=True, strategy="leastping")
+        st["lb"] = {
+            "v6_exits": ["de", "nl1"],
+            "alive": ["de", "fi1", "nl1", "pl1"],
+            "balance": {"shares": {"de": 0.30, "fi1": 0.30,
+                                    "nl1": 0.25, "pl1": 0.15}},
+        }
+        self._write_state(st)
+        self.assertTrue(self.lb.lb_dispatcher_install())
+        # v6-хвост: de со statistic 0.5455, nl1 — catch-all
+        self.assertTrue(self.rec.has(
+            "ip6tables", "--probability", "0.5455"))
+        v6_marks = [c for c in self.rec.calls
+                    if c and c[0] == "ip6tables" and "--set-mark" in c]
+        marks = {m for c in v6_marks for m in c if m.startswith("0x82")}
+        self.assertEqual(marks, {"0x8201", "0x8203"})
+        # v4-хвост не тронут фильтром: все 4 марки
+        v4_marks = [c for c in self.rec.calls
+                    if c and c[0] == "iptables" and "--set-mark" in c]
+        marks4 = {m for c in v4_marks for m in c if m.startswith("0x82")}
+        self.assertEqual(len(marks4), 4)
+
+    def test_empty_v6_set_keeps_old_behavior(self):
+        st = self._lb_state(n=3, v6=True, strategy="random")
+        self._write_state(st)
+        self.assertTrue(self.lb.lb_dispatcher_install())
+        # все слоты в v6-хвосте: три разные марки
+        v6_marks = [c for c in self.rec.calls
+                    if c and c[0] == "ip6tables" and "--set-mark" in c]
+        marks = {m for c in v6_marks for m in c if m.startswith("0x82")}
+        self.assertEqual(len(marks), 3)
+
+    def test_status_info_reports_v6(self):
+        st = self._lb_state(n=3)
+        st["lb"] = {"v6_exits": ["fi1"]}
+        info = self.lb.lb_status_info(st)
+        self.assertEqual(info["v6_exits"], ["fi1"])
+        by_name = {s["name"]: s for s in info["slots"]}
+        self.assertFalse(by_name["de"]["v6_capable"])
+        self.assertTrue(by_name["fi1"]["v6_capable"])
+        self.assertFalse(by_name["nl1"]["v6_capable"])
+
+
+class TestPurgeLegacyTcpmss(_LbTestBase):
+    """_purge_pair_tcpmss: легаси-клампы (любой --set-mss) снимаются."""
+
+    def setUp(self):
+        super().setUp()
+        self._use_rec_run()
+
+    def _run_with_stdout(self, stdout_map):
+        """_run-мок: -S запросы возвращают заданный текст."""
+        rec = self.rec
+
+        def fake_run(argv, capture=False, check=False, **kw):
+            rec.run(argv, capture, check, **kw)
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            key = tuple(argv)
+            r.stdout = stdout_map.get(key, "")
+            return r
+
+        return fake_run
+
+    def test_purge_removes_legacy_1140_both_directions(self):
+        stdout_map = {
+            ("iptables", "-t", "mangle", "-S", "FORWARD"): (
+                "-A FORWARD -i awg0 -o awg1 -p tcp -m tcp "
+                "--tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140\n"
+                "-A FORWARD -i awg1 -o awg0 -p tcp -m tcp "
+                "--tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1140\n"
+                "-A FORWARD -i awg0 -o awg2 -p tcp -m tcp "
+                "--tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240\n"
+            ),
+        }
+        with patch.object(self.lb, "_run",
+                          side_effect=self._run_with_stdout(stdout_map)):
+            self.lb._purge_pair_tcpmss("awg1", False)
+        # оба направления ЛЮБОГО mss пары awg0↔awg1 удалены...
+        self.assertTrue(self.rec.has(
+            "iptables", "-t", "mangle", "-D", "FORWARD",
+            "-i", "awg0", "-o", "awg1"))
+        self.assertTrue(self.rec.has(
+            "iptables", "-t", "mangle", "-D", "FORWARD",
+            "-i", "awg1", "-o", "awg0"))
+        # ...ровно два удаления (чужая пара awg2 не тронута)
+        dels = [c for c in self.rec.calls
+                if c[:5] == ["iptables", "-t", "mangle", "-D", "FORWARD"]]
+        self.assertEqual(len(dels), 2)
+
+    def test_purge_v6_family(self):
+        stdout_map = {
+            ("ip6tables", "-t", "mangle", "-S", "FORWARD"): (
+                "-A FORWARD -i awg0 -o awg3 -p tcp -m tcp "
+                "--tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1220\n"
+            ),
+        }
+        with patch.object(self.lb, "_run",
+                          side_effect=self._run_with_stdout(stdout_map)):
+            self.lb._purge_pair_tcpmss("awg3", True)
+        self.assertTrue(self.rec.has(
+            "ip6tables", "-t", "mangle", "-D", "FORWARD",
+            "-i", "awg0", "-o", "awg3"))
+
+    def test_dispatcher_purges_then_installs(self):
+        # интеграционно: install вызывает purge пары перед _check_or_add
+        st = self._lb_state(n=2)
+        self._write_state(st)
+        self.lb.lb_dispatcher_install()
+        purge_calls = [c for c in self.rec.calls
+                       if c[:5] == ["iptables", "-t", "mangle",
+                                    "-S", "FORWARD"]]
+        self.assertEqual(len(purge_calls), 2)   # по одному на слот
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

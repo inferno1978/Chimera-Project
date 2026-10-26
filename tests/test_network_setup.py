@@ -126,5 +126,32 @@ class TestSysctlBufferAlignment(unittest.TestCase):
         self.assertEqual(AWGS_SYSCTL_TARGETS["net.core.wmem_default"], 7500000)
 
 
+class TestIpForwardPreserve(unittest.TestCase):
+    """fix 26.10 (cascade-exit «чёрная дыра»): шаблон не опускает ip_forward.
+
+    E2E ee1 (203.0.113.210): лексический порядок sysctl.d —
+    99-awg-standalone.conf < 99-vless-performance.conf — заставлял
+    vless-файл побеждать при загрузке; его `else 0` гасил форвардинг
+    AWG-exit-ноды: туннели живы (handshake свежий), MASQUERADE на
+    месте, а данные не форвардятся — «чёрная дыра» каскада.
+    Теперь: Mode B ИЛИ активное значение 1 → пишем 1.
+    """
+
+    def test_ip_forward_never_lowered_below_active(self):
+        src = (_PROJECT_ROOT / "chimera" / "modules" /
+               "network_setup.py").read_text()
+        # preserve-if-1 форма в обеих строках шаблона
+        self.assertIn(
+            'net.ipv4.ip_forward = {1 if (INSTALL_MODE == "B" or _ipfwd_keep) else 0}',
+            src)
+        self.assertIn(
+            'net.ipv6.conf.all.forwarding = {1 if (INSTALL_MODE == "B" or _ipfwd_keep) else 0}',
+            src)
+        # чтение активного значения присутствует
+        self.assertIn('_ipfwd_keep = Path("/proc/sys/net/ipv4/ip_forward"', src)
+        # старая форма (безусловный 0 в режиме A) не должна возвращаться
+        self.assertNotIn('{1 if INSTALL_MODE == "B" else 0}', src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

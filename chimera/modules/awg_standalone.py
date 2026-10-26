@@ -1628,7 +1628,25 @@ def awgs_build_nat_helper_body(awg_subnet: str,
     subnet_v6 (непустой) → helper применяет и v6-часть
     (NAT66 MASQUERADE + FORWARD v6 через build_nat6_idempotent_shell)
     — для standalone-серверов с включённым IPv6-туннелем.
+
+    fix 26.10 (cascade-exit «чёрная дыра», E2E ee1/203.0.113.210):
+    up обязан сам ставить ip_forward=1 — 99-vless-performance.conf
+    лексически перекрывает 99-awg-standalone.conf, и после ребута
+    форвардинг гасился при живых туннелях и MASQUERADE; юнит стартует
+    после awg-quick@awg0 — это удостовает активное значение на любом
+    порядке установки модулей. Плюс широкая MASQUERADE 172.16.0.0/12:
+    каскад-exit получает транзит с любой chimera-подсети (вход снатит
+    на свой туннельный IP, но страховка от прямых подсетей/вторых
+    входов не мешает и в standalone).
     """
+    fwd_v4 = "sysctl -q -w net.ipv4.ip_forward=1; "
+    broad_masq = (
+        "iptables -t nat -C POSTROUTING -s 172.16.0.0/12 -o $WAN -j MASQUERADE 2>/dev/null || "
+        "iptables -t nat -A POSTROUTING -s 172.16.0.0/12 -o $WAN -j MASQUERADE"
+    )
+    broad_del = (
+        "iptables -t nat -D POSTROUTING -s 172.16.0.0/12 -o $WAN -j MASQUERADE 2>/dev/null || true"
+    )
     body = (
         "#!/bin/bash\n"
         "# AWG standalone NAT + FORWARD — сгенерировано chimera (awg_standalone.py)\n"
@@ -1640,8 +1658,8 @@ def awgs_build_nat_helper_body(awg_subnet: str,
         "WAN=$(ip route show default | awk '{print $5; exit}')\n"
         "if [ -z \"$WAN\" ]; then echo \"awg-nat-rules: WAN interface not found\" >&2; exit 1; fi\n"
         "case \"$CMD\" in\n"
-        "  up)   " + build_nat_idempotent_shell(awg_subnet, awg_iface, "$WAN") + " ;;\n"
-        "  down) " + build_nat_cleanup_shell(awg_subnet, awg_iface, "$WAN") + " ;;\n"
+        "  up)   " + fwd_v4 + build_nat_idempotent_shell(awg_subnet, awg_iface, "$WAN") + "; " + broad_masq + " ;;\n"
+        "  down) " + build_nat_cleanup_shell(awg_subnet, awg_iface, "$WAN") + "; " + broad_del + " ;;\n"
         "  *) echo \"usage: $0 up|down\" >&2; exit 1 ;;\n"
         "esac\n"
     )
@@ -1649,7 +1667,8 @@ def awgs_build_nat_helper_body(awg_subnet: str,
         body += (
             "# IPv6 (NAT66) — идемпотентно, тот же up/down\n"
             "case \"$CMD\" in\n"
-            "  up)   " + build_nat6_idempotent_shell(subnet_v6, awg_iface, "$WAN") + " ;;\n"
+            "  up)   sysctl -q -w net.ipv6.conf.all.forwarding=1; "
+            + build_nat6_idempotent_shell(subnet_v6, awg_iface, "$WAN") + " ;;\n"
             "  down) " + build_nat6_cleanup_shell(subnet_v6, awg_iface, "$WAN") + " ;;\n"
             "esac\n"
         )

@@ -39,6 +39,18 @@ exit'ов (например пару de+pl1) — state['lb_exits'] = [имена
 Смена состава на лету — lb_set_exits() (пересборка туннелей/диспетчера/
 routing-скрипта + чистка EMA ушедших имён).
 
+Капасити-множители (weight_mult, fix 26.10): метрики health-тика
+видят RTT/потери/нагрузку, но НЕ пропускную способность аплинка ноды —
+«умные» доли выходили равными у быстрых и медленных выходов.
+state['lb']['weight_mult'] = {имя: множитель} домножает базовый вес
+(доля ∝ метрика × множитель; 0 = вне ротации при живом туннеле).
+
+v6-способные слоты (v6_exits, fix 26.10): у exit-ноды без глобального
+v6 на WAN NAT66 MASQUERADE не работает — маркировка v6-клиентов туда
+= мгновенная чёрная дыра (туннель жив, handshake свежий, данных нет).
+state['lb']['v6_exits'] = [имена с рабочим v6] — v6-хвост диспетчера
+строится только по ним; пусто = все слоты (прежнее поведение).
+
 Пер-exit инфраструктура:
   марка  0x8200|slot  (0x8201..0x8210; бит 0x8000 b4-exempt в каждой —
                        критично для сосуществования с b4 на entry)
@@ -472,6 +484,30 @@ def _while_del(spec: list) -> None:
     _run(["bash", "-c", f"while {d} 2>/dev/null; do :; done"])
 
 
+def _purge_pair_tcpmss(iface: str, v6: bool = False) -> None:
+    """Снять ВСЕ TCPMSS-клампы пары awg0↔iface в mangle FORWARD (fix 26.10).
+
+    Легаси-значения (напр. 1140 из старого каскадного спека) не совпадают
+    с актуальными 1240/1220 — _check_or_add их не переустанавливает, и
+    мёртвый кламп висит вечно: ПЕРВЫЙ TCPMSS-матч в цепочке перехватывает
+    SYN раньше актуального правила. Снимает по живому выводу
+    `iptables -t mangle -S FORWARD` (любое --set-mss, оба направления),
+    вызывается перед установкой актуальных правил пары.
+    """
+    import shlex
+    ipt = "ip6tables" if v6 else "iptables"
+    r = _run([ipt, "-t", "mangle", "-S", "FORWARD"], capture=True)
+    for ln in ((r.stdout or "").splitlines() or []):
+        if "TCPMSS" not in ln:
+            continue
+        if (f"-i awg0 -o {iface}" in ln) or (f"-i {iface} -o awg0" in ln):
+            dl = ln.replace("-A FORWARD", "-D FORWARD", 1)
+            try:
+                _run([ipt, "-t", "mangle"] + shlex.split(dl))
+            except Exception:
+                pass
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ДИСПЕТЧЕР: install/remove
 # ══════════════════════════════════════════════════════════════════════════════
@@ -521,6 +557,8 @@ def lb_dispatcher_install(state: Optional[dict] = None) -> bool:
     hmark = lb.get("hmark_available", True)
     v6_on = bool(state.get("allow_ipv6_tunnel")) and bool(
         lb.get("v6_slots_on", True))
+    # v6-способные слоты (fix 26.10): пусто = все (прежнее поведение)
+    v6_set = set(lb.get("v6_exits") or [])
 
     # 1. каскадный MARK-путь (все формы) — как в apply_iptables
     _remove_cascade_mark_path()
@@ -550,7 +588,22 @@ def lb_dispatcher_install(state: Optional[dict] = None) -> bool:
         use_v6 = v6_on if v6 else True
         if not use_v6:
             continue
-        tail = lb_tail_specs(strategy, slots, alive, shares, pinned,
+        # v6-хвост — только по v6-способным слотам; доли ПЕРЕНОРМИРУЮТСЯ
+        # на отфильтрованный состав (иначе вероятности statistic считались
+        # бы от долей полного состава и catch-all получал остаток чужих
+        # долей); если способные мертвы — фолбэк на полный состав
+        # (философия all-dead: хвост НЕ пустой, прямой выход = deanon)
+        alive_arg = alive
+        shares_arg = shares
+        if v6 and v6_set:
+            cap = [nm for nm in alive if nm in v6_set]
+            if cap:
+                alive_arg = cap
+                tot = sum(shares.get(nm, 0.0) for nm in cap)
+                if tot > 0:
+                    shares_arg = {nm: shares.get(nm, 0.0) / tot
+                                  for nm in cap}
+        tail = lb_tail_specs(strategy, slots, alive_arg, shares_arg, pinned,
                              hmark=hmark, v6=v6)
         applied_key = "applied_v6" if v6 else "applied"
         applied: list = []
@@ -589,6 +642,9 @@ def lb_dispatcher_install(state: Optional[dict] = None) -> bool:
         _run(["bash", "-c",
               f"while ip rule del fwmark {mark:#x} lookup {table} 2>/dev/null; do :; done; "
               f"ip rule add fwmark {mark:#x} lookup {table}"])
+        # легаси-TCPMSS этой пары (любые --set-mss, напр. 1140) снять
+        # перед установкой актуальных — _check_or_add их не трогает
+        _purge_pair_tcpmss(iface, False)
         for spec in (
             ["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", iface,
              "-j", "MASQUERADE"],
@@ -607,7 +663,9 @@ def lb_dispatcher_install(state: Optional[dict] = None) -> bool:
             if not _check_or_add(spec):
                 ok = False
                 _warn(f"per-slot rule failed ({name}): {spec}")
-        if v6_on:
+        slot_v6 = v6_on and (not v6_set or name in v6_set)
+        if slot_v6:
+            _purge_pair_tcpmss(iface, True)
             for spec in (
                 ["ip6tables", "-t", "nat", "-A", "POSTROUTING", "-o", iface,
                  "-j", "MASQUERADE"],
@@ -631,6 +689,30 @@ def lb_dispatcher_install(state: Optional[dict] = None) -> bool:
             _run(["bash", "-c",
                   f"while ip -6 rule del fwmark {mark:#x} lookup {table} 2>/dev/null; do :; done; "
                   f"ip -6 rule add fwmark {mark:#x} lookup {table}"])
+        elif v6_on:
+            # слот вне v6-состава: убрать ранее поставленную v6-инфраструктуру
+            # (маркированный v6 не должен попадать в туннель без NAT66)
+            for spec in (
+                ["ip6tables", "-t", "nat", "-A", "POSTROUTING", "-o", iface,
+                 "-j", "MASQUERADE"],
+                ["ip6tables", "-A", "FORWARD", "-i", "awg0", "-o", iface,
+                 "-j", "ACCEPT"],
+                ["ip6tables", "-A", "FORWARD", "-i", iface, "-o", "awg0",
+                 "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+                 "-j", "ACCEPT"],
+                ["ip6tables", "-t", "mangle", "-A", "FORWARD", "-i", "awg0",
+                 "-o", iface, "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+                 "-j", "TCPMSS", "--set-mss", "1220"],
+                ["ip6tables", "-t", "mangle", "-A", "FORWARD", "-i", iface,
+                 "-o", "awg0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+                 "-j", "TCPMSS", "--set-mss", "1220"],
+            ):
+                _while_del(spec)
+            _run(["ip", "-6", "route", "del", "default", "dev", iface,
+                  "table", str(table)])
+            _run(["bash", "-c",
+                  f"while ip -6 rule del fwmark {mark:#x} lookup {table} 2>/dev/null; do :; done; "
+                  f"true"])
 
     # RU-сети — forward напрямую (общий с каскадом, v4)
     _check_or_add(["iptables", "-A", "FORWARD", "-i", "awg0",
@@ -946,7 +1028,13 @@ def lb_balance_shares(lb: dict, strategy: str,
                           + AWGS_LB_W_LOAD * load_n, 4)
             sm["score"] = score
             w = 1.0 / max(score, AWGS_LB_SCORE_FLOOR)
-        weights[name] = w
+        # капасити-множитель (fix 26.10): метрика не видит аплинк ноды —
+        # базовый вес домножается ручным хинтом lb['weight_mult'][имя]
+        try:
+            mult = float((lb.get("weight_mult") or {}).get(name, 1.0))
+        except (TypeError, ValueError):
+            mult = 1.0
+        weights[name] = w * max(mult, 0.0)
     if not weights:
         return None
     total = sum(weights.values())
@@ -1245,12 +1333,15 @@ def lb_set_exits(exits: Optional[list]) -> bool:
               "закрепление снято")
         state["lb_pinned"] = ""
         lb["pinned_fallback"] = False
-    for key in ("metrics_ema", "probes", "tx_prev"):
+    for key in ("metrics_ema", "probes", "tx_prev", "weight_mult"):
         tree = lb.get(key)
         if isinstance(tree, dict):
             for nm in list(tree.keys()):
                 if nm not in eff_names:
                     tree.pop(nm, None)
+    # fix 26.10: v6-состав и капасити-множители не ссылаются на ушедшие
+    lb["v6_exits"] = [nm for nm in (lb.get("v6_exits") or [])
+                      if nm in eff_names]
     lb["balance"] = None                # форс-ребаланс долей
     lb["alive_prev"] = None
     awgs_state_save(state)
@@ -1360,6 +1451,7 @@ def lb_status_info(state: Optional[dict] = None) -> dict:
     lb = state.get("lb") or {}
     bal = lb.get("balance") or {}
     probes = lb.get("probes") or {}
+    v6_set = set(lb.get("v6_exits") or [])
     out = {
         "on": lb_is_on(state),
         "strategy": lb_strategy(state) if state.get("lb_mode") else "",
@@ -1370,6 +1462,8 @@ def lb_status_info(state: Optional[dict] = None) -> dict:
                            if n],
         "exits_total": len(state.get("cascade_exits") or []),
         "exits_effective": len(lb_effective_exits(state)),
+        "weight_mult": {k: v for k, v in (lb.get("weight_mult") or {}).items()},
+        "v6_exits": [n for n in (lb.get("v6_exits") or []) if n],
         "slots": [],
     }
     for name, info in lb_slot_map(state).items():
@@ -1383,6 +1477,8 @@ def lb_status_info(state: Optional[dict] = None) -> dict:
             "rtt_ms": pr.get("rtt_ms"),
             "tx_kbps": pr.get("tx_rate_bps"),
             "share": round(((bal.get("shares") or {}).get(name) or 0.0), 4),
+            "weight_mult": (lb.get("weight_mult") or {}).get(name, 1.0),
+            "v6_capable": (not v6_set) or (name in v6_set),
         })
     return out
 
