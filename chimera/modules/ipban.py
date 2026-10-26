@@ -773,6 +773,9 @@ def ipban_sync(quiet: bool = False) -> bool:
     _ensure_boot_unit()
     cidrs = _state_cidrs()
     added_v4, added_v6 = _ipset_add_cidrs(cidrs)
+    # снапшот для boot-скрипта: на существующих нодах state писался старым
+    # кодом (без снапшота) — при деплое фикса его ещё нет → регенерируем
+    _write_cidr_snapshot(_state_load())
     _ipban_persist_save()
     if not quiet:
         if cidrs:

@@ -610,6 +610,16 @@ class TestIpbanSync(_EvaporationEnv):
         after = sorted(self._sim.sets["xray_manual_ban"])
         self.assertEqual(before, after)
 
+    def test_sync_writes_snapshot_for_legacy_state(self):
+        """Деплой фикса на ноду со старым state (без снапшота): sync обязан
+        регенерировать ipban.cidrs — иначе бут-самовосстановление инертно."""
+        from chimera.modules.ipban import ipban_sync
+        self.assertFalse(self._snap.exists())   # старая нода: снапшота нет
+        ipban_sync(quiet=True)
+        self.assertTrue(self._snap.exists(), "sync не создал снапшот ipban.cidrs")
+        lines = set(self._snap.read_text(encoding="utf-8").splitlines())
+        self.assertEqual(lines, set(_GRCHC_CIDRS))
+
     def test_sync_installs_rules_and_boot_unit(self):
         from chimera.modules.ipban import ipban_sync
         ipban_sync(quiet=True)
