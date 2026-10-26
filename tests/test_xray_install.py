@@ -1736,3 +1736,123 @@ class TestAutoupdateScriptV3(TestAutoupdateScript):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Генерация config.json: domainStrategy исходящих — из state («strategy»),
+#  не хардкод (регрессия кейса 91.х: state UseIPv4, конфиг UseIPv6v4).
+# ═════════════════════════════════════════════════════════════════════════════
+class TestGenerateConfigHonorsStateStrategy(unittest.TestCase):
+    """generate_xray_config_xhttp: freedom-outbound (дуал-запись) и
+    dns.queryStrategy следуют выбору установки (PARAM_DOMAIN_STRATEGY)
+    с учётом живого IPv6 — а не хардкоду UseIPv6v4."""
+
+    def setUp(self):
+        self._fake_core = _setup_core_in_sysmodules()
+        c = self._fake_core
+        c.PROTOCOL_MODE = "xhttp"
+        c.XHTTP_MODE = "stream-up"
+        c.XHTTP_PATH = "/test-strategy.ts"
+        c.PARAM_DOMAIN = "test.example.com"
+        c.PARAM_UUID = "test-uuid-1234"
+        c.XHTTP_BACKEND_PORT = 8443
+        c.IS_IPV6_AVAILABLE = False
+        c.PARAM_DOMAIN_STRATEGY = "UseIPv4"
+        c.DNSCRYPT_LISTEN_PORT = 5353
+        c.DNSCRYPT_INSTALLED = False
+        c.DNSCRYPT_LISTEN_ADDR = "127.0.0.1"
+        c.AWG_FWMARK = 0
+        c.AWG_EXIT_ENABLED = False
+        c.SPLIT_TUNNEL_ENABLED = False
+        c.SERVER_PORT = 443
+        c.XRAY_BIN = "/usr/local/bin/xray"
+        c.INSTALL_COMPLETED = False
+        c.command_exists = lambda x: True
+        c._run = MagicMock(return_value=MagicMock(returncode=0, stdout="",
+                                                   stderr=""))
+        c._set_config_owner = MagicMock()
+        c._apply_stats_to_config = lambda cfg: None
+        c._xray_log_block = lambda: {"loglevel": "warning"}
+        c.XHTTP_MODE_SUPPORTED = True
+        c.XHTTP_CDN_MASKING = False
+        for attr in ("YELLOW", "NC", "BOLD", "WHITE", "CYAN", "GREEN",
+                     "DIM", "RED", "BLUE"):
+            setattr(c, attr, "")
+        self._tmp = tempfile.mkdtemp()
+        c.CONFIG_DIR = Path(self._tmp)
+        self._path_mkdir_patcher = patch.object(Path, "mkdir",
+                                                lambda self, *a, **kw: None)
+        self._path_mkdir_patcher.start()
+        self._path_chmod_patcher = patch.object(Path, "chmod",
+                                                lambda self, *a, **kw: None)
+        self._path_chmod_patcher.start()
+        self._os_chown_patcher = patch("os.chown", lambda *a, **kw: None)
+        self._os_chown_patcher.start()
+        self._os_geteuid_patcher = patch("os.geteuid", return_value=0)
+        self._os_geteuid_patcher.start()
+
+    def tearDown(self):
+        self._path_mkdir_patcher.stop()
+        self._path_chmod_patcher.stop()
+        self._os_chown_patcher.stop()
+        self._os_geteuid_patcher.stop()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _generate_and_read(self) -> dict:
+        from chimera.modules import xray_install
+        xray_install.generate_xray_config_xhttp()
+        cfg_file = Path(self._tmp) / "config.json"
+        self.assertTrue(cfg_file.exists(), "config.json must be created")
+        return json.loads(cfg_file.read_text())
+
+    @staticmethod
+    def _direct_outbound(cfg: dict) -> dict:
+        return next(ob for ob in cfg["outbounds"]
+                    if ob.get("tag") == "direct")
+
+    def test_state_use_ipv4_wins_over_v6_node(self):
+        """РЕГРЕССИЯ 91.х: state UseIPv4 + сервер С живым IPv6 → UseIPv4.
+
+        Раньше freedom-outbound хардкодил UseIPv6v4, игнорируя выбор
+        установки (шаг 8) — расхождение state ↔ конфиг."""
+        self._fake_core.PARAM_DOMAIN_STRATEGY = "UseIPv4"
+        self._fake_core.IS_IPV6_AVAILABLE = True
+        cfg = self._generate_and_read()
+        ob = self._direct_outbound(cfg)
+        self.assertEqual(ob["settings"]["domainStrategy"], "UseIPv4")
+        self.assertEqual(
+            ob["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv4")
+        self.assertEqual(cfg["dns"]["queryStrategy"], "UseIPv4")
+
+    def test_state_v6_strategy_degrades_without_v6(self):
+        """«IPv6 отвалился после установки»: state UseIPv6v4 + мёртвый
+        v6 → UseIPv4 (не таймауты по мёртвому v6)."""
+        self._fake_core.PARAM_DOMAIN_STRATEGY = "UseIPv6v4"
+        self._fake_core.IS_IPV6_AVAILABLE = False
+        cfg = self._generate_and_read()
+        ob = self._direct_outbound(cfg)
+        self.assertEqual(ob["settings"]["domainStrategy"], "UseIPv4")
+        self.assertEqual(
+            ob["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv4")
+        self.assertEqual(cfg["dns"]["queryStrategy"], "UseIPv4")
+
+    def test_state_v6_strategy_kept_with_live_v6(self):
+        """Нормальный v6-режим: state UseIPv6v4 + живой v6 → UseIPv6v4
+        (дуал-запись) — прежнее поведение сохранено."""
+        self._fake_core.PARAM_DOMAIN_STRATEGY = "UseIPv6v4"
+        self._fake_core.IS_IPV6_AVAILABLE = True
+        cfg = self._generate_and_read()
+        ob = self._direct_outbound(cfg)
+        self.assertEqual(ob["settings"]["domainStrategy"], "UseIPv6v4")
+        self.assertEqual(
+            ob["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv6v4")
+        self.assertEqual(cfg["dns"]["queryStrategy"], "UseIPv6v4")
+
+    def test_state_use_ip_maps_query_strategy(self):
+        """state UseIP: queryStrategy=UseIP (раньше маппился на UseIPv4)."""
+        self._fake_core.PARAM_DOMAIN_STRATEGY = "UseIP"
+        self._fake_core.IS_IPV6_AVAILABLE = True
+        cfg = self._generate_and_read()
+        ob = self._direct_outbound(cfg)
+        self.assertEqual(ob["settings"]["domainStrategy"], "UseIP")
+        self.assertEqual(cfg["dns"]["queryStrategy"], "UseIP")

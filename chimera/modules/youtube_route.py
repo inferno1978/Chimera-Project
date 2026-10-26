@@ -411,11 +411,14 @@ def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
     info                     = core.info
     success                  = core.success
     warn                     = core.warn
-    #  2026-10-11: domainStrategy для direct/direct-local теперь адаптивный.
-    # Раньше хардкод UseIPv4 ломал v6 на серверах с IPv6 — B4 v2.x+ умеет v6
-    # DPI-bypass (--ipv6 + nft inet b4_mangle + nfq_ipv6.go), резать AAAA
-    # не нужно, а UseIPv4 выключал v6 даже когда она работает.
-    _direct_ds = "UseIPv6v4" if getattr(core, "IS_IPV6_AVAILABLE", False) else "UseIPv4"
+    #  2026-10-11: domainStrategy для direct/direct-local адаптивный.
+    #  2026-10-26: + учёт выбора установки (state «strategy», шаг 8) —
+    # resolve_outbound_strategy: state UseIPv4 не перекрывается хардкодом
+    # (кейс 91.х), v6-стратегии без живого v6 деградируют до UseIPv4.
+    from chimera.modules.domain_strategy import resolve_outbound_strategy
+    _direct_ds = resolve_outbound_strategy(
+        getattr(core, "PARAM_DOMAIN_STRATEGY", ""),
+        getattr(core, "IS_IPV6_AVAILABLE", False))
 
     # Определяем outboundTag для правила.
     if target_tag is not None:
@@ -623,9 +626,13 @@ def _youtube_apply_fragment_to_xray(
     info                     = core.info
     success                  = core.success
     warn                     = core.warn
-    #  2026-10-11: domainStrategy адаптивный — UseIPv6v4 при наличии IPv6
-    # (B4 v2.x+ поддерживает v6 DPI-bypass). Хардкод UseIPv4 ломал YouTube по v6.
-    _direct_ds = "UseIPv6v4" if getattr(core, "IS_IPV6_AVAILABLE", False) else "UseIPv4"
+    #  2026-10-11: domainStrategy адаптивный (B4 v2.x+ поддерживает v6
+    # DPI-bypass). 2026-10-26: + учёт выбора установки (state «strategy») —
+    # resolve_outbound_strategy (кейс 91.х: state UseIPv4 != хардкод).
+    from chimera.modules.domain_strategy import resolve_outbound_strategy
+    _direct_ds = resolve_outbound_strategy(
+        getattr(core, "PARAM_DOMAIN_STRATEGY", ""),
+        getattr(core, "IS_IPV6_AVAILABLE", False))
 
     # В AWG-режиме используем direct-local-fragment (без fwmark → default route),
     # иначе — direct-fragment (с fwmark → awg0).

@@ -86,7 +86,9 @@ from chimera.modules.xray_mirrors import (
 )
 from chimera.modules.geo_packages import GEOSITE_SPEC, GEOIP_SPEC
 from chimera.modules.agh_probe import agh_dns_available
-from chimera.modules.domain_strategy import make_freedom_outbound
+from chimera.modules.domain_strategy import (
+    make_freedom_outbound, resolve_outbound_strategy,
+)
 
 
 # =============================================================================
@@ -885,12 +887,14 @@ def generate_xray_config() -> None:
                 warn(f"Не удалось определить реальный порт DNSCrypt — "
                      f"используем {DNSCRYPT_LISTEN_PORT}")
 
-    # queryStrategy
-    query_strategy = "UseIPv4"
-    if PARAM_DOMAIN_STRATEGY == "UseIPv6v4":
-        query_strategy = "UseIPv6v4"
-    if not IS_IPV6_AVAILABLE:
-        query_strategy = "UseIPv4"
+    # domainStrategy исходящих / dns.queryStrategy — из выбора установки
+    # (state «strategy», шаг 8) с учётом живого IPv6. Раньше freedom-outbound
+    # хардкодил UseIPv6v4, игнорируя state (кейс 91.х: state UseIPv4,
+    # конфиг UseIPv6v4), а queryStrategy не понимала UseIPv4v6/UseIP —
+    # см. modules/domain_strategy.resolve_outbound_strategy.
+    _direct_strategy = resolve_outbound_strategy(
+        PARAM_DOMAIN_STRATEGY, IS_IPV6_AVAILABLE)
+    query_strategy = _direct_strategy
 
     # BUGFIX: clients — из единого источника юзеров
     # (_users_collect_for_config), а не только PARAM_UUID. Регенерация
@@ -1070,14 +1074,14 @@ def generate_xray_config() -> None:
             # sockopt — каноничная для 26.9.30+ (freedom.settings объявлен
             # deprecated, будет удалён; sockopt-domainStrategy принимается
             # всеми ядрами v1.8.24+, т.е. всем реальным флотом Химеры).
-            # UseIPv6v4: Xray предпочитает IPv6 при исходящих соединениях.
-            # Без этого клиент не увидит IPv6 сайтов даже при наличии AAAA.
+            # _direct_strategy — выбор установки (state «strategy») с учётом
+            # живого IPv6 (UseIPv6v4 при v6 — клиент увидит IPv6 сайтов).
             # ПАТЧ: mark=AWG_FWMARK направляет исходящий трафик xray через AWG таблицу.
             # Используем AWG_EXIT_ENABLED (из state.json), а не AWG_INSTALLED
             # (AWG_INSTALLED=True только в момент первичной установки, но сбрасывается
             # в False при reconfigure/emergency_repair, что вызывало EOF у клиентов).
             make_freedom_outbound(
-                "direct", "UseIPv6v4",
+                "direct", _direct_strategy,
                 mark=AWG_FWMARK if AWG_EXIT_ENABLED else None),
             {"protocol": "blackhole", "tag": "BLOCK"},
         ],
@@ -1112,7 +1116,7 @@ def generate_xray_config() -> None:
     # SPLIT_TUNNEL_ENABLED — это базовая диагностика туннеля. Полный split tunnel
     # (geosite:category-ru, geoip:ru, RIPE) — см. ниже, только если включён.
     if AWG_EXIT_ENABLED:
-        _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+        _dl_strategy = _direct_strategy
         if not any(ob.get("tag") == "direct-local" for ob in config["outbounds"]):
             # НЕТ sockopt.mark → ОС использует default route ОС, не awg0.
             config["outbounds"].insert(0,
@@ -1243,12 +1247,14 @@ def generate_xray_config_xhttp() -> None:
     info("Создание конфигурации Xray (xHTTP TLS)...")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    # queryStrategy
-    query_strategy = "UseIPv4"
-    if PARAM_DOMAIN_STRATEGY == "UseIPv6v4":
-        query_strategy = "UseIPv6v4"
-    if not IS_IPV6_AVAILABLE:
-        query_strategy = "UseIPv4"
+    # domainStrategy исходящих / dns.queryStrategy — из выбора установки
+    # (state «strategy», шаг 8) с учётом живого IPv6. Раньше freedom-outbound
+    # хардкодил UseIPv6v4, игнорируя state (кейс 91.х: state UseIPv4,
+    # конфиг UseIPv6v4), а queryStrategy не понимала UseIPv4v6/UseIP —
+    # см. modules/domain_strategy.resolve_outbound_strategy.
+    _direct_strategy = resolve_outbound_strategy(
+        PARAM_DOMAIN_STRATEGY, IS_IPV6_AVAILABLE)
+    query_strategy = _direct_strategy
 
     # BUGFIX: clients — из единого источника юзеров
     # (_users_collect_for_config), а не только PARAM_UUID — регенерация
@@ -1418,7 +1424,7 @@ def generate_xray_config_xhttp() -> None:
             # ПАТЧ: при AWG_EXIT_ENABLED добавляем sockopt.mark, чтобы исходящий
             # трафик Xray маршрутизировался через AWG-туннель (policy routing fwmark).
             make_freedom_outbound(
-                "direct", "UseIPv6v4",
+                "direct", _direct_strategy,
                 mark=AWG_FWMARK if AWG_EXIT_ENABLED else None),
             {"protocol": "blackhole", "tag": "BLOCK"},
         ],
@@ -1446,7 +1452,7 @@ def generate_xray_config_xhttp() -> None:
     # IPv6: UseIPv4 принудительно при отсутствии IPv6 на entry (см. _check_ipv6_preflight).
     # Применяется ВСЕГДА при AWG_EXIT_ENABLED=True, независимо от split tunnel.
     if AWG_EXIT_ENABLED:
-        _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+        _dl_strategy = _direct_strategy
         if not any(ob.get("tag") == "direct-local" for ob in config["outbounds"]):
             config["outbounds"].insert(0,
                 make_freedom_outbound("direct-local", _dl_strategy))
@@ -1642,12 +1648,14 @@ def generate_xray_config_xhttp_reality() -> None:
                 warn(f"Не удалось определить реальный порт DNSCrypt — "
                      f"используем {DNSCRYPT_LISTEN_PORT}")
 
-    # queryStrategy
-    query_strategy = "UseIPv4"
-    if PARAM_DOMAIN_STRATEGY == "UseIPv6v4":
-        query_strategy = "UseIPv6v4"
-    if not IS_IPV6_AVAILABLE:
-        query_strategy = "UseIPv4"
+    # domainStrategy исходящих / dns.queryStrategy — из выбора установки
+    # (state «strategy», шаг 8) с учётом живого IPv6. Раньше freedom-outbound
+    # хардкодил UseIPv6v4, игнорируя state (кейс 91.х: state UseIPv4,
+    # конфиг UseIPv6v4), а queryStrategy не понимала UseIPv4v6/UseIP —
+    # см. modules/domain_strategy.resolve_outbound_strategy.
+    _direct_strategy = resolve_outbound_strategy(
+        PARAM_DOMAIN_STRATEGY, IS_IPV6_AVAILABLE)
+    query_strategy = _direct_strategy
 
     # clients — из единого источника юзеров, БЕЗ flow (xhttp-транспорт
     # не поддерживает xtls-rprx-vision — как в xhttp+tls ветке).
@@ -1778,7 +1786,7 @@ def generate_xray_config_xhttp_reality() -> None:
         "outbounds": [
             # Дуал-запись domainStrategy (settings + sockopt) — см. modules/domain_strategy.py.
             make_freedom_outbound(
-                "direct", "UseIPv6v4",
+                "direct", _direct_strategy,
                 mark=AWG_FWMARK if AWG_EXIT_ENABLED else None),
             {"protocol": "blackhole", "tag": "BLOCK"},
         ],
@@ -1794,7 +1802,7 @@ def generate_xray_config_xhttp_reality() -> None:
 
     # ── AWG: direct-local outbound + IP-проверка (как в reality-ветке) ──────
     if AWG_EXIT_ENABLED:
-        _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+        _dl_strategy = _direct_strategy
         if not any(ob.get("tag") == "direct-local" for ob in config["outbounds"]):
             config["outbounds"].insert(0,
                 make_freedom_outbound("direct-local", _dl_strategy))

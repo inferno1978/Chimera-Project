@@ -64,6 +64,7 @@ from chimera.modules.agh_probe import agh_dns_available
 # (инцидент 28.08.2026 — DPI резал data-in-SYN, см. tfo_settings.py)
 from chimera.modules.domain_strategy import (
     apply_domain_strategy_to_config, make_freedom_outbound,
+    resolve_outbound_strategy, resolve_exit_node_strategy,
 )
 from chimera.modules.tfo_settings import tfo_sockopt
 
@@ -774,6 +775,9 @@ def generate_xray_config_chain_entry() -> None:
     DNSCRYPT_LISTEN_ADDR = getattr(core, "DNSCRYPT_LISTEN_ADDR", "127.0.0.1")
     DNSCRYPT_INSTALLED = getattr(core, "DNSCRYPT_INSTALLED", False)
     IS_IPV6_AVAILABLE = getattr(core, "IS_IPV6_AVAILABLE", False)
+    # domainStrategy — выбор установки (state «strategy»), не хардкод:
+    # см. modules/domain_strategy.resolve_outbound_strategy (кейс 91.х).
+    PARAM_DOMAIN_STRATEGY = getattr(core, "PARAM_DOMAIN_STRATEGY", "")
     PROTOCOL_MODE = getattr(core, "PROTOCOL_MODE", "reality")
     PARAM_DOMAIN = getattr(core, "PARAM_DOMAIN", "")
     PARAM_UUID = getattr(core, "PARAM_UUID", "")
@@ -864,7 +868,10 @@ def generate_xray_config_chain_entry() -> None:
             {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": False},
         ]
 
-    query_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+    # Стратегия исходящих — выбор установки + живой IPv6 (не хардкод).
+    _direct_strategy = resolve_outbound_strategy(
+        PARAM_DOMAIN_STRATEGY, IS_IPV6_AVAILABLE)
+    query_strategy = _direct_strategy
 
     # ── BUGFIX: clients — из ЕДИНОГО источника юзеров ──────────
     #    Раньше сюда жёстко подставлялся PARAM_UUID из state.json. При
@@ -1024,7 +1031,7 @@ def generate_xray_config_chain_entry() -> None:
             # Дуал-запись domainStrategy (settings + sockopt) — см.
             # modules/domain_strategy.py (совместимость ядер ≤ 26.7.x и 26.9.30+).
             make_freedom_outbound(
-                "direct", "UseIPv6v4",
+                "direct", _direct_strategy,
                 mark=AWG_FWMARK if AWG_EXIT_ENABLED else None),
         ],
         "routing": {
@@ -1049,7 +1056,7 @@ def generate_xray_config_chain_entry() -> None:
             config["routing"]["geoDataBasePath"] = str(CONFIG_DIR)
             info(f"Split tunneling: добавлено {len(st_rules)} правил (Режим B, одиночная нода)")
     elif SPLIT_TUNNEL_ENABLED and AWG_EXIT_ENABLED:
-        _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+        _dl_strategy = _direct_strategy
         config["outbounds"].insert(0,
             make_freedom_outbound("direct-local", _dl_strategy))
         # IP-проверочные домены → direct-local (всегда в AWG-режиме)
@@ -1116,6 +1123,11 @@ def _make_exit_node_config(nd: dict) -> dict:
     core = _core_module()
     _build_exit_xhttp_settings = core._build_exit_xhttp_settings
     _build_sockopt = core._build_sockopt
+    # Стратегия exit-ноды: её IPv6-статус неизвестен с entry (конфиг
+    # копируется вручную) → самоподстраивающийся v6-first/v4-fallback;
+    # явный UseIPv4 из state entry («v4-only инфраструктура») — уважаем.
+    PARAM_DOMAIN_STRATEGY = getattr(core, "PARAM_DOMAIN_STRATEGY", "")
+    _exit_strategy = resolve_exit_node_strategy(PARAM_DOMAIN_STRATEGY)
     # Гейт версий клиента REALITY — лениво из state.json (меню 5b):
     # "" = выкл (норма для Xray 26.9.8+), "1.8.0" — даунгрейд-рецепт
     # для 26.7.11–26.7.28 (VLESS_FAQ §18).
@@ -1332,14 +1344,16 @@ def _make_exit_node_config(nd: dict) -> dict:
                 {"address": "2001:4860:4860::8888", "port": 53, "network": "udp", "skipFallback": True},
                 {"address": "8.8.8.8",              "port": 53, "network": "udp", "skipFallback": False},
             ],
-            # UseIPv6v4: резолвим AAAA сначала — ключевое для видимости IPv6 клиентом
-            "queryStrategy": "UseIPv6v4",
+            # Стратегия исходящих exit-ноды — самоподстраивающаяся
+            # (v6-first с v4-fallback), см. resolve_exit_node_strategy.
+            "queryStrategy": _exit_strategy,
         },
         "inbounds": [inbound],
         "outbounds": [
-            # Дуал-запись domainStrategy (settings + sockopt) — см. modules/domain_strategy.py.
-            # UseIPv6v4: Xray предпочитает IPv6 при исходящем соединении
-            make_freedom_outbound("direct", "UseIPv6v4"),
+            # Дуал-запись domainStrategy (settings + sockopt) — см.
+            # modules/domain_strategy.py; стратегия — _exit_strategy
+            # (v6-first/v4-fallback, IPv6-статус exit неизвестен с entry).
+            make_freedom_outbound("direct", _exit_strategy),
             {"protocol": "blackhole", "tag": "BLOCK"},
         ],
         "routing": {
@@ -2273,6 +2287,9 @@ def generate_xray_config_chain_entry_multi() -> None:
     DNSCRYPT_LISTEN_ADDR = getattr(core, "DNSCRYPT_LISTEN_ADDR", "127.0.0.1")
     DNSCRYPT_INSTALLED = getattr(core, "DNSCRYPT_INSTALLED", False)
     IS_IPV6_AVAILABLE = getattr(core, "IS_IPV6_AVAILABLE", False)
+    # domainStrategy — выбор установки (state «strategy»), не хардкод:
+    # см. modules/domain_strategy.resolve_outbound_strategy (кейс 91.х).
+    PARAM_DOMAIN_STRATEGY = getattr(core, "PARAM_DOMAIN_STRATEGY", "")
     PROTOCOL_MODE = getattr(core, "PROTOCOL_MODE", "reality")
     PARAM_DOMAIN = getattr(core, "PARAM_DOMAIN", "")
     PARAM_UUID = getattr(core, "PARAM_UUID", "")
@@ -2421,7 +2438,10 @@ def generate_xray_config_chain_entry_multi() -> None:
             {"address": "8.8.8.8", "port": 53, "network": "udp", "skipFallback": False},
         ]
 
-    query_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+    # Стратегия исходящих — выбор установки + живой IPv6 (не хардкод).
+    _direct_strategy = resolve_outbound_strategy(
+        PARAM_DOMAIN_STRATEGY, IS_IPV6_AVAILABLE)
+    query_strategy = _direct_strategy
 
     # ── Chain Relay (релейные хопы): exit-нода с via = «chain_nodes[i].via»
     #    соединяется к хопу через другой outbound (sockopt.dialerProxy).
@@ -2804,7 +2824,7 @@ def generate_xray_config_chain_entry_multi() -> None:
             # При AWG добавляем fwmark для корректной маршрутизации через AWG-таблицу.
             # Дуал-запись domainStrategy (settings + sockopt) — см. modules/domain_strategy.py.
             make_freedom_outbound(
-                "direct", "UseIPv6v4",
+                "direct", _direct_strategy,
                 mark=AWG_FWMARK if AWG_EXIT_ENABLED else None),
         ],
         "routing": {
@@ -2831,7 +2851,7 @@ def generate_xray_config_chain_entry_multi() -> None:
         # В AWG-режиме proxy_tag = "direct" (с fwmark → awg0 → exit-VPS),
         # direct_tag = "direct-local" (без fwmark → default route ОС → IP entry-сервера).
         if AWG_EXIT_ENABLED:
-            _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
+            _dl_strategy = _direct_strategy
             if not any(ob.get("tag") == "direct-local" for ob in config.get("outbounds", [])):
                 config["outbounds"].insert(0,
                     make_freedom_outbound("direct-local", _dl_strategy))

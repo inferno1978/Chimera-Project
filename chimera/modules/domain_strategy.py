@@ -102,6 +102,58 @@ def _is_v6_address(addr: Any) -> bool:
     return bool(_V6_LITERAL_RE.match(addr))
 
 
+# Стратегии, бесполезные/вредные без живого IPv6 (мёртвый v6 → таймауты/EOF
+# вместо мгновенного фолбэка) — деградируют до UseIPv4.
+_V6_REQUIRING = frozenset({"UseIPv6v4", "UseIPv4v6", "UseIPv6"})
+
+
+def resolve_outbound_strategy(preferred: str = "",
+                              ipv6_available: bool = False) -> str:
+    """
+    Фактическая domainStrategy исходящих для генераторов конфигов.
+
+    Приоритет (кейс 91.х: state «strategy»=UseIPv4, а конфиг сгенерён
+    UseIPv6v4 из-за хардкода):
+      1. выбор юзера при установке (state.json «strategy» /
+         PARAM_DOMAIN_STRATEGY) — «как указано при установке»;
+      2. пустой выбор — адаптивно по живому IPv6 ноды («как нужно»):
+         UseIPv6v4 при v6, иначе UseIPv4 (та же рекомендация, что
+         показывает установщик на шаге 8);
+      3. v6-приоритетная стратегия при отсутствии живого IPv6 —
+         деградация до UseIPv4 (кейс «IPv6 отвалился после установки»).
+
+    :param preferred: значение из state/промпта ("" = не задано).
+    :param ipv6_available: живой статус IPv6 (IS_IPV6_AVAILABLE —
+        preflight при установке, quick-verify при загрузке state).
+    """
+    pref = (preferred or "").strip()
+    if not pref:
+        return "UseIPv6v4" if ipv6_available else "UseIPv4"
+    if not ipv6_available and pref in _V6_REQUIRING:
+        return "UseIPv4"
+    return pref
+
+
+def resolve_exit_node_strategy(preferred: str = "") -> str:
+    """
+    Стратегия для конфигов exit-нод, ГЕНЕРИРУЕМЫХ С ENTRY и копируемых
+    вручную (/root/xray_config_exit_node*.json → /etc/xray/config.json).
+
+    IPv6-статус exit-ноды неизвестен (её state.json недоступен с entry),
+    поэтому «как нужно» = самоподстраивающийся UseIPv6v4: freedom
+    резолвит обе семьи и при недоступности v6 откатывается на v4
+    (proxy/freedom/freedom.go: retry.ExponentialBackoff + HasStrategy).
+    Явный UseIPv4 из state entry — сигнал владельца «v4-only инфраструктура»,
+    уважаем; UseIP/UseIPv6 — passthrough.
+
+    :param preferred: PARAM_DOMAIN_STRATEGY entry-ноды.
+    """
+    pref = (preferred or "").strip()
+    if pref in ("", "UseIPv6v4", "UseIPv4v6"):
+        return "UseIPv6v4"
+    return pref
+
+
 def set_freedom_domain_strategy(ob: dict[str, Any],
                                  domain_strategy: str) -> bool:
     """

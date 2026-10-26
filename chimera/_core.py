@@ -9823,7 +9823,7 @@ def _load_state_into_globals() -> None:
     # rebuild через меню (пункт 5b) — Xray падал с 'please fill in a valid
     # value for "target"'. При do_full_install() эти поля устанавливались в
     # процессе установки, поэтому баг не проявлялся.
-    global PARAM_SOCKET_PATH, PARAM_SPIDERX
+    global PARAM_SOCKET_PATH, PARAM_SPIDERX, PARAM_DOMAIN_STRATEGY
     # === FIX 1: объявление глобалей для multi-node полей ===
     global AWG_NODES, AWG_ACTIVE_NODE_INDEX, _AWG_SSH_CLIENT_IP
     # === END FIX 1 ===
@@ -9866,6 +9866,10 @@ def _load_state_into_globals() -> None:
         PARAM_PRIVATE_KEY = state.get("private_key", PARAM_PRIVATE_KEY)
         PARAM_SHORTID    = state.get("short_id",    PARAM_SHORTID)
         PARAM_FINGERPRINT = state.get("fingerprint", PARAM_FINGERPRINT) or "chrome"
+        # FIX (кейс 91.х): «strategy» не загружалась из state — PARAM_DOMAIN_
+        # STRATEGY оставался пустым после рестарта меню/ребилда, и генераторы
+        # конфига не видели выбор шага 8 установки (domainStrategy).
+        PARAM_DOMAIN_STRATEGY = state.get("strategy", PARAM_DOMAIN_STRATEGY) or ""
         # Гейт версий клиента REALITY (меню 5b, VLESS_FAQ §18):
         # "" = выкл (норма для Xray 26.9.8+), "1.8.0" — даунгрейд-рецепт.
         PARAM_MIN_CLIENT_VER = state.get("min_client_ver", "") or ""

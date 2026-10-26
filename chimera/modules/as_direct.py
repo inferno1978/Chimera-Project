@@ -410,7 +410,12 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
     AWG_EXIT_ENABLED         = getattr(core, "AWG_EXIT_ENABLED", False)
     #  2026-10-11: domainStrategy адаптивный — UseIPv6v4 при наличии IPv6.
     # Хардкод UseIPv4 ломал v6 на серверах с IPv6 (B4 v2.x+ поддерживает v6 DPI-bypass).
-    _direct_ds = "UseIPv6v4" if getattr(core, "IS_IPV6_AVAILABLE", False) else "UseIPv4"
+    #  2026-10-26: + учёт выбора установки (state «strategy», шаг 8) —
+    # resolve_outbound_strategy (кейс 91.х: state UseIPv4 != хардкод).
+    from chimera.modules.domain_strategy import resolve_outbound_strategy
+    _direct_ds = resolve_outbound_strategy(
+        getattr(core, "PARAM_DOMAIN_STRATEGY", ""),
+        getattr(core, "IS_IPV6_AVAILABLE", False))
     import ipaddress
 
     action = action.lower()

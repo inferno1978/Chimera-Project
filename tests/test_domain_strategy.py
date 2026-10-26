@@ -313,3 +313,83 @@ class TestDualWriteSockopt(unittest.TestCase):
                  "settings": {"domainStrategy": "UseIPv6v4"}}
         self.assertFalse(set_freedom_domain_strategy(stats, "UseIPv4"))
         self.assertEqual(stats["settings"]["domainStrategy"], "UseIPv6v4")
+
+
+class TestResolveOutboundStrategy(unittest.TestCase):
+    """Резолвер стратегии для генераторов: выбор установки (state) имеет
+    приоритет; пустой выбор — адаптив по живому IPv6; v6-стратегии без
+    живого v6 деградируют до UseIPv4. Регрессия кейса 91.х: генератор
+    хардкодил UseIPv6v4 при state UseIPv4."""
+
+    def test_empty_prefers_v6_when_available(self):
+        from chimera.modules.domain_strategy import resolve_outbound_strategy
+        self.assertEqual(resolve_outbound_strategy("", True), "UseIPv6v4")
+
+    def test_empty_v4_when_no_v6(self):
+        from chimera.modules.domain_strategy import resolve_outbound_strategy
+        self.assertEqual(resolve_outbound_strategy("", False), "UseIPv4")
+
+    def test_state_use_ipv4_wins_even_with_v6(self):
+        """ГЛАВНАЯ регрессия 91.х: state UseIPv4 + живой IPv6 → UseIPv4."""
+        from chimera.modules.domain_strategy import resolve_outbound_strategy
+        self.assertEqual(
+            resolve_outbound_strategy("UseIPv4", True), "UseIPv4")
+
+    def test_v6_strategy_degrades_without_v6(self):
+        """«IPv6 отвалился после установки» → v6-first silently dangerous."""
+        from chimera.modules.domain_strategy import resolve_outbound_strategy
+        for pref in ("UseIPv6v4", "UseIPv4v6", "UseIPv6"):
+            self.assertEqual(
+                resolve_outbound_strategy(pref, False), "UseIPv4",
+                f"{pref} без IPv6 должен деградировать до UseIPv4")
+
+    def test_v6_strategy_kept_with_v6(self):
+        from chimera.modules.domain_strategy import resolve_outbound_strategy
+        self.assertEqual(
+            resolve_outbound_strategy("UseIPv6v4", True), "UseIPv6v4")
+        self.assertEqual(
+            resolve_outbound_strategy("UseIPv4v6", True), "UseIPv4v6")
+
+    def test_use_ip_passthrough(self):
+        from chimera.modules.domain_strategy import resolve_outbound_strategy
+        self.assertEqual(resolve_outbound_strategy("UseIP", True), "UseIP")
+        self.assertEqual(resolve_outbound_strategy("UseIP", False), "UseIP")
+
+    def test_use_ipv4_passthrough_no_v6(self):
+        from chimera.modules.domain_strategy import resolve_outbound_strategy
+        self.assertEqual(
+            resolve_outbound_strategy("UseIPv4", False), "UseIPv4")
+
+    def test_none_and_whitespace(self):
+        from chimera.modules.domain_strategy import resolve_outbound_strategy
+        self.assertEqual(resolve_outbound_strategy(None, True), "UseIPv6v4")
+        self.assertEqual(
+            resolve_outbound_strategy("  UseIPv4  ", True), "UseIPv4")
+        self.assertEqual(resolve_outbound_strategy("   ", False), "UseIPv4")
+
+
+class TestResolveExitNodeStrategy(unittest.TestCase):
+    """Стратегия exit-конфигов, генерируемых с entry: IPv6-статус exit
+    неизвестен → самоподстраивающийся v6-first/v4-fallback; явный UseIPv4
+    из state entry («v4-only инфраструктура») уважается."""
+
+    def test_empty_defaults_to_self_adapting(self):
+        from chimera.modules.domain_strategy import resolve_exit_node_strategy
+        self.assertEqual(resolve_exit_node_strategy(""), "UseIPv6v4")
+        self.assertEqual(resolve_exit_node_strategy(None), "UseIPv6v4")
+
+    def test_explicit_v4_respected(self):
+        from chimera.modules.domain_strategy import resolve_exit_node_strategy
+        self.assertEqual(
+            resolve_exit_node_strategy("UseIPv4"), "UseIPv4")
+
+    def test_v6_first_variants_collapse_to_self_adapting(self):
+        from chimera.modules.domain_strategy import resolve_exit_node_strategy
+        self.assertEqual(
+            resolve_exit_node_strategy("UseIPv6v4"), "UseIPv6v4")
+        self.assertEqual(
+            resolve_exit_node_strategy("UseIPv4v6"), "UseIPv6v4")
+
+    def test_use_ip_passthrough(self):
+        from chimera.modules.domain_strategy import resolve_exit_node_strategy
+        self.assertEqual(resolve_exit_node_strategy("UseIP"), "UseIP")
