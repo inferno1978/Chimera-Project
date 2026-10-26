@@ -1,7 +1,7 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
 # Сгенерирован из живого baseline 2026-10-27 (306 модулей, python 3.10.22 + 3.12.3,
 # раннер ci-de с прод-окружением + чистая среда). Зелёные ВЕЗДЕ = гейт.
-# 29 модулей вне гейта — env-класс: красные ТОЛЬКО на хосте раннера (это живая
+# 30 модулей вне гейта — env-класс: красные ТОЛЬКО на хосте раннера (это живая
 # chimera-нода: реальные /var/lib/xray-installer, сервисы; тесты писались под
 # чистый контейнер — см. шапку smoke_test_modules.py). В чистых средах они
 # зелёные; их смотрит nightly full-report (не блокирующий) и GitHub mirror CI.
@@ -194,7 +194,6 @@ tests.test_secure_bootstrap
 tests.test_singbox_client_links
 tests.test_singbox_config
 tests.test_singbox_install
-tests.test_singbox_multinode_config
 tests.test_singbox_nginx
 tests.test_singbox_packages
 tests.test_singbox_sni_autoconfig
