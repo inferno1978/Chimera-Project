@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Static (python 3.12: compileall + PEP 701 скан + full_test + гард)
+      - name: "Static (python 3.12: compileall + PEP 701 скан + full_test + гард)"
         run: bash scripts/ci_suite.sh python3 static
 
   gate:

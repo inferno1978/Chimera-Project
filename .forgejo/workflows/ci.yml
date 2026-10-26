@@ -29,7 +29,7 @@ jobs:
           echo "HEAD=$(git rev-parse HEAD) (событие: ${{ github.sha }})"
           [ "$(git rev-parse HEAD)" = "${{ github.sha }}" ] || echo "WARN: HEAD != event sha (dispatch на старом main?)"
 
-      - name: Static (python 3.12: compileall + PEP 701 скан + full_test + гард)
+      - name: "Static (python 3.12: compileall + PEP 701 скан + full_test + гард)"
         run: bash scripts/ci_suite.sh python3 static
 
       - name: Gate (python 3.10 — заявленный минимум INSTALL.md)
