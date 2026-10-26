@@ -22,6 +22,7 @@ chimera/modules/ipset_persist.py
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import textwrap
@@ -44,6 +45,11 @@ _IPSET_CONF     = Path('/etc/ipset.conf')
 _RESTORE_SVC    = Path('/etc/systemd/system/xray-ipset-restore.service')
 _RESTORE_LOG    = Path('/var/log/xray-ipset-restore.log')
 _IPSET_SETS     = ('xray_ru_block', 'xray_ru_block6')
+
+# Собственные строки в /etc/ipset.conf: «create xray_ru_block[6] …» /
+# «add xray_ru_block[6] …». Каждая строка секции ipset-save начинается
+# с имени сета → построчная вырезка не зависит от порядка секций.
+_OWN_SECTION_RE = re.compile(r'^(create|add)\s+xray_ru_block(6)?\s')
 
 
 # ── Внутренние хелперы ────────────────────────────────────────────────────────
@@ -73,9 +79,23 @@ def _is_enabled(unit: str) -> bool:
 # ── Публичный API ─────────────────────────────────────────────────────────────
 def ipset_save() -> bool:
     """
-    Сохраняет xray_ru_block и xray_ru_block6 в /etc/ipset.conf.
-    Вызывается автоматически после _ingress_enable / _ingress_apply_ipset.
-    Возвращает True при успехе.
+    Сохраняет xray_ru_block и xray_ru_block6 в /etc/ipset.conf,
+    дополняя (НЕ заменяя) чужие секции.
+
+    /etc/ipset.conf — файл ОБЩИЙ для нескольких модулей: сюда же
+    ipban пишет секции xray_manual_ban* (баны ASN/подсетей).
+    Прежняя версия писала файл ЦЕЛИКОМ (`write_text` только своих
+    сетов) — каждый её вызов (автоматический: ingress_geoip после
+    каждого обновления геосписка, geoblock, user_ip_whitelist)
+    вычищал чужие секции. Кейс «тихого испарения бана ГРЧЦ» (Москва,
+    окт.2026): секция manual-ban исчезла из персистенса → ближайший
+    ребут восстановил ПУСТЫЕ сеты → бан AS61280 тихо испарился при
+    живом state. Теперь перед записью из файла вырезаются ТОЛЬКО
+    собственные секции (create/add xray_ru_block*), чужие строки
+    сохраняются дословно.
+
+    Вызывается автоматически после _ingress_enable /
+    _ingress_apply_ipset. Возвращает True при успехе.
     """
     if not _ipset_available():
         _warn('ipset не установлен — сохранение пропущено')
@@ -97,7 +117,22 @@ def ipset_save() -> bool:
         _warn('ipset save вернул пустой результат')
         return False
 
-    content = '\n'.join(lines) + '\n'
+    # ── merge: чужие секции файла сохраняются дословно ──
+    foreign_lines: list[str] = []
+    if _IPSET_CONF.exists():
+        try:
+            foreign_lines = [
+                ln for ln in _IPSET_CONF.read_text(encoding='utf-8').splitlines()
+                if ln and not _OWN_SECTION_RE.match(ln)
+            ]
+        except Exception:
+            foreign_lines = []
+
+    content = ''
+    if foreign_lines:
+        content = '\n'.join(foreign_lines) + '\n'
+    content += '\n'.join(lines) + '\n'
+
     try:
         _IPSET_CONF.write_text(content, encoding='utf-8')
         _IPSET_CONF.chmod(0o600)

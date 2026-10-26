@@ -18,9 +18,15 @@ chimera/modules/ipban.py
     INPUT был недостижим при включённом UFW: пакеты на открытые порты
     принимались внутри ufw-user-input раньше — кейс AS25369)
   • ip6tables INPUT -I 1 -m set --match-set xray_manual_ban6 src -j DROP
-  • Восстановление после reboot: xray-ipban-restore.service (сеты + правила)
-  • Состояние бана → /var/lib/xray-installer/ipban.json
-  • Персистентность — через ipset_persist (сохранение в /etc/ipset.conf)
+  • Восстановление после reboot: xray-ipban-restore.service
+    (сеты + ЭЛЕМЕНТЫ из state-снапшота ipban.cidrs + правила +
+    самовосстановление секций xray_manual_ban* в /etc/ipset.conf)
+  • Состояние бана → /var/lib/xray-installer/ipban.json (источник истины)
+  • Снапшот CIDR  → /var/lib/xray-installer/ipban.cidrs (для boot-скрипта)
+  • Персистентность → /etc/ipset.conf (merge: перезаписываются ТОЛЬКО
+    собственные секции xray_manual_ban*; чужие — ingress_geoip/
+    geoblock/user_ip_whitelist пишут сюда же xray_ru_block* —
+    сохраняются дословно)
 
 Бан НЕ затрагивает:
   • Xray-конфиг (никаких изменений в config.json)
@@ -37,6 +43,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -70,11 +77,19 @@ DIM    = _C['DIM'];   WHITE  = _C['WHITE']; NC     = _C['NC']
 
 # ── Константы ─────────────────────────────────────────────────────────────────
 _STATE_FILE    = Path("/var/lib/xray-installer/ipban.json")
+_CIDR_SNAPSHOT = Path("/var/lib/xray-installer/ipban.cidrs")
 _IPSET_V4      = "xray_manual_ban"
 _IPSET_V6      = "xray_manual_ban6"
 _COMMENT       = "xray-manual-ban"
 _IPSET_CONF    = Path("/etc/ipset.conf")
 _BOOT_UNIT     = Path("/etc/systemd/system/xray-ipban-restore.service")
+_BOOT_SCRIPT   = Path("/usr/local/sbin/xray-ipban-boot.sh")
+
+# Собственные строки в /etc/ipset.conf: «create xray_manual_ban[6] …» /
+# «add xray_manual_ban[6] …». Формат ipset-save — каждая строка секции
+# начинается с имени сета → посимвольная вырезка безопасна и не зависит
+# от порядка секций в файле.
+_OWN_SECTION_RE = re.compile(r"^(create|add)\s+xray_manual_ban(6)?\s")
 
 _RIPE_PREFIXES = (
     "https://stat.ripe.net/data/announced-prefixes/data.json?resource={asn}"
@@ -113,6 +128,37 @@ def _state_save(state: dict) -> None:
     _STATE_FILE.write_text(
         json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _write_cidr_snapshot(state)
+
+
+def _write_cidr_snapshot(state: dict) -> None:
+    """Пишет плоский снапшот всех CIDR из state → ipban.cidrs.
+
+    Читается boot-скриптом (/usr/local/sbin/xray-ipban-boot.sh): bash не
+    умеет JSON, а снапшот — по CIDR на строку — позволяет восстановить
+    ЭЛЕМЕНТЫ сетов при загрузке без python. В отличие от /etc/ipset.conf
+    файл никем, кроме ipban, не пишется → не может быть «затёрт» чужим
+    ipset-сейвером (кейс тихого испарения бана ГРЧЦ, Москва, 2026-10).
+    Сбой записи — не фатален: снапшот вспомогательный.
+    """
+    cidrs = sorted({c for e in state.get("entries", []) for c in e.get("cidrs", [])})
+    try:
+        _CIDR_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+        _CIDR_SNAPSHOT.write_text(
+            "\n".join(cidrs) + ("\n" if cidrs else ""), encoding="utf-8"
+        )
+        _CIDR_SNAPSHOT.chmod(0o600)
+    except Exception:
+        pass
+
+
+def _state_cidrs() -> List[str]:
+    """Все CIDR из всех записей state (уникальные, отсортированные)."""
+    return sorted({
+        c
+        for e in _state_load().get("entries", [])
+        for c in e.get("cidrs", [])
+    })
 
 
 def _state_add_entry(
@@ -238,26 +284,38 @@ def _ensure_iptables_rules() -> None:
 
 def _ensure_boot_unit() -> None:
     """
-    systemd-юнит восстановления правил после reboot.
+    systemd-юнит + boot-скрипт восстановления после reboot.
 
-    Проблема: ipset_persist восстанавливает только САМИ сеты
-    (ipset restore -! -f /etc/ipset.conf), но НЕ iptables-правила,
-    которые на них ссылаются → после ребута бан ASN превращался в
-    пустой сет без правила. Юнит пересоздаёт сеты (-exist), затем
-    правила (-C || -I INPUT 1).
+    История проблемы (3 инкарнации юнита):
+      1. ipset_persist восстанавливал только САМИ сеты (ipset restore
+         из /etc/ipset.conf), но НЕ iptables-правила → после ребута бан
+         превращался в сет без правила → юнит получил правила
+         (ipt -C || -I INPUT 1).
+      2. НО /etc/ipset.conf — файл ОБЩИЙ: ipset_persist.ipset_save()
+         (вызывается автоматически из ingress_geoip/geoblock/
+         user_ip_whitelist) перезаписывал его ЦЕЛИКОМ, вычищая секции
+         xray_manual_ban* → после ближайшего ребута restore наполнял
+         сеты ПУСТЫМИ, и бан ASN «тихо испарялся» при живом state
+         (кейс ГРЧЦ AS61280 на Москве, окт.2026: live=0 записей при
+         13 CIDR в state).
+      3. Теперь юнит запускает самодостаточный boot-скрипт, который
+         восстанавливает ЭЛЕМЕНТЫ из state-снапшота ipban.cidrs
+         (принадлежит только ipban, затереть нечем) и ЗАТЕМ
+         самовосстанавливает секции xray_manual_ban* в /etc/ipset.conf
+         из уже наполненного живого сета → тройная конвергенция
+         live == /etc/ipset.conf == state.
     """
     try:
+        _ensure_boot_script()
         unit = f"""# AUTOGENERATED by chimera ipban — не редактировать вручную
 [Unit]
-Description=xray-ipban: правила iptables для manual-ban (xray_manual_ban*)
-After=xray-ipset-restore.service
+Description=xray-ipban: manual-ban restore (sets + entries from state snapshot + iptables INPUT 1 + /etc/ipset.conf self-heal)
+After=telemt-iptables.service xray-ipset-restore.service
 Before=xray.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'ipset create {_IPSET_V4} hash:net family inet maxelem 65536 -exist; ipset create {_IPSET_V6} hash:net family inet6 maxelem 65536 -exist'
-ExecStart=/bin/bash -c 'iptables -C INPUT -m set --match-set {_IPSET_V4} src -j DROP -m comment --comment {_COMMENT} 2>/dev/null || iptables -I INPUT 1 -m set --match-set {_IPSET_V4} src -j DROP -m comment --comment {_COMMENT}'
-ExecStart=/bin/bash -c 'ip6tables -C INPUT -m set --match-set {_IPSET_V6} src -j DROP -m comment --comment {_COMMENT} 2>/dev/null || ip6tables -I INPUT 1 -m set --match-set {_IPSET_V6} src -j DROP -m comment --comment {_COMMENT}'
+ExecStart={_BOOT_SCRIPT}
 RemainAfterExit=yes
 
 [Install]
@@ -270,6 +328,66 @@ WantedBy=multi-user.target
         _run(["systemctl", "enable", "xray-ipban-restore.service"], quiet=True)
     except Exception as exc:
         _warn(f"Не удалось создать boot-юнит: {exc}")
+
+
+def _ensure_boot_script() -> None:
+    """Генерирует /usr/local/sbin/xray-ipban-boot.sh (самодостаточный
+    bash-скрипт: сеты + элементы из ipban.cidrs + правила + самолечение
+    /etc/ipset.conf). Вызывается из _ensure_boot_unit; отдельная функция
+    — для прямых тестов содержимого."""
+    script = f"""#!/bin/bash
+# AUTOGENERATED by chimera ipban — не редактировать вручную
+# Восстановление manual-ban при загрузке: сеты + ЭЛЕМЕНТЫ из
+# state-снапшота + правила iptables + самолечение /etc/ipset.conf.
+CIDRS="/var/lib/xray-installer/ipban.cidrs"
+CONF="/etc/ipset.conf"
+
+ipset create {_IPSET_V4} hash:net family inet maxelem 65536 -exist 2>/dev/null || true
+ipset create {_IPSET_V6} hash:net family inet6 maxelem 65536 -exist 2>/dev/null || true
+
+# Элементы — из state-снапшота (НЕ из /etc/ipset.conf: тот общий файл,
+# его могла перезаписать чужая ipset-сейверилка, вырезав наши секции).
+# -exist → идемпотентно: совпавшие элементы — no-op, не существует — добавить.
+if [ -s "$CIDRS" ]; then
+  while read -r cidr; do
+    [ -n "$cidr" ] || continue
+    case "$cidr" in
+      *:*) ipset add {_IPSET_V6} "$cidr" -exist 2>/dev/null || true ;;
+      *)   ipset add {_IPSET_V4} "$cidr" -exist 2>/dev/null || true ;;
+    esac
+  done < "$CIDRS"
+fi
+
+# Правила — ПЕРВОЙ строкой INPUT (до ufw-цепочек, first-match-wins).
+iptables  -C INPUT -m set --match-set {_IPSET_V4}  src -j DROP -m comment --comment {_COMMENT} 2>/dev/null || iptables  -I INPUT 1 -m set --match-set {_IPSET_V4}  src -j DROP -m comment --comment {_COMMENT}
+ip6tables -C INPUT -m set --match-set {_IPSET_V6} src -j DROP -m comment --comment {_COMMENT} 2>/dev/null || ip6tables -I INPUT 1 -m set --match-set {_IPSET_V6} src -j DROP -m comment --comment {_COMMENT}
+
+# Самолечение /etc/ipset.conf: вырезать наши секции, дописать свежий
+# дамп наполненного сета. Живой сет к этому моменту уже восстановлен
+# из state → файл сходится с ним (boot-order: telemt-iptables /
+# xray-ipset-restore уже отработали ДО нас).
+TMP="$(mktemp /etc/ipset.conf.XXXXXX 2>/dev/null)" || exit 0
+if [ -n "$TMP" ]; then
+  {{
+    [ -f "$CONF" ] && grep -vE '^(create|add)[[:space:]]+{_IPSET_V4}6?[[:space:]]' "$CONF"
+    ipset save {_IPSET_V4} 2>/dev/null
+    ipset save {_IPSET_V6} 2>/dev/null
+  }} > "$TMP" 2>/dev/null
+  if [ -s "$TMP" ]; then
+    chmod 600 "$TMP"
+    mv -f "$TMP" "$CONF"
+  else
+    rm -f "$TMP"
+  fi
+fi
+exit 0
+"""
+    try:
+        _BOOT_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+        _BOOT_SCRIPT.write_text(script, encoding="utf-8")
+        _BOOT_SCRIPT.chmod(0o755)
+    except Exception as exc:
+        _warn(f"Не удалось создать boot-скрипт: {exc}")
 
 
 def _remove_iptables_rules() -> None:
@@ -338,43 +456,67 @@ def _ipset_count() -> Tuple[int, int]:
     return _cnt2(_IPSET_V4), _cnt2(_IPSET_V6)
 
 
+def _live_members(name: str) -> List[str]:
+    """Элементы живого сета (после строки 'Members:'), иначе []."""
+    if not _set_exists(name):
+        return []
+    r = subprocess.run(["ipset", "list", name], capture_output=True, text=True)
+    out = r.stdout or ""
+    if "Members:" not in out:
+        return []
+    return [ln.strip() for ln in out.split("Members:", 1)[1].splitlines() if ln.strip()]
+
+
 # ── Сохранение ipset-состояния (персистентность) ──────────────────────────────
 def _ipban_persist_save() -> None:
     """
-    Сохраняет xray_manual_ban* в /etc/ipset.conf, дополняя (не заменяя)
-    существующие записи из ingress_geoip / других модулей.
+    Сохраняет секции xray_manual_ban* в /etc/ipset.conf, дополняя
+    (не заменяя) чужие секции (xray_ru_block* от ingress_geoip и т.п.).
+
+    КЛЮЧЕВОЙ инвариант (кейс «тихого испарения бана ГРЧЦ», Москва,
+    окт.2026): источник истины — STATE (ipban.json), а не живой ipset.
+    Прежняя версия дампила ТОЛЬКО живой сет: если сет был пуст
+    (персистенс затёрт чужим сейвером + ребут → restore пустоты),
+    запись персистенса цементировала потерю при живом state.
+    Теперь персист строится из ОБЪЕДИНЕНИЯ state ∪ live:
+      • state гарантирует невыпадение известных банов;
+      • live подхватывает ручные `ipset add` админа, не отражённые
+        в state.
     """
     if not _ipset_available():
         return
 
-    # Читаем существующий файл (может содержать xray_ru_block* и т.д.)
+    # 1) CIDR к персисту: state ∪ live
+    v4: set = set()
+    v6: set = set()
+    for c in _state_cidrs() + _live_members(_IPSET_V4) + _live_members(_IPSET_V6):
+        (v6 if ":" in c else v4).add(c)
+
+    # 2) Чужие строки файла — сохранить дословно (вырезаем только свои)
     existing_lines: list[str] = []
     if _IPSET_CONF.exists():
         try:
             raw = _IPSET_CONF.read_text(encoding="utf-8")
-            # Удаляем старые секции xray_manual_ban*
-            skip = False
-            for ln in raw.splitlines():
-                if ln.startswith("create xray_manual_ban"):
-                    skip = True
-                if skip and (ln.startswith("create ") and "xray_manual_ban" not in ln):
-                    skip = False
-                if not skip:
-                    existing_lines.append(ln)
+            existing_lines = [
+                ln for ln in raw.splitlines() if not _OWN_SECTION_RE.match(ln)
+            ]
         except Exception:
             pass
 
-    # Добавляем свежий дамп xray_manual_ban*
-    new_parts: list[str] = []
-    for name in (_IPSET_V4, _IPSET_V6):
-        if _set_exists(name):
-            r = subprocess.run(["ipset", "save", name], capture_output=True, text=True)
-            if r.returncode == 0 and r.stdout.strip():
-                new_parts.append(r.stdout.strip())
+    # 3) Свои секции — сгенерировать (create + add-строки)
+    sections: list[str] = []
+    for name, family, members in (
+        (_IPSET_V4, "inet",   sorted(v4)),
+        (_IPSET_V6, "inet6",  sorted(v6)),
+    ):
+        if not members and not _set_exists(name):
+            continue  # ни записей, ни сета — секцию не пишем
+        sections.append(f"create {name} hash:net family {family} maxelem 65536")
+        sections.extend(f"add {name} {c}" for c in members)
 
     content = "\n".join(line for line in existing_lines if line) + "\n"
-    if new_parts:
-        content += "\n".join(new_parts) + "\n"
+    if sections:
+        content += "\n".join(sections) + "\n"
 
     try:
         _IPSET_CONF.write_text(content, encoding="utf-8")
@@ -595,23 +737,50 @@ def ipban_flush() -> None:
 
 def ipban_restore() -> None:
     """
-    Восстанавливает баны из state (например, после reboot если
-    xray-ipset-restore.service не установлен).
+    Восстанавливает баны из state (reboot / потеря живого сета /
+    затёртый персистенс). Полная конвергенция: state → live ipset →
+    правила → boot-юнит → /etc/ipset.conf.
     """
     state = _state_load()
     entries = state.get("entries", [])
     if not entries:
         _info("Нет записей для восстановления")
+        _ensure_boot_unit()
         return
+    total_cidrs = sum(len(e.get("cidrs", [])) for e in entries)
+    if ipban_sync():
+        _ok(f"Восстановлено {total_cidrs} CIDR из {len(entries)} записей — "
+            f"live + правила + персистенс синхронизированы")
+
+
+def ipban_sync(quiet: bool = False) -> bool:
+    """
+    Идемпотентная полная синхронизация manual-ban из state:
+      1. сеты xray_manual_ban / xray_manual_ban6 (create -exist);
+      2. правила iptables/ip6tables INPUT 1;
+      3. boot-юнит + boot-скрипт (регенерируются — юниты старой
+         версии не восстанавливали ЭЛЕМЕНТЫ);
+      4. все CIDR из state → живые сеты (ipset add -exist);
+      5. персистенс /etc/ipset.conf (секции ← state ∪ live).
+
+    Источник истины — state (ipban.json). Вызывается из ipban_restore
+    (меню TUI), пригодна для cron/эпилога установки. Возвращает True
+    при успехе.
+    """
     if not _ensure_sets():
-        return
+        return False
     _ensure_iptables_rules()
     _ensure_boot_unit()
-    total = 0
-    for e in entries:
-        v4, v6 = _ipset_add_cidrs(e.get("cidrs", []))
-        total += v4 + v6
-    _ok(f"Восстановлено {total} CIDR из {len(entries)} записей")
+    cidrs = _state_cidrs()
+    added_v4, added_v6 = _ipset_add_cidrs(cidrs)
+    _ipban_persist_save()
+    if not quiet:
+        if cidrs:
+            _ok(f"Синхронизировано {len(cidrs)} CIDR из state "
+                f"({added_v4} v4 + {added_v6} v6) → live + персистенс")
+        else:
+            _info("State пуст — синхронизация тривиальна")
+    return True
 
 
 # ── Интерактивное меню ────────────────────────────────────────────────────────
@@ -660,7 +829,7 @@ def do_manage_ipban() -> None:
         _box_item("2", f"➖  Снять бан{NC}")
         _box_item("3", f"📋  Список активных банов")
         _box_sep()
-        _box_item("4", f"🔄  Восстановить из state  {DIM}(после reboot){NC}")
+        _box_item("4", f"🔄  Восстановить/синхронизировать из state  {DIM}(live ← state + персистенс){NC}")
         _box_item("5", f"💾  Сохранить ipset → {_IPSET_CONF}")
         _box_item("X", f"{RED}🗑️   Снять ВСЕ баны{NC}  {DIM}(flush + удаление сетов){NC}")
         _box_back()

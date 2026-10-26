@@ -307,6 +307,10 @@ class TestRulesOrderingAndPersistence(unittest.TestCase):
                     self._tmp / "xray-ipban-restore.service")
         _p2.start()
         self.addCleanup(_p2.stop)
+        _p3 = patch("chimera.modules.ipban._BOOT_SCRIPT",
+                    self._tmp / "xray-ipban-boot.sh")
+        _p3.start()
+        self.addCleanup(_p3.stop)
 
     def tearDown(self):
         import shutil
@@ -352,16 +356,27 @@ class TestRulesOrderingAndPersistence(unittest.TestCase):
         self.assertTrue(without_comment, "миграция не удаляет вариант без comment")
 
     def test_boot_unit_created_and_persists_rules(self):
-        """После reboot правила восстанавливаются юнитом (сеты + INPUT 1)."""
-        from chimera.modules.ipban import _ensure_boot_unit, _BOOT_UNIT
+        """После reboot юнит запускает boot-скрипт: сеты + элементы +
+        правила INPUT 1 + самолечение персистенса (3-я инкарнация юнита —
+        после кейса тихого испарения бана ГРЧЦ, окт.2026)."""
+        from chimera.modules.ipban import _ensure_boot_unit, _BOOT_UNIT, _BOOT_SCRIPT
         _ensure_boot_unit()
         self.assertTrue(_BOOT_UNIT.exists(), "юнит не записан")
-        text = _BOOT_UNIT.read_text(encoding="utf-8")
-        self.assertIn("ipset create xray_manual_ban", text)
-        self.assertIn("-exist", text)
-        self.assertIn("-I INPUT 1", text, "юнит восстанавливает правило НЕ первой строкой")
-        self.assertIn("xray_manual_ban6", text)
-        self.assertIn("After=xray-ipset-restore.service", text)
+        self.assertTrue(_BOOT_SCRIPT.exists(), "boot-скрипт не записан")
+        unit = _BOOT_UNIT.read_text(encoding="utf-8")
+        script = _BOOT_SCRIPT.read_text(encoding="utf-8")
+        # юнит исполняет самодостаточный скрипт
+        self.assertIn(f"ExecStart={_BOOT_SCRIPT}", unit)
+        self.assertIn("After=telemt-iptables.service xray-ipset-restore.service", unit)
+        self.assertIn("Before=xray.service", unit)
+        # скрипт: сеты + элементы из state-снапшота + правила + самолечение
+        self.assertIn("ipset create xray_manual_ban", script)
+        self.assertIn("-exist", script)
+        self.assertIn("/var/lib/xray-installer/ipban.cidrs", script)
+        self.assertIn("-I INPUT 1", script,
+                      "скрипт восстанавливает правило НЕ первой строкой")
+        self.assertIn("xray_manual_ban6", script)
+        self.assertIn("grep -vE", script, "нет самолечения /etc/ipset.conf")
         # enable вызван
         enabled = [c for c in self._runner.calls
                    if c[:2] == ["systemctl", "enable"]]
@@ -380,6 +395,279 @@ class TestRulesOrderingAndPersistence(unittest.TestCase):
         self.assertTrue(top_insert, "ipban_add не вставил правило в вершину INPUT")
         unit_calls = [c for c in self._runner.calls if c[:2] == ["systemctl", "enable"]]
         self.assertTrue(unit_calls, "ipban_add не установил boot-юнит")
+
+
+# ============================================================================
+#  Тихое испарение бана (кейс ГРЧЦ AS61280, Москва, окт.2026):
+#  /etc/ipset.conf затёрт сторонним сейвером + ребут → live пуст
+#  при живом state. Фикс: state — источник истины, персист ← state ∪ live,
+#  boot-скрипт восстанавливает элементы из снапшота ipban.cidrs.
+# ============================================================================
+
+
+class _IpsetSim:
+    """Симулятор ipset/iptables-подсистемы (сеты + элементы в памяти)."""
+
+    def __init__(self, sets=None):
+        self.sets: dict = dict(sets or {})          # name -> set(cidr)
+        self.calls: list = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(list(cmd))
+        r = MagicMock()
+        r.stderr = ""
+        r.stdout = ""
+        r.returncode = 0
+        if cmd[:2] == ["ipset", "create"]:
+            self.sets.setdefault(cmd[2], set())
+        elif cmd[:2] == ["ipset", "add"]:
+            name, cidr = cmd[2], cmd[3]
+            if name not in self.sets:
+                r.returncode = 1
+            else:
+                self.sets[name].add(cidr)
+        elif cmd[:2] == ["ipset", "del"]:
+            self.sets.get(cmd[2], set()).discard(cmd[3])
+        elif cmd[:2] == ["ipset", "list"]:
+            if "-n" in cmd:                          # ["ipset","list","-n",name]
+                name = cmd[3] if len(cmd) > 3 else cmd[2]
+                r.returncode = 0 if name in self.sets else 1
+            else:                                    # ["ipset","list",name]
+                name = cmd[2]
+                if name not in self.sets:
+                    r.returncode = 1
+                else:
+                    members = "\n".join(sorted(self.sets[name]))
+                    r.stdout = f"Name: {name}\nType: hash:net\nMembers:\n{members}\n"
+        elif cmd[0] == "which":
+            r.returncode = 0
+        elif cmd[0] in ("iptables", "ip6tables"):
+            r.returncode = 1 if ("-C" in cmd or "-D" in cmd) else 0
+        return r
+
+
+_GRCHC_CIDRS = [
+    "45.132.21.0/24", "45.157.4.0/24", "62.76.12.0/24", "85.142.6.0/24",
+    "87.245.160.0/24", "91.108.4.0/24", "93.158.128.0/24", "95.163.32.0/24",
+    "185.76.8.0/24", "185.191.4.0/24", "194.32.72.0/24", "2a00:7360::/32",
+    "2a0b:3f80::/32",
+]
+
+_FOREIGN_CONF = (
+    "create xray_ru_block hash:net family inet maxelem 65536\n"
+    "add xray_ru_block 1.2.3.0/24\n"
+    "add xray_ru_block 5.6.7.0/24\n"
+    "create xray_ru_block6 hash:net family inet6 maxelem 65536\n"
+    "add xray_ru_block6 2a01::/32\n"
+)
+
+
+class _EvaporationEnv(unittest.TestCase):
+    """Общее окружение: tmp-пути + симулятор ipset + предзаполненный state."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self._sim = _IpsetSim()
+        self._state = self._tmp / "ipban.json"
+        self._snap = self._tmp / "ipban.cidrs"
+        self._conf = self._tmp / "ipset.conf"
+        self._unit = self._tmp / "xray-ipban-restore.service"
+        self._script = self._tmp / "xray-ipban-boot.sh"
+        # state с 13 CIDR бана ГРЧЦ (как на Москве в окт.2026)
+        self._state.write_text(json.dumps({
+            "entries": [{
+                "display": "AS61280",
+                "kind": "asn",
+                "cidrs": _GRCHC_CIDRS,
+                "comment": "ГРЧЦ Роскомнадзор DPI-сканер",
+                "added_at": "2026-09-01T00:00:00+00:00",
+            }]
+        }, ensure_ascii=False), encoding="utf-8")
+        # персистенс «затёрт сторонним сейвером»: только чужие секции
+        self._conf.write_text(_FOREIGN_CONF, encoding="utf-8")
+        # живые сеты существуют, но ПУСТЫ (reboot после restore пустоты)
+        self._sim.sets = {"xray_manual_ban": set(), "xray_manual_ban6": set()}
+        for p in (
+            patch("chimera.modules.ipban.subprocess.run", self._sim),
+            patch("chimera.modules.ipban._STATE_FILE", self._state),
+            patch("chimera.modules.ipban._CIDR_SNAPSHOT", self._snap),
+            patch("chimera.modules.ipban._IPSET_CONF", self._conf),
+            patch("chimera.modules.ipban._BOOT_UNIT", self._unit),
+            patch("chimera.modules.ipban._BOOT_SCRIPT", self._script),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+
+class TestCidrSnapshot(_EvaporationEnv):
+    """_state_save → снапшот ipban.cidrs (для boot-скрипта)."""
+
+    def test_snapshot_written_on_state_save(self):
+        from chimera.modules.ipban import _state_save
+        _state_save({"entries": [{"display": "x", "cidrs": ["1.2.3.0/24", "::/0"]}]} )
+        self.assertTrue(self._snap.exists())
+        lines = self._snap.read_text(encoding="utf-8").splitlines()
+        self.assertIn("1.2.3.0/24", lines)
+        self.assertIn("::/0", lines)
+
+    def test_snapshot_empty_for_empty_state(self):
+        from chimera.modules.ipban import _state_save
+        _state_save({"entries": []})
+        content = self._snap.read_text(encoding="utf-8") if self._snap.exists() else ""
+        self.assertEqual(content.strip(), "")
+
+    def test_snapshot_dedups_across_entries(self):
+        from chimera.modules.ipban import _state_save
+        _state_save({"entries": [
+            {"display": "a", "cidrs": ["1.2.3.0/24"]},
+            {"display": "b", "cidrs": ["1.2.3.0/24", "9.9.9.0/24"]},
+        ]})
+        lines = self._snap.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(sorted(lines), ["1.2.3.0/24", "9.9.9.0/24"])
+
+
+class TestPersistFromStateUnion(_EvaporationEnv):
+    """Персистенс строится из state ∪ live — регрессия тихого испарения."""
+
+    def test_persist_survives_empty_live_set(self):
+        """live ПУСТ при 13 CIDR в state → персист обязан содержать все 13."""
+        from chimera.modules.ipban import _ipban_persist_save
+        _ipban_persist_save()
+        text = self._conf.read_text(encoding="utf-8")
+        for cidr in _GRCHC_CIDRS:
+            name = "xray_manual_ban6" if ":" in cidr else "xray_manual_ban"
+            self.assertIn(f"add {name} {cidr}", text,
+                          f"CIDR {cidr} выпал из персистенса при пустом live")
+
+    def test_persist_preserves_foreign_sections(self):
+        """Чужие секции (xray_ru_block*) сохраняются дословно."""
+        from chimera.modules.ipban import _ipban_persist_save
+        _ipban_persist_save()
+        text = self._conf.read_text(encoding="utf-8")
+        self.assertIn("add xray_ru_block 1.2.3.0/24", text)
+        self.assertIn("add xray_ru_block6 2a01::/32", text)
+
+    def test_persist_union_with_live_manual_adds(self):
+        """Ручной `ipset add` админа (не в state) не теряется при персисте."""
+        from chimera.modules.ipban import _ipban_persist_save
+        self._sim.sets["xray_manual_ban"].add("100.200.0.0/16")
+        _ipban_persist_save()
+        text = self._conf.read_text(encoding="utf-8")
+        self.assertIn("add xray_manual_ban 100.200.0.0/16", text)
+        # state-записи при этом тоже на месте
+        self.assertIn(f"add xray_manual_ban {_GRCHC_CIDRS[0]}", text)
+
+    def test_persist_replaces_own_stale_section_no_duplicates(self):
+        """Повторный персист не дублирует create-строки собственных секций."""
+        from chimera.modules.ipban import _ipban_persist_save
+        _ipban_persist_save()
+        _ipban_persist_save()
+        text = self._conf.read_text(encoding="utf-8")
+        self.assertEqual(text.count("create xray_manual_ban "), 1)
+        self.assertEqual(text.count("create xray_manual_ban6 "), 1)
+        self.assertEqual(text.count("create xray_ru_block "), 1)
+
+    def test_persist_skips_section_when_no_entries_and_no_set(self):
+        """Сет не существует и записей нет → секция не пишется вовсе."""
+        from chimera.modules.ipban import _ipban_persist_save
+        self._sim.sets = {}                      # сеты уничтожены
+        self._state.write_text('{"entries": []}', encoding="utf-8")
+        _ipban_persist_save()
+        text = self._conf.read_text(encoding="utf-8")
+        self.assertNotIn("create xray_manual_ban ", text)
+        self.assertIn("add xray_ru_block 1.2.3.0/24", text)
+
+
+class TestIpbanSync(_EvaporationEnv):
+    """ipban_sync — идемпотентная конвергенция state → live → персист."""
+
+    def test_sync_refills_live_from_state(self):
+        from chimera.modules.ipban import ipban_sync
+        self.assertTrue(ipban_sync(quiet=True))
+        v4 = {c for c in _GRCHC_CIDRS if ":" not in c}
+        v6 = {c for c in _GRCHC_CIDRS if ":" in c}
+        self.assertEqual(self._sim.sets["xray_manual_ban"], v4)
+        self.assertEqual(self._sim.sets["xray_manual_ban6"], v6)
+
+    def test_sync_rewrites_persist_and_keeps_foreign(self):
+        from chimera.modules.ipban import ipban_sync
+        ipban_sync(quiet=True)
+        text = self._conf.read_text(encoding="utf-8")
+        for cidr in _GRCHC_CIDRS:
+            name = "xray_manual_ban6" if ":" in cidr else "xray_manual_ban"
+            self.assertIn(f"add {name} {cidr}", text)
+        self.assertIn("add xray_ru_block 1.2.3.0/24", text)
+
+    def test_sync_idempotent(self):
+        from chimera.modules.ipban import ipban_sync
+        ipban_sync(quiet=True)
+        before = sorted(self._sim.sets["xray_manual_ban"])
+        ipban_sync(quiet=True)
+        after = sorted(self._sim.sets["xray_manual_ban"])
+        self.assertEqual(before, after)
+
+    def test_sync_installs_rules_and_boot_unit(self):
+        from chimera.modules.ipban import ipban_sync
+        ipban_sync(quiet=True)
+        inserted = [c for c in self._sim.calls if c[:4] == ["iptables", "-I", "INPUT", "1"]]
+        self.assertTrue(inserted, "sync не вставил правило INPUT 1")
+        self.assertTrue(self._unit.exists(), "sync не записал boot-юнит")
+        self.assertTrue(self._script.exists(), "sync не записал boot-скрипт")
+
+    def test_restore_calls_persist(self):
+        """ipban_restore чинит не только live, но и затёртый персистенс."""
+        from chimera.modules.ipban import ipban_restore
+        ipban_restore()
+        text = self._conf.read_text(encoding="utf-8")
+        for cidr in _GRCHC_CIDRS:
+            name = "xray_manual_ban6" if ":" in cidr else "xray_manual_ban"
+            self.assertIn(f"add {name} {cidr}", text)
+
+
+class TestBootScriptSelfHeal(_EvaporationEnv):
+    """Boot-юнит/скрипт восстанавливают ЭЛЕМЕНТЫ из state-снапшота."""
+
+    def test_unit_executes_boot_script(self):
+        from chimera.modules.ipban import _ensure_boot_unit, _BOOT_SCRIPT
+        _ensure_boot_unit()
+        text = self._unit.read_text(encoding="utf-8")
+        self.assertIn(f"ExecStart={_BOOT_SCRIPT}", text)
+        self.assertIn("After=telemt-iptables.service xray-ipset-restore.service", text)
+        self.assertIn("Before=xray.service", text)
+
+    def test_script_refills_entries_from_snapshot(self):
+        from chimera.modules.ipban import _ensure_boot_unit, _BOOT_SCRIPT
+        _ensure_boot_unit()
+        text = self._script.read_text(encoding="utf-8")
+        # refill из снапшота (НЕ из /etc/ipset.conf)
+        self.assertIn("/var/lib/xray-installer/ipban.cidrs", text)
+        self.assertIn("while read -r cidr", text)
+        self.assertIn("-exist", text)
+        # раздача v4/v6 по наличию двоеточия
+        self.assertIn("ipset add xray_manual_ban6", text)
+        self.assertIn("ipset add xray_manual_ban ", text)
+        # правила — первой строкой INPUT
+        self.assertIn("-I INPUT 1", text)
+
+    def test_script_selfheals_ipset_conf(self):
+        from chimera.modules.ipban import _ensure_boot_unit
+        _ensure_boot_unit()
+        text = self._script.read_text(encoding="utf-8")
+        self.assertIn("grep -vE", text)
+        self.assertIn("ipset save xray_manual_ban", text)
+        self.assertIn("mktemp", text)
+        self.assertIn("mv -f", text)
+
+    def test_script_is_executable(self):
+        from chimera.modules.ipban import _ensure_boot_unit, _BOOT_SCRIPT
+        _ensure_boot_unit()
+        import stat as _stat
+        mode = _BOOT_SCRIPT.stat().st_mode
+        self.assertTrue(mode & _stat.S_IXUSR, "boot-скрипт не исполняемый")
 
 
 if __name__ == "__main__":
