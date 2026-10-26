@@ -30,12 +30,12 @@ jobs:
           [ "$(git rev-parse HEAD)" = "${{ github.sha }}" ] || echo "WARN: HEAD != event sha (dispatch на старом main?)"
 
       - name: "Static (python 3.12: compileall + PEP 701 скан + full_test + гард)"
-        run: bash scripts/ci_suite.sh python3 static
+        run: bash scripts/ci_suite.sh static python3
 
       - name: Gate (python 3.10 — заявленный минимум INSTALL.md)
-        if: ${{ github.event_name != 'schedule' && inputs.mode != 'full' }}
-        run: bash scripts/ci_suite.sh python3.10 gate
+        if: ${{ github.event_name != 'schedule' && github.event.inputs.mode != 'full' }}
+        run: bash scripts/ci_suite.sh gate python3.10
 
       - name: Full report (python 3.10, не блокирующий)
-        if: ${{ github.event_name == 'schedule' || inputs.mode == 'full' }}
-        run: bash scripts/ci_suite.sh python3.10 full
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.mode == 'full' }}
+        run: bash scripts/ci_suite.sh full python3.10

@@ -30,7 +30,7 @@ jobs:
             -rawin -in bootstrap.sh -sigfile bootstrap.sh.sig
 
       - name: Gate перед релизом (python 3.10)
-        run: bash scripts/ci_suite.sh python3.10 gate
+        run: bash scripts/ci_suite.sh gate python3.10
 
       - name: Создание Release + артефакты
         env:
