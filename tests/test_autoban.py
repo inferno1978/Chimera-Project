@@ -29,7 +29,8 @@ def _setup_core():
         exec(compile(src, str(core_path), "exec"), g)
     import types; m = types.ModuleType("chimera._core"); m.__dict__.update(g)
     sys.modules["chimera._core"] = m
-
+    import chimera as _pkg310  # 3.10: mock._dot_lookup идёт через атрибут пакета
+    _pkg310._core = m
 class TestAutobanLoadSave(unittest.TestCase):
     def setUp(self):
         _setup_core()

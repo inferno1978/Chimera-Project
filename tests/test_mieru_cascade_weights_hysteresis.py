@@ -13,7 +13,16 @@ Exit-ов).
 import time
 import types
 
-import pytest
+try:
+    import pytest  # noqa: F401
+except ImportError:
+    # stdlib-only окружения (CI): файлы pytest-native (approx/фикстуры),
+    # unittest их в принципе не исполняет — отдаём пустой сьют вместо
+    # ImportError-шума в отчётах
+    import unittest
+
+    def load_tests(loader, tests, pattern):
+        return unittest.TestSuite()
 
 from chimera.modules import mieru_cascade as mc
 

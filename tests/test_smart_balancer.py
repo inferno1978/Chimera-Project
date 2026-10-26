@@ -47,8 +47,8 @@ def _setup_core_in_sysmodules():
     fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
     sys.modules["chimera._core"] = fake_core
-
-
+    import chimera as _pkg310  # 3.10: mock._dot_lookup идёт через атрибут пакета
+    _pkg310._core = fake_core
 class TestComputeScore(unittest.TestCase):
     """_compute_score — pure math."""
 

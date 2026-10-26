@@ -44,8 +44,8 @@ def _setup_core_in_sysmodules():
     fake_core = types.ModuleType("chimera._core")
     fake_core.__dict__.update(g)
     sys.modules["chimera._core"] = fake_core
-
-
+    import chimera as _pkg310  # 3.10: mock._dot_lookup идёт через атрибут пакета
+    _pkg310._core = fake_core
 class TestSupportsI2I5(unittest.TestCase):
     """awgs_supports_i2_i5 — определение поддержки I2-I5."""
 

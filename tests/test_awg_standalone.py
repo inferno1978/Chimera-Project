@@ -722,9 +722,13 @@ class TestAwgsKeygenFallbackChain(unittest.TestCase):
     def test_fallback_to_pure_python_when_binaries_broken(self):
         """wg нет, awg-заглушка падает на genkey → pure-Python ключи."""
         import base64
-        from cryptography.hazmat.primitives.asymmetric.x25519 import (
-            X25519PrivateKey,
-        )
+        try:
+            from cryptography.hazmat.primitives.asymmetric.x25519 import (
+                X25519PrivateKey,
+            )
+        except ImportError:
+            self.skipTest("cryptography недоступна (stdlib-CI): pure-Python "
+                          "fallback валидируется только при установленной зависимости")
         from chimera.modules import awg_standalone
 
         core = self._make_core(genkey_rc=1)

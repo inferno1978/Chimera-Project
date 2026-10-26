@@ -37,8 +37,8 @@ def _setup_core():
     m = types.ModuleType("chimera._core")
     m.__dict__.update(g)
     sys.modules["chimera._core"] = m
-
-
+    import chimera as _pkg310  # 3.10: mock._dot_lookup идёт через атрибут пакета
+    _pkg310._core = m
 class TestAwgHwTuning(unittest.TestCase):
     def setUp(self): _setup_core()
     def test_detect_ram_mb(self):
