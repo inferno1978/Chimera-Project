@@ -246,6 +246,7 @@ def _ru_subnets_restore_if_needed(silent: bool = False) -> bool:
 
 
 def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
+    from chimera.modules.domain_strategy import make_freedom_outbound
     core = _core_module()
     AWG_EXIT_ENABLED         = core.AWG_EXIT_ENABLED
     CONFIG_DIR               = core.CONFIG_DIR
@@ -288,11 +289,10 @@ def _ru_subnets_apply_to_xray(cidrs: list) -> bool:
             # В классическом режиме — "direct" (как и раньше).
             if AWG_EXIT_ENABLED:
                 if not any(ob.get("tag") == "direct-local" for ob in outbounds):
-                    outbounds.append({
-                        "protocol": "freedom",
-                        "tag":      "direct-local",
-                        "settings": {"domainStrategy": "UseIPv4"},
-                    })
+                    # Дуал-запись domainStrategy (settings + sockopt) — см.
+                    # modules/domain_strategy.py.
+                    outbounds.append(
+                        make_freedom_outbound("direct-local", "UseIPv4"))
                     info("AWG: добавлен outbound direct-local для RIPE-маршрутизации")
             else:
                 if not any(ob.get("tag") == "direct" for ob in outbounds):

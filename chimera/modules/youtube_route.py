@@ -466,12 +466,12 @@ def _youtube_apply_to_xray(target_tag: str | None = None) -> bool:
                 # RU-путь: автосоздание outbound если отсутствует.
                 if AWG_EXIT_ENABLED:
                     if not any(ob.get("tag") == "direct-local" for ob in outbounds):
-                        outbounds.append({
-                            "protocol": "freedom",
-                            "tag":      "direct-local",
-                            #  2026-10-11: UseIPv6v4 при наличии IPv6 — B4 v6 DPI-bypass работает.
-                            "settings": {"domainStrategy": _direct_ds},
-                        })
+                        # Дуал-запись domainStrategy (settings + sockopt) — см.
+                        # modules/domain_strategy.py.
+                        #  2026-10-11: UseIPv6v4 при наличии IPv6 — B4 v6 DPI-bypass работает.
+                        from chimera.modules.domain_strategy import make_freedom_outbound
+                        outbounds.append(
+                            make_freedom_outbound("direct-local", _direct_ds))
                         info(f"AWG: добавлен outbound direct-local для YouTube→RU (domainStrategy={_direct_ds})")
                 else:
                     if not any(ob.get("tag") == "direct" for ob in outbounds):

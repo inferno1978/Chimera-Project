@@ -339,11 +339,11 @@ def _geoip_apply_routing(extra_rules: list) -> None:
             if AWG_EXIT_ENABLED and any(r.get("outboundTag") == "direct-local"
                                         for r in extra_rules):
                 if not any(ob.get("tag") == "direct-local" for ob in outbounds):
-                    outbounds.append({
-                        "protocol": "freedom",
-                        "tag":      "direct-local",
-                        "settings": {"domainStrategy": "UseIPv4"},
-                    })
+                    # Дуал-запись domainStrategy (settings + sockopt) — см.
+                    # modules/domain_strategy.py.
+                    from chimera.modules.domain_strategy import make_freedom_outbound
+                    outbounds.append(
+                        make_freedom_outbound("direct-local", "UseIPv4"))
                     warn("AWG: добавлен outbound direct-local для GeoIP-allowlist")
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
             _set_config_owner(cfg_path)

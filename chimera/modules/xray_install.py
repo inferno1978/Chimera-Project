@@ -86,6 +86,7 @@ from chimera.modules.xray_mirrors import (
 )
 from chimera.modules.geo_packages import GEOSITE_SPEC, GEOIP_SPEC
 from chimera.modules.agh_probe import agh_dns_available
+from chimera.modules.domain_strategy import make_freedom_outbound
 
 
 # =============================================================================
@@ -1064,16 +1065,20 @@ def generate_xray_config() -> None:
             },
         }],
         "outbounds": [
-            {"protocol": "freedom", "tag": "direct",
-             # UseIPv6v4: Xray предпочитает IPv6 при исходящих соединениях.
-             # Без этого клиент не увидит IPv6 сайтов даже при наличии AAAA.
-             "settings": {"domainStrategy": "UseIPv6v4"},
-             # ПАТЧ: mark=AWG_FWMARK направляет исходящий трафик xray через AWG таблицу.
-             # Используем AWG_EXIT_ENABLED (из state.json), а не AWG_INSTALLED
-             # (AWG_INSTALLED=True только в момент первичной установки, но сбрасывается
-             # в False при reconfigure/emergency_repair, что вызывало EOF у клиентов).
-             **({"streamSettings": {"sockopt": {"mark": AWG_FWMARK}}}
-                if AWG_EXIT_ENABLED else {})},
+            # Дуал-запись domainStrategy (settings + sockopt) — см.
+            # modules/domain_strategy.py: легаси-форма для ядер ≤ 26.7.x,
+            # sockopt — каноничная для 26.9.30+ (freedom.settings объявлен
+            # deprecated, будет удалён; sockopt-domainStrategy принимается
+            # всеми ядрами v1.8.24+, т.е. всем реальным флотом Химеры).
+            # UseIPv6v4: Xray предпочитает IPv6 при исходящих соединениях.
+            # Без этого клиент не увидит IPv6 сайтов даже при наличии AAAA.
+            # ПАТЧ: mark=AWG_FWMARK направляет исходящий трафик xray через AWG таблицу.
+            # Используем AWG_EXIT_ENABLED (из state.json), а не AWG_INSTALLED
+            # (AWG_INSTALLED=True только в момент первичной установки, но сбрасывается
+            # в False при reconfigure/emergency_repair, что вызывало EOF у клиентов).
+            make_freedom_outbound(
+                "direct", "UseIPv6v4",
+                mark=AWG_FWMARK if AWG_EXIT_ENABLED else None),
             {"protocol": "blackhole", "tag": "BLOCK"},
         ],
         "routing": {
@@ -1109,12 +1114,9 @@ def generate_xray_config() -> None:
     if AWG_EXIT_ENABLED:
         _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
         if not any(ob.get("tag") == "direct-local" for ob in config["outbounds"]):
-            config["outbounds"].insert(0, {
-                "protocol": "freedom",
-                "tag":      "direct-local",
-                "settings": {"domainStrategy": _dl_strategy},
-                # НЕТ sockopt.mark → ОС использует default route ОС, не awg0.
-            })
+            # НЕТ sockopt.mark → ОС использует default route ОС, не awg0.
+            config["outbounds"].insert(0,
+                make_freedom_outbound("direct-local", _dl_strategy))
             info(f"AWG: добавлен outbound direct-local "
                  f"(domainStrategy={_dl_strategy}, без fwmark → напрямую через default route ОС)")
         # IP-проверочные домены → direct-local (всегда, даже без split tunnel)
@@ -1410,16 +1412,14 @@ def generate_xray_config_xhttp() -> None:
             },
         }],
         "outbounds": [
-            {
-                "protocol": "freedom",
-                "tag": "direct",
-                # UseIPv6v4: Xray предпочитает IPv6 при исходящих соединениях.
-                "settings": {"domainStrategy": "UseIPv6v4"},
-                # ПАТЧ: при AWG_EXIT_ENABLED добавляем sockopt.mark, чтобы исходящий
-                # трафик Xray маршрутизировался через AWG-туннель (policy routing fwmark).
-                **({"streamSettings": {"sockopt": {"mark": AWG_FWMARK}}}
-                   if AWG_EXIT_ENABLED else {}),
-            },
+            # Дуал-запись domainStrategy (settings + sockopt) — см.
+            # modules/domain_strategy.py (совместимость ядер ≤ 26.7.x и 26.9.30+).
+            # UseIPv6v4: Xray предпочитает IPv6 при исходящих соединениях.
+            # ПАТЧ: при AWG_EXIT_ENABLED добавляем sockopt.mark, чтобы исходящий
+            # трафик Xray маршрутизировался через AWG-туннель (policy routing fwmark).
+            make_freedom_outbound(
+                "direct", "UseIPv6v4",
+                mark=AWG_FWMARK if AWG_EXIT_ENABLED else None),
             {"protocol": "blackhole", "tag": "BLOCK"},
         ],
         "routing": {
@@ -1448,11 +1448,8 @@ def generate_xray_config_xhttp() -> None:
     if AWG_EXIT_ENABLED:
         _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
         if not any(ob.get("tag") == "direct-local" for ob in config["outbounds"]):
-            config["outbounds"].insert(0, {
-                "protocol": "freedom",
-                "tag":      "direct-local",
-                "settings": {"domainStrategy": _dl_strategy},
-            })
+            config["outbounds"].insert(0,
+                make_freedom_outbound("direct-local", _dl_strategy))
             info(f"AWG: добавлен outbound direct-local "
                  f"(domainStrategy={_dl_strategy}, без fwmark → напрямую через default route ОС)")
         from chimera.modules.split_tunnel import build_awg_ip_check_rule
@@ -1779,10 +1776,10 @@ def generate_xray_config_xhttp_reality() -> None:
             },
         }],
         "outbounds": [
-            {"protocol": "freedom", "tag": "direct",
-             "settings": {"domainStrategy": "UseIPv6v4"},
-             **({"streamSettings": {"sockopt": {"mark": AWG_FWMARK}}}
-                if AWG_EXIT_ENABLED else {})},
+            # Дуал-запись domainStrategy (settings + sockopt) — см. modules/domain_strategy.py.
+            make_freedom_outbound(
+                "direct", "UseIPv6v4",
+                mark=AWG_FWMARK if AWG_EXIT_ENABLED else None),
             {"protocol": "blackhole", "tag": "BLOCK"},
         ],
         "routing": {
@@ -1799,11 +1796,8 @@ def generate_xray_config_xhttp_reality() -> None:
     if AWG_EXIT_ENABLED:
         _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
         if not any(ob.get("tag") == "direct-local" for ob in config["outbounds"]):
-            config["outbounds"].insert(0, {
-                "protocol": "freedom",
-                "tag":      "direct-local",
-                "settings": {"domainStrategy": _dl_strategy},
-            })
+            config["outbounds"].insert(0,
+                make_freedom_outbound("direct-local", _dl_strategy))
             info(f"AWG: добавлен outbound direct-local "
                  f"(domainStrategy={_dl_strategy}, без fwmark → напрямую через default route ОС)")
         from chimera.modules.split_tunnel import build_awg_ip_check_rule

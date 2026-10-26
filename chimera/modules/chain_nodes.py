@@ -60,9 +60,11 @@ from pathlib import Path
 from typing import Optional
 
 from chimera.modules.agh_probe import agh_dns_available
-
 # TFO (TCP Fast Open): централизованная настройка, дефолт ВЫКЛЮЧЕН
 # (инцидент 28.08.2026 — DPI резал data-in-SYN, см. tfo_settings.py)
+from chimera.modules.domain_strategy import (
+    apply_domain_strategy_to_config, make_freedom_outbound,
+)
 from chimera.modules.tfo_settings import tfo_sockopt
 
 
@@ -1019,12 +1021,11 @@ def generate_xray_config_chain_entry() -> None:
             # к 127.0.0.1:5300 (DNSCrypt-proxy). Без direct outbound они попадают
             # в chain-exit (VLESS TCP) и получают "read response: EOF".
             # При AWG добавляем fwmark для корректной маршрутизации.
-            {
-                "protocol": "freedom",
-                "tag":      "direct",
-                "settings": {"domainStrategy": "UseIPv6v4"},
-                **({"streamSettings": {"sockopt": {"mark": AWG_FWMARK}}} if AWG_EXIT_ENABLED else {}),
-            },
+            # Дуал-запись domainStrategy (settings + sockopt) — см.
+            # modules/domain_strategy.py (совместимость ядер ≤ 26.7.x и 26.9.30+).
+            make_freedom_outbound(
+                "direct", "UseIPv6v4",
+                mark=AWG_FWMARK if AWG_EXIT_ENABLED else None),
         ],
         "routing": {
             "domainStrategy": "IPIfNonMatch",
@@ -1040,11 +1041,8 @@ def generate_xray_config_chain_entry() -> None:
     # уйдёт через awg0 (exit-VPS), и split tunnel бесполезен.
     if SPLIT_TUNNEL_ENABLED and not AWG_EXIT_ENABLED:
         if not any(ob.get("tag") == "direct" for ob in config.get("outbounds", [])):
-            config["outbounds"].insert(0, {
-                "protocol": "freedom",
-                "tag":      "direct",
-                "settings": {"domainStrategy": "UseIP"},
-            })
+            config["outbounds"].insert(0,
+                make_freedom_outbound("direct", "UseIP"))
         st_rules = build_split_tunnel_routing_rules(proxy_tag="chain-exit", direct_tag="direct")
         if st_rules:
             config["routing"]["rules"] = st_rules + config["routing"]["rules"]
@@ -1052,11 +1050,8 @@ def generate_xray_config_chain_entry() -> None:
             info(f"Split tunneling: добавлено {len(st_rules)} правил (Режим B, одиночная нода)")
     elif SPLIT_TUNNEL_ENABLED and AWG_EXIT_ENABLED:
         _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
-        config["outbounds"].insert(0, {
-            "protocol": "freedom",
-            "tag":      "direct-local",
-            "settings": {"domainStrategy": _dl_strategy},
-        })
+        config["outbounds"].insert(0,
+            make_freedom_outbound("direct-local", _dl_strategy))
         # IP-проверочные домены → direct-local (всегда в AWG-режиме)
         # build_awg_ip_check_rule возвращает list (domain + ip правило).
         from chimera.modules.split_tunnel import build_awg_ip_check_rule
@@ -1342,12 +1337,9 @@ def _make_exit_node_config(nd: dict) -> dict:
         },
         "inbounds": [inbound],
         "outbounds": [
-            {
-                "protocol": "freedom",
-                "tag":      "direct",
-                # UseIPv6v4: Xray предпочитает IPv6 при исходящем соединении
-                "settings": {"domainStrategy": "UseIPv6v4"},
-            },
+            # Дуал-запись domainStrategy (settings + sockopt) — см. modules/domain_strategy.py.
+            # UseIPv6v4: Xray предпочитает IPv6 при исходящем соединении
+            make_freedom_outbound("direct", "UseIPv6v4"),
             {"protocol": "blackhole", "tag": "BLOCK"},
         ],
         "routing": {
@@ -2810,12 +2802,10 @@ def generate_xray_config_chain_entry_multi() -> None:
             # Правило 127.0.0.1/8 → direct (выше в routing) требует этого outbound,
             # иначе xray упадёт с ошибкой "unknown outbound tag".
             # При AWG добавляем fwmark для корректной маршрутизации через AWG-таблицу.
-            {
-                "protocol": "freedom",
-                "tag":      "direct",
-                "settings": {"domainStrategy": "UseIPv6v4"},
-                **({"streamSettings": {"sockopt": {"mark": AWG_FWMARK}}} if AWG_EXIT_ENABLED else {}),
-            },
+            # Дуал-запись domainStrategy (settings + sockopt) — см. modules/domain_strategy.py.
+            make_freedom_outbound(
+                "direct", "UseIPv6v4",
+                mark=AWG_FWMARK if AWG_EXIT_ENABLED else None),
         ],
         "routing": {
             "domainStrategy": "IPIfNonMatch",
@@ -2843,20 +2833,14 @@ def generate_xray_config_chain_entry_multi() -> None:
         if AWG_EXIT_ENABLED:
             _dl_strategy = "UseIPv6v4" if IS_IPV6_AVAILABLE else "UseIPv4"
             if not any(ob.get("tag") == "direct-local" for ob in config.get("outbounds", [])):
-                config["outbounds"].insert(0, {
-                    "protocol": "freedom",
-                    "tag":      "direct-local",
-                    "settings": {"domainStrategy": _dl_strategy},
-                })
+                config["outbounds"].insert(0,
+                    make_freedom_outbound("direct-local", _dl_strategy))
             proxy_t = "direct"
             direct_t = "direct-local"
         else:
             if not any(ob.get("tag") == "direct" for ob in config.get("outbounds", [])):
-                config["outbounds"].insert(0, {
-                    "protocol": "freedom",
-                    "tag":      "direct",
-                    "settings": {"domainStrategy": "UseIP"},
-                })
+                config["outbounds"].insert(0,
+                    make_freedom_outbound("direct", "UseIP"))
             proxy_t = "chain-balancer" if balancers else (outbound_tags[0] if outbound_tags else "direct")
             direct_t = "direct"
         st_rules = build_split_tunnel_routing_rules(proxy_tag=proxy_t, direct_tag=direct_t)
@@ -3546,13 +3530,23 @@ def do_manage_nodes() -> None:
                 if _cfg_f.exists():
                     try:
                         _c2 = json.loads(_cfg_f.read_text())
-                        _c2.setdefault("routing", {})["domainStrategy"] = new_ds
-                        # Обновляем domainStrategy в freedom-outbound (direct/UseIP)
-                        for _ob in _c2.get("outbounds", []):
-                            if _ob.get("protocol") == "freedom" and _ob.get("tag") not in ("xray-stats-api",):
-                                _ob.setdefault("settings", {})["domainStrategy"] = new_ds
+                        # routing.domainStrategy НЕ трогаем: это
+                        # AsIs/IPIfNonMatch/IPOnDemand (семантика ip/geoip-
+                        # правил), а не IPv4/IPv6-приоритет. Прежний код
+                        # писал сюда Use*-значение: Xray молча принимает его
+                        # как AsIs → IPIfNonMatch деградирует → правила
+                        # geoip:ru/RIPE перестают матчить домены (тот же
+                        # баг, что и в меню _core.do_change_domain_strategy,
+                        # фиксы синхронизированы). Чистый хелпер патчит
+                        # freedom-outbound'ы (дуал: settings + sockopt) +
+                        # dns.queryStrategy (+ v4-чистка DNS при UseIPv4).
+                        _changes = apply_domain_strategy_to_config(_c2, new_ds)
                         _cfg_f.write_text(json.dumps(_c2, indent=2, ensure_ascii=False))
                         success(f"domainStrategy изменена → {new_ds_desc}")
+                        for _ch in _changes:
+                            info(f"   • {_ch}")
+                        if not _changes:
+                            info("   Конфиг уже соответствовал выбранной стратегии.")
                     except Exception as _e3:
                         warn(f"Не удалось обновить config.json: {_e3}")
                 ans = input(f"{YELLOW}Перезапустить Xray для применения? [y/N]:{NC} ").strip().lower()

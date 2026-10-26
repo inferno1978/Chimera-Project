@@ -1281,7 +1281,11 @@ Xray. Когда IPv6 пропадает на хостинге, Xray продо�
    - в `dns.servers` удалить IPv6-серверы (`2a10:50c0::…`, `2606:4700:…`,
      `2001:4860:…`), оставить `1.1.1.1` / `8.8.8.8` / `9.9.9.9`;
    - в `outbounds` у freedom-тегов (`direct`, `direct-local`):
-     `settings.domainStrategy` → `UseIPv4`;
+     `settings.domainStrategy` → `UseIPv4` и (если хотите сразу новую форму)
+     `streamSettings.sockopt.domainStrategy` → `UseIPv4` — Xray 26.9.30+
+     читает стратегию из sockopt, а `settings`-форма объявлена deprecated
+     (но пока работает на всех версиях; обновлённая Химера пишет обе формы
+     автоматически);
    - проверить и применить:
      `xray run -test -config /etc/xray/config.json && systemctl restart xray`.
 2. `/var/lib/xray-installer/state.json`: `"strategy": "UseIPv4"` — чтобы

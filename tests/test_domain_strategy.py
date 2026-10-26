@@ -210,3 +210,106 @@ class TestEdgeCases(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestDualWriteSockopt(unittest.TestCase):
+    """Миграция freedom.settings.domainStrategy → sockopt.domainStrategy
+    (deprecated в Xray 26.9.30+, будет удалён). Дуал-запись: оба поля с
+    одинаковым значением — поведение идентично на любом ядре флота
+    (≤26.7.x читает settings, 26.9.30+ читает sockopt, значения совпадают)."""
+
+    def test_make_freedom_outbound_shape(self):
+        from chimera.modules.domain_strategy import make_freedom_outbound
+        ob = make_freedom_outbound("direct", "UseIPv6v4")
+        self.assertEqual(ob["protocol"], "freedom")
+        self.assertEqual(ob["tag"], "direct")
+        self.assertEqual(ob["settings"]["domainStrategy"], "UseIPv6v4")
+        self.assertEqual(
+            ob["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv6v4")
+        # без mark — ключа mark нет
+        self.assertNotIn("mark", ob["streamSettings"]["sockopt"])
+
+    def test_make_freedom_outbound_with_mark(self):
+        from chimera.modules.domain_strategy import make_freedom_outbound
+        ob = make_freedom_outbound("direct", "UseIPv6v4", mark=51820)
+        self.assertEqual(ob["streamSettings"]["sockopt"]["mark"], 51820)
+        self.assertEqual(
+            ob["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv6v4")
+
+    def test_make_freedom_outbound_send_through(self):
+        from chimera.modules.domain_strategy import make_freedom_outbound
+        ob = make_freedom_outbound("warp", "UseIPv4",
+                                   send_through="172.16.0.2")
+        self.assertEqual(ob["settings"]["sendThrough"], "172.16.0.2")
+        self.assertEqual(ob["settings"]["domainStrategy"], "UseIPv4")
+        self.assertEqual(
+            ob["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv4")
+
+    def test_set_merges_existing_sockopt_keys(self):
+        """AWG-mark / TFO в sockopt не затираются при патче стратегии."""
+        from chimera.modules.domain_strategy import set_freedom_domain_strategy
+        ob = {
+            "protocol": "freedom", "tag": "direct",
+            "settings": {"domainStrategy": "UseIPv6v4"},
+            "streamSettings": {"sockopt": {
+                "mark": 51820, "tcpFastOpen": True}},
+        }
+        self.assertTrue(set_freedom_domain_strategy(ob, "UseIPv4"))
+        self.assertEqual(ob["streamSettings"]["sockopt"]["mark"], 51820)
+        self.assertIs(ob["streamSettings"]["sockopt"]["tcpFastOpen"], True)
+        self.assertEqual(ob["settings"]["domainStrategy"], "UseIPv4")
+        self.assertEqual(
+            ob["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv4")
+
+    def test_set_creates_sockopt_when_absent(self):
+        from chimera.modules.domain_strategy import set_freedom_domain_strategy
+        ob = {"protocol": "freedom", "tag": "direct-local",
+              "settings": {"domainStrategy": "UseIPv4"}}
+        set_freedom_domain_strategy(ob, "UseIPv4")
+        self.assertEqual(
+            ob["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv4")
+
+    def test_set_preserves_settings_send_through(self):
+        from chimera.modules.domain_strategy import set_freedom_domain_strategy
+        ob = {"protocol": "freedom", "tag": "warp",
+              "settings": {"domainStrategy": "UseIPv6",
+                           "sendThrough": "fd00::2"}}
+        set_freedom_domain_strategy(ob, "UseIPv4")
+        self.assertEqual(ob["settings"]["sendThrough"], "fd00::2")
+
+    def test_apply_produces_dual_form(self):
+        cfg = _v6_mode_config()
+        apply_domain_strategy_to_config(cfg, "UseIPv4")
+        direct = next(ob for ob in cfg["outbounds"] if ob["tag"] == "direct")
+        self.assertEqual(direct["settings"]["domainStrategy"], "UseIPv4")
+        self.assertEqual(
+            direct["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv4")
+        # легаси-марка AWG не тронута (её в fixture нет — просто структура)
+        self.assertIn("sockopt", direct["streamSettings"])
+
+    def test_apply_awg_mark_preserved(self):
+        """Инцидент-класс: патч стратегии на AWG-ноде не должен ронять fwmark."""
+        cfg = _v6_mode_config()
+        cfg["outbounds"][0]["streamSettings"] = {"sockopt": {"mark": 51820}}
+        apply_domain_strategy_to_config(cfg, "UseIPv4")
+        direct = cfg["outbounds"][0]
+        self.assertEqual(direct["streamSettings"]["sockopt"]["mark"], 51820)
+        self.assertEqual(
+            direct["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv4")
+
+    def test_dual_write_idempotent(self):
+        from chimera.modules.domain_strategy import (
+            make_freedom_outbound, set_freedom_domain_strategy)
+        ob = make_freedom_outbound("direct", "UseIPv6v4")
+        self.assertFalse(set_freedom_domain_strategy(ob, "UseIPv6v4"))
+
+    def test_set_ignores_non_freedom_and_stats(self):
+        from chimera.modules.domain_strategy import set_freedom_domain_strategy
+        vless = {"protocol": "vless", "tag": "chain-exit-0",
+                 "settings": {"domainStrategy": "UseIPv6v4"}}
+        self.assertFalse(set_freedom_domain_strategy(vless, "UseIPv4"))
+        self.assertNotIn("streamSettings", vless)
+        stats = {"protocol": "freedom", "tag": "xray-stats-api",
+                 "settings": {"domainStrategy": "UseIPv6v4"}}
+        self.assertFalse(set_freedom_domain_strategy(stats, "UseIPv4"))
+        self.assertEqual(stats["settings"]["domainStrategy"], "UseIPv6v4")

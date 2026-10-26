@@ -268,15 +268,13 @@ def _xray_apply_warp_outbound(ip_version: str = "auto"):
 
             # Удаляем старый outbound warp (если есть) — перезаписываем с
             # актуальным sendThrough и domainStrategy.
+            # Дуал-запись domainStrategy (settings + sockopt) — см.
+            # modules/domain_strategy.py.
+            from chimera.modules.domain_strategy import make_freedom_outbound
             outbounds = [ob for ob in outbounds if ob.get("tag") != "warp"]
-            outbounds.append({
-                "protocol": "freedom",
-                "tag": "warp",
-                "settings": {
-                    "domainStrategy": domain_strategy,
-                    "sendThrough": send_through,
-                },
-            })
+            outbounds.append(
+                make_freedom_outbound("warp", domain_strategy,
+                                      send_through=send_through))
             cfg["outbounds"] = outbounds
             info(f"Outbound 'warp' настроен: {strategy_desc}")
 

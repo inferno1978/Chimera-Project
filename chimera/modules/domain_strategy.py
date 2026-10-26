@@ -14,7 +14,10 @@ UseIPv6v4), IPv6 на хостинге отвалился. Xray продолжа
 
 ЧТО ПРАВИТСЯ (apply_domain_strategy_to_config):
   • freedom-outbound'ы (direct / direct-local, кроме xray-stats-api):
-    settings.domainStrategy = new_ds;
+    ДУАЛ-ЗАПИСЬ domainStrategy — и в settings.domainStrategy (легаси-форма),
+    и в streamSettings.sockopt.domainStrategy (каноничная форма для Xray
+    26.9.30+); существующие ключи sockopt (mark/tfo/tcpFastOpen/…) — мержатся,
+    не затираются;
   • dns.queryStrategy = new_ds — именно это управляет A/AAAA-приоритетом
     встроенного DNS Xray: freedom c UseIPv6v4 при queryStrategy=UseIPv4
     получает только A-записи и звонит по IPv4 (сам freedom-флаг при этом
@@ -28,6 +31,28 @@ UseIPv6v4), IPv6 на хостинге отвалился. Xray продолжа
     1.1.1.1 / 8.8.8.8 / 9.9.9.9. Локальные резолверы (127.0.0.1 AGH,
     dnscrypt:5300) и DoH/DoT-URL не трогаются — двоеточий в адресе нет.
 
+ПОЧЕМУ ДУАЛ-ЗАПИСЬ, А НЕ ТОЛЬКО sockopt (исследование совместимости,
+проба по тегам Xray-core raw.githubusercontent, 2026-10-26):
+  • freedom.settings.domainStrategy объявлен deprecated в Xray 26.9.30+
+    (journal: «The "freedom.domainStrategy" setting is deprecated and will
+    be removed…migrated to "sockopt.domainStrategy"»); начиная с 26.9.30
+    freedom-прокси читает стратегию ИЗ sockopt (proxy/freedom/freedom.go:57:
+    h.resolveStrategy = streamSettings.SocketSettings.DomainStrategy), а
+    conf-слой при загрузке авто-мигрирует значение из settings → sockopt;
+  • до v26.7.x включительно — наоборот: freedom читал ТОЛЬКО свой
+    settings.domainStrategy, sockopt-поле для freedom было инертно;
+  • switch значений в sockopt.domainStrategy принимает UseIPv4v6/UseIPv6v4
+    во ВСЕХ проверенных тегах от v1.8.24 до v26.10.21 (в v1.0.0–v1.8.0
+    этих значений нет, но эти ядра физически не могут исполнить конфиги
+    Химеры — REALITY/postquantum требуют 24.x+; реальный флот ≥ 24.9.30).
+    Значит: дуал-запись с ОДИНАКОВЫМ значением в обоих полях даёт
+    идентичное поведение на любом ядре флота (каждая версия читает
+    «своё» поле, значения совпадают), а после будущего удаления
+    легаси-формы конфиг продолжит работать через sockopt. Если ядро
+    когда-нибудь откатят назад — заработает легаси-поле. Цена —
+    косметический Warning в journal на 26.9.30+ (settings непустой) —
+    поведение не меняется.
+
 ЧТО НЕ ПРАВИТСЯ (осознанно, баг-фикс):
   • routing.domainStrategy — ДРУГАЯ настройка (AsIs / IPIfNonMatch /
     IPOnDemand): она регулирует резолв доменов ДЛЯ ПРАВИЛ маршрутизации,
@@ -38,9 +63,13 @@ UseIPv6v4), IPv6 на хостинге отвалился. Xray продолжа
     IPIfNonMatch деградирует до AsIs → ip/geoip-правила (geoip:ru,
     RIPE-префиксы РФ-direct) перестают матчить доменный трафик.
 
-Точки входа из _core.py (do_change_domain_strategy):
+Точки входа из _core.py (do_change_domain_strategy) и генераторов
+конфигов (xray_install / chain_nodes / ru_subnets / geoip_block /
+as_direct / dpi_bypass / youtube_route / youtube_warp_route):
     from chimera.modules.domain_strategy import (
         apply_domain_strategy_to_config,
+        make_freedom_outbound,
+        set_freedom_domain_strategy,
     )
 ───────────────────────────────────────────────────────────────────────────────
 """
@@ -48,6 +77,9 @@ from __future__ import annotations
 
 import re
 from typing import Any
+
+# Служебный outbound статистики — стратегию не трогаем (как и прежний код меню).
+NON_STRATEGY_FREEDOM_TAGS = ("xray-stats-api",)
 
 # v4-fallback для dns.servers (зеркалит ветку IS_IPV6_AVAILABLE=False
 # генераторов xray_install: первичный + запасной + skipFallback-хвост).
@@ -70,6 +102,66 @@ def _is_v6_address(addr: Any) -> bool:
     return bool(_V6_LITERAL_RE.match(addr))
 
 
+def set_freedom_domain_strategy(ob: dict[str, Any],
+                                 domain_strategy: str) -> bool:
+    """
+    Дуал-запись domainStrategy в один freedom-outbound (in-place).
+
+    Пишет settings.domainStrategy (легаси, живёт до удаления в Xray) И
+    streamSettings.sockopt.domainStrategy (канонично с 26.9.30+).
+    Существующие ключи sockopt (mark, tcpFastOpen, …) и settings
+    (sendThrough, …) мержатся, не затираются.
+
+    :return: True, если хоть одно поле изменилось.
+    """
+    if not isinstance(ob, dict) or ob.get("protocol") != "freedom":
+        return False
+    if ob.get("tag") in NON_STRATEGY_FREEDOM_TAGS:
+        return False
+    changed = False
+    settings = ob.setdefault("settings", {})
+    if not isinstance(settings, dict):
+        return False
+    if settings.get("domainStrategy") != domain_strategy:
+        settings["domainStrategy"] = domain_strategy
+        changed = True
+    sockopt = (ob.setdefault("streamSettings", {}).setdefault("sockopt", {}))
+    if isinstance(sockopt, dict) and sockopt.get("domainStrategy") != domain_strategy:
+        sockopt["domainStrategy"] = domain_strategy
+        changed = True
+    return changed
+
+
+def make_freedom_outbound(tag: str, domain_strategy: str,
+                           mark: int | None = None,
+                           send_through: str | None = None) -> dict[str, Any]:
+    """
+    Собрать freedom-outbound с дуал-записью domainStrategy.
+
+    Единая точка правды для генераторов конфигов (xray_install,
+    chain_nodes, ru_subnets, …): конфиг сразу содержит обе формы —
+    легаси settings.domainStrategy (для ядер ≤ 26.7.x и отката назад)
+    и streamSettings.sockopt.domainStrategy (для 26.9.30+ и будущего
+    удаления легаси-формы). Значения всегда одинаковые → поведение
+    идентично на любом ядре (см. докстринг модуля).
+
+    :param mark: fwmark (AWG policy routing) — мержится в sockopt.
+    :param send_through: привязка source-адреса (settings.sendThrough).
+    """
+    settings: dict[str, Any] = {"domainStrategy": domain_strategy}
+    if send_through is not None:
+        settings["sendThrough"] = send_through
+    sockopt: dict[str, Any] = {"domainStrategy": domain_strategy}
+    if mark is not None:
+        sockopt["mark"] = mark
+    return {
+        "protocol": "freedom",
+        "tag": tag,
+        "settings": settings,
+        "streamSettings": {"sockopt": sockopt},
+    }
+
+
 def apply_domain_strategy_to_config(config: dict[str, Any],
                                     new_ds: str) -> list[str]:
     """
@@ -82,18 +174,17 @@ def apply_domain_strategy_to_config(config: dict[str, Any],
     """
     changes: list[str] = []
 
-    # 1) freedom-outbound'ы (кроме служебного xray-stats-api)
+    # 1) freedom-outbound'ы (кроме служебного xray-stats-api) — дуал-запись
     for ob in config.get("outbounds", []) or []:
         if not isinstance(ob, dict) or ob.get("protocol") != "freedom":
             continue
-        if ob.get("tag") in ("xray-stats-api",):
+        if ob.get("tag") in NON_STRATEGY_FREEDOM_TAGS:
             continue
-        cur = (ob.get("settings") or {}).get("domainStrategy", "")
-        if cur != new_ds:
-            ob.setdefault("settings", {})["domainStrategy"] = new_ds
+        _tag = ob.get("tag", "?")
+        if set_freedom_domain_strategy(ob, new_ds):
             changes.append(
-                f"outbound «{ob.get('tag', '?')}»: domainStrategy "
-                f"{cur or '(не задан)'} → {new_ds}")
+                f"outbound «{_tag}»: domainStrategy → {new_ds} "
+                f"(settings + sockopt)")
 
     # 2) dns.queryStrategy (+ 3) v4-only: вычистить мёртвые IPv6-DNS)
     dns = config.get("dns")

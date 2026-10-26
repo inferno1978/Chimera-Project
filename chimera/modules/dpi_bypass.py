@@ -2004,18 +2004,17 @@ def _get_xray_outbound_tag() -> str:
 
 def _ensure_direct_local_outbound(cfg: dict) -> None:
     """Если outboundTag='direct-local' — убеждаемся что такой outbound существует.
-    Если нет — создаём freedom outbound с domainStrategy=UseIPv4.
+    Если нет — создаём freedom outbound с domainStrategy=UseIPv4 (дуал-запись:
+    settings + sockopt — см. modules/domain_strategy.py).
     """
+    from chimera.modules.domain_strategy import make_freedom_outbound
     outbounds = cfg.get("outbounds", [])
     has_direct_local = any(
         o.get("tag") == "direct-local" for o in outbounds
     )
     if not has_direct_local:
-        outbounds.append({
-            "protocol": "freedom",
-            "tag": "direct-local",
-            "settings": {"domainStrategy": "UseIPv4"},
-        })
+        outbounds.append(
+            make_freedom_outbound("direct-local", "UseIPv4"))
         cfg["outbounds"] = outbounds
 
 

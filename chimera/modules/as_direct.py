@@ -395,6 +395,7 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
     - Батчи по 500 CIDR (ограничение Xray на размер массива "ip")
     - Новые правила вставляются после других as_direct_*/ru_subnets блоков
     """
+    from chimera.modules.domain_strategy import make_freedom_outbound
     core = _core_module()
     CONFIG_DIR               = core.CONFIG_DIR
     XRAY_BIN                 = core.XRAY_BIN
@@ -464,12 +465,11 @@ def _as_direct_apply_to_xray(asn: str, cidrs: list, action: str = "direct") -> b
                     # AWG: "direct-local" (без fwmark → default route ОС)
                     outbound_tag = "direct-local"
                     if not any(ob.get("tag") == "direct-local" for ob in outbounds):
-                        outbounds.append({
-                            "protocol": "freedom",
-                            "tag":      "direct-local",
-                            #  2026-10-11: UseIPv6v4 при наличии IPv6 (B4 v6 DPI-bypass работает).
-                            "settings": {"domainStrategy": _direct_ds},
-                        })
+                        # Дуал-запись domainStrategy (settings + sockopt) —
+                        # см. modules/domain_strategy.py.
+                        #  2026-10-11: UseIPv6v4 при наличии IPv6 (B4 v6 DPI-bypass работает).
+                        outbounds.append(
+                            make_freedom_outbound("direct-local", _direct_ds))
                         info(f"AWG: добавлен outbound direct-local для AS-direct (domainStrategy={_direct_ds})")
                 else:
                     outbound_tag = "direct"
