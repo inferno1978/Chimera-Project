@@ -46,9 +46,11 @@ run_modules() {  # $1=список-файл, $2=блокирующий(0/1)
       mods_ok=$((mods_ok+1)); echo "SKIP(0 тестов): $m"
     elif [ "$st" -eq 124 ]; then
       mods_to=$((mods_to+1)); echo "TIMEOUT(${MODULE_TIMEOUT}s): $m (${ran:-0} тестов)"
+      echo "::error::TIMEOUT ${MODULE_TIMEOUT}s: $m (${ran:-0} тестов)"
       [ "$blocking" = 1 ] && fail=1
     else
       mods_bad=$((mods_bad+1)); echo "FAIL: $m (${ran:-0} тестов, rc=$st)"
+      echo "::error::FAIL $m (${ran:-0} тестов, rc=$st)"
       printf '%s\n' "$out" | grep -E "^(FAIL|ERROR):" | head -4
       [ "$blocking" = 1 ] && fail=1
     fi
