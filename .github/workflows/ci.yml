@@ -32,10 +32,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Gate (python ${{ matrix.python }}, полный список — чистые раннеры)
-        run: |
-          ls tests/test_*.py | sed 's|^tests/|tests.|; s|\.py$||' > /tmp/gate_list.txt
-          bash scripts/ci_suite.sh gate python /tmp/gate_list.txt
+      - name: Gate (python ${{ matrix.python }}, манифест tests/ci_gate.txt)
+        run: bash scripts/ci_suite.sh gate python
 
   full-report:
     # только вручную (workflow_dispatch): полный отчёт по всем 300+ модулям,

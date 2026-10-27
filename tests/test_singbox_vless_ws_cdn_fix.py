@@ -446,9 +446,12 @@ class TestApplyCdnAllowlist(unittest.TestCase):
 
     def setUp(self):
         _setup_core()
+        import os
         import shutil
         if not shutil.which("iptables") or not shutil.which("ipset"):
             self.skipTest("iptables/ipset not available in test environment")
+        if os.geteuid() != 0:
+            self.skipTest("iptables/ipset-тесты требуют root (CI-раннеры — non-root)")
 
     def test_apply_returns_true_on_success(self):
         from chimera.modules.singbox_cdn_nets import apply_cdn_allowlist

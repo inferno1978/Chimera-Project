@@ -29,8 +29,21 @@ MODULE_TIMEOUT="${MODULE_TIMEOUT:-240}"
 
 fail=0
 mods_ok=0; mods_bad=0; mods_to=0
+FAILDETAIL=/tmp/ci_fails.txt
+: > "$FAILDETAIL"
 
 header() { echo; echo "═══ $1 ═══"; }
+
+_summary() {  # дописать блок в $GITHUB_STEP_SUMMARY (если задан)
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -s "$FAILDETAIL" ]; then
+    {
+      echo "### Падения модулей: fail=$mods_bad timeout=$mods_to ok=$mods_ok"
+      echo '```'
+      head -c 20000 "$FAILDETAIL"
+      echo '```'
+    } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+  fi
+}
 
 run_modules() {  # $1=список-файл, $2=блокирующий(0/1)
   local list="$1" blocking="$2"
@@ -51,6 +64,7 @@ run_modules() {  # $1=список-файл, $2=блокирующий(0/1)
     else
       mods_bad=$((mods_bad+1)); echo "FAIL: $m (${ran:-0} тестов, rc=$st)"
       echo "::error::FAIL $m (${ran:-0} тестов, rc=$st)"
+      { echo "──── FAIL: $m (${ran:-0} тестов, rc=$st)"; printf '%s\n' "$out" | tail -25; echo; } >> "$FAILDETAIL"
       printf '%s\n' "$out" | grep -E "^(FAIL|ERROR):" | head -4
       [ "$blocking" = 1 ] && fail=1
     fi
@@ -78,6 +92,7 @@ case "$MODE" in
     run_modules "$LIST" 1
     echo
     echo "ГЕЙТ: ok=$mods_ok fail=$mods_bad timeout=$mods_to"
+    _summary
     ;;
   full)
     echo "FULL REPORT: python = $($PY --version 2>&1) (не блокирующий)"
@@ -86,6 +101,7 @@ case "$MODE" in
     echo
     echo "FULL: ok=$mods_ok fail=$mods_bad timeout=$mods_to"
     echo "FULL-режим отчётный: красные модули выше — кандидаты в триаж (tests/ci_gate.txt их не содержит)."
+    _summary
     ;;
   *)
     echo "usage: $0 {static <py312> | gate <py> | full <py>}" >&2

@@ -56,9 +56,12 @@ class TestIptablesInsertAtPosition1(unittest.TestCase):
 
     def setUp(self):
         _setup_core()
+        import os
         import shutil
         if not shutil.which("iptables"):
             self.skipTest("iptables not available in test environment")
+        if os.geteuid() != 0:
+            self.skipTest("iptables-тесты требуют root (CI-раннеры — non-root)")
 
     def test_apply_uses_insert_not_append(self):
         """iptables -I INPUT 1, а НЕ -A INPUT."""
@@ -190,9 +193,12 @@ class TestPersistenceOnReboot(unittest.TestCase):
 
     def test_ipset_save_writes_to_file(self):
         """_ipset_save_port реально записывает ipset в файл (если iptables/ipset доступны)."""
+        import os
         import shutil
         if not shutil.which("ipset"):
             self.skipTest("ipset not available — cannot test real file persistence")
+        if os.geteuid() != 0:
+            self.skipTest("ipset-тесты требуют root (CI-раннеры — non-root)")
         from chimera.modules.singbox_cdn_nets import (
             _ipset_save_port, _IPSET_CONF, _ipset_name,
         )
