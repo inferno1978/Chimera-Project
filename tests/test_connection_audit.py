@@ -257,6 +257,222 @@ class TestNormAddrForDisplay(unittest.TestCase):
         self.assertLessEqual(len(email_full), max_email)
 
 
+# ── Ротированные access-логи (сводка не «теряет» юзеров после daily-ротации) ─
+
+def _write_gz(path: Path, text: str) -> None:
+    """Пишет текст в gzip-файл (имитация access.log.N.gz от logrotate)."""
+    import gzip as _gzip
+    with _gzip.open(path, "wt", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+class TestRotatedAccessLogPaths(unittest.TestCase):
+    """_rotated_access_log_paths() — порядок старшинства и граница rotate 14.
+
+    logrotate (setup_logrotate, _core.py): rotate 14 + delaycompress →
+    access.log.1 не сжат, access.log.2.gz…access.log.14.gz сжатые.
+    Порядок на выходе: СТАРЫЕ → НОВЫЕ (хронология), чтобы «последний
+    выигрывает»-маппинги (ip_to_email) оставались корректными.
+    """
+
+    def setUp(self):
+        _setup_core()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._log = self._tmpdir / "access.log"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_log(self):
+        return patch("chimera.modules.connection_audit._ACCESS_LOG", self._log)
+
+    def test_order_oldest_to_newest(self):
+        self._log.write_text("")
+        (self._tmpdir / "access.log.1").write_text("")
+        (self._tmpdir / "access.log.2.gz").write_text("")
+        from chimera.modules.connection_audit import _rotated_access_log_paths
+        with self._patch_log():
+            result = _rotated_access_log_paths()
+        self.assertEqual(result, [self._tmpdir / "access.log.2.gz",
+                                  self._tmpdir / "access.log.1"])
+
+    def test_empty_when_no_rotated(self):
+        self._log.write_text("")
+        from chimera.modules.connection_audit import _rotated_access_log_paths
+        with self._patch_log():
+            self.assertEqual(_rotated_access_log_paths(), [])
+
+    def test_rotation_15_excluded(self):
+        """access.log.15.gz — за пределами rotate 14, не читается."""
+        self._log.write_text("")
+        (self._tmpdir / "access.log.15.gz").write_text("")
+        from chimera.modules.connection_audit import _rotated_access_log_paths
+        with self._patch_log():
+            result = _rotated_access_log_paths()
+        self.assertEqual(result, [])
+
+    def test_sources_include_current_last(self):
+        """_access_log_sources: ротированные (старые→новые), затем текущий."""
+        self._log.write_text("")
+        (self._tmpdir / "access.log.1").write_text("")
+        (self._tmpdir / "access.log.2.gz").write_text("")
+        from chimera.modules.connection_audit import _access_log_sources
+        with self._patch_log():
+            full = _access_log_sources(include_rotated=True)
+            only_cur = _access_log_sources(include_rotated=False)
+        self.assertEqual(full, [self._tmpdir / "access.log.2.gz",
+                                self._tmpdir / "access.log.1",
+                                self._log])
+        self.assertEqual(only_cur, [self._log])
+
+    def test_sources_current_missing_rotated_present(self):
+        """Текущий лог отсутствует (xray остановлен), но история осталась.
+
+        _access_log_sources возвращает кандидатов БЕЗ фильтра существования
+        (фильтр — в _parse_access_log, см. TestParseAccessLogRotated):
+        текущий всегда в списке, ротированные добавляются перед ним.
+        """
+        (self._tmpdir / "access.log.1").write_text("")
+        from chimera.modules.connection_audit import _access_log_sources
+        with self._patch_log():
+            full = _access_log_sources(include_rotated=True)
+        self.assertEqual(full, [self._tmpdir / "access.log.1", self._log])
+
+
+class TestParseAccessLogRotated(unittest.TestCase):
+    """_parse_access_log(include_rotated=True) — слияние истории.
+
+    Кейс юзера: после ночной daily-ротации сводка показывала только тех,
+    кто подключался ПОСЛЕ среза — «недавно добавленные пропали».
+    """
+
+    OLD_LINE = ("2026/10/25 09:12:33 accepted tcp:198.51.100.7:49775 "
+                "dst:1.2.3.4:443 email:olduser@example.com")
+    NEW_LINE = ("2026/10/27 13:40:01 accepted tcp:198.51.100.9:51902 "
+                "dst:1.2.3.4:443 email:newuser@example.com")
+
+    def setUp(self):
+        _setup_core()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._log = self._tmpdir / "access.log"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_log(self):
+        return patch("chimera.modules.connection_audit._ACCESS_LOG", self._log)
+
+    def test_merges_rotated_and_current_chronologically(self):
+        (self._tmpdir / "access.log.1").write_text(self.OLD_LINE + "\n")
+        self._log.write_text(self.NEW_LINE + "\n")
+        from chimera.modules.connection_audit import _parse_access_log
+        with self._patch_log():
+            result = _parse_access_log(include_rotated=True)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["email"], "olduser@example.com")
+        self.assertEqual(result[1]["email"], "newuser@example.com")
+
+    def test_reads_gz_archives(self):
+        _write_gz(self._tmpdir / "access.log.2.gz", self.OLD_LINE + "\n")
+        self._log.write_text(self.NEW_LINE + "\n")
+        from chimera.modules.connection_audit import _parse_access_log
+        with self._patch_log():
+            result = _parse_access_log(include_rotated=True)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["email"], "olduser@example.com")
+        self.assertEqual(result[0]["dt_str"], "2026/10/25 09:12:33")
+
+    def test_default_reads_only_current(self):
+        """include_rotated=False (default) — прежнее поведение: только текущий."""
+        (self._tmpdir / "access.log.1").write_text(self.OLD_LINE + "\n")
+        self._log.write_text(self.NEW_LINE + "\n")
+        from chimera.modules.connection_audit import _parse_access_log
+        with self._patch_log():
+            result = _parse_access_log()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["email"], "newuser@example.com")
+
+    def test_current_missing_rotated_present(self):
+        """Текущего нет, .1 есть — история не теряется, warn не сыплется."""
+        (self._tmpdir / "access.log.1").write_text(self.OLD_LINE + "\n")
+        from chimera.modules.connection_audit import _parse_access_log
+        with self._patch_log():
+            result = _parse_access_log(include_rotated=True)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["email"], "olduser@example.com")
+
+    def test_window_10000_per_file(self):
+        """Окно — последние 10000 строк НА ФАЙЛ (bounded память, полная история)."""
+        filler = ["2026/10/26 10:00:00 accepted tcp:198.51.100.1:1 dst:1.2.3.4:443 email:fill@example.com"] * 10001
+        (self._tmpdir / "access.log.1").write_text("\n".join(filler) + "\n")
+        self._log.write_text(self.NEW_LINE + "\n")
+        from chimera.modules.connection_audit import _parse_access_log
+        with self._patch_log():
+            result = _parse_access_log(include_rotated=True)
+        # 10000 из ротированного + 1 из текущего
+        self.assertEqual(len(result), 10001)
+        # Первая строка окна — НЕ первая строка файла (последние 10000)
+        self.assertEqual(result[0]["email"], "fill@example.com")
+        self.assertEqual(result[-1]["email"], "newuser@example.com")
+
+    def test_broken_gz_skipped_not_fatal(self):
+        """Битый .gz не валит аудит — файл пропускается, остальные читаются."""
+        (self._tmpdir / "access.log.2.gz").write_bytes(b"\x1f\x8bNOTREALGZIP")
+        (self._tmpdir / "access.log.1").write_text(self.OLD_LINE + "\n")
+        self._log.write_text(self.NEW_LINE + "\n")
+        from chimera.modules.connection_audit import _parse_access_log
+        with self._patch_log():
+            result = _parse_access_log(include_rotated=True)
+        self.assertEqual(len(result), 2)
+
+
+class TestRotatedWiring(unittest.TestCase):
+    """Сводка и активные соединения обязаны читать ротированную историю."""
+
+    def setUp(self):
+        _setup_core()
+
+    def test_user_summary_uses_rotated_history(self):
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import connection_audit
+        with patch.object(connection_audit, "_parse_access_log",
+                          MagicMock(return_value=[])) as spy, \
+             patch.object(connection_audit, "_rotated_access_log_paths",
+                          MagicMock(return_value=[])) as rot_spy, \
+             patch.object(connection_audit, "_ACCESS_LOG",
+                          Path(tempfile.mkdtemp()) / "access.log"), \
+             redirect_stdout(io.StringIO()):
+            connection_audit._audit_user_summary()
+        spy.assert_called_once_with(include_rotated=True)
+        rot_spy.assert_called()
+
+    def test_active_now_builds_map_from_rotated(self):
+        """_audit_active_now: ip_to_email из include_rotated=True
+        (long-lived туннель установлен до ночной ротации — иначе «(не сопоставлен)»)."""
+        import io
+        from contextlib import redirect_stdout
+        from chimera.modules import connection_audit
+        core = connection_audit._core_module()
+        fake_ss = MagicMock()
+        fake_ss.stdout = ('0 0 203.0.113.10:443 198.51.100.9:51902 '
+                          'users:(("xray",pid=1,fd=95))')
+        fake_ss.returncode = 0
+        with patch.object(core, "_run", return_value=fake_ss), \
+             patch.object(core, "get_server_ip", return_value="203.0.113.10"), \
+             patch.object(connection_audit, "_parse_access_log",
+                          MagicMock(return_value=[{
+                              "dt": None, "dt_str": "", "action": "accepted",
+                              "src_ip": "198.51.100.9", "email": "user@example.com",
+                              "raw": "", "dst": "",
+                          }])) as spy, \
+             redirect_stdout(io.StringIO()):
+            connection_audit._audit_active_now()
+        spy.assert_called_once_with(include_rotated=True)
+
+
 # ── traffic_history ────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

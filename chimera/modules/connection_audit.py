@@ -9,6 +9,8 @@ chimera/modules/connection_audit.py
   • do_connection_audit()        — главное меню (сводка / хронология /
                                     подозрительная активность / активные сейчас)
   • _parse_access_log()          — парсит /var/log/xray/access.log → list[dict]
+                                    (include_rotated=True: + access.log.1 и
+                                    access.log.{2..14}.gz — daily-ротация)
   • _audit_user_summary()        — сводка по пользователям (email / IP / время)
   • _audit_recent_connections(n) — последние N подключений в хронологии
   • _audit_suspicious()          — топ-IP по ошибкам + последние строки error.log
@@ -31,6 +33,7 @@ helpers) — через importlib (lazy binding), как и в других из
 """
 from __future__ import annotations
 
+import gzip
 import os
 import re
 import time
@@ -38,6 +41,11 @@ from collections import defaultdict, Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+
+# ── Пути access-логов (модуль-level константы — патчатся в тестах) ───────────
+_ACCESS_LOG = Path("/var/log/xray/access.log")
+_ACCESS_LOG_ROTATIONS = 14   # синхронно с setup_logrotate() в _core.py: rotate 14
 
 
 # ── Ленивый доступ к ядру ────────────────────────────────────────────────────
@@ -90,14 +98,72 @@ def do_connection_audit() -> None:
             time.sleep(1)
 
 
-def _parse_access_log() -> list:
-    """Парсит /var/log/xray/access.log в список dict."""
+def _rotated_access_log_paths() -> list:
+    """Ротированные access.log.* в порядке старшинства (старые → новые).
+
+    logrotate (setup_logrotate(), _core.py) с rotate 14 + delaycompress создаёт:
+      access.log.1        — свежий ротированный, НЕ сжат (delaycompress)
+      access.log.2.gz … access.log.14.gz — сжатые, чем больше N, тем старше
+    Порядок выхода: .14.gz → … → .2.gz → .1 — хронологический (старые → новые),
+    поэтому "последний выигрывает"-маппинги (ip_to_email) остаются корректными:
+    самая свежая запись для IP перезапишет устаревшую.
+    """
+    out: list = []
+    base = _ACCESS_LOG.parent
+    for n in range(_ACCESS_LOG_ROTATIONS, 1, -1):
+        p = base / f"access.log.{n}.gz"
+        if p.exists():
+            out.append(p)
+    p1 = base / "access.log.1"
+    if p1.exists():
+        out.append(p1)
+    return out
+
+
+def _access_log_sources(include_rotated: bool = False) -> list:
+    """Все источники access-лога: [ротированные (старые → новые)…, текущий]."""
+    sources: list = []
+    if include_rotated:
+        sources.extend(_rotated_access_log_paths())
+    sources.append(_ACCESS_LOG)
+    return sources
+
+
+def _read_log_lines(path: Path) -> list:
+    """Строки лог-файла: plain или .gz (stdlib gzip — без внешнего zgrep).
+
+    Бинарник zgrep в системе может отсутствовать (минимальные образы),
+    gzip из stdlib есть всегда. Ошибка чтения отдельного файла (битый архив,
+    права) не валит весь аудит: файл пропускается, остальные читаются.
+    """
+    try:
+        if str(path).endswith(".gz"):
+            with gzip.open(path, "rt", errors="replace") as fh:
+                return fh.read().splitlines()
+        return path.read_text(errors="replace").splitlines()
+    except Exception:
+        return []
+
+
+def _parse_access_log(include_rotated: bool = False) -> list:
+    """Парсит /var/log/xray/access.log в список dict.
+
+    include_rotated=True — дополнительно читает ротированные логи
+    (access.log.1 … access.log.14.gz — daily-ротация из setup_logrotate()):
+    файлы идут от старых к новым, поэтому записи в списке остаются
+    в хронологическом порядке, а словари вида "последний выигрывает"
+    (ip_to_email в _audit_active_now) корректны.
+
+    Окно ограничено: последние 10000 строк НА КАЖДЫЙ файл (не суммарно) —
+    память bounded (≤ 15 × 10000 записей), а история после ротации
+    не теряется (кейс: юзер подключался до среза — записи ушли в .1/.gz).
+    """
     core = _core_module()
     warn = core.warn
 
-    log_path = Path("/var/log/xray/access.log")
-    if not log_path.exists():
-        warn(f"access.log не найден: {log_path}")
+    sources = [p for p in _access_log_sources(include_rotated) if p.exists()]
+    if not sources:
+        warn(f"access.log не найден: {_ACCESS_LOG}")
         return []
 
     entries = []
@@ -110,46 +176,47 @@ def _parse_access_log() -> list:
         r'(?:.*?email:\s*(?P<email>\S+))?'
     )
     try:
-        lines = log_path.read_text(errors="replace").splitlines()
-        for line in lines[-10000:]:
-            line = line.strip()
-            if not line:
-                continue
-            m = pattern.match(line)
-            dt_str  = ""
-            dt      = None
-            action  = ""
-            src_ip  = ""
-            email   = ""
-            if m:
-                dt_str = f"{m.group('date')} {m.group('time')}"
-                try:
-                    dt = datetime.strptime(dt_str, "%Y/%m/%d %H:%M:%S")
-                except Exception:
-                    pass
-                action = m.group("action") or ""
-                src_ip = m.group("from_ip") or m.group("dst_ip") or ""
-                email  = m.group("email")  or ""
-            else:
-                m2 = re.match(r'(\d{4}/\d{2}/\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\w+)', line)
-                if m2:
-                    dt_str = f"{m2.group(1)} {m2.group(2)}"
+        for path in sources:
+            lines = _read_log_lines(path)
+            for line in lines[-10000:]:
+                line = line.strip()
+                if not line:
+                    continue
+                m = pattern.match(line)
+                dt_str  = ""
+                dt      = None
+                action  = ""
+                src_ip  = ""
+                email   = ""
+                if m:
+                    dt_str = f"{m.group('date')} {m.group('time')}"
                     try:
                         dt = datetime.strptime(dt_str, "%Y/%m/%d %H:%M:%S")
                     except Exception:
                         pass
-                    action = m2.group(3)
-                    ip_m   = re.search(r'(\d{1,3}(?:\.\d{1,3}){3}):\d+', line)
-                    src_ip = ip_m.group(1) if ip_m else ""
-                    em_m   = re.search(r'email:(\S+)', line)
-                    email  = em_m.group(1) if em_m else ""
+                    action = m.group("action") or ""
+                    src_ip = m.group("from_ip") or m.group("dst_ip") or ""
+                    email  = m.group("email")  or ""
                 else:
-                    continue
-            entries.append({
-                "dt": dt, "dt_str": dt_str, "action": action,
-                "src_ip": src_ip, "email": email, "raw": line,
-                "dst": m.group("dst") if m else "",
-            })
+                    m2 = re.match(r'(\d{4}/\d{2}/\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\w+)', line)
+                    if m2:
+                        dt_str = f"{m2.group(1)} {m2.group(2)}"
+                        try:
+                            dt = datetime.strptime(dt_str, "%Y/%m/%d %H:%M:%S")
+                        except Exception:
+                            pass
+                        action = m2.group(3)
+                        ip_m   = re.search(r'(\d{1,3}(?:\.\d{1,3}){3}):\d+', line)
+                        src_ip = ip_m.group(1) if ip_m else ""
+                        em_m   = re.search(r'email:(\S+)', line)
+                        email  = em_m.group(1) if em_m else ""
+                    else:
+                        continue
+                entries.append({
+                    "dt": dt, "dt_str": dt_str, "action": action,
+                    "src_ip": src_ip, "email": email, "raw": line,
+                    "dst": m.group("dst") if m else "",
+                })
     except Exception as e:
         warn(f"Ошибка чтения access.log: {e}")
     return entries
@@ -166,20 +233,23 @@ def _audit_user_summary() -> None:
     BOLD, NC, CYAN, DIM = core.BOLD, core.NC, core.CYAN, core.DIM
 
     print()
-    info("Анализ access.log...")
-    all_entries = _parse_access_log()
+    info("Анализ access.log (текущий + ротированные)...")
+    # Кейс: daily-ротация (setup_logrotate) переносит историю подключений
+    # в access.log.1/.gz — сводка по ОДНОМУ текущему файлу «теряла» юзеров,
+    # не заходивших после ночного среза. Читаем всю доступную историю.
+    all_entries = _parse_access_log(include_rotated=True)
     entries = [e for e in all_entries if e.get("action", "").lower() == "accepted"]
     if not entries:
-        log_path = Path("/var/log/xray/access.log")
-        if not log_path.exists():
+        rotated = _rotated_access_log_paths()
+        if not _ACCESS_LOG.exists() and not rotated:
             warn("access.log не найден — xray не запущен или путь не задан в config.json")
-        elif log_path.stat().st_size == 0:
+        elif _ACCESS_LOG.exists() and _ACCESS_LOG.stat().st_size == 0 and not rotated:
             warn("access.log пустой — xray запущен с loglevel=warning")
             info("Для аудита подключений нужен loglevel=info в config.json → перезапустите xray")
         elif not all_entries:
             warn("access.log есть, но записи не распознаны — нестандартный формат")
         else:
-            warn("access.log есть, но записи 'accepted' не найдены")
+            warn("записи 'accepted' не найдены (текущий лог + ротированные)")
             info("Причина: loglevel=warning — xray не пишет подключения при таком уровне")
             info("Для аудита: config.json → log.loglevel = 'info', затем перезапустите xray")
         return
@@ -208,7 +278,16 @@ def _audit_user_summary() -> None:
         col = CYAN if email != "[без email]" else DIM
         _box_row(f"  {col}{email:<30}{NC} {s['connections']:<8} {len(s['ips']):<8} {first_str:<18} {last_str}")
     _box_sep()
-    _box_row(f"  {DIM}Всего записей: {len(entries)}{NC}")
+    # Строка источников и периода: юзер видит, каким окном данных он владеет
+    # (сколько логов прочитано и за какой период), — иначе «пропавшие» юзеры
+    # выглядели как баг данных, хотя это просто окно чтения.
+    n_rot = len(_rotated_access_log_paths())
+    src_note = f"текущий лог + {n_rot} ротир." if n_rot else "текущий лог (ротации нет)"
+    _box_row(f"  {DIM}Всего принятых: {len(entries)} · источники: {src_note}{NC}")
+    dts = [e["dt"] for e in entries if e.get("dt")]
+    if dts:
+        period = f"{min(dts).strftime('%d.%m %H:%M')} — {max(dts).strftime('%d.%m %H:%M')}"
+        _box_row(f"  {DIM}Период данных: {period}{NC}")
     _box_row()
     _box_bottom()
 
@@ -356,10 +435,15 @@ def _audit_active_now() -> None:
             r'users:\(\("(?P<proc>[^"]+)"'
         )
 
-        # Построим map: client_IP → email через access.log
+        # Построим map: client_IP → email через access.log.
+        # include_rotated=True: long-lived туннели устанавливаются ДО ночной
+        # ротации — их записей уже нет в текущем access.log, и IP показывался
+        # бы «(не сопоставлен)». Ротированные логи восстанавливают карту.
+        # Порядок записей хронологический (старые → новые), поэтому для
+        # каждого IP остаётся самая свежая привязка («последний выигрывает»).
         ip_to_email: dict[str, str] = {}
         try:
-            entries = _parse_access_log()
+            entries = _parse_access_log(include_rotated=True)
             for e in entries:
                 ip = e.get("src_ip", "")
                 em = e.get("email", "")
