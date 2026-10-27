@@ -364,5 +364,163 @@ class TestGenerateClientConfigXhttpReality(unittest.TestCase):
         self.assertNotIn("sing-box.json", written)
 
 
+_FRAG_ADDON_FILES = (
+    "xray-client-fragment.json",
+    "singbox-client-fragment.json",
+    "vless-links-fragment.txt",
+)
+
+_FAKE_STATE_REALITY_FRAG_ON = {
+    **_FAKE_STATE_REALITY,
+    "client_fragment": {
+        "enabled": True,
+        "packets": "tlshello",
+        "length": "10-20",
+        "interval": "10-20",
+    },
+}
+
+
+class TestExportFragmentAddon(unittest.TestCase):
+    """Fragment-аддон дефолтного экспорта (тумблер client_fragment).
+
+    ВЫКЛ (дефолт): набор файлов байт-в-байт прежний — fragment-файлов нет.
+    ВКЛ: ДОПОЛНИТЕЛЬНО xray-client-fragment.json + singbox-client-fragment.json
+    (только reality) + vless-links-fragment.txt; существующие файлы не меняются.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = tempfile.mkdtemp()
+        self._state_file = Path(self._tmpdir) / "state.json"
+        self._out_dir = Path(self._tmpdir) / "configs"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _run_generate(self, state_dict: dict):
+        from chimera.modules import client_config_export
+        self._state_file.write_text(json.dumps(state_dict))
+        core = sys.modules.get("chimera._core")
+        written = {}
+        _orig_write = Path.write_text
+
+        def _capture_write(self_path, data, *a, **kw):
+            s = str(self_path)
+            if "xray-client-configs" in s or "configs" in s:
+                name = Path(s).name
+                dest = self._out_dir / name
+                os.makedirs(str(dest.parent), exist_ok=True)
+                _orig_write(dest, data, *a, **kw)
+                written[name] = data
+                return len(data)
+            return _orig_write(self_path, data, *a, **kw)
+
+        with patch.object(core, "STATE_FILE", self._state_file), \
+             patch.object(client_config_export, "_core_module", return_value=core), \
+             patch.object(Path, "write_text", _capture_write), \
+             patch.object(Path, "mkdir", lambda self, *a, **kw: None):
+            for _fn in ("_box_top", "_box_row", "_box_sep", "_box_bottom",
+                        "_box_ok", "_box_warn", "_box_info"):
+                setattr(core, _fn, MagicMock())
+            core.log_to_file = MagicMock()
+            client_config_export.do_generate_client_config()
+
+        return written
+
+    def test_fragment_files_absent_when_toggle_off(self):
+        """Регрессия: тумблер ВЫКЛ — fragment-файлов нет, дефолтный набор
+        не изменился (обратная совместимость 100%)."""
+        written = self._run_generate(_FAKE_STATE_REALITY)
+        for fname in _FRAG_ADDON_FILES:
+            self.assertNotIn(fname, written,
+                             f"{fname} не должен генерироваться при "
+                             f"client_fragment=OFF")
+
+    def test_fragment_files_generated_when_toggle_on(self):
+        """Тумблер ВКЛ (reality): три доп. файла; vless-link.txt и прочие
+        дефолтные файлы не изменились."""
+        written_off = self._run_generate(_FAKE_STATE_REALITY)
+        written_on = self._run_generate(_FAKE_STATE_REALITY_FRAG_ON)
+
+        self.assertIn("xray-client-fragment.json", written_on)
+        self.assertIn("singbox-client-fragment.json", written_on)
+        self.assertIn("vless-links-fragment.txt", written_on)
+
+        # Дефолтные файлы не изменились
+        for fname in ("clash-meta.yaml", "sing-box.json", "hiddify.json",
+                      "vless-link.txt"):
+            self.assertIn(fname, written_on)
+            self.assertEqual(written_on[fname], written_off[fname],
+                             f"{fname} не должен меняться при включении "
+                             f"fragment-аддона")
+
+    def test_xray_fragment_json_contains_fragment(self):
+        """Xray JSON (v2rayN/v2rayNG): sockopt.fragment с параметрами
+        тумблера (tlshello-рецепт)."""
+        written = self._run_generate(_FAKE_STATE_REALITY_FRAG_ON)
+        xray_cfg = json.loads(written["xray-client-fragment.json"])
+        proxy = [ob for ob in xray_cfg["outbounds"] if ob["tag"] == "proxy"][0]
+        frag = proxy["streamSettings"]["sockopt"]["fragment"]
+        self.assertEqual(frag["packets"], "tlshello")
+        self.assertEqual(frag["length"], "10-20")
+        self.assertEqual(frag["interval"], "10-20")
+        # REALITY-параметры на месте (транспорт не пострадал)
+        rs = proxy["streamSettings"]["realitySettings"]
+        self.assertEqual(rs["publicKey"], "TEST_PUB_KEY_123")
+        self.assertEqual(rs["shortId"], "abcd1234")
+
+    def test_singbox_fragment_json_contains_fragment(self):
+        """Sing-box JSON (Hiddify/NekoBox): dial-поле fragment."""
+        written = self._run_generate(_FAKE_STATE_REALITY_FRAG_ON)
+        sb_cfg = json.loads(written["singbox-client-fragment.json"])
+        ob = sb_cfg["outbounds"][0]
+        self.assertTrue(ob["fragment"]["enabled"])
+        self.assertEqual(ob["fragment"]["size"], "10-20")
+
+    def test_links_fragment_file_has_client_formats(self):
+        """vless-links-fragment.txt: Happ (length,interval,packets),
+        Incy (fragmentLength/fragmentInterval), Neko (packets,length,interval)."""
+        written = self._run_generate(_FAKE_STATE_REALITY_FRAG_ON)
+        links = written["vless-links-fragment.txt"]
+        import urllib.parse
+        # Happ: fragment=length,interval,packets
+        self.assertIn("fragment=", links)
+        happ_val = urllib.parse.unquote(
+            [p for p in links.split() if p.startswith("vless://")][0]
+            .split("fragment=", 1)[1].split("#", 1)[0].split("&", 1)[0])
+        self.assertEqual(happ_val, "10-20,10-20,tlshello")
+        # Incy: fragmentLength/fragmentInterval
+        self.assertIn("fragmentLength=10-20", links)
+        self.assertIn("fragmentInterval=10-20", links)
+        # Три ссылки — Happ/Incy/Neko
+        self.assertEqual(links.count("vless://"), 3)
+
+    def test_xhttp_reality_honest_export_no_singbox_fragment(self):
+        """Честный экспорт: xhttp_reality — sing-box fragment НЕ генерируем
+        (ядро sing-box не поддерживает xhttp), Xray JSON и ссылки — генерируем."""
+        state = {
+            **_FAKE_STATE_XHTTP_REALITY,
+            "client_fragment": {"enabled": True, "packets": "1-3",
+                                "length": "10-20", "interval": "10-20"},
+        }
+        written = self._run_generate(state)
+        self.assertIn("xray-client-fragment.json", written)
+        self.assertIn("vless-links-fragment.txt", written)
+        self.assertNotIn("singbox-client-fragment.json", written)
+
+    def test_broken_toggle_state_falls_back_to_default(self):
+        """Честный экспорт: битый блок client_fragment (неполные параметры)
+        = выключено, дефолтный набор без fragment-файлов, ничего не падает."""
+        state = {
+            **_FAKE_STATE_REALITY,
+            "client_fragment": {"enabled": True, "packets": "1-3"},
+        }
+        written = self._run_generate(state)
+        for fname in _FRAG_ADDON_FILES:
+            self.assertNotIn(fname, written)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

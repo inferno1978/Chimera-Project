@@ -156,10 +156,16 @@ def generate_fragment_client_config(
     length: str = "3-7",
     interval: str = "10-20",
     label: str = "fragment",
+    noise_packet: Optional[str] = None,
+    noise_delay: Optional[str] = None,
 ) -> Optional[Path]:
     """
     Генерирует клиентский конфиг Xray с фрагментацией и сохраняет его
     в /var/lib/xray-installer/fragment_configs/<label>.json.
+
+    noise_packet/noise_delay (опционально, обе или ни одной): добавляют
+    sockopt.noise — комбо «fragment + noise» одной генерацией
+    (шум перед ClientHello: если DPI научился распознавать фрагменты).
 
     Конфиг является КЛИЕНТСКИМ — он работает на устройстве пользователя
     и проксирует трафик через VPS. Серверный /etc/xray/config.json
@@ -191,7 +197,15 @@ def generate_fragment_client_config(
         _warn("В state.json нет domain/uuid — конфиг не может быть сгенерирован")
         return None
 
-    sockopt = build_fragment_sockopt(packets, length, interval)
+    # Комбо fragment+noise — одной генерацией (ленивый импорт:
+    # fragment_noise сам импортирует build_fragment_sockopt отсюда,
+    # топ-левел импорт дал бы circular import).
+    if noise_packet and noise_delay:
+        from chimera.modules.fragment_noise import build_noise_sockopt
+        sockopt = build_noise_sockopt(packets, length, interval,
+                                      noise_packet, noise_delay)
+    else:
+        sockopt = build_fragment_sockopt(packets, length, interval)
 
     # ── Строим outbound в зависимости от протокола ─────────────────────────
     if protocol_mode == "xhttp":
@@ -349,7 +363,18 @@ def generate_fragment_client_config(
 
 
 def _validate_range_str(value: str, what: str) -> bool:
-    """Проверяет, что строка имеет вид 'N' или 'N-M' с целыми числами > 0."""
+    """Проверяет, что строка имеет вид 'N' или 'N-M' с целыми числами > 0.
+
+    Спец-значение для what='packets': 'tlshello' — фрагментировать ВСЕ
+    TCP-сегменты до конца TLS ClientHello (Xray-core sockopt.fragment.
+    .packets; принято живой валидацией `xray run -test` на ядре 26.10.21).
+    Рецепт волны DPI/CHECKER (окт-2026): packets=tlshello length=10-20
+    interval=10-20.
+    """
+    # Xray sockopt.fragment.packets допускает спец-строку "tlshello"
+    # вместо числового диапазона — валидна ТОЛЬКО для поля packets.
+    if what == "packets" and value.strip().lower() == "tlshello":
+        return True
     parts = value.strip().split("-")
     if len(parts) not in (1, 2):
         _warn(f"{what}: ожидается формат 'N' или 'N-M', например '3-7'")
@@ -366,6 +391,164 @@ def _validate_range_str(value: str, what: str) -> bool:
         _warn(f"{what}: нижняя граница должна быть ≤ верхней")
         return False
     return True
+
+
+# ── Fragment в дефолтном экспорте клиентских конфигов (тумблер) ────────────
+#
+# state.json → "client_fragment":
+#     {"enabled": true, "packets": "1-3", "length": "10-20", "interval": "10-20"}
+#
+# ВКЛ: do_generate_client_config (client_config_export.py) ДОПОЛНИТЕЛЬНО
+# кладёт в /root/xray-client-configs/ (аддитивно, существующие файлы
+# экспорта не меняются):
+#   xray-client-fragment.json    — v2rayN/v2rayNG/Nekoray(Xray)/xray CLI
+#   singbox-client-fragment.json — Hiddify/NekoBox (только reality-ветка:
+#                                   xhttp-транспорт sing-box не поддерживает)
+#   vless-links-fragment.txt     — Happ/Incy/Nekoray (fragment прямо в URI)
+#
+# ВЫКЛ (ключа нет / enabled=false — дефолт): поведение дефолтного экспорта
+# байт-в-байт прежнее. Управление — пункт 5 в do_fragment_config_menu().
+
+def get_client_fragment_settings(state: dict) -> Optional[dict]:
+    """Настройки fragment-аддона дефолтного экспорта.
+
+    Возвращает {"packets", "length", "interval"} или None = выключено
+    (в т.ч. при неполных параметрах — честный экспорт не врёт).
+    """
+    cf = state.get("client_fragment") if isinstance(state, dict) else None
+    if not isinstance(cf, dict) or not cf.get("enabled"):
+        return None
+    packets  = str(cf.get("packets", "") or "").strip()
+    length   = str(cf.get("length", "") or "").strip()
+    interval = str(cf.get("interval", "") or "").strip()
+    if not (packets and length and interval):
+        return None
+    return {"packets": packets, "length": length, "interval": interval}
+
+
+def _save_client_fragment_state(cf: dict) -> bool:
+    """Записывает блок client_fragment в state.json (сохраняя остальное)."""
+    st: dict = {}
+    if _STATE_FILE.exists():
+        try:
+            st = json.loads(_STATE_FILE.read_text())
+        except Exception:
+            st = {}
+        if not isinstance(st, dict):
+            st = {}
+    st["client_fragment"] = cf
+    try:
+        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _STATE_FILE.write_text(json.dumps(st, indent=2, ensure_ascii=False))
+        return True
+    except Exception as e:
+        _warn(f"Не удалось записать state.json: {e}")
+        return False
+
+
+def do_export_fragment_toggle_menu() -> None:
+    """
+    Тумблер «fragment в дефолтном экспорте клиентских конфигов».
+
+    ВКЛ: do_generate_client_config (меню экспорта) дополнительно
+    генерирует fragment-варианты конфигов — Xray JSON (v2rayNG/v2rayN),
+    Sing-box JSON (Hiddify/NekoBox) и ссылки Happ/Incy/Nekoray с
+    fragment в URI. Серверный /etc/xray/config.json не затрагивается.
+
+    Вызывается пунктом 5 меню do_fragment_config_menu (Меню 4 → F4).
+    """
+    # Текущее состояние
+    state: dict = {}
+    if _STATE_FILE.exists():
+        try:
+            state = json.loads(_STATE_FILE.read_text())
+        except Exception:
+            state = {}
+    cur = get_client_fragment_settings(state)
+
+    os.system("clear")
+    print()
+    _box_top("📦  FRAGMENT В ДЕФОЛТНОМ ЭКСПОРТЕ")
+    _box_desc(
+        "Когда ВКЛ: экспорт клиентских конфигов дополнительно кладёт "
+        "fragment-варианты — Xray JSON (v2rayNG/v2rayN), Sing-box JSON "
+        "(Hiddify/NekoBox) и ссылки Happ/Incy/Nekoray с fragment в URI. "
+        "Существующие файлы экспорта не меняются."
+    )
+    _box_sep()
+    if cur:
+        _box_row(f"  {GREEN}● ВКЛЮЧЕНО{NC}: packets={cur['packets']}  "
+                 f"length={cur['length']}б  interval={cur['interval']}мс")
+    else:
+        _box_row(f"  {DIM}○ ВЫКЛЮЧЕНО (дефолт){NC}")
+    _box_sep()
+    _box_item("1", f"Включить — агрессивная  {DIM}packets=1-3 length=1-3б interval=5-10мс{NC}")
+    _box_item("2", f"Включить — сбалансированная  {DIM}packets=1-3 length=3-7б interval=10-20мс{NC}")
+    _box_item("3", f"Включить — лёгкая  {DIM}packets=1-2 length=5-15б interval=20-50мс{NC}")
+    _box_item("4", f"Включить — tlshello-рецепт  {DIM}packets=tlshello length=10-20б "
+                   f"interval=10-20мс (DPI/CHECKER){NC}")
+    _box_item("5", f"Включить — своя  {DIM}ввести packets/length/interval вручную{NC}")
+    _box_sep()
+    _box_item("0", f"{RED}Выключить{NC}  {DIM}(вернуть дефолтный экспорт без fragment){NC}")
+    _box_row()
+    _box_back()
+    _box_bottom()
+
+    try:
+        ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+    except KeyboardInterrupt:
+        return
+
+    preset_map = {
+        "1": {"packets": "1-3", "length": "1-3",  "interval": "5-10"},
+        "2": {"packets": "1-3", "length": "3-7",  "interval": "10-20"},
+        "3": {"packets": "1-2", "length": "5-15", "interval": "20-50"},
+        "4": {"packets": "tlshello", "length": "10-20", "interval": "10-20"},
+    }
+
+    if ch in ("q", ""):
+        return
+
+    if ch == "0":
+        if _save_client_fragment_state({"enabled": False}):
+            _success("Fragment-аддон экспорта ВЫКЛЮЧЕН")
+        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        return
+
+    if ch in preset_map:
+        cf = {"enabled": True, **preset_map[ch]}
+    elif ch == "5":
+        print()
+        _info("Введите параметры (packets: N, N-M или tlshello):")
+        print()
+        try:
+            raw_packets  = input(f"  {CYAN}packets {DIM}(напр. 1-3 или tlshello){NC}:  ").strip() or "1-3"
+            raw_length   = input(f"  {CYAN}length  {DIM}(байты,    напр. 10-20){NC}:  ").strip() or "10-20"
+            raw_interval = input(f"  {CYAN}interval{DIM}(мс,       напр. 10-20){NC}: ").strip() or "10-20"
+        except KeyboardInterrupt:
+            return
+        ok = (
+            _validate_range_str(raw_packets,  "packets")
+            and _validate_range_str(raw_length,   "length")
+            and _validate_range_str(raw_interval, "interval")
+        )
+        if not ok:
+            time.sleep(2)
+            return
+        cf = {"enabled": True, "packets": raw_packets,
+              "length": raw_length, "interval": raw_interval}
+    else:
+        _warn("Неверный выбор.")
+        time.sleep(1)
+        return
+
+    if _save_client_fragment_state(cf):
+        _success(f"Fragment-аддон экспорта ВКЛЮЧЁН: packets={cf['packets']} "
+                 f"length={cf['length']}б interval={cf['interval']}мс")
+        _info("Применится при следующей генерации клиентских конфигов "
+              "(экспорт/share) — дополнительными файлами "
+              "*-fragment.json + vless-links-fragment.txt")
+    input(f"\n{BLUE}Нажмите Enter...{NC}")
 
 
 def do_fragment_config_menu() -> None:
@@ -387,6 +570,8 @@ def do_fragment_config_menu() -> None:
         _box_item("2", f"✅ Сбалансированная  {DIM}(3–7 байт, рекомендуется){NC}")
         _box_item("3", f"🔆 Лёгкая  {DIM}(5–15 байт, минимальный оверхед){NC}")
         _box_item("4", f"⚙️  Пользовательская  {DIM}(ввести length / interval / packets){NC}")
+        _box_item("5", f"📦 Fragment в дефолтном экспорте  {DIM}(тумблер: доп. файлы "
+                       f"v2rayNG/Hiddify/Happ){NC}")
         _box_sep()
         _box_item("L", f"📂 Показать сохранённые конфиги")
         _box_row(f"       {DIM}{_FRAGMENT_DIR}{NC}")
@@ -453,6 +638,9 @@ def do_fragment_config_menu() -> None:
             if path:
                 _success(f"Конфиг сохранён: {path}")
             input(f"\n{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "5":
+            do_export_fragment_toggle_menu()
 
         elif ch == "l":
             # Список сохранённых конфигов

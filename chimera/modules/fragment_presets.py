@@ -144,6 +144,16 @@ PRESET_MATRIX = [
         "interval": "10-20",
     },
     {
+        "label":    "frag_04b_medium_tlshello",
+        "group":    "medium",
+        "name":     "Средняя tlshello",
+        "hint":     "10–20 байт / tlshello / 10–20 мс — ClientHello целиком "
+                    "(рецепт волны DPI/CHECKER окт-2026)",
+        "packets":  "tlshello",
+        "length":   "10-20",
+        "interval": "10-20",
+    },
+    {
         "label":    "frag_05_medium_std",
         "group":    "medium",
         "name":     "Средняя стандарт",
@@ -180,6 +190,19 @@ PRESET_MATRIX = [
         "length":   "100-200",
         "interval": "5-10",
     },
+    # ── Комбо fragment + noise (одной генерацией) ───────────────────
+    {
+        "label":    "frag_09_noise_std",
+        "group":    "combo",
+        "name":     "Средняя + шум",
+        "hint":     "10–20 байт / 1–3 пак / 10–20 мс + noise 10–20 б — "
+                    "если DPI ловит фрагментированные паттерны",
+        "packets":  "1-3",
+        "length":   "10-20",
+        "interval": "10-20",
+        "noise_packet": "10-20",
+        "noise_delay":  "5-10",
+    },
     # ── Без фрагментации (эталон) ───────────────────────────────────────
     {
         "label":    "frag_00_no_fragment",
@@ -197,6 +220,7 @@ _GROUP_LABELS = {
     "aggressive": f"⚡ Агрессивные  {DIM}(мелкие пакеты, жёсткий DPI){NC}",
     "medium":     f"⚖️  Средние      {DIM}(когда мелкие не работают){NC}",
     "light":      f"🔆 Лёгкие       {DIM}(минимальный оверхед){NC}",
+    "combo":      f"🧩 Комбо        {DIM}(fragment + noise одной генерацией){NC}",
     "baseline":   f"📋 Эталон       {DIM}(без фрагментации, для сравнения){NC}",
 }
 
@@ -334,11 +358,16 @@ def _generate_one(preset: dict) -> Optional[Path]:
         except Exception:
             return None
     else:
+        # noise-параметры пресета (группа combo) пробрасываются в
+        # generate_fragment_client_config — комбо «fragment + noise»
+        # одной генерацией; у обычных пресетов ключей нет → None.
         return generate_fragment_client_config(
             packets=preset["packets"],
             length=preset["length"],
             interval=preset["interval"],
             label=preset["label"],
+            noise_packet=preset.get("noise_packet"),
+            noise_delay=preset.get("noise_delay"),
         )
 
 

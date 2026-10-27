@@ -477,6 +477,69 @@ def do_generate_client_config() -> None:
         from chimera.modules.ios_link_variant import to_ios_karing_link
         ios_link_file.write_text(to_ios_karing_link(vless_link) + "\n")
 
+    # ── Fragment-аддон дефолтного экспорта (тумблер, дефолт ВЫКЛ) ──────
+    # state.json → "client_fragment": {enabled, packets, length, interval}
+    # (управление — Меню 4 → F4 → пункт 5). ВКЛ: ДОПОЛНИТЕЛЬНО кладём
+    # fragment-варианты — существующие clash/singbox/hiddify/vless-link/ios
+    # не меняются (аддитивно, обратная совместимость 100%).
+    # Матрица клиентов: Happ/Incy/Nekoray — fragment в URI;
+    # v2rayN/v2rayNG/Xray — Xray JSON; Hiddify/NekoBox — sing-box JSON
+    # (только reality-ветка: xhttp-транспорт sing-box не поддерживает).
+    _frag_files: list = []
+    _frag_note = ""
+    try:
+        from chimera.modules.fragment_config import get_client_fragment_settings
+        _cf = get_client_fragment_settings(state)
+    except Exception:
+        _cf = None
+    if _cf:
+        try:
+            from chimera.modules import fragment_link as _fl
+            _p, _l, _i = _cf["packets"], _cf["length"], _cf["interval"]
+            # Xray JSON — v2rayN / v2rayNG / Nekoray(Xray) / xray CLI
+            _xray_frag_file = out_dir / "xray-client-fragment.json"
+            _xray_frag_file.write_text(json.dumps(
+                _fl._build_xray_client_json(state, _p, _l, _i),
+                ensure_ascii=False, indent=2))
+            _frag_files.append(_xray_frag_file)
+            # Sing-box JSON — Hiddify / NekoBox (только reality-ветка)
+            if proto == "reality":
+                _sb_frag_file = out_dir / "singbox-client-fragment.json"
+                _sb_frag_file.write_text(json.dumps(
+                    _fl._build_singbox_json(state, _p, _l, _i),
+                    ensure_ascii=False, indent=2))
+                _frag_files.append(_sb_frag_file)
+            # URI-ссылки Happ/Incy/Nekoray — fragment прямо в ссылке
+            _sni_frag = _fl._resolve_sni(state)
+            _links_frag = [
+                f"# Fragment-ссылки: packets={_p} length={_l}b interval={_i}ms",
+                "# Happ (iOS/Android/Desktop) — fragment=length,interval,packets:",
+                _fl._gen_happ_link(domain, vuuid, pub_key, short_id, _sni_frag,
+                                   _p, _l, _i, fp, proto, xhttp_path,
+                                   xhttp_mode, port),
+                "",
+                "# Incy (iOS/Android/Desktop/TV) — fragmentLength/fragmentInterval:",
+                _fl._gen_incy_link(domain, vuuid, pub_key, short_id, _sni_frag,
+                                   _p, _l, _i, fp, proto, xhttp_path,
+                                   xhttp_mode, port),
+                "",
+                "# Nekoray / Nekobox (Desktop) — fragment=packets,length,interval:",
+                _fl._gen_nekoray_link(domain, vuuid, pub_key, short_id, _sni_frag,
+                                      _p, _l, _i, fp, proto, xhttp_path,
+                                      xhttp_mode, port),
+            ]
+            _links_frag_file = out_dir / "vless-links-fragment.txt"
+            _links_frag_file.write_text("\n".join(_links_frag) + "\n")
+            _frag_files.append(_links_frag_file)
+            _frag_note = f"packets={_p} length={_l}b interval={_i}мс"
+            log_to_file("INFO", "export: fragment addon (" + _frag_note
+                                + "): "
+                                + ", ".join(str(f) for f in _frag_files))
+        except Exception as _fe:
+            _frag_files = []
+            _box_warn(f"Fragment-аддон не сгенерирован: {_fe}")
+            log_to_file("WARN", f"export: fragment addon failed: {_fe}")
+
     # ── Итоговый отчёт: только реально сгенерированные файлы ────────────
     if _xhr_mode:
         # Честный экспорт: перечисляем лишь то, что создано, и объясняем,
@@ -495,6 +558,13 @@ def do_generate_client_config() -> None:
         _box_row()
         _box_row(f"  {DIM}Скопируйте ссылку на клиентское устройство:{NC}")
         _box_row(f"    {CYAN}scp root@{domain}:{vless_link_file} .{NC}")
+        if _frag_files:
+            _box_row()
+            _box_row(f"  {CYAN}Fragment-аддон (client_fragment=ON): {_frag_note}{NC}")
+            for _ff in _frag_files:
+                _box_row(f"    {CYAN}scp root@{domain}:{_ff} .{NC}")
+            _box_row(f"  {DIM}v2rayN/v2rayNG — xray-client-fragment.json; "
+                     f"Happ/Incy/Neko — ссылки в vless-links-fragment.txt{NC}")
         _box_bottom()
         log_to_file("INFO", f"Client configs generated (xhttp_reality, "
                              f"vless-link only): {vless_link_file}")
@@ -505,6 +575,14 @@ def do_generate_client_config() -> None:
     _box_ok(f"Hiddify      → {hiddify_file}")
     _box_ok(f"VLESS-ссылка → {vless_link_file}")
     _box_ok(f"iOS/Karing   → {ios_link_file}")
+    if _frag_files:
+        _box_row()
+        _box_row(f"  {CYAN}Fragment-аддон (client_fragment=ON): {_frag_note}{NC}")
+        for _ff in _frag_files:
+            _box_row(f"    {CYAN}scp root@{domain}:{_ff} .{NC}")
+        _box_row(f"  {DIM}v2rayN/v2rayNG — xray-client-fragment.json; Hiddify — "
+                 f"singbox-client-fragment.json; Happ/Incy/Neko — "
+                 f"vless-links-fragment.txt{NC}")
     _box_row()
     _box_row(f"  {DIM}Скопируйте файлы на клиентское устройство:{NC}")
     _box_row(f"    {CYAN}scp root@{domain}:{clash_file} .{NC}")

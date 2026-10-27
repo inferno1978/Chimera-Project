@@ -242,8 +242,10 @@ def _gen_nekoray_link(
 # ══════════════════════════════════════════════════════════════════════════
 
 def _build_xray_client_json(state: dict, packets: str, length: str,
-                             interval: str) -> dict:
-    """Полный клиентский Xray config.json с fragment в sockopt."""
+                             interval: str,
+                             noise_packet: Optional[str] = None,
+                             noise_delay: Optional[str] = None) -> dict:
+    """Полный клиентский Xray config.json с fragment (+ опц. noise) в sockopt."""
     proto      = state.get("protocol_mode", "reality")
     domain     = state.get("domain", "")
     port       = int(state.get("server_port", 443))
@@ -258,18 +260,24 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
 
     # TFO — только по настройке tfo_settings (дефолт ВЫКЛ,
     # инцидент 28.08.2026: DPI резал data-in-SYN).
+    # Комбо fragment+noise: noise-параметры (обе или ни одной) — ленивый
+    # импорт fragment_noise (он импортирует build_fragment_sockopt
+    # из fragment_config — топ-левел импорт дал бы circular import).
     from chimera.modules.tfo_settings import tfo_sockopt
-    sockopt = (
-        build_fragment_sockopt(packets, length, interval)
-        if packets and length and interval
-        else {
+    if noise_packet and noise_delay:
+        from chimera.modules.fragment_noise import build_noise_sockopt
+        sockopt = build_noise_sockopt(packets, length, interval,
+                                      noise_packet, noise_delay)
+    elif packets and length and interval:
+        sockopt = build_fragment_sockopt(packets, length, interval)
+    else:
+        sockopt = {
             **tfo_sockopt(),
             "tcpKeepAliveInterval": 15,
             "tcpKeepAliveIdle": 60,
             "tcpUserTimeout": 30000,
             "tcpCongestion": "bbr",
         }
-    )
 
     if proto == "xhttp":
         outbound = {
@@ -341,8 +349,10 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
 
 
 def _build_singbox_json(state: dict, packets: str, length: str,
-                        interval: str) -> dict:
-    """Sing-box outbound с нативным fragment."""
+                        interval: str,
+                        noise_packet: Optional[str] = None,
+                        noise_delay: Optional[str] = None) -> dict:
+    """Sing-box outbound с нативным fragment (+ опц. noise)."""
     proto      = state.get("protocol_mode", "reality")
     domain     = state.get("domain", "")
     port       = int(state.get("server_port", 443))
@@ -356,9 +366,15 @@ def _build_singbox_json(state: dict, packets: str, length: str,
     sni        = _resolve_sni(state)
 
     # TFO — только по настройке tfo_settings (дефолт ВЫКЛ).
+    # Комбо fragment+noise — build_singbox_noise_dial (ленивый импорт,
+    # см. _build_xray_client_json).
     from chimera.modules.tfo_settings import tfo_dial
     dial_fields: dict = {}
-    if packets and length and interval:
+    if noise_packet and noise_delay:
+        from chimera.modules.fragment_noise import build_singbox_noise_dial
+        dial_fields = build_singbox_noise_dial(packets, length, interval,
+                                               noise_packet, noise_delay)
+    elif packets and length and interval:
         dial_fields.update(tfo_dial())
         dial_fields["fragment"] = {"enabled": True, "size": length, "sleep": interval}
 
@@ -431,7 +447,9 @@ def _pick_fragment_preset() -> Optional[tuple[str, str, str]]:
     _box_item("1", f"⚡ Агрессивная    {DIM}packets=1-3  length=1-3б   interval=5-10мс{NC}")
     _box_item("2", f"✅ Сбалансированная  {DIM}packets=1-3  length=3-7б   interval=10-20мс{NC}")
     _box_item("3", f"🔆 Лёгкая         {DIM}packets=1-2  length=5-15б  interval=20-50мс{NC}")
-    _box_item("4", f"⚙️  Своя           {DIM}ввести параметры вручную{NC}")
+    _box_item("4", f"🧩 tlshello-рецепт  {DIM}packets=tlshello length=10-20б "
+                   f"interval=10-20мс (DPI/CHECKER){NC}")
+    _box_item("5", f"⚙️  Своя           {DIM}ввести параметры вручную (packets: N/N-M/tlshello){NC}")
     _box_sep()
     _box_item("0", f"Без фрагментации  {DIM}стандартная ссылка + QR{NC}")
     _box_row()
@@ -447,6 +465,7 @@ def _pick_fragment_preset() -> Optional[tuple[str, str, str]]:
         "1": ("1-3", "1-3",  "5-10"),
         "2": ("1-3", "3-7",  "10-20"),
         "3": ("1-2", "5-15", "20-50"),
+        "4": ("tlshello", "10-20", "10-20"),
     }
 
     if ch in ("0", "Q", "q", ""):
@@ -454,16 +473,21 @@ def _pick_fragment_preset() -> Optional[tuple[str, str, str]]:
 
     if ch in preset_map:
         packets, length, interval = preset_map[ch]
-        name = {"1": "aggressive", "2": "balanced", "3": "light"}[ch]
-        _info(f"Пресет: {_FRAGMENT_PRESETS[name]['desc']}")
+        name = {"1": "aggressive", "2": "balanced", "3": "light",
+                "4": "tlshello"}[ch]
+        if name == "tlshello":
+            _info("tlshello-рецепт: дробим все сегменты до конца TLS "
+                  "ClientHello (спец-значение sockopt Xray-core)")
+        else:
+            _info(f"Пресет: {_FRAGMENT_PRESETS[name]['desc']}")
         return (packets, length, interval)
 
-    if ch == "4":
+    if ch == "5":
         print()
-        _info("Введите параметры (диапазон: N или N-M, например 3-7):")
+        _info("Введите параметры (packets: N, N-M или tlshello):")
         print()
         try:
-            raw_packets  = input(f"  {CYAN}packets {DIM}(сегменты, напр. 1-3){NC}:  ").strip() or "1-3"
+            raw_packets  = input(f"  {CYAN}packets {DIM}(сегменты, напр. 1-3 или tlshello){NC}:  ").strip() or "1-3"
             raw_length   = input(f"  {CYAN}length  {DIM}(байты,    напр. 3-7){NC}:  ").strip() or "3-7"
             raw_interval = input(f"  {CYAN}interval{DIM}(мс,       напр. 10-20){NC}: ").strip() or "10-20"
         except KeyboardInterrupt:
@@ -733,8 +757,42 @@ def do_fragment_link_menu() -> None:
     packets, length, interval = result
     has_fragment = bool(packets and length and interval)
 
+    # ── Опциональный noise (комбо fragment+noise одной генерацией) ────
+    # Дефолт — N (Enter): прежнее поведение. Noise идёт ТОЛЬКО в
+    # JSON-конфиги (URI-форматы Happ/Incy/Neko noise не несут).
+    noise_packet: Optional[str] = None
+    noise_delay:  Optional[str] = None
+    if has_fragment:
+        try:
+            _ans = input(f"{CYAN}Добавить noise (шум перед ClientHello)? "
+                         f"{DIM}[y/N]{NC}: ").strip().lower()
+        except KeyboardInterrupt:
+            _ans = ""
+        if _ans in ("y", "yes", "д", "да"):
+            print()
+            _box_top("Интенсивность шума (noise)")
+            _box_item("1", "🔅 Лёгкий      10–20 байт, 5–10 мс")
+            _box_item("2", "🔆 Средний     20–50 байт, 10–20 мс")
+            _box_item("3", "🔊 Агрессивный 50–100 байт, 15–30 мс")
+            _box_bottom()
+            try:
+                _nch = input(f"{CYAN}Выбор [1-3]:{NC} ").strip()
+            except KeyboardInterrupt:
+                _nch = ""
+            _nmap = {
+                "1": ("10-20",  "5-10"),
+                "2": ("20-50",  "10-20"),
+                "3": ("50-100", "15-30"),
+            }
+            if _nch in _nmap:
+                noise_packet, noise_delay = _nmap[_nch]
+                _info(f"Noise: packet={noise_packet}б delay={noise_delay}мс "
+                      f"(только в JSON-конфигах)")
+
     safe = lambda s: s.replace("-", "_")
     frag_suffix = f"fragment_{safe(length)}b_{safe(interval)}ms" if has_fragment else "no_fragment"
+    if noise_packet and noise_delay:
+        frag_suffix += f"_noise_{safe(noise_packet)}b"
 
     # Генерируем JSON-конфиги
     print()
@@ -746,12 +804,14 @@ def do_fragment_link_menu() -> None:
 
     try:
         xray_path.write_text(
-            json.dumps(_build_xray_client_json(state, packets, length, interval),
+            json.dumps(_build_xray_client_json(state, packets, length, interval,
+                                                noise_packet, noise_delay),
                        ensure_ascii=False, indent=2)
         )
         xray_path.chmod(0o600)
         singbox_path.write_text(
-            json.dumps(_build_singbox_json(state, packets, length, interval),
+            json.dumps(_build_singbox_json(state, packets, length, interval,
+                                           noise_packet, noise_delay),
                        ensure_ascii=False, indent=2)
         )
         singbox_path.chmod(0o600)
@@ -764,7 +824,9 @@ def do_fragment_link_menu() -> None:
 
     _log("INFO", (
         f"Fragment configs generated: {xray_path}, {singbox_path} "
-        f"[packets={packets} length={length} interval={interval}]"
+        f"[packets={packets} length={length} interval={interval}"
+        + (f" noise_packet={noise_packet} noise_delay={noise_delay}]"
+           if noise_packet and noise_delay else "]")
     ))
 
     # Ссылки и QR

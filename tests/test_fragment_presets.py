@@ -44,9 +44,32 @@ class TestPresetMatrix(unittest.TestCase):
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_has_9_presets(self):
+    def test_has_11_presets(self):
         from chimera.modules.fragment_presets import PRESET_MATRIX
-        self.assertEqual(len(PRESET_MATRIX), 9)
+        self.assertEqual(len(PRESET_MATRIX), 11)
+
+    def test_frag_04b_tlshello_preset_values(self):
+        """Пресет frag_04b (рецепт DPI/CHECKER окт-2026): packets=tlshello,
+        length=10-20, interval=10-20 — цифры пастбина tuv9BiG7."""
+        from chimera.modules.fragment_presets import PRESET_MATRIX
+        p = next((x for x in PRESET_MATRIX if x["label"] == "frag_04b_medium_tlshello"), None)
+        self.assertIsNotNone(p)
+        self.assertEqual(p["packets"], "tlshello")
+        self.assertEqual(p["length"], "10-20")
+        self.assertEqual(p["interval"], "10-20")
+        self.assertEqual(p["group"], "medium")
+
+    def test_frag_09_noise_preset_values(self):
+        """Комбо-пресет fragment+noise одной генерацией (группа combo)."""
+        from chimera.modules.fragment_presets import PRESET_MATRIX
+        p = next((x for x in PRESET_MATRIX if x["label"] == "frag_09_noise_std"), None)
+        self.assertIsNotNone(p)
+        self.assertEqual(p["group"], "combo")
+        self.assertEqual(p["packets"], "1-3")
+        self.assertEqual(p["length"], "10-20")
+        self.assertEqual(p["interval"], "10-20")
+        self.assertEqual(p["noise_packet"], "10-20")
+        self.assertEqual(p["noise_delay"], "5-10")
 
     def test_each_preset_has_required_keys(self):
         from chimera.modules.fragment_presets import PRESET_MATRIX
@@ -82,9 +105,9 @@ class TestGroupLabels(unittest.TestCase):
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_has_4_groups(self):
+    def test_has_5_groups(self):
         from chimera.modules.fragment_presets import _GROUP_LABELS
-        for g in ("aggressive", "medium", "light", "baseline"):
+        for g in ("aggressive", "medium", "light", "combo", "baseline"):
             self.assertIn(g, _GROUP_LABELS)
 
 
@@ -171,6 +194,69 @@ class TestGenerateAllPresets(unittest.TestCase):
         self.assertEqual(rs["shortId"], "abcd1234")
         # baseline — без fragment в sockopt
         self.assertNotIn("fragment", ss["sockopt"])
+
+    def test_tlshello_preset_generates_config(self):
+        """frag_04b: packets='tlshello' доходит до sockopt.fragment."""
+        from chimera.modules.fragment_presets import _generate_one, PRESET_MATRIX
+        self._state.write_text(json.dumps({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+        }))
+        preset = next(p for p in PRESET_MATRIX
+                      if p["label"] == "frag_04b_medium_tlshello")
+        with self._patch()[0], self._patch()[1], self._patch()[2], self._patch()[3]:
+            path = _generate_one(preset)
+        self.assertIsNotNone(path)
+        data = json.loads(path.read_text())
+        frag = data["outbounds"][0]["streamSettings"]["sockopt"]["fragment"]
+        self.assertEqual(frag["packets"], "tlshello")
+        self.assertEqual(frag["length"], "10-20")
+
+    def test_noise_preset_generates_fragment_plus_noise(self):
+        """frag_09 (combo): sockopt содержит И fragment, И noise."""
+        from chimera.modules.fragment_presets import _generate_one, PRESET_MATRIX
+        self._state.write_text(json.dumps({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+        }))
+        preset = next(p for p in PRESET_MATRIX
+                      if p["label"] == "frag_09_noise_std")
+        with self._patch()[0], self._patch()[1], self._patch()[2], self._patch()[3]:
+            path = _generate_one(preset)
+        self.assertIsNotNone(path)
+        data = json.loads(path.read_text())
+        sockopt = data["outbounds"][0]["streamSettings"]["sockopt"]
+        self.assertIn("fragment", sockopt)
+        self.assertIn("noise", sockopt)
+        self.assertEqual(sockopt["noise"][0]["packet"], "10-20")
+        self.assertEqual(sockopt["noise"][0]["delay"], "5-10")
+
+    def test_regular_presets_have_no_noise(self):
+        """Обычные пресеты (без noise-ключей) не добавляют sockopt.noise
+        — обратная совместимость генерации."""
+        from chimera.modules.fragment_presets import _generate_one, PRESET_MATRIX
+        self._state.write_text(json.dumps({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+        }))
+        preset = next(p for p in PRESET_MATRIX
+                      if p["label"] == "frag_04_medium_fast")
+        with self._patch()[0], self._patch()[1], self._patch()[2], self._patch()[3]:
+            path = _generate_one(preset)
+        self.assertIsNotNone(path)
+        data = json.loads(path.read_text())
+        sockopt = data["outbounds"][0]["streamSettings"]["sockopt"]
+        self.assertIn("fragment", sockopt)
+        self.assertNotIn("noise", sockopt)
 
 
 if __name__ == "__main__":

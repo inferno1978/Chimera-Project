@@ -122,6 +122,26 @@ class TestValidateRangeStr(unittest.TestCase):
         from chimera.modules.fragment_config import _validate_range_str
         self.assertTrue(_validate_range_str("  3-7  ", "test"))
 
+    def test_tlshello_valid_for_packets(self):
+        """Спец-значение 'tlshello' валидно ТОЛЬКО для поля packets
+        (Xray sockopt.fragment.packets — фрагментировать до конца
+        TLS ClientHello; живая валидация xray run -test 26.10.21 OK)."""
+        from chimera.modules.fragment_config import _validate_range_str
+        self.assertTrue(_validate_range_str("tlshello", "packets"))
+
+    def test_tlshello_case_insensitive_and_whitespace(self):
+        from chimera.modules.fragment_config import _validate_range_str
+        self.assertTrue(_validate_range_str("TLSHELLO", "packets"))
+        self.assertTrue(_validate_range_str("  tlshello ", "packets"))
+
+    def test_tlshello_invalid_for_length_and_interval(self):
+        """tlshello — спец-значение только packets; для length/interval
+        оно невалидно (там Xray ждёт числовой диапазон)."""
+        from chimera.modules.fragment_config import _validate_range_str
+        self.assertFalse(_validate_range_str("tlshello", "length"))
+        self.assertFalse(_validate_range_str("tlshello", "interval"))
+        self.assertFalse(_validate_range_str("tlshello", "test"))
+
 
 class TestFragmentPresets(unittest.TestCase):
     """_FRAGMENT_PRESETS — структура."""
@@ -275,6 +295,122 @@ class TestGenerateFragmentClientConfig(unittest.TestCase):
         # имя файла должно содержать только alnum/-/_
         for c in result.name:
             self.assertTrue(c.isalnum() or c in "-_.")
+
+    def test_generates_config_with_tlshello_packets(self):
+        """packets='tlshello' проходит насквозь в sockopt.fragment
+        (рецепт DPI/CHECKER окт-2026)."""
+        from chimera.modules.fragment_config import generate_fragment_client_config
+        self._state.write_text(json.dumps({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+        }))
+        with self._patch()[0], self._patch()[1]:
+            result = generate_fragment_client_config(
+                "tlshello", "10-20", "10-20", label="tlshello_recipe")
+        self.assertIsNotNone(result)
+        data = json.loads(result.read_text())
+        frag = (data["outbounds"][0]["streamSettings"]["sockopt"]["fragment"])
+        self.assertEqual(frag["packets"], "tlshello")
+        self.assertEqual(frag["length"], "10-20")
+        self.assertEqual(frag["interval"], "10-20")
+        # noise не добавлен — комбо опционально
+        self.assertNotIn("noise",
+                         data["outbounds"][0]["streamSettings"]["sockopt"])
+
+    def test_generates_config_with_fragment_and_noise(self):
+        """Комбо fragment+noise одной генерацией: noise_packet+noise_delay
+        → sockopt.noise появляется; без них — нет (обратная совместимость)."""
+        from chimera.modules.fragment_config import generate_fragment_client_config
+        self._state.write_text(json.dumps({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+        }))
+        with self._patch()[0], self._patch()[1]:
+            result = generate_fragment_client_config(
+                "1-3", "10-20", "10-20", label="combo_noise",
+                noise_packet="10-20", noise_delay="5-10")
+        self.assertIsNotNone(result)
+        data = json.loads(result.read_text())
+        sockopt = data["outbounds"][0]["streamSettings"]["sockopt"]
+        self.assertEqual(sockopt["fragment"]["length"], "10-20")
+        self.assertIn("noise", sockopt)
+        self.assertEqual(sockopt["noise"][0]["type"], "rand")
+        self.assertEqual(sockopt["noise"][0]["packet"], "10-20")
+        self.assertEqual(sockopt["noise"][0]["delay"], "5-10")
+
+
+class TestClientFragmentSettings(unittest.TestCase):
+    """get_client_fragment_settings / _save_client_fragment_state —
+    тумблер fragment-аддона дефолтного экспорта."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_returns_none_when_absent_or_disabled(self):
+        from chimera.modules.fragment_config import get_client_fragment_settings
+        self.assertIsNone(get_client_fragment_settings({}))
+        self.assertIsNone(get_client_fragment_settings(
+            {"client_fragment": {"enabled": False, "packets": "1-3"}}))
+        self.assertIsNone(get_client_fragment_settings(
+            {"client_fragment": {}}))
+
+    def test_returns_none_when_params_incomplete(self):
+        """Честный экспорт: неполные параметры = выключено (None)."""
+        from chimera.modules.fragment_config import get_client_fragment_settings
+        self.assertIsNone(get_client_fragment_settings(
+            {"client_fragment": {"enabled": True, "packets": "1-3"}}))
+        self.assertIsNone(get_client_fragment_settings(
+            {"client_fragment": {"enabled": True, "packets": "1-3",
+                                  "length": "", "interval": "10-20"}}))
+
+    def test_returns_settings_when_enabled(self):
+        from chimera.modules.fragment_config import get_client_fragment_settings
+        cf = {"enabled": True, "packets": "tlshello",
+              "length": "10-20", "interval": "10-20"}
+        got = get_client_fragment_settings({"client_fragment": cf})
+        self.assertEqual(got, {"packets": "tlshello",
+                               "length": "10-20", "interval": "10-20"})
+
+    def test_returns_none_for_non_dict_input(self):
+        from chimera.modules.fragment_config import get_client_fragment_settings
+        self.assertIsNone(get_client_fragment_settings(None))
+        self.assertIsNone(get_client_fragment_settings(
+            {"client_fragment": "garbage"}))
+
+    def test_save_roundtrip_preserves_other_state(self):
+        """_save_client_fragment_state не затирает остальные ключи state.json
+        и округляет блок client_fragment через get_client_fragment_settings."""
+        import tempfile
+        from chimera.modules import fragment_config
+        tmpdir = Path(tempfile.mkdtemp())
+        state_file = tmpdir / "state.json"
+        state_file.write_text(json.dumps({
+            "domain": "x.com", "uuid": "u", "client_fragment": {"enabled": False},
+        }))
+        try:
+            with patch("chimera.modules.fragment_config._STATE_FILE", state_file):
+                ok = fragment_config._save_client_fragment_state(
+                    {"enabled": True, "packets": "tlshello",
+                     "length": "10-20", "interval": "10-20"})
+                self.assertTrue(ok)
+                st = json.loads(state_file.read_text())
+                # остальной state цел
+                self.assertEqual(st["domain"], "x.com")
+                self.assertEqual(st["uuid"], "u")
+                # блок записан и читается тумблером
+                self.assertEqual(
+                    fragment_config.get_client_fragment_settings(st),
+                    {"packets": "tlshello", "length": "10-20",
+                     "interval": "10-20"})
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":
