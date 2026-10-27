@@ -136,10 +136,30 @@ class TestSupportsAwg31(unittest.TestCase):
                   "KeepaliveTimeout", "MaxHandshakeAttempts",
                   "RandomTrailers = on", "DisableCookies = on"):
             self.assertIn(d, conf, msg=d)
-        # Stripped-формат: без awg-quick директив (Address/DNS/MTU/Table)
-        self.assertNotIn("Address", conf)
-        self.assertNotIn("MTU", conf)
-        self.assertNotIn("Table", conf)
+        # Stripped-формат: без awg-quick директив (Address/DNS/MTU/Table).
+        # Line-anchored: подстрочный assertNotIn("MTU") ловил случайные
+        # base64-подстроки HeaderProtectionKey ('M','T','U' — валидные
+        # b64-символы, P≈1/5263 ключа) — флейк CI run 76 (28.10.2026):
+        # падение гейта без изменения кода. Директива = строка «^Name =»;
+        # подстрока внутри значения ключа директивой не является.
+        import re
+        for d in ("Address", "DNS", "MTU", "Table"):
+            self.assertIsNone(
+                re.search(rf"(?m)^\s*{d}\s*=", conf), msg=d)
+
+    def test_stripped_check_ignores_b64_substrings(self):
+        """Регрессия флейка CI run 76: 'MTU' внутри base64-значения
+        HeaderProtectionKey — НЕ awg-quick директива; line-anchored
+        проверка не должна на него реагировать."""
+        import re
+        conf = ("HeaderProtectionKey = 2GYbmX3F06UWiXuWcBlCmd+TyI5Ht3kP/01aEMTUukc=\n"
+                "PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n")
+        for d in ("Address", "DNS", "MTU", "Table"):
+            self.assertIsNone(re.search(rf"(?m)^\s*{d}\s*=", conf), msg=d)
+        # а настоящая awg-quick директива — ловится
+        conf2 = "PrivateKey = A\nMTU = 1420\nAddress = 10.0.0.1/32\n"
+        self.assertIsNotNone(re.search(r"(?m)^\s*MTU\s*=", conf2))
+        self.assertIsNotNone(re.search(r"(?m)^\s*Address\s*=", conf2))
 
 
 class TestApply31ErrorHandling(unittest.TestCase):

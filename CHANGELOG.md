@@ -1,3 +1,11 @@
+# Changelog new entry — Флейк CI run 76: assertNotIn("MTU") ловил случайные base64-подстроки HeaderProtectionKey (28 Oct 2026)
+
+## FIX(tests)/диагноз: гейт run 76 упал на tests.test_awg_compat_31::test_sample_conf_contains_31_directives БЕЗ изменения кода (runs 74/75 зелёные, коммит 63590de не трогал awg). Корень: sample-conf для пробы setconf содержит СЛУЧАЙНЫЙ HeaderProtectionKey (44-символьный base64 от awg31_generate_extra_params), а тест проверял stripped-формат подстрочным assertNotIn("MTU", conf) — буквы M/T/U валидны в base64, подстрока «MTU» в ключе встречается с P≈1/5263 прогона (замер: 38 ключей из 200000; «Address»/«Table» — 0, но теоретически возможны: все их буквы тоже b64-символы). Run 76 — тот самый 1 из ~5000; мина латентная, существовала с момента написания теста.
+
+**Фикс — line-anchored проверки:** директива awg-quick = строка «^Name =», а не подстрока в любом месте конфига: re.search(rf"(?m)^\s*{d}\s*=", conf) для Address/DNS/MTU/Table (DNS добавлен — он в документированном наборе awg-quick из комментария теста). Подстрока внутри base64-значения ключа директивой не является и проверку не триггерит. + Регрессионный тест test_stripped_check_ignores_b64_substrings: ключ с «MTU» внутри (реальный пример из замера) не детектится как директива; настоящие строки «MTU = 1420»/«Address = …» — детектятся.
+
+**Верификация:** 18/18 на 3.12.15 и 3.10.22; фазз самого сценария 2000 прогонов (каждый с новым случайным ключом) — 0 ложных срабатываний. warp_telegram_probe::assertNotIn("Table") проверен — статические моки, мины нет.
+
 # Changelog new entry — Fragment-стек: tlshello (рецепт DPI/CHECKER окт-2026), fragment за тумблером в дефолтном экспорте, комбо fragment+noise одной генерацией (28 Oct 2026)
 
 ## FEAT(fragment)/контекст: пересыл из 🛡️ DPI/CHECKER — «в РФ у части операторов на домашнем/мобильном интернете начали резать ClientHello на 443 TCP». Пастбин tuv9BiG7 — Xray sockopt.fragment {length:10-20, packets:"tlshello", interval:10-20} в обёртке Remnawave Final Mask (чужая схема — в Chimera не вносилась, у нас свой эквивалент). Живая валидация перед патчем: `xray run -test` на ядре ноды 26.10.21 с packets="tlshello" → Configuration OK.
