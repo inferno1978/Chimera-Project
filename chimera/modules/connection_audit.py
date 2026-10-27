@@ -10,7 +10,9 @@ chimera/modules/connection_audit.py
                                     подозрительная активность / активные сейчас)
   • _parse_access_log()          — парсит /var/log/xray/access.log → list[dict]
                                     (include_rotated=True: + access.log.1 и
-                                    access.log.{2..14}.gz — daily-ротация)
+                                    access.log.{2..14}.gz — daily-ротация;
+                                    IP клиента — ТОЛЬКО из `from <IP>:<port>`,
+                                    строки observatory/outbound игнорируются)
   • _audit_user_summary()        — сводка по пользователям (email / IP / время)
   • _audit_recent_connections(n) — последние N подключений в хронологии
   • _audit_suspicious()          — топ-IP по ошибкам + последние строки error.log
@@ -145,6 +147,58 @@ def _read_log_lines(path: Path) -> list:
         return []
 
 
+# ── Правила парсинга access-лога (фикс «чужих IP в аудите») ──────────────────
+
+# Служебные строки xray, которые НЕ являются клиентскими соединениями:
+#   • observatory (app/observatory, burst observatory) — health-check'ы
+#     цепочек: адреса в них — цели проверок, а не клиенты;
+#   • outbound (app/proxyman/outbound, proxy/*/outbound) — диспетчер
+#     исходящего трафика: адреса в них — destination'ы.
+# Без фильтра такие строки попадали в аудит и приписывали юзерам ЧУЖИЕ IP
+# (кейс: destination-адрес показывался как «IP клиента» юзера).
+# Теги outbound'ов Chimera (direct / chain-exit-N / hop-fi / xray-stats-api)
+# слов-маркеров не содержат — фильтр их не задевает.
+_SKIP_LINE_MARKERS = ("observatory", "outbound")
+
+# Голова строки access-лога Xray (реальный формат нод Chimera):
+#   2026/10/27 03:53:45.890235 from 192.0.2.20:52359 accepted tcp:... email: u@d
+#   2026/10/27 14:07:32.429924 from [2001:db8:...]:63698 accepted tcp:...
+#   2026/10/27 03:53:46.138124 from DNS accepted udp:127.0.0.1:53 [xray.system...]
+#   2026/10/25 09:12:33 accepted tcp:198.51.100.7:49775 dst:... (легаси без from)
+_ACCESS_LINE_HEAD = re.compile(
+    r'^(?P<date>\d{4}/\d{2}/\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2})(?:\.\d+)?\s+'
+    r'(?:from\s+(?P<from_tok>\S+)\s+)?'
+    r'(?P<action>\w+)'
+)
+
+# from-токен как адрес клиента: IPv4:port | [IPv6]:port.
+_FROM_ADDR = re.compile(
+    r'^(?:\[(?P<v6>[0-9a-fA-F:.]+)\]|(?P<v4>\d{1,3}(?:\.\d{1,3}){3})):(?P<port>\d+)$'
+)
+
+_EMAIL_FIELD = re.compile(r'email:\s*(\S+)')
+
+# Destination из `tcp:<dest>:<port>` / `udp:<dest>:<port>` (информационно).
+_DST_FIELD = re.compile(r'\b(?:tcp|udp):(?P<dst>\[[0-9a-fA-F:.]+\]|[^\s:]+):\d+')
+
+
+def _client_ip_from_token(tok: str) -> str:
+    """IP клиента из from-токена; '' — если токен не адрес (напр. 'DNS').
+
+    '[2001:db8:...]:63698'   → '2001:db8:...'
+    '[::ffff:1.2.3.4]:443'    → '1.2.3.4'      (IPv4-mapped нормализуется)
+    '192.0.2.20:52359'       → '192.0.2.20'
+    'DNS'                     → ''
+    """
+    m = _FROM_ADDR.match(tok)
+    if not m:
+        return ""
+    ip = m.group("v6") or m.group("v4") or ""
+    if ip.lower().startswith("::ffff:") and "." in ip:
+        ip = ip[7:]
+    return ip
+
+
 def _parse_access_log(include_rotated: bool = False) -> list:
     """Парсит /var/log/xray/access.log в список dict.
 
@@ -157,6 +211,18 @@ def _parse_access_log(include_rotated: bool = False) -> list:
     Окно ограничено: последние 10000 строк НА КАЖДЫЙ файл (не суммарно) —
     память bounded (≤ 15 × 10000 записей), а история после ротации
     не теряется (кейс: юзер подключался до среза — записи ушли в .1/.gz).
+
+    Правила извлечения IP клиента (фикс «чужих IP в аудите»):
+      • IP клиента берётся ТОЛЬКО из префикса `from <IP>:<port>` — IPv4
+        или [IPv6] (IPv4-mapped [::ffff:x.x.x.x] нормализуется до IPv4);
+      • строки observatory/outbound (health-check'ы цепочек, диспетчер
+        исходящего трафика) игнорируются целиком — их адреса не клиентские;
+      • строки `from <не-адрес>` — внутренние события xray (например
+        «from DNS … udp:127.0.0.1:53» — диспетчер DNS) — пропускаются;
+      • строка без `from` (легаси-формат) сохраняется (action/email/dst),
+        но src_ip остаётся пустым: destination из `tcp:<addr>:<port>`
+        как IP клиента больше НЕ используется (раньше это приписывало
+        юзерам адреса назначений — чужие IP в сводке/активных соединениях).
     """
     core = _core_module()
     warn = core.warn
@@ -167,14 +233,6 @@ def _parse_access_log(include_rotated: bool = False) -> list:
         return []
 
     entries = []
-    # Формат Xray: 2024/01/15 12:34:56 accepted tcp:1.2.3.4:1234 ... email:user@domain
-    pattern = re.compile(
-        r'(?P<date>\d{4}/\d{2}/\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2})(?:\.\d+)?\s+'
-        r'(?:from\s+(?P<from_ip>[^:]+):\d+\s+)?'
-        r'(?P<action>\w+)\s+(?P<proto>\w+):(?P<dst_ip>[^:]+):(?P<src_port>\d+)'
-        r'(?:\s+(?P<dst>\S+))?(?:\s+\[(?P<tag>[^\]]*)\])?'
-        r'(?:.*?email:\s*(?P<email>\S+))?'
-    )
     try:
         for path in sources:
             lines = _read_log_lines(path)
@@ -182,40 +240,40 @@ def _parse_access_log(include_rotated: bool = False) -> list:
                 line = line.strip()
                 if not line:
                     continue
-                m = pattern.match(line)
-                dt_str  = ""
-                dt      = None
-                action  = ""
-                src_ip  = ""
-                email   = ""
-                if m:
-                    dt_str = f"{m.group('date')} {m.group('time')}"
-                    try:
-                        dt = datetime.strptime(dt_str, "%Y/%m/%d %H:%M:%S")
-                    except Exception:
-                        pass
-                    action = m.group("action") or ""
-                    src_ip = m.group("from_ip") or m.group("dst_ip") or ""
-                    email  = m.group("email")  or ""
-                else:
-                    m2 = re.match(r'(\d{4}/\d{2}/\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\w+)', line)
-                    if m2:
-                        dt_str = f"{m2.group(1)} {m2.group(2)}"
-                        try:
-                            dt = datetime.strptime(dt_str, "%Y/%m/%d %H:%M:%S")
-                        except Exception:
-                            pass
-                        action = m2.group(3)
-                        ip_m   = re.search(r'(\d{1,3}(?:\.\d{1,3}){3}):\d+', line)
-                        src_ip = ip_m.group(1) if ip_m else ""
-                        em_m   = re.search(r'email:(\S+)', line)
-                        email  = em_m.group(1) if em_m else ""
-                    else:
+                # 1) Служебные строки (observatory/outbound) — не клиентские.
+                low = line.lower()
+                if any(marker in low for marker in _SKIP_LINE_MARKERS):
+                    continue
+                # 2) Голова строки: дата/время, опц. from-токен, действие.
+                m = _ACCESS_LINE_HEAD.match(line)
+                if not m:
+                    continue
+                dt_str = f"{m.group('date')} {m.group('time')}"
+                try:
+                    dt = datetime.strptime(dt_str, "%Y/%m/%d %H:%M:%S")
+                except Exception:
+                    dt = None
+                action = m.group("action") or ""
+                # 3) IP клиента — ТОЛЬКО из from-токена.
+                from_tok = m.group("from_tok")
+                if from_tok is not None:
+                    src_ip = _client_ip_from_token(from_tok)
+                    if not src_ip:
+                        # `from <не-адрес>` — внутреннее событие xray
+                        # (например «from DNS …»): не клиентское соединение.
                         continue
+                else:
+                    # Легаси-формат без from: IP клиента неизвестен —
+                    # НЕ выдумываем его из destination.
+                    src_ip = ""
+                em = _EMAIL_FIELD.search(line)
+                email = em.group(1) if em else ""
+                dm = _DST_FIELD.search(line)
+                dst = dm.group("dst") if dm else ""
                 entries.append({
                     "dt": dt, "dt_str": dt_str, "action": action,
                     "src_ip": src_ip, "email": email, "raw": line,
-                    "dst": m.group("dst") if m else "",
+                    "dst": dst,
                 })
     except Exception as e:
         warn(f"Ошибка чтения access.log: {e}")

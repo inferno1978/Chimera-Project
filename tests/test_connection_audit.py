@@ -473,6 +473,176 @@ class TestRotatedWiring(unittest.TestCase):
         spy.assert_called_once_with(include_rotated=True)
 
 
+# ── IP клиента только из from <IP> (фикс «чужих IP в аудите») ────────────────
+
+class TestClientIpOnlyFromPrefix(unittest.TestCase):
+    """Регрессия фикса «чужих IP в аудите» (кейс 192.0.2.29 vs 192.0.2.20).
+
+    Реальный формат нод Chimera:
+      `from <IP>:<port> accepted tcp:<DEST>:<port> [in -> out] email: <e>`
+    Старый парсер брал from-группу `[^:]+`, которая НЕ матчила [IPv6]-клиентов
+    → строка падала в fallback, бравший первый IPv4:port в строке — часто
+    DESTINATION. Итог: адрес назначения приписывался юзеру как «IP клиента»
+    и попадал в ip_to_email («Активные соединения» показывали чужой IP с
+    email юзера). Правила фикса (по спецификации юзера):
+      • IP только из `from <IP>:<port>`;
+      • observatory/outbound-строки игнорируются.
+    """
+
+    REAL_V4 = ("2026/10/27 03:53:45.890235 from 192.0.2.20:52359 accepted "
+               "tcp:cloudflare-dns.com:443 [inbound-vless -> chain-exit-3] "
+               "email: user@chimeraprodcdn.online")
+    REAL_V6 = ("2026/10/27 14:07:32.429924 from "
+               "[2001:db8:5a7:6214:2d82:41b3:6872:4bb9]:63698 accepted "
+               "tcp:149.154.167.41:80 [inbound-vless -> chain-exit-2] "
+               "email: user@chimeraprodcdn.online")
+    STRAY_DEST = ("2026/10/27 14:07:33.000000 from [2001:db8:5a7::1]:63699 "
+                  "accepted tcp:192.0.2.29:443 [inbound-vless -> chain-exit-2] "
+                  "email: user@chimeraprodcdn.online")
+    FROM_DNS = ("2026/10/27 03:53:46.138124 from DNS accepted udp:127.0.0.1:53 "
+                "[xray.system.d471e110-f003-47de-a27e-9e66dd2160f7 -> direct]")
+    OBSERVATORY = ("2026/10/27 10:00:00.111111 [Info] [42] app/observatory: "
+                   "burst observation results: [chain-exit-1] 1.2.3.4:443 100ms")
+    OUTBOUND = ("2026/10/27 10:00:00.222222 [Info] [43] app/proxyman/outbound: "
+                "failed to process outbound traffic > dial tcp 192.0.2.29:443")
+    STATS_API = ("2026/10/27 03:53:45.992913 from 127.0.0.1:49250 accepted "
+                 "tcp:127.0.0.1:10085 [xray-stats-api -> xray-stats-api]")
+    MAPPED_V4 = ("2026/10/27 04:00:00.000000 from [::ffff:192.0.2.20]:40123 "
+                 "accepted tcp:example.org:443 [inbound-vless -> direct] "
+                 "email: user@chimeraprodcdn.online")
+    LEGACY_NO_FROM = ("2026/10/25 09:12:33 accepted tcp:198.51.100.7:49775 "
+                      "dst:1.2.3.4:443 email:olduser@example.com")
+
+    def setUp(self):
+        _setup_core()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._log = self._tmpdir / "access.log"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _parse(self, *lines):
+        self._log.write_text("\n".join(lines) + "\n")
+        from chimera.modules.connection_audit import _parse_access_log
+        with patch("chimera.modules.connection_audit._ACCESS_LOG", self._log):
+            return _parse_access_log()
+
+    def test_real_ipv4_from(self):
+        """Основной формат: src_ip = из from, action/email/dst на месте."""
+        entries = self._parse(self.REAL_V4)
+        self.assertEqual(len(entries), 1)
+        e = entries[0]
+        self.assertEqual(e["src_ip"], "192.0.2.20")
+        self.assertEqual(e["action"], "accepted")
+        self.assertEqual(e["email"], "user@chimeraprodcdn.online")
+        self.assertEqual(e["dt_str"], "2026/10/27 03:53:45")
+        self.assertEqual(e["dst"], "cloudflare-dns.com")
+
+    def test_ipv6_client_destination_not_client_ip(self):
+        """[IPv6]-клиент + IPv4-destination: src_ip = IPv6, НЕ destination.
+
+        Старый баг: from-группа `[^:]+` не брала [IPv6] → fallback хватал
+        первый IPv4:port в строке = 149.154.167.41 (destination!) и
+        приписывал его юзеру как клиентский IP.
+        """
+        entries = self._parse(self.REAL_V6)
+        self.assertEqual(len(entries), 1)
+        e = entries[0]
+        self.assertEqual(e["src_ip"], "2001:db8:5a7:6214:2d82:41b3:6872:4bb9")
+        self.assertNotEqual(e["src_ip"], "149.154.167.41")
+        self.assertEqual(e["dst"], "149.154.167.41")
+
+    def test_stray_destination_ip_never_attributed(self):
+        """Кейс юзера: destination 192.0.2.29 НЕ становится клиентским IP.
+
+        Ни в записях, ни в маппинге ip_to_email (который строит экран
+        «Активные соединения») чужой IP появиться не должен.
+        """
+        entries = self._parse(self.REAL_V4, self.STRAY_DEST)
+        src_ips = [e["src_ip"] for e in entries]
+        self.assertNotIn("192.0.2.29", src_ips)
+        ip_to_email = {e["src_ip"]: e["email"] for e in entries
+                       if e["src_ip"] and e["email"]}
+        self.assertNotIn("192.0.2.29", ip_to_email)
+        self.assertEqual(ip_to_email.get("2001:db8:5a7::1"),
+                         "user@chimeraprodcdn.online")
+
+    def test_dns_dispatch_line_skipped(self):
+        """«from DNS … udp:127.0.0.1:53» — внутренний диспетчер, не клиент.
+
+        Старый парсер делал из него запись с src_ip=127.0.0.1 (fallback).
+        """
+        entries = self._parse(self.REAL_V4, self.FROM_DNS)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["src_ip"], "192.0.2.20")
+
+    def test_observatory_line_skipped(self):
+        """observatory (health-check'ы цепочек) — адреса не клиентские."""
+        entries = self._parse(self.REAL_V4, self.OBSERVATORY)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["src_ip"], "192.0.2.20")
+
+    def test_outbound_line_skipped(self):
+        """app/proxyman/outbound — диспетчер исходящего, игнорируется."""
+        entries = self._parse(self.REAL_V4, self.OUTBOUND)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["src_ip"], "192.0.2.20")
+
+    def test_skip_markers_case_insensitive(self):
+        """Маркеры observatory/outbound срабатывают без учёта регистра."""
+        upper_obs = self.OBSERVATORY.replace("app/observatory",
+                                             "app/Observatory")
+        entries = self._parse(self.REAL_V4, upper_obs)
+        self.assertEqual(len(entries), 1)
+
+    def test_stats_api_local_line_kept_as_before(self):
+        """Локальный stats-api (from 127.0.0.1:port) — валидный from,
+        сохраняется как и раньше (не регрессия поведения)."""
+        entries = self._parse(self.STATS_API)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["src_ip"], "127.0.0.1")
+        self.assertEqual(entries[0]["action"], "accepted")
+
+    def test_ipv4_mapped_ipv6_normalized(self):
+        """[::ffff:192.0.2.20]:port → '192.0.2.20' (нормализация mapped)."""
+        entries = self._parse(self.MAPPED_V4)
+        self.assertEqual(entries[0]["src_ip"], "192.0.2.20")
+
+    def test_legacy_line_kept_with_empty_src_ip(self):
+        """Легаси-формат без from: запись остаётся, но src_ip пустой.
+
+        Раньше fallback брал IP из tcp:<ip>:<port> — на таком формате это
+        был клиент, но на реальном (с from) — destination. IP из destination
+        больше никогда не используется.
+        """
+        entries = self._parse(self.LEGACY_NO_FROM)
+        self.assertEqual(len(entries), 1)
+        e = entries[0]
+        self.assertEqual(e["action"], "accepted")
+        self.assertEqual(e["email"], "olduser@example.com")
+        self.assertEqual(e["src_ip"], "")
+
+    def test_no_fabricated_src_ip_invariant(self):
+        """Инвариант: каждый непустой src_ip обязан присутствовать в raw
+        как `from <src_ip>:` / `from [<src_ip>]:` (± ::ffff:-нормализация) —
+        иначе IP выдуман из другого места строки."""
+        entries = self._parse(self.REAL_V4, self.REAL_V6, self.STRAY_DEST,
+                              self.STATS_API, self.MAPPED_V4,
+                              self.LEGACY_NO_FROM)
+        self.assertEqual(len(entries), 6)
+        for e in entries:
+            if not e["src_ip"]:
+                continue
+            ok = (f"from {e['src_ip']}:" in e["raw"]
+                  or f"from [{e['src_ip']}]:" in e["raw"]
+                  or f"from [::ffff:{e['src_ip']}]" in e["raw"])
+            self.assertTrue(
+                ok,
+                f"src_ip {e['src_ip']} не найден в from-префиксе: {e['raw'][:80]}"
+            )
+
+
 # ── traffic_history ────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
