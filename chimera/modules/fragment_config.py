@@ -407,7 +407,8 @@ def _validate_range_str(value: str, what: str) -> bool:
 #   vless-links-fragment.txt     — Happ/Incy/Nekoray (fragment прямо в URI)
 #
 # ВЫКЛ (ключа нет / enabled=false — дефолт): поведение дефолтного экспорта
-# байт-в-байт прежнее. Управление — пункт 5 в do_fragment_config_menu().
+# байт-в-байт прежнее. Управление — пункт 5 меню do_fragment_config_menu
+# (Меню 4 «Диагностика и мониторинг» → F1).
 
 def get_client_fragment_settings(state: dict) -> Optional[dict]:
     """Настройки fragment-аддона дефолтного экспорта.
@@ -455,7 +456,8 @@ def do_export_fragment_toggle_menu() -> None:
     Sing-box JSON (Hiddify/NekoBox) и ссылки Happ/Incy/Nekoray с
     fragment в URI. Серверный /etc/xray/config.json не затрагивается.
 
-    Вызывается пунктом 5 меню do_fragment_config_menu (Меню 4 → F4).
+    Вызывается пунктом 5 меню do_fragment_config_menu (Меню 4 «Диагностика
+    и мониторинг» → F1 → пункт 5).
     """
     # Текущее состояние
     state: dict = {}

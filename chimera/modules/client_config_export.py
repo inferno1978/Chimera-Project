@@ -479,7 +479,8 @@ def do_generate_client_config() -> None:
 
     # ── Fragment-аддон дефолтного экспорта (тумблер, дефолт ВЫКЛ) ──────
     # state.json → "client_fragment": {enabled, packets, length, interval}
-    # (управление — Меню 4 → F4 → пункт 5). ВКЛ: ДОПОЛНИТЕЛЬНО кладём
+    # (управление — Меню 4 «Диагностика и мониторинг» → F1 → пункт 5). ВКЛ:
+    # ДОПОЛНИТЕЛЬНО кладём
     # fragment-варианты — существующие clash/singbox/hiddify/vless-link/ios
     # не меняются (аддитивно, обратная совместимость 100%).
     # Матрица клиентов: Happ/Incy/Nekoray — fragment в URI;
