@@ -355,6 +355,14 @@ class TestProtocolGetBackupPaths(unittest.TestCase):
         p.write_text("test-content")
         return p
 
+    def _tmpdir_missing(self, tag: str) -> Path:
+        """Гарантированно НЕсуществующий каталог в self._tmpdir — для
+        негативных тестов «uninstalled → пусто»: реальные пути модулей
+        живут в /etc (вне изолируемых деревьев Химеры) и на живой ноде
+        могут существовать."""
+        p = self._tmpdir / f"missing-{tag}"
+        return p
+
     # ── mtproto ──────────────────────────────────────────────────────────────
     def test_mtproto_empty_when_uninstalled(self):
         from chimera.modules import mtproto
@@ -387,7 +395,16 @@ class TestProtocolGetBackupPaths(unittest.TestCase):
     # ── mieru ────────────────────────────────────────────────────────────────
     def test_mieru_empty_when_uninstalled(self):
         from chimera.modules import mieru
-        self.assertEqual(mieru.get_backup_paths(), [])
+        # Детерминизм: реальные пути mieru живут ВНЕ прод-деревьев Химеры
+        # (/etc/mita/server.json, /etc/systemd/system/mita.service) и на
+        # живой ноде-раннере СУЩЕСТВУЮТ — env-изоляция их не прячет (это не
+        # деревья Химеры). Уводим константы в несуществующий tmp — как в
+        # чистой среде.
+        missing = self._tmpdir_missing("mieru")
+        with patch.object(mieru, "_SERVER_CFG", missing / "server.json"), \
+             patch.object(mieru, "_SERVICE_FILE", missing / "mita.service"), \
+             patch.object(mieru, "_MODULE_STATE", missing / "mieru.json"):
+            self.assertEqual(mieru.get_backup_paths(), [])
 
     def test_mieru_nonempty_when_installed(self):
         from chimera.modules import mieru
@@ -404,7 +421,15 @@ class TestProtocolGetBackupPaths(unittest.TestCase):
     # ── naiveproxy ───────────────────────────────────────────────────────────
     def test_naiveproxy_empty_when_uninstalled(self):
         from chimera.modules import naiveproxy
-        self.assertEqual(naiveproxy.get_backup_paths(), [])
+        # Детерминизм: _CADDYFILE/_PROBE_SECRET указывают в /etc (вне
+        # изолируемых деревьев Химеры) — на стенде с установленным Caddy
+        # непатченный вызов зависел бы от окружения.
+        missing = self._tmpdir_missing("naiveproxy")
+        with patch.object(naiveproxy, "_CADDYFILE", missing / "Caddyfile"), \
+             patch.object(naiveproxy, "_PROBE_SECRET", missing / "probe_secret"), \
+             patch.object(naiveproxy, "_SERVICE_FILE", missing / "caddy-naive.service"), \
+             patch.object(naiveproxy, "_MODULE_STATE", missing / "naiveproxy.json"):
+            self.assertEqual(naiveproxy.get_backup_paths(), [])
 
     def test_naiveproxy_nonempty_when_installed(self):
         from chimera.modules import naiveproxy
