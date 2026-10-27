@@ -128,6 +128,8 @@ TEST_GROUPS: dict[str, dict] = {
             "network_bench", "mtu_tuning", "geo_files",
             # Гард совместимости исходников с Python 3.10/3.11 (PEP 701)
             "py_compat",
+            # Гард env-изоляции CI (CHIMERA_TEST_ISOLATE)
+            "env_isolation",
         ],
     },
     "9": {

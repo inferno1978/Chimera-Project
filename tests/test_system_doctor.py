@@ -867,12 +867,17 @@ class TestRunOnce(unittest.TestCase):
 
     def test_check_runs_and_saves_last(self):
         self.cfgf.write_text(json.dumps({"enabled": True}))
+        # ВАЖНО: мокать надо CHECKS-словарь, а не атрибут chk_journald_cap:
+        # CHECKS = {... fn ...} захватил оригиналы из globals() при импорте,
+        # patch.object(sd, "chk_journald_cap") на него НЕ действует. Из-за
+        # этого раньше гонялся НАСТОЯЩий chk_journald_cap и тест зелёный был
+        # только на стендах с маленьким journald (живая нода: журнал > кэпа
+        # → warn → ok=0).
+        _mock_check = lambda ctx: ctx.record("journald_cap", "ok", "тест")  # noqa: E731
         with patch.multiple(self.sd, CONFIG_FILE=self.cfgf,
                             LAST_FILE=self.last), \
              patch.object(self.sd, "_notify_report"), \
-             patch.object(self.sd, "chk_journald_cap",
-                          lambda ctx: ctx.record("journald_cap", "ok",
-                                                 "тест")):
+             patch.dict(self.sd.CHECKS, {"journald_cap": _mock_check}):
             rep = self.sd.run_once(mode="fix", only=["journald_cap"])
         self.assertFalse(rep.get("skipped"))
         self.assertEqual(rep["counts"]["ok"], 1)

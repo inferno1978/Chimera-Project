@@ -3,6 +3,15 @@
 # scripts/ci_suite.sh — единый CI-прогон Химеры (Forgejo Actions + GitHub
 # Actions вызывают ОДИН этот скрипт; разница только в питоне и режиме).
 #
+# ENV-ИЗОЛЯЦИЯ: все unittest-режимы гоняются с CHIMERA_TEST_ISOLATE=1
+# (tests/_env_isolation.py): прод-деревья ноды (/var/lib/xray-installer,
+# /etc/xray, /usr/local/etc/xray, /etc/letsencrypt, /opt/chimera,
+# /usr/local/bin/xray) для тестового процесса НЕВИДИМЫ — как в чистом
+# контейнере. Без этого раннер на живой ноде и «чистые» GHA-раннеры
+# расходятся (env-класс падений), а часть тестов пишет в реальный
+# /etc/xray/config.json (инцидент 2026-10-27). Отключить: экспортировать
+# CHIMERA_TEST_ISOLATE=0 до запуска.
+#
 # Режимы:
 #   static <py312>   — compileall + PEP 701-сканер + full_test.py +
 #                      test_py_compat (запускать под python3.12: сканеру
@@ -24,6 +33,14 @@ LIST="${3:-tests/ci_gate.txt}"   # gate: какой список гнать (д�
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
 cd "$ROOT"
+
+# ─── env-изоляция прод-деревьев (см. tests/_env_isolation.py) ────────────────
+# Включена всегда по умолчанию; sitecustomize-каталог — в PYTHONPATH, чтобы
+# сабпроцессы тестов (inner-скрипты tg-бота и т.п.) получали ту же изоляцию.
+export CHIMERA_TEST_ISOLATE="${CHIMERA_TEST_ISOLATE:-1}"
+export PYTHONPATH="$ROOT:$ROOT/tests/_ci_site${PYTHONPATH:+:$PYTHONPATH}"
+
+echo "env-изоляция: CHIMERA_TEST_ISOLATE=$CHIMERA_TEST_ISOLATE"
 
 MODULE_TIMEOUT="${MODULE_TIMEOUT:-240}"
 

@@ -1,16 +1,20 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
-# Сгенерирован из живого baseline 2026-10-27 (306 модулей, python 3.10.22 + 3.12.3,
-# раннер ci-de с прод-окружением + чистая среда). Зелёные ВЕЗДЕ = гейт.
-# 30 модулей вне гейта — env-класс: красные ТОЛЬКО на хосте раннера (это живая
-# chimera-нода: реальные /var/lib/xray-installer, сервисы; тесты писались под
-# чистый контейнер — см. шапку smoke_test_modules.py). В чистых средах они
-# зелёные; их смотрит nightly full-report (не блокирующий) и GitHub mirror CI.
-# Пополнение: починить env-изоляцию модуля → перенести строку сюда.
-
+# Обновлён 2026-10-27 (v2): 307 модулей = полный tests/ (306) + гард
+# env-изоляции. Список АВТО-сверяется с файлами: каждый test_*.py обязан
+# быть здесь (полный охват), каждая строка — существующим файлом.
+#
+# Предыстория: baseline 2026-10-26 выделял 30 «env-класс» модулей — красных
+# ТОЛЬКО на хосте раннера ci-de (живая chimera-нода). 2026-10-27 корневое
+# лечение: CHIMERA_TEST_ISOLATE=1 (tests/_env_isolation.py, включается в
+# scripts/ci_suite.sh) делает прод-деревья ноды невидимыми для тестового
+# процесса — ранняя среда ведёт себя как чистый контейнер, гейт получает
+# ПОЛНЫЙ охват сьютов. Пополнение: новый модуль → строка сюда (автосверка
+# в test_env_isolation не нужна, но держите список актуальным).
 tests.test_access_control
 tests.test_admin_panel
 tests.test_admin_whitelist_geo_dns
 tests.test_agh_aware_and_start_limit
+tests.test_agh_le_cert_order
 tests.test_agh_probe
 tests.test_agh_ratelimit_heal
 tests.test_aghome_setup
@@ -34,6 +38,7 @@ tests.test_awg_hw_tuning
 tests.test_awg_i2i5_mimicry
 tests.test_awg_install_fixes
 tests.test_awg_ipv6_dualstack
+tests.test_awg_net_common
 tests.test_awg_peers
 tests.test_awg_presets
 tests.test_awg_presets_31
@@ -58,6 +63,7 @@ tests.test_cdn_masking_path_skip
 tests.test_certmon_v2
 tests.test_chain_lb_nodes
 tests.test_chain_nodes
+tests.test_chain_relay
 tests.test_chain_relay_speed_chunk
 tests.test_clean_install_no_warnings
 tests.test_client_config_export
@@ -66,9 +72,12 @@ tests.test_cold_boot_restore
 tests.test_config_backup
 tests.test_connection_audit
 tests.test_core_dns_redirect_integration
+tests.test_core_dynamic_version
+tests.test_credential_rotation
 tests.test_cron_subprocess_integration
 tests.test_csqtt_manual_binary
 tests.test_csqtt_packages
+tests.test_csqtt_uninstall_state
 tests.test_diagnostics
 tests.test_diagnostics_errorlog
 tests.test_dns_ipv6
@@ -81,12 +90,14 @@ tests.test_dnscrypt_setup
 tests.test_domain_external_check
 tests.test_domain_strategy
 tests.test_download_manager
+tests.test_dpi_bypass
 tests.test_dpi_censor_check
 tests.test_dpi_detector
 tests.test_emergency_repair_socket_wait
 tests.test_enable_dns_ipv6_script
 tests.test_entry_mirrors
 tests.test_entry_mirrors_ui_smoke
+tests.test_env_isolation
 tests.test_exit_switch_watcher
 tests.test_fail2ban_manager
 tests.test_failover
@@ -134,6 +145,7 @@ tests.test_hysteria2_traffic
 tests.test_hysteria2_transport
 tests.test_hysteria2_watchdog
 tests.test_icmp_gate
+tests.test_identity_guard
 tests.test_ingress_geoip
 tests.test_ingress_port_follow_agh_autostart
 tests.test_install_prompts
@@ -141,6 +153,7 @@ tests.test_ios_link_regression
 tests.test_ios_link_variant
 tests.test_ios_patch4_open_surfaces
 tests.test_ios_patch5_subscription_cleanup
+tests.test_ios_shadow_client
 tests.test_ios_unified_menu
 tests.test_ip_mask
 tests.test_ipban
@@ -151,9 +164,12 @@ tests.test_logrotate
 tests.test_mieru
 tests.test_mieru_cascade_b4qlog
 tests.test_mieru_cascade_health_timer
+tests.test_mieru_cascade_lb_exits
 tests.test_mieru_cascade_monitor
 tests.test_mieru_cascade_redsocks_guard
+tests.test_mieru_cascade_weights_hysteresis
 tests.test_mieru_download
+tests.test_mieru_dpi
 tests.test_mieru_mirrors
 tests.test_mieru_stats
 tests.test_mieru_traffic_presets
@@ -173,11 +189,13 @@ tests.test_nginx_cleanup_stale_vhosts
 tests.test_nginx_watchdog
 tests.test_no_streamup_typo
 tests.test_node_health_monitor
+tests.test_olcrtc
 tests.test_openflux
 tests.test_panel_nginx_front_input
 tests.test_port_follow
 tests.test_port_hopping
 tests.test_port_knocking
+tests.test_port_registry
 tests.test_pq_vless
 tests.test_proto_common
 tests.test_proto_port_username_v424
@@ -189,17 +207,23 @@ tests.test_rest_api_auth
 tests.test_rest_api_web_panel_firewall
 tests.test_ripe_file_age
 tests.test_ru_subnets
+tests.test_satellite_bindings
 tests.test_scheduler
 tests.test_secure_bootstrap
+tests.test_server_fragment
 tests.test_singbox_client_links
+tests.test_singbox_client_rulesets
 tests.test_singbox_config
 tests.test_singbox_install
+tests.test_singbox_multinode_config
 tests.test_singbox_nginx
 tests.test_singbox_packages
 tests.test_singbox_sni_autoconfig
 tests.test_singbox_state
 tests.test_singbox_ufw
 tests.test_singbox_vless_ws_cdn
+tests.test_singbox_vless_ws_cdn_fix
+tests.test_singbox_vless_ws_cdn_fix2
 tests.test_singbox_vless_ws_cdn_fix3
 tests.test_slipgate
 tests.test_smart_balancer
@@ -215,10 +239,15 @@ tests.test_stale_mirror_guard
 tests.test_status_awg_v3
 tests.test_status_panel
 tests.test_steal_monitor
+tests.test_subscription
+tests.test_subscription_content_negotiation
+tests.test_subscription_e2e
+tests.test_subscription_multinode
 tests.test_subscription_nginx_front
 tests.test_subscription_registry
 tests.test_subscription_uninstall
 tests.test_system_deps
+tests.test_system_doctor
 tests.test_telemt_download
 tests.test_telemt_fallback
 tests.test_telemt_ios_fix
@@ -232,6 +261,7 @@ tests.test_text_width
 tests.test_tfo_settings
 tests.test_tg_bot
 tests.test_tg_client_bot
+tests.test_tg_client_bot_inner_script
 tests.test_tg_nets
 tests.test_tgmon_v2
 tests.test_traffic_accounting
@@ -239,6 +269,7 @@ tests.test_traffic_collectors
 tests.test_traffic_dispatcher
 tests.test_traffic_history
 tests.test_traffic_tracking
+tests.test_triple_panel
 tests.test_trusttunnel
 tests.test_trusttunnel_user_lifecycle
 tests.test_tty_json
@@ -274,12 +305,15 @@ tests.test_wdtt
 tests.test_wdtt_webdav_mirrors
 tests.test_webdav_tunnel
 tests.test_wpp_awg_adapters
+tests.test_wpp_portal_mieru
 tests.test_wpp_upstream_sync
 tests.test_xhttp_cdn_masking
 tests.test_xhttp_path_gen
 tests.test_xray_dns_via_agh
 tests.test_xray_downgrade
+tests.test_xray_install
 tests.test_xray_safe_apply
 tests.test_xray_safe_restart
 tests.test_youtube_ip_pin
+tests.test_youtube_route
 tests.test_youtube_route_v5013

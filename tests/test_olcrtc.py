@@ -56,6 +56,7 @@ class TestGenerateConfigJson(unittest.TestCase):
 
     def test_config_has_required_fields(self):
         """JSON должен содержать все поля из гайда."""
+        from chimera.modules import olcrtc
         from chimera.modules.olcrtc import _generate_config_json
         locations = [{
             "name": "wb-vps",
@@ -65,7 +66,13 @@ class TestGenerateConfigJson(unittest.TestCase):
             "key": "abc123",
             "payload": {"vp8-fps": "30", "vp8-batch": "64"},
         }]
-        config_text = _generate_config_json(locations)
+        # Детерминизм: _resolver_for_olcrtc() пробует ЖИВЫЕ сервисы ноды
+        # (AGH :53 → dnscrypt :5300 → 8.8.8.8). На раннере/живой ноде
+        # dnscrypt-proxy активен → 127.0.0.1:5300, и тест зависит от стенда.
+        # Фиксируем дефолтный уровень — сам резолвер-каскад покрыт своим тестом.
+        with patch.object(olcrtc, "_resolver_for_olcrtc",
+                          return_value="8.8.8.8:53"):
+            config_text = _generate_config_json(locations)
         config = json.loads(config_text)
 
         self.assertEqual(config["version"], 1)

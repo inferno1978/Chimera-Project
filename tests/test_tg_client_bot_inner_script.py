@@ -466,13 +466,17 @@ class TestInnerScriptNegativeScenarioErrorMessage(unittest.TestCase):
             # Save original Path
             OrigPath = bot.Path
             _awg_state_path = {str(awg_state_file)!r}
-            class FakePath(OrigPath):
+            # Конкретный класс (PosixPath): на 3.10/3.11 pathlib.Path —
+            # абстрактный базовый (_flavour живёт на PosixPath), сабкласс
+            # от Path падает в __new__ (GHA-3.10 ловили именно это).
+            ConcretePath = type(OrigPath())
+            class FakePath(ConcretePath):
                 def __new__(cls, *args, **kw):
                     p = str(args[0]) if args else ''
                     # Redirect awg_standalone_state.json to our fake file
                     if 'awg_standalone_state.json' in p:
                         return OrigPath(_awg_state_path)
-                    return OrigPath.__new__(cls, *args, **kw)
+                    return ConcretePath.__new__(cls, *args, **kw)
             bot.Path = FakePath
             r = bot._build_all_links({{"uuid": "u1", "email": "alice@xray"}})
             sys.stdout.write(_json.dumps(r))
