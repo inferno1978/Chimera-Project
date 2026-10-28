@@ -238,6 +238,62 @@ def _gen_nekoray_link(
     label  = _flag_prefix() + urllib.parse.quote(sni) + "%20%F0%9F%94%B5Neko"
     return f"{base}&fragment={frag}#{label}"
 
+
+def build_fragment_link_variants(base_link: str, packets: str,
+                                 length: str, interval: str) -> list:
+    """Три fragment-варианта (Happ/Incy/Neko) ГОТОВОЙ vless://-ссылки.
+
+    Каноническую ссылку собирает ЛЮБОЙ генератор проекта
+    (users_manager._gen_vless_link, subscription._build_vless_uri,
+    subscription_multinode.get_multinode_uris) — со всеми параметрами
+    (CDN host=, xhttp path/mode и т.д.). Здесь параметры НЕ пересобираются,
+    а только ДОБАВЛЯЮТСЯ клиент-специфичные fragment-параметры —
+    рассинхрон форматов исключён по построению.
+
+    Матрица клиентов (см. шапку модуля):
+      Happ     &fragment=length,interval,packets
+      Incy     &fragmentLength=length&fragmentInterval=interval
+               (packets в URI Incy не кодируется — клиент сам использует
+               tlshello на tls/reality)
+      Nekoray  &fragment=packets,length,interval
+
+    Happ и Nekoray читают ОДНО имя параметра fragment= с РАЗНЫМ порядком
+    значений — поэтому вариантов ТРИ, а не один: каждый клиент импортирует
+    ссылку, помеченную его именем (метка #…🔵Happ / 🔵Incy / 🔵Neko).
+
+    Метка варианта = метка base_link (часть после '#') + суффикс клиента;
+    если метки нет — суффикс становится меткой целиком.
+
+    Возвращает [] (молча) если base_link пуст/не vless:///уже содержит
+    fragment-параметры (идемпотентность: двойное добавление исключено).
+    """
+    import urllib.parse
+    raw = (base_link or "").strip()
+    if not raw or not raw.startswith("vless://"):
+        return []
+    base, _, old_label = raw.partition("#")
+    if not base:
+        return []
+    # Уже фрагментированная ссылка — не дублируем параметры.
+    if ("fragment=" in base or "fragmentLength=" in base
+            or "fragmentInterval=" in base):
+        return []
+    p, l, i = str(packets), str(length), str(interval)
+    happ_frag = urllib.parse.quote(f"{l},{i},{p}", safe="")
+    neko_frag = urllib.parse.quote(f"{p},{l},{i}", safe="")
+    incy_l    = urllib.parse.quote(l, safe="")
+    incy_i    = urllib.parse.quote(i, safe="")
+    _sep      = "%20" if old_label else ""
+    # Минимальная ссылка vless://uuid@host:port без query — первый
+    # добавляемый параметр стартует с '?', а не '&'.
+    _q = "&" if "?" in base else "?"
+    return [
+        f"{base}{_q}fragment={happ_frag}#{old_label}{_sep}%F0%9F%94%B5Happ",
+        f"{base}{_q}fragmentLength={incy_l}&fragmentInterval={incy_i}"
+        f"#{old_label}{_sep}%F0%9F%94%B5Incy",
+        f"{base}{_q}fragment={neko_frag}#{old_label}{_sep}%F0%9F%94%B5Neko",
+    ]
+
 # ══════════════════════════════════════════════════════════════════════════
 # ГЕНЕРАЦИЯ JSON-КОНФИГОВ
 # ══════════════════════════════════════════════════════════════════════════

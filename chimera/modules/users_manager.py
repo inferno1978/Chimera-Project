@@ -1764,6 +1764,8 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
         ipv6 = get_server_ip("6") or ""
 
     links = []
+    # База для fragment-вариантов: domain preferred, иначе первый доступный.
+    _frag_base = ""
 
     def _mk(host: str) -> str:
         _, _, _flag = get_server_country_cached()
@@ -1786,6 +1788,8 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
     if ipv4:
         link4 = _mk(ipv4)
         links.append(link4)
+        if not _frag_base:
+            _frag_base = link4
         if print_output:
             print()
             print(f"{GREEN}📡 IPv4 ссылка:{NC}")
@@ -1800,6 +1804,8 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
     if ipv6 and install_mode == "A":
         link6 = _mk(f"[{ipv6}]")
         links.append(link6)
+        if not _frag_base:
+            _frag_base = link6
         if print_output:
             print()
             print(f"{CYAN}🌐 IPv6 ссылка:{NC}")
@@ -1812,6 +1818,7 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
     if domain:
         link_ds = _mk(domain)
         links.append(link_ds)
+        _frag_base = link_ds  # domain preferred для fragment-вариантов
         if print_output:
             print()
             print(f"{MAGENTA}🔄 Domain (DualStack) ссылка:{NC}")
@@ -1819,6 +1826,46 @@ def _unified_show_links(u: dict, print_output: bool = True) -> list:
             print()
             qr_ds = f"/root/vless_qr_{name_safe}_domain.png"
             _show_qr(link_ds, f"{label} Domain", qr_ds)
+
+    # ── Fragment-ссылки (Happ/Incy/Neko) — тумблер client_fragment ──────
+    # Дефолт ВЫКЛ (нет ключа/enabled=false): вывод и файлы байт-в-байт
+    # прежние, возвращаемый список канонических ссылок НЕ меняется.
+    # ВКЛ: ДОПОЛНИТЕЛЬНО показываем три fragment-варианта канонической
+    # ссылки (domain preferred) и пишем /root/vless_link_<user>_fragment.txt.
+    # v2rayN/v2rayNG/Hiddify fragment из URI не читают — им JSON
+    # (меню 2 → экспорт клиентских конфигов, xray-client-fragment.json).
+    _cf = None
+    try:
+        from chimera.modules.fragment_config import get_client_fragment_settings
+        from chimera.modules.fragment_link import build_fragment_link_variants
+        _cf = get_client_fragment_settings(st)
+    except Exception:
+        _cf = None
+    if _cf and _frag_base:
+        _variants = build_fragment_link_variants(
+            _frag_base, _cf["packets"], _cf["length"], _cf["interval"])
+        if _variants and print_output:
+            _YELLOW_F = getattr(core, "YELLOW", "")
+            print()
+            print(f"{_YELLOW_F}✂️  Fragment-ссылки (client_fragment=ON): "
+                  f"packets={_cf['packets']} length={_cf['length']}b "
+                  f"interval={_cf['interval']}мс{NC}")
+            print(f"{DIM}   Happ (iOS/Android/Desktop) — fragment=length,interval,packets:{NC}")
+            _box_link(_variants[0])
+            print()
+            print(f"{DIM}   Incy (iOS/Android/Desktop/TV) — fragmentLength/fragmentInterval:{NC}")
+            _box_link(_variants[1])
+            print()
+            print(f"{DIM}   Nekoray/Nekobox (Desktop) — fragment=packets,length,interval:{NC}")
+            _box_link(_variants[2])
+            print()
+            _frag_file = Path(f"/root/vless_link_{name_safe}_fragment.txt")
+            _frag_file.write_text(
+                "# Fragment-ссылки (client_fragment=ON): "
+                f"packets={_cf['packets']} length={_cf['length']}b "
+                f"interval={_cf['interval']}ms\n"
+                + "\n".join(_variants) + "\n")
+            _frag_file.chmod(0o600)
 
     if print_output:
         _box_row()

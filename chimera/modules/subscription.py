@@ -966,6 +966,19 @@ def build_subscription_body(user: dict) -> bytes:
         vless = _build_vless_uri(user, state)
         if vless:
             links.append(vless)
+            # Fragment-варианты entry-ссылки (Happ/Incy/Neko) — тумблер
+            # client_fragment в state.json (дефолт ВЫКЛ: подписка
+            # байт-в-байт прежняя). См. fragment_link.build_fragment_link_variants.
+            try:
+                from chimera.modules.fragment_config import get_client_fragment_settings
+                from chimera.modules.fragment_link import (
+                    build_fragment_link_variants as _flv)
+                _cf = get_client_fragment_settings(state)
+                if _cf:
+                    links += _flv(vless, _cf["packets"],
+                                  _cf["length"], _cf["interval"])
+            except Exception as e:
+                _log("WARN", f"fragment-варианты entry-ссылки: {e}")
     else:
         _log("INFO", "hybrid_mieru активен — vless:// исключён из подписки")
 

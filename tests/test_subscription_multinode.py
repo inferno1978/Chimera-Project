@@ -590,6 +590,76 @@ class TestMultinodeUris(unittest.TestCase):
             uris = self._mn.get_multinode_uris(_TEST_USER)
         self.assertEqual(uris, [])
 
+    # ── Fragment-варианты exit-ссылок (тумблер client_fragment, Task 23) ──
+
+    def _state_with_fragment(self, cf):
+        st = json.loads(json.dumps(_TEST_STATE_MODE_B))
+        if cf is not None:
+            st["client_fragment"] = cf
+        return st
+
+    def _get_uris(self, state):
+        self._state_file.write_text(json.dumps(state))
+        self._sub_conf.write_text(json.dumps({}))
+        self._mirrors.write_text(json.dumps({"mirrors": []}))
+        with patch.object(self._mn, "_STATE_FILE", self._state_file), \
+             patch.object(self._mn, "_SUB_CONF", self._sub_conf), \
+             patch.object(self._mn, "_MIRRORS_FILE", self._mirrors), \
+             patch.object(self._mn, "_geo_lookup", return_value=""), \
+             patch.object(self._mn, "_core_call",
+                          side_effect=lambda fn, *a, **k: _fake_vless_link(*a, **k)):
+            return self._mn.get_multinode_uris(_TEST_USER)
+
+    def test_fragment_variants_appended_when_enabled(self):
+        """ВКЛ: 2 ноды → 2 базовые + 2×3 варианта (Happ/Incy/Neko)."""
+        st = self._state_with_fragment({
+            "enabled": True, "packets": "tlshello",
+            "length": "10-20", "interval": "10-20",
+        })
+        uris = self._get_uris(st)
+        self.assertEqual(len(uris), 8)
+        base1, happ1, incy1, neko1 = uris[0], uris[1], uris[2], uris[3]
+        base2 = uris[4]
+        # Базовые ссылки без fragment-параметров, имя ноды в метке
+        self.assertNotIn("fragment=", base1)
+        self.assertNotIn("fragmentLength=", base1)
+        self.assertNotIn("fragment=", base2)
+        self.assertIn("#", base1)
+        # Форматы вариантов — точные (матрица клиентов)
+        self.assertIn("&fragment=10-20%2C10-20%2Ctlshello", happ1)
+        self.assertIn("%F0%9F%94%B5Happ", happ1)
+        self.assertIn("&fragmentLength=10-20&fragmentInterval=10-20", incy1)
+        self.assertIn("%F0%9F%94%B5Incy", incy1)
+        self.assertIn("&fragment=tlshello%2C10-20%2C10-20", neko1)
+        self.assertIn("%F0%9F%94%B5Neko", neko1)
+        # Вариант наследует метку ноды (имя ноды сохранено перед суффиксом)
+        self.assertIn(base1.split("#", 1)[1], happ1.split("#", 1)[1])
+
+    def test_fragment_variants_absent_by_default(self):
+        """Дефолт (нет client_fragment): список байт-в-байт прежний (2)."""
+        uris = self._get_uris(self._state_with_fragment(None))
+        self.assertEqual(len(uris), 2)
+        for u in uris:
+            self.assertNotIn("fragment=", u)
+            self.assertNotIn("fragmentLength=", u)
+
+    def test_fragment_variants_skipped_when_settings_incomplete(self):
+        """ВКЛ, но неполные параметры — честный экспорт: только базовые (2)."""
+        st = self._state_with_fragment({
+            "enabled": True, "packets": "tlshello", "length": "10-20",
+        })
+        uris = self._get_uris(st)
+        self.assertEqual(len(uris), 2)
+
+    def test_fragment_variants_disabled_flag_off(self):
+        """enabled=False: как дефолт — только базовые (2)."""
+        st = self._state_with_fragment({
+            "enabled": False, "packets": "tlshello",
+            "length": "10-20", "interval": "10-20",
+        })
+        uris = self._get_uris(st)
+        self.assertEqual(len(uris), 2)
+
 
 class TestSubscriptionIntegration(unittest.TestCase):
     """Интеграция с subscription.py: форматы, base64, iOS-исключение."""
@@ -664,6 +734,43 @@ class TestSubscriptionIntegration(unittest.TestCase):
         self.assertEqual(len(vless_links), 3)  # entry + 2 exit
         self.assertIn("exit-uuid-1", decoded)
         self.assertIn("exit-uuid-2", decoded)
+
+    def test_base64_body_includes_fragment_variants_when_enabled(self):
+        """ВКЛ client_fragment: entry(1+3) + 2 exit×(1+3) = 12 vless."""
+        st = json.loads(json.dumps(_TEST_STATE_MODE_B))
+        st["client_fragment"] = {
+            "enabled": True, "packets": "tlshello",
+            "length": "10-20", "interval": "10-20",
+        }
+        ps = self._patches(st)
+        with ps[0], ps[1], ps[2], ps[3], ps[4], ps[5], ps[6], ps[7], \
+             ps[8], ps[9], ps[10], ps[11], ps[12], ps[13], ps[14], ps[15], ps[16]:
+            body = self._sub.build_subscription_body(_TEST_USER)
+        decoded = base64.b64decode(body).decode("utf-8")
+        vless_links = [l for l in decoded.split("\n")
+                       if l.startswith("vless://")]
+        self.assertEqual(len(vless_links), 12)
+        # Entry-ссылка (замоканная _build_vless_uri, без метки) + 3 варианта
+        entry_prefix = "vless://user-uuid@entry.test.online:443?security=reality"
+        entry_family = [l for l in vless_links if l.startswith(entry_prefix)]
+        self.assertEqual(len(entry_family), 4)
+        self.assertIn("&fragment=10-20%2C10-20%2Ctlshello",
+                      entry_family[1])
+        self.assertIn("&fragmentLength=10-20&fragmentInterval=10-20",
+                      entry_family[2])
+        self.assertIn("&fragment=tlshello%2C10-20%2C10-20",
+                      entry_family[3])
+        # Exit-семья: по (1+3) на каждую из 2 нод; из них 6 — с fragment
+        exit_family = [l for l in vless_links
+                       if not l.startswith(entry_prefix)]
+        self.assertEqual(len(exit_family), 8)
+        frag_variants = [l for l in exit_family
+                         if "fragment=" in l or "fragmentLength=" in l]
+        base_exits = [l for l in exit_family if l not in frag_variants]
+        self.assertEqual(len(frag_variants), 6)
+        self.assertEqual(len(base_exits), 2)
+        for l in base_exits:
+            self.assertNotIn("fragment=", l)
 
     def test_ios_body_excludes_exit_uris(self):
         ps = self._patches(_TEST_STATE_MODE_B)

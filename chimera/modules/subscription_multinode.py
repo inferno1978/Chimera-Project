@@ -378,10 +378,27 @@ def collect_nodes(user: dict) -> dict:
 def get_multinode_uris(user: dict) -> list[str]:
     """vless:// каждой exit-ноды (chain-UUID ноды, имя с флагом в fragment).
     Mirrors НЕ включаются — их уже добавляет subscription.py отдельно.
-    Никогда не бросает исключение."""
+    Никогда не бросает исключение.
+
+    Fragment-варианты (тумблер client_fragment в state.json, дефолт ВЫКЛ):
+    при ВКЛ после каждой exit-ссылки добавляются три вариантa —
+    Happ/Incy/Neko (см. fragment_link.build_fragment_link_variants),
+    помеченные именем ноды + 🔵<клиент>: каждый клиент импортирует
+    «свою» ссылку. Дефолт/ВЫКЛ: список байт-в-байт прежний."""
     try:
         if not is_multinode_active():
             return []
+        # Тумблер client_fragment — единственный источник настроек.
+        _cf = None
+        try:
+            from chimera.modules.fragment_config import (
+                get_client_fragment_settings)
+            from chimera.modules.fragment_link import (
+                build_fragment_link_variants as _flv)
+            _cf = get_client_fragment_settings(_load_state())
+        except Exception as e:
+            _log("WARN", f"client_fragment: {e}")
+            _cf = None
         reg = collect_nodes(user)
         uris: list[str] = []
         for nd in reg["exits"]:
@@ -397,7 +414,11 @@ def get_multinode_uris(user: dict) -> list[str]:
             if not link:
                 continue
             base, _, _frag = link.partition("#")
-            uris.append(f"{base}#{urllib.parse.quote(nd['name'])}")
+            node_link = f"{base}#{urllib.parse.quote(nd['name'])}"
+            uris.append(node_link)
+            if _cf:
+                uris += _flv(node_link, _cf["packets"],
+                             _cf["length"], _cf["interval"])
         return uris
     except Exception as e:
         _log("WARN", f"get_multinode_uris: {e}")

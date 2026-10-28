@@ -165,6 +165,101 @@ class TestGenNekorayLink(unittest.TestCase):
         self.assertEqual(frag_val, "1-3,3-7,10-20")
 
 
+class TestBuildFragmentLinkVariants(unittest.TestCase):
+    """build_fragment_link_variants — fragment-варианты ГОТОВОЙ ссылки
+    (users_manager/subscription/subscription_multinode используют её,
+    чтобы не пересобирать URI и не рассинхронить форматы)."""
+
+    _BASE = ("vless://uuid-1@1.2.3.4:443?type=tcp&security=reality"
+             "&pbk=PUB&fp=firefox&sni=example.com&sid=abcd"
+             "&flow=xtls-rprx-vision#%F0%9F%87%B3%F0%9F%87%B1%20example.com")
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _variants(self, base=None, packets="tlshello",
+                  length="10-20", interval="10-20"):
+        from chimera.modules.fragment_link import build_fragment_link_variants
+        return build_fragment_link_variants(
+            base if base is not None else self._BASE,
+            packets, length, interval)
+
+    def test_returns_three_variants(self):
+        vs = self._variants()
+        self.assertEqual(len(vs), 3)
+
+    def test_happ_format_length_interval_packets(self):
+        """Happ: fragment=length,interval,packets (запятые URL-кодированы)."""
+        vs = self._variants()
+        self.assertIn("&fragment=10-20%2C10-20%2Ctlshello", vs[0])
+        self.assertTrue(vs[0].endswith("%F0%9F%94%B5Happ"))
+
+    def test_incy_format_fragment_length_interval(self):
+        """Incy: fragmentLength/fragmentInterval, packets НЕ кодируется."""
+        vs = self._variants()
+        self.assertIn("&fragmentLength=10-20&fragmentInterval=10-20", vs[1])
+        self.assertNotIn("tlshello", vs[1])
+        self.assertTrue(vs[1].endswith("%F0%9F%94%B5Incy"))
+
+    def test_neko_format_packets_length_interval(self):
+        """Nekoray: fragment=packets,length,interval (обратный порядок)."""
+        vs = self._variants()
+        self.assertIn("&fragment=tlshello%2C10-20%2C10-20", vs[2])
+        self.assertTrue(vs[2].endswith("%F0%9F%94%B5Neko"))
+
+    def test_base_uri_params_preserved(self):
+        """Все базовые параметры ссылки сохранены без пересборки."""
+        for v in self._variants():
+            self.assertTrue(v.startswith(
+                "vless://uuid-1@1.2.3.4:443?type=tcp&security=reality"
+                "&pbk=PUB&fp=firefox&sni=example.com&sid=abcd"
+                "&flow=xtls-rprx-vision&"))
+
+    def test_label_preserved_with_client_suffix(self):
+        vs = self._variants()
+        self.assertIn("%F0%9F%87%B3%F0%9F%87%B1%20example.com"
+                      "%20%F0%9F%94%B5Happ", vs[0])
+        self.assertIn("%F0%9F%87%B3%F0%9F%87%B1%20example.com"
+                      "%20%F0%9F%94%B5Neko", vs[2])
+
+    def test_idempotent_already_fragmented_returns_empty(self):
+        """Повторное применение к fragment-ссылке не дублирует параметры."""
+        vs = self._variants()
+        for already in (vs[0], vs[1], vs[2]):
+            self.assertEqual(self._variants(base=already), [])
+
+    def test_empty_and_non_vless_return_empty(self):
+        for bad in ("", "   ", "ss://xxx", "http://example.com"):
+            self.assertEqual(self._variants(base=bad), [])
+
+    def test_link_without_label_gets_bare_suffix(self):
+        v = self._variants(base="vless://u@h:1?type=tcp")[0]
+        self.assertTrue(v.endswith("#%F0%9F%94%B5Happ"))
+
+    def test_minimal_link_without_query_gets_question_mark(self):
+        """vless://uuid@host:port без query — первый параметр через '?'."""
+        v = self._variants(base="vless://u@h:1")[0]
+        self.assertIn("?fragment=", v)
+        self.assertNotIn("&fragment=", v)
+
+    def test_numeric_ranges_not_needlessly_encoded(self):
+        v = self._variants(packets="1-3", length="3-7", interval="10-20")[2]
+        self.assertIn("&fragment=1-3%2C3-7%2C10-20", v)
+
+    def test_variants_decode_to_correct_orders(self):
+        """URL-decode: Happ=length,interval,packets; Neko=packets,length,interval."""
+        import urllib.parse
+        vs = self._variants()
+        happ = [p for p in vs[0].split("#", 1)[0].split("&")
+                if p.startswith("fragment=")][0]
+        neko = [p for p in vs[2].split("#", 1)[0].split("&")
+                if p.startswith("fragment=")][0]
+        self.assertEqual(
+            urllib.parse.unquote(happ.split("=", 1)[1]), "10-20,10-20,tlshello")
+        self.assertEqual(
+            urllib.parse.unquote(neko.split("=", 1)[1]), "tlshello,10-20,10-20")
+
+
 class TestBuildXrayClientJson(unittest.TestCase):
     """_build_xray_client_json — генерация Xray клиентского конфига."""
 

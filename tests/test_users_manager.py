@@ -941,6 +941,135 @@ class TestUnifiedShowLinks(unittest.TestCase):
         fragment = ipv4_link.split("#")[-1]
         self.assertIn("alice", urllib.parse.unquote(fragment))
 
+    # ── Fragment-ссылки (тумблер client_fragment, Task 23) ──────────────
+
+    _FRAG_STATE = {
+        "domain": "example.com",
+        "server_port": 443,
+        "protocol_mode": "reality",
+        "public_key": "PUBKEY",
+        "short_id": "abcd1234",
+        "install_mode": "A",
+        "client_fragment": {
+            "enabled": True, "packets": "tlshello",
+            "length": "10-20", "interval": "10-20",
+        },
+    }
+
+    def test_fragment_not_in_canonical_list_when_enabled(self):
+        """ВКЛ тумблер: канонический список ссылок НЕ меняется (API/экспорт
+        получают те же IPv4+Domain ссылки без fragment-параметров)."""
+        from chimera.modules import users_manager
+        self._write_state(dict(self._FRAG_STATE))
+        self._fake_core.get_server_ip = MagicMock(
+            side_effect=lambda v: "1.2.3.4" if v == "4" else "")
+        with patch.object(users_manager, "_show_qr"):
+            links = users_manager._unified_show_links(
+                {"uuid": "test-uuid", "name": "alice"}, print_output=False)
+        self.assertEqual(len(links), 2)  # IPv4 + Domain, как без тумблера
+        for ln in links:
+            self.assertNotIn("fragment=", ln)
+            self.assertNotIn("fragmentLength=", ln)
+
+    def test_fragment_displayed_and_saved_when_enabled(self):
+        """ВКЛ + print_output: 3 varianta показаны (Happ/Incy/Neko) и файл
+        vless_link_<user>_fragment.txt записан (через redirect Path)."""
+        from chimera.modules import users_manager
+        self._write_state(dict(self._FRAG_STATE))
+        self._fake_core.get_server_ip = MagicMock(
+            side_effect=lambda v: "1.2.3.4" if v == "4" else "")
+        _box_link = self._fake_core._box_link
+        _box_link.reset_mock()
+        _orig_path = users_manager.Path
+        _redirect = lambda p: _orig_path(
+            str(p).replace("/root/", str(self._tmpdir) + "/"))
+        import io
+        import contextlib
+        with patch.object(users_manager, "_show_qr"), \
+             patch.object(users_manager, "Path", _redirect), \
+             contextlib.redirect_stdout(io.StringIO()):
+            users_manager._unified_show_links(
+                {"uuid": "test-uuid", "name": "alice"}, print_output=True)
+        # Файл с 3 fragment-ссылками + заголовок
+        frag_file = Path(self._tmpdir) / "vless_link_alice_fragment.txt"
+        self.assertTrue(frag_file.exists(), "файл fragment-ссылок не создан")
+        content = frag_file.read_text()
+        vless_lines = [l for l in content.splitlines()
+                       if l.startswith("vless://")]
+        self.assertEqual(len(vless_lines), 3)
+        self.assertIn("&fragment=10-20%2C10-20%2Ctlshello", vless_lines[0])
+        self.assertIn("&fragmentLength=10-20&fragmentInterval=10-20",
+                      vless_lines[1])
+        self.assertIn("&fragment=tlshello%2C10-20%2C10-20", vless_lines[2])
+        self.assertIn("client_fragment=ON", content)
+        # Отображение: _box_link зван и для базовых (IPv4+Domain), и для
+        # трёх fragment-вариантов — всего 5 раз, варианты содержат параметры
+        shown = [str(c.args[0]) for c in _box_link.call_args_list
+                 if c.args]
+        frag_shown = [s for s in shown if "fragment=" in s
+                      or "fragmentLength=" in s]
+        self.assertEqual(len(frag_shown), 3)
+
+    def test_fragment_absent_when_disabled(self):
+        """ДЕФАКТ (нет client_fragment): вывод байт-в-байт прежний — файла
+        fragment-ссылок нет, fragment-параметров в отображении нет."""
+        from chimera.modules import users_manager
+        self._write_state({
+            "domain": "example.com",
+            "server_port": 443,
+            "protocol_mode": "reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+            "install_mode": "A",
+        })
+        self._fake_core.get_server_ip = MagicMock(
+            side_effect=lambda v: "1.2.3.4" if v == "4" else "")
+        _box_link = self._fake_core._box_link
+        _box_link.reset_mock()
+        _orig_path = users_manager.Path
+        _redirect = lambda p: _orig_path(
+            str(p).replace("/root/", str(self._tmpdir) + "/"))
+        import io
+        import contextlib
+        with patch.object(users_manager, "_show_qr"), \
+             patch.object(users_manager, "Path", _redirect), \
+             contextlib.redirect_stdout(io.StringIO()):
+            users_manager._unified_show_links(
+                {"uuid": "test-uuid", "name": "alice"}, print_output=True)
+        frag_file = Path(self._tmpdir) / "vless_link_alice_fragment.txt"
+        self.assertFalse(frag_file.exists())
+        shown = [str(c.args[0]) for c in _box_link.call_args_list
+                 if c.args]
+        for s in shown:
+            self.assertNotIn("fragment=", s)
+            self.assertNotIn("fragmentLength=", s)
+
+    def test_fragment_skipped_when_settings_incomplete(self):
+        """ВКЛ, но неполные параметры (нет interval): честный экспорт не
+        врёт — секции fragment нет, файла нет."""
+        from chimera.modules import users_manager
+        st = dict(self._FRAG_STATE)
+        st["client_fragment"] = {"enabled": True, "packets": "tlshello",
+                                 "length": "10-20"}
+        self._write_state(st)
+        self._fake_core.get_server_ip = MagicMock(
+            side_effect=lambda v: "1.2.3.4" if v == "4" else "")
+        _orig_path = users_manager.Path
+        _redirect = lambda p: _orig_path(
+            str(p).replace("/root/", str(self._tmpdir) + "/"))
+        import io
+        import contextlib
+        with patch.object(users_manager, "_show_qr"), \
+             patch.object(users_manager, "Path", _redirect), \
+             contextlib.redirect_stdout(io.StringIO()):
+            links = users_manager._unified_show_links(
+                {"uuid": "test-uuid", "name": "alice"}, print_output=True)
+        frag_file = Path(self._tmpdir) / "vless_link_alice_fragment.txt"
+        self.assertFalse(frag_file.exists())
+        # Канонический список тоже без fragment
+        for ln in links:
+            self.assertNotIn("fragment=", ln)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  _users_gen_link — генерация ссылки из существующего config.json
