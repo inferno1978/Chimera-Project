@@ -457,19 +457,43 @@ class TestExportFragmentAddon(unittest.TestCase):
                              f"fragment-аддона")
 
     def test_xray_fragment_json_contains_fragment(self):
-        """Xray JSON (v2rayN/v2rayNG): sockopt.fragment с параметрами
-        тумблера (tlshello-рецепт)."""
+        """Xray JSON (v2rayN/v2rayNG): валидная схема — параметры тумблера
+        (tlshello-рецепт) в settings.fragment freedom-outbound."""
         written = self._run_generate(_FAKE_STATE_REALITY_FRAG_ON)
         xray_cfg = json.loads(written["xray-client-fragment.json"])
-        proxy = [ob for ob in xray_cfg["outbounds"] if ob["tag"] == "proxy"][0]
-        frag = proxy["streamSettings"]["sockopt"]["fragment"]
+        frag_obs = [ob for ob in xray_cfg["outbounds"]
+                    if ob.get("tag") == "fragment"]
+        self.assertEqual(len(frag_obs), 1,
+                         "должен быть ровно один fragment-outbound")
+        self.assertEqual(frag_obs[0]["protocol"], "freedom")
+        frag = frag_obs[0]["settings"]["fragment"]
         self.assertEqual(frag["packets"], "tlshello")
         self.assertEqual(frag["length"], "10-20")
         self.assertEqual(frag["interval"], "10-20")
+        # тумблер не передаёт noise-аргументы — noises нет (и noise тоже)
+        self.assertNotIn("noises", frag_obs[0]["settings"])
+        self.assertNotIn("noise", frag_obs[0]["settings"])
+        proxy = [ob for ob in xray_cfg["outbounds"] if ob["tag"] == "proxy"][0]
         # REALITY-параметры на месте (транспорт не пострадал)
         rs = proxy["streamSettings"]["realitySettings"]
         self.assertEqual(rs["publicKey"], "TEST_PUB_KEY_123")
         self.assertEqual(rs["shortId"], "abcd1234")
+
+    def test_xray_fragment_json_valid_schema_dialer_proxy(self):
+        """Регрессия плацебо-схемы: основной outbound — dialerProxy="fragment",
+        БЕЗ placebo-ключей fragment/noise/noises в sockopt; теги уникальны."""
+        written = self._run_generate(_FAKE_STATE_REALITY_FRAG_ON)
+        xray_cfg = json.loads(written["xray-client-fragment.json"])
+        proxy = [ob for ob in xray_cfg["outbounds"] if ob["tag"] == "proxy"][0]
+        sockopt = proxy["streamSettings"]["sockopt"]
+        self.assertEqual(sockopt["dialerProxy"], "fragment")
+        for placebo in ("fragment", "noise", "noises"):
+            self.assertNotIn(placebo, sockopt)
+        tags = [ob.get("tag") for ob in xray_cfg["outbounds"]]
+        self.assertEqual(len(tags), len(set(tags)),
+                         f"теги outbound должны быть уникальны: {tags}")
+        for expected in ("proxy", "fragment", "direct", "block"):
+            self.assertIn(expected, tags)
 
     def test_singbox_fragment_json_contains_fragment(self):
         """Sing-box JSON (Hiddify/NekoBox): dial-поле fragment."""

@@ -192,11 +192,17 @@ class TestGenerateAllPresets(unittest.TestCase):
         self.assertEqual(rs["serverName"], "vpn.example.com")
         self.assertEqual(rs["publicKey"], "PUBKEY")
         self.assertEqual(rs["shortId"], "abcd1234")
-        # baseline — без fragment в sockopt
+        # baseline — без фрагментации: ни fragment-ключа в sockopt, ни
+        # dialerProxy, ни fragment-outbound (валидная схема включается
+        # только с fragment-параметрами)
         self.assertNotIn("fragment", ss["sockopt"])
+        self.assertNotIn("dialerProxy", ss["sockopt"])
+        tags = [ob.get("tag") for ob in data["outbounds"]]
+        self.assertNotIn("fragment", tags)
 
     def test_tlshello_preset_generates_config(self):
-        """frag_04b: packets='tlshello' доходит до sockopt.fragment."""
+        """frag_04b: packets='tlshello' доходит до settings.fragment
+        freedom-outbound."""
         from chimera.modules.fragment_presets import _generate_one, PRESET_MATRIX
         self._state.write_text(json.dumps({
             "domain": "vpn.example.com",
@@ -211,12 +217,21 @@ class TestGenerateAllPresets(unittest.TestCase):
             path = _generate_one(preset)
         self.assertIsNotNone(path)
         data = json.loads(path.read_text())
-        frag = data["outbounds"][0]["streamSettings"]["sockopt"]["fragment"]
+        frag_ob = [ob for ob in data["outbounds"]
+                   if ob.get("tag") == "fragment"][0]
+        frag = frag_ob["settings"]["fragment"]
         self.assertEqual(frag["packets"], "tlshello")
         self.assertEqual(frag["length"], "10-20")
+        self.assertEqual(frag["interval"], "10-20")
+        # основной outbound: dialerProxy, без placebo fragment-ключа
+        proxy = data["outbounds"][0]
+        sockopt = proxy["streamSettings"]["sockopt"]
+        self.assertEqual(sockopt["dialerProxy"], "fragment")
+        self.assertNotIn("fragment", sockopt)
 
     def test_noise_preset_generates_fragment_plus_noise(self):
-        """frag_09 (combo): sockopt содержит И fragment, И noise."""
+        """frag_09 (combo): freedom-outbound содержит И fragment, И noises;
+        основной outbound — dialerProxy без placebo-ключей."""
         from chimera.modules.fragment_presets import _generate_one, PRESET_MATRIX
         self._state.write_text(json.dumps({
             "domain": "vpn.example.com",
@@ -232,14 +247,24 @@ class TestGenerateAllPresets(unittest.TestCase):
         self.assertIsNotNone(path)
         data = json.loads(path.read_text())
         sockopt = data["outbounds"][0]["streamSettings"]["sockopt"]
-        self.assertIn("fragment", sockopt)
-        self.assertIn("noise", sockopt)
-        self.assertEqual(sockopt["noise"][0]["packet"], "10-20")
-        self.assertEqual(sockopt["noise"][0]["delay"], "5-10")
+        frag_ob = [ob for ob in data["outbounds"]
+                   if ob.get("tag") == "fragment"][0]
+        self.assertIn("fragment", frag_ob["settings"])
+        noises = frag_ob["settings"]["noises"]
+        self.assertEqual(noises[0]["packet"], "10-20")
+        self.assertEqual(noises[0]["delay"], "5-10")
+        self.assertEqual(noises[0]["type"], "rand")
+        # сингулярный noise не появляется нигде
+        self.assertNotIn("noise", frag_ob["settings"])
+        # основной outbound: dialerProxy, без fragment/noise/noises
+        self.assertEqual(sockopt["dialerProxy"], "fragment")
+        self.assertNotIn("fragment", sockopt)
+        self.assertNotIn("noise", sockopt)
+        self.assertNotIn("noises", sockopt)
 
     def test_regular_presets_have_no_noise(self):
-        """Обычные пресеты (без noise-ключей) не добавляют sockopt.noise
-        — обратная совместимость генерации."""
+        """Обычные пресеты (без noise-ключей) не добавляют noises —
+        обратная совместимость генерации (шум — опция комбо-пресета)."""
         from chimera.modules.fragment_presets import _generate_one, PRESET_MATRIX
         self._state.write_text(json.dumps({
             "domain": "vpn.example.com",
@@ -255,8 +280,42 @@ class TestGenerateAllPresets(unittest.TestCase):
         self.assertIsNotNone(path)
         data = json.loads(path.read_text())
         sockopt = data["outbounds"][0]["streamSettings"]["sockopt"]
-        self.assertIn("fragment", sockopt)
+        frag_ob = [ob for ob in data["outbounds"]
+                   if ob.get("tag") == "fragment"][0]
+        self.assertIn("fragment", frag_ob["settings"])
+        self.assertNotIn("noises", frag_ob["settings"])
+        self.assertNotIn("noise", frag_ob["settings"])
         self.assertNotIn("noise", sockopt)
+
+    def test_regular_preset_fragment_outbound_and_unique_tags(self):
+        """Регулярный пресет: fragment-outbound с точными settings.fragment,
+        теги outbound уникальны (proxy/fragment/direct/block)."""
+        from chimera.modules.fragment_presets import _generate_one, PRESET_MATRIX
+        self._state.write_text(json.dumps({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+        }))
+        preset = next(p for p in PRESET_MATRIX
+                      if p["label"] == "frag_04_medium_fast")
+        with self._patch()[0], self._patch()[1], self._patch()[2], self._patch()[3]:
+            path = _generate_one(preset)
+        self.assertIsNotNone(path)
+        data = json.loads(path.read_text())
+        frag_ob = [ob for ob in data["outbounds"]
+                   if ob.get("tag") == "fragment"][0]
+        self.assertEqual(frag_ob["protocol"], "freedom")
+        self.assertEqual(
+            frag_ob["settings"]["fragment"],
+            {"packets": preset["packets"], "length": preset["length"],
+             "interval": preset["interval"]})
+        tags = [ob.get("tag") for ob in data["outbounds"]]
+        self.assertEqual(len(tags), len(set(tags)),
+                         f"теги outbound должны быть уникальны: {tags}")
+        for expected in ("proxy", "fragment", "direct", "block"):
+            self.assertIn(expected, tags)
 
 
 if __name__ == "__main__":

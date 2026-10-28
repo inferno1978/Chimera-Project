@@ -7,10 +7,15 @@ chimera/modules/fragment_config.py
 Xray разбивает первые N байт TLS ClientHello на мелкие куски, что
 препятствует DPI-анализу провайдера.
 
-Параметры sockopt.fragment (на стороне outbound клиента):
-  • packets  — "1-3"          (первые 1–3 TCP-сегмента)
+Схема Xray-core (единственно валидная — infra/conf/freedom.go): fragment и
+noises живут в settings freedom-outbound, основной outbound набирает своё
+соединение ЧЕРЕЗ него (streamSettings.sockopt.dialerProxy, transport_sockopt.go):
+  • packets  — "1-3" / "tlshello"  (первые 1–3 TCP-сегмента / весь ClientHello)
   • length   — "1-5"          (размер каждого фрагмента в байтах)
   • interval — "10-20"        (задержка между фрагментами, мс)
+
+Поля fragment/noise ВНУТРИ sockopt ядром НЕ поддерживаются и молча
+игнорировались (плацебо до фикса 2026-10-28).
 
 ВАЖНО: фрагментация применяется ТОЛЬКО к исходящим соединениям (outbounds),
 и ТОЛЬКО в клиентском конфиге (не в серверном xray/config.json на VPS).
@@ -18,6 +23,7 @@ Xray разбивает первые N байт TLS ClientHello на мелки�
 
 Точка входа из _core.py / fragment_fuzzer.py:
     from chimera.modules.fragment_config import (
+        build_fragment_outbound,
         build_fragment_sockopt,
         generate_fragment_client_config,
         do_fragment_config_menu,
@@ -113,29 +119,12 @@ _FRAGMENT_PRESETS = {
 
 # ── Публичные функции ──────────────────────────────────────────────────────
 
-def build_fragment_sockopt(
-    packets: str = "1-3",
-    length: str = "3-7",
-    interval: str = "10-20",
-) -> dict:
-    """
-    Возвращает dict sockopt с секцией fragment.
-    Используется fragment_fuzzer.py и do_fragment_config_menu().
+FRAGMENT_OUTBOUND_TAG = "fragment"
 
-    TFO (tcpFastOpen) добавляется ТОЛЬКО если включён в tfo_settings
-    (дефолт ВЫКЛ — инцидент 28.08.2026: DPI резал data-in-SYN).
 
-    Пример результата (TFO выключен — базовый случай):
-        {
-            "tcpKeepAliveInterval": 15,
-            ... ,
-            "fragment": {
-                "packets":  "1-3",
-                "length":   "3-7",
-                "interval": "10-20"
-            }
-        }
-    """
+def _base_tcp_sockopt() -> dict:
+    """Базовый TCP-тюнинг sockopt (TFO — только если включён в tfo_settings;
+    дефолт ВЫКЛ — инцидент 28.08.2026: DPI резал data-in-SYN)."""
     from chimera.modules.tfo_settings import tfo_sockopt
     return {
         **tfo_sockopt(),
@@ -143,11 +132,80 @@ def build_fragment_sockopt(
         "tcpKeepAliveIdle":   60,
         "tcpUserTimeout":     30000,
         "tcpCongestion":      "bbr",
+    }
+
+
+def build_fragment_outbound(
+    packets: str = "1-3",
+    length: str = "3-7",
+    interval: str = "10-20",
+    noise_packet: Optional[str] = None,
+    noise_delay: Optional[str] = None,
+    tag: str = FRAGMENT_OUTBOUND_TAG,
+) -> dict:
+    """
+    freedom-outbound с settings.fragment (+ опц. noises) — ЕДИНСТВЕННО
+    валидное место fragment/noise в схеме Xray-core (infra/conf/freedom.go:
+    Fragment *Fragment `json:"fragment"` / Noises []*Noise `json:"noises"`;
+    сингулярный "noise" из Xray-core удалён — только массив noises).
+
+    Цепочка: основной outbound получает streamSettings.sockopt.dialerProxy
+    = tag (см. build_fragment_sockopt) — его TCP-соединение набирается через
+    этот freedom-outbound, который дробит записи (fragment) и/или шлёт шум
+    (noises). TCP-тюнинг продублирован здесь: фактический dial выполняет
+    именно freedom-outbound.
+    """
+    settings: dict = {
         "fragment": {
             "packets":  packets,
             "length":   length,
             "interval": interval,
-        },
+        }
+    }
+    if noise_packet and noise_delay:
+        settings["noises"] = [
+            {
+                "type":   "rand",
+                "packet": noise_packet,
+                "delay":  noise_delay,
+            }
+        ]
+    return {
+        "tag":            tag,
+        "protocol":       "freedom",
+        "settings":       settings,
+        "streamSettings": {"sockopt": _base_tcp_sockopt()},
+    }
+
+
+def build_fragment_sockopt(
+    packets: str = "1-3",
+    length: str = "3-7",
+    interval: str = "10-20",
+) -> dict:
+    """
+    sockopt ОСНОВНОГО (proxy) outbound: TCP-тюнинг + dialerProxy.
+
+    Валидная схема Xray-core: фрагментацию выполняет freedom-outbound
+    (build_fragment_outbound), основной outbound набирает соединение ЧЕРЕЗ
+    него — sockopt.dialerProxy (поле есть в infra/conf/transport_sockopt.go).
+    Прежняя схема — fragment прямо в sockopt — была невалидна: sockopt
+    такого поля не имеет, ядро молча его игнорировало (плацебо).
+
+    Параметры packets/length/interval сохранены для совместимости сигнатуры
+    (вызовы в fragment_link / fragment_mux / fragment_fuzzer); значения
+    фрагментации читает build_fragment_outbound().
+
+    Пример результата (TFO выключен — базовый случай):
+        {
+            "tcpKeepAliveInterval": 15,
+            ... ,
+            "dialerProxy": "fragment"
+        }
+    """
+    return {
+        **_base_tcp_sockopt(),
+        "dialerProxy": FRAGMENT_OUTBOUND_TAG,
     }
 
 
@@ -164,8 +222,9 @@ def generate_fragment_client_config(
     в /var/lib/xray-installer/fragment_configs/<label>.json.
 
     noise_packet/noise_delay (опционально, обе или ни одной): добавляют
-    sockopt.noise — комбо «fragment + noise» одной генерацией
-    (шум перед ClientHello: если DPI научился распознавать фрагменты).
+    noises в settings freedom-outbound — комбо «fragment + noise»
+    одной генерацией (шум перед ClientHello: если DPI научился
+    распознавать фрагменты).
 
     Конфиг является КЛИЕНТСКИМ — он работает на устройстве пользователя
     и проксирует трафик через VPS. Серверный /etc/xray/config.json
@@ -197,15 +256,12 @@ def generate_fragment_client_config(
         _warn("В state.json нет domain/uuid — конфиг не может быть сгенерирован")
         return None
 
-    # Комбо fragment+noise — одной генерацией (ленивый импорт:
-    # fragment_noise сам импортирует build_fragment_sockopt отсюда,
-    # топ-левел импорт дал бы circular import).
-    if noise_packet and noise_delay:
-        from chimera.modules.fragment_noise import build_noise_sockopt
-        sockopt = build_noise_sockopt(packets, length, interval,
-                                      noise_packet, noise_delay)
-    else:
-        sockopt = build_fragment_sockopt(packets, length, interval)
+    # Валидная схема Xray-core: fragment(+опц. noises) — в settings
+    # freedom-outbound, основной outbound цепляется через sockopt.dialerProxy
+    # (комбо «fragment + noise» — одной генерацией: noises на том же outbound).
+    fragment_outbound = build_fragment_outbound(
+        packets, length, interval, noise_packet, noise_delay)
+    sockopt = build_fragment_sockopt(packets, length, interval)
 
     # ── Строим outbound в зависимости от протокола ─────────────────────────
     if protocol_mode == "xhttp":
@@ -337,6 +393,7 @@ def generate_fragment_client_config(
         ],
         "outbounds": [
             outbound,
+            fragment_outbound,
             {"protocol": "freedom", "tag": "direct"},
             {"protocol": "blackhole", "tag": "block"},
         ],
@@ -365,13 +422,13 @@ def generate_fragment_client_config(
 def _validate_range_str(value: str, what: str) -> bool:
     """Проверяет, что строка имеет вид 'N' или 'N-M' с целыми числами > 0.
 
-    Спец-значение для what='packets': 'tlshello' — фрагментировать ВСЕ
-    TCP-сегменты до конца TLS ClientHello (Xray-core sockopt.fragment.
-    .packets; принято живой валидацией `xray run -test` на ядре 26.10.21).
+    Спец-значение для what='packets': 'tlshello' — дробить TLS ClientHello
+    на отдельные handshake-сообщения (Xray-core freedom.settings.fragment
+    .packets, case "tlshello" в infra/conf/freedom.go).
     Рецепт волны DPI/CHECKER (окт-2026): packets=tlshello length=10-20
     interval=10-20.
     """
-    # Xray sockopt.fragment.packets допускает спец-строку "tlshello"
+    # freedom.settings.fragment.packets допускает спец-строку "tlshello"
     # вместо числового диапазона — валидна ТОЛЬКО для поля packets.
     if what == "packets" and value.strip().lower() == "tlshello":
         return True
@@ -654,11 +711,13 @@ def do_fragment_config_menu() -> None:
                 for f in sorted(_FRAGMENT_DIR.glob("*.json")):
                     try:
                         data = json.loads(f.read_text())
-                        # Извлекаем параметры fragment из outbound
-                        ob = data.get("outbounds", [{}])[0]
-                        frag = (ob.get("streamSettings", {})
-                                  .get("sockopt", {})
-                                  .get("fragment", {}))
+                        # Извлекаем параметры fragment из freedom-outbound
+                        frag = {}
+                        for _ob in data.get("outbounds", []):
+                            _fr = (_ob.get("settings", {}) or {}).get("fragment")
+                            if isinstance(_fr, dict):
+                                frag = _fr
+                                break
                         tag = (f"packets={frag.get('packets','-')} "
                                f"length={frag.get('length','-')} "
                                f"interval={frag.get('interval','-')}")

@@ -94,6 +94,7 @@ from chimera.modules.box_renderer import (
     _box_info, _box_warn, _box_desc, _box_ok, _get_box_width,
 )
 from chimera.modules.fragment_config import (
+    build_fragment_outbound,
     build_fragment_sockopt,
     generate_fragment_client_config,
 )
@@ -224,7 +225,11 @@ def _build_test_client_config(
     reality_dest  = state.get("reality_dest", "")
     xtls_flow     = state.get("xtls_flow", "xtls-rprx-vision")
     fp            = _fp_from_state(state)
-    sockopt       = build_fragment_sockopt(packets, length, interval)
+    # Валидная схема Xray-core: fragment — в settings freedom-outbound,
+    # основной outbound цепляется через sockopt.dialerProxy (матрица всегда
+    # с реальными параметрами — baseline-записей нет).
+    sockopt           = build_fragment_sockopt(packets, length, interval)
+    fragment_outbound = build_fragment_outbound(packets, length, interval)
 
     if protocol_mode == "xhttp":
         outbound = {
@@ -296,7 +301,8 @@ def _build_test_client_config(
         "inbounds": [{"tag": "socks-test", "protocol": "socks",
                       "listen": "127.0.0.1", "port": socks_port,
                       "settings": {"auth": "noauth", "udp": False}}],
-        "outbounds": [outbound, {"protocol": "freedom", "tag": "direct"}],
+        "outbounds": [outbound, fragment_outbound,
+                      {"protocol": "freedom", "tag": "direct"}],
     }
 
 

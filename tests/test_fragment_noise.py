@@ -5,11 +5,14 @@ tests/test_fragment_noise.py
 Unit-тесты для chimera/modules/fragment_noise.py.
 
 Покрывает:
-  1. build_noise_sockopt — генерация sockopt с noise
-  2. build_singbox_noise_dial — генерация Sing-box dial
-  3. _resolve_sni — выбор SNI
-  4. _load_state — чтение state
-  5. _NOISE_PRESETS — структура пресетов
+  1. build_fragment_outbound(noise args) — комбо fragment+noises в одном
+     freedom-outbound (замена удалённой build_noise_sockopt — валидная
+     схема Xray-core, сингулярный noise из ядра удалён)
+  2. _build_xray_noise_json — полный клиентский Xray JSON (комбо-путь)
+  3. build_singbox_noise_dial — генерация Sing-box dial
+  4. _resolve_sni — выбор SNI
+  5. _load_state — чтение state
+  6. _NOISE_PRESETS — структура пресетов
 """
 from __future__ import annotations
 
@@ -40,50 +43,146 @@ def _setup_core_in_sysmodules():
     sys.modules["chimera._core"] = fake_core
 
 
-class TestBuildNoiseSockopt(unittest.TestCase):
-    """build_noise_sockopt — pure dict builder."""
+class TestBuildFragmentOutboundNoise(unittest.TestCase):
+    """build_fragment_outbound(noise args) — замена удалённой
+    build_noise_sockopt: комбо fragment+noises в одном freedom-outbound
+    (валидная схема Xray-core; fragment_noise реэкспортирует билдеры
+    из fragment_config — проверяем его публичное API-пространство имён)."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
 
-    def test_returns_dict_with_fragment_and_noise(self):
-        from chimera.modules.fragment_noise import build_noise_sockopt
-        s = build_noise_sockopt()
-        self.assertIn("fragment", s)
-        self.assertIn("noise", s)
-        self.assertIsInstance(s["noise"], list)
-        self.assertEqual(len(s["noise"]), 1)
+    def test_returns_freedom_outbound_with_fragment_and_noises(self):
+        from chimera.modules.fragment_noise import build_fragment_outbound
+        ob = build_fragment_outbound(noise_packet="20-50", noise_delay="10-20")
+        self.assertEqual(ob["protocol"], "freedom")
+        self.assertEqual(ob["tag"], "fragment")
+        self.assertIn("fragment", ob["settings"])
+        noises = ob["settings"]["noises"]
+        self.assertIsInstance(noises, list)
+        self.assertEqual(len(noises), 1)
+        self.assertEqual(noises[0]["type"], "rand")
+        # сингулярный noise (удалён из Xray-core) не появляется
+        self.assertNotIn("noise", ob["settings"])
 
     def test_default_noise_values(self):
-        from chimera.modules.fragment_noise import build_noise_sockopt
-        s = build_noise_sockopt()
-        noise = s["noise"][0]
+        """Штатные noise-значения комбо (20-50/10-20) — как прежде в
+        build_noise_sockopt, теперь в noises freedom-outbound."""
+        from chimera.modules.fragment_noise import build_fragment_outbound
+        ob = build_fragment_outbound(noise_packet="20-50", noise_delay="10-20")
+        noise = ob["settings"]["noises"][0]
         self.assertEqual(noise["type"], "rand")
         self.assertEqual(noise["packet"], "20-50")
         self.assertEqual(noise["delay"], "10-20")
 
     def test_custom_noise_values(self):
-        from chimera.modules.fragment_noise import build_noise_sockopt
-        s = build_noise_sockopt(noise_packet="100-200", noise_delay="50-100")
-        noise = s["noise"][0]
+        from chimera.modules.fragment_noise import build_fragment_outbound
+        ob = build_fragment_outbound(noise_packet="100-200", noise_delay="50-100")
+        noise = ob["settings"]["noises"][0]
         self.assertEqual(noise["packet"], "100-200")
         self.assertEqual(noise["delay"], "50-100")
 
+    def test_noises_omitted_without_noise_args(self):
+        """Без noise-аргументов noises нет — шум опционален."""
+        from chimera.modules.fragment_noise import build_fragment_outbound
+        ob = build_fragment_outbound()
+        self.assertNotIn("noises", ob["settings"])
+        self.assertNotIn("noise", ob["settings"])
+
     def test_no_tcp_fast_open_by_default(self):
         """TFO выключен по умолчанию (инцидент 28.08.2026: DPI резал data-in-SYN)."""
-        from chimera.modules.fragment_noise import build_noise_sockopt
-        s = build_noise_sockopt()
-        self.assertNotIn("tcpFastOpen", s)
+        from chimera.modules.fragment_noise import (
+            build_fragment_outbound, build_fragment_sockopt,
+        )
+        ob = build_fragment_outbound(noise_packet="20-50", noise_delay="10-20")
+        self.assertNotIn("tcpFastOpen", ob["streamSettings"]["sockopt"])
+        self.assertNotIn("tcpFastOpen", build_fragment_sockopt())
 
     def test_tcp_fast_open_when_enabled(self):
         from chimera.modules import tfo_settings
-        from chimera.modules.fragment_noise import build_noise_sockopt
+        from chimera.modules.fragment_noise import (
+            build_fragment_outbound, build_fragment_sockopt,
+        )
         tfo_settings.set_tfo_override(True)
         try:
-            s = build_noise_sockopt()
-            self.assertTrue(s.get("tcpFastOpen"))
+            ob = build_fragment_outbound(noise_packet="20-50", noise_delay="10-20")
+            self.assertTrue(ob["streamSettings"]["sockopt"].get("tcpFastOpen"))
+            self.assertTrue(build_fragment_sockopt().get("tcpFastOpen"))
         finally:
             tfo_settings.clear_tfo_override()
+
+
+class TestBuildXrayNoiseJson(unittest.TestCase):
+    """_build_xray_noise_json — комбо fragment+noises (валидная схема)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _state(self):
+        return {
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "public_key": "PUBKEY",
+            "short_id": "abcd",
+            "reality_dest": "dest:443",
+            "fingerprint": "chrome",
+            "server_port": 443,
+        }
+
+    def _build(self):
+        from chimera.modules.fragment_noise import _build_xray_noise_json
+        return _build_xray_noise_json(
+            self._state(), "1-3", "10-20", "10-20", "20-50", "10-20")
+
+    def test_fragment_outbound_present_with_fragment_and_noises(self):
+        """Комбо-путь: freedom-outbound несёт settings.fragment И noises."""
+        cfg = self._build()
+        frag_obs = [ob for ob in cfg["outbounds"] if ob.get("tag") == "fragment"]
+        self.assertEqual(len(frag_obs), 1)
+        ob = frag_obs[0]
+        self.assertEqual(ob["protocol"], "freedom")
+        self.assertEqual(
+            ob["settings"]["fragment"],
+            {"packets": "1-3", "length": "10-20", "interval": "10-20"})
+        noises = ob["settings"]["noises"]
+        self.assertEqual(noises[0]["type"], "rand")
+        self.assertEqual(noises[0]["packet"], "20-50")
+        self.assertEqual(noises[0]["delay"], "10-20")
+        # сингулярный noise не появляется
+        self.assertNotIn("noise", ob["settings"])
+
+    def test_proxy_sockopt_dialer_proxy_without_placebo_keys(self):
+        """Основной outbound: dialerProxy="fragment", НЕТ placebo-ключей
+        fragment/noise/noises в sockopt (регрессия плацебо-схемы)."""
+        cfg = self._build()
+        proxy = [ob for ob in cfg["outbounds"] if ob["tag"] == "proxy"][0]
+        sockopt = proxy["streamSettings"]["sockopt"]
+        self.assertEqual(sockopt["dialerProxy"], "fragment")
+        self.assertNotIn("fragment", sockopt)
+        self.assertNotIn("noise", sockopt)
+        self.assertNotIn("noises", sockopt)
+
+    def test_outbound_tags_unique(self):
+        """Теги outbound уникальны (proxy/fragment/direct/block)."""
+        cfg = self._build()
+        tags = [ob.get("tag") for ob in cfg["outbounds"]]
+        self.assertEqual(len(tags), len(set(tags)),
+                         f"теги outbound должны быть уникальны: {tags}")
+        for expected in ("proxy", "fragment", "direct", "block"):
+            self.assertIn(expected, tags)
+
+    def test_reality_transport_intact(self):
+        """Транспорт не пострадал: reality-ветка с vision-flow."""
+        cfg = self._build()
+        proxy = [ob for ob in cfg["outbounds"] if ob["tag"] == "proxy"][0]
+        ss = proxy["streamSettings"]
+        self.assertEqual(ss["network"], "tcp")
+        self.assertEqual(ss["security"], "reality")
+        self.assertEqual(ss["realitySettings"]["serverName"], "vpn.example.com")
+        self.assertEqual(ss["realitySettings"]["publicKey"], "PUBKEY")
+        self.assertEqual(
+            proxy["settings"]["vnext"][0]["users"][0].get("flow"),
+            "xtls-rprx-vision")
 
 
 class TestBuildSingboxNoiseDial(unittest.TestCase):

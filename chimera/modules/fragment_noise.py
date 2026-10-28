@@ -7,20 +7,22 @@ Noise дополняет фрагментацию: если DPI научился
 паттерны, noise добавляет случайные байты перед реальным соединением — DPI
 видит «мусор» и не может классифицировать трафик.
 
-Xray sockopt.noise (v1.8.4+):
-    "noise": [{"type": "rand", "packet": "10-20", "delay": "5-10"}]
-    type:   "rand" (случайные байты) или "str" (фиксированная строка hex)
-    packet: диапазон размера шумового пакета в байтах
+Xray: noises в settings freedom-outbound (infra/conf/freedom.go;
+сингулярный "noise" из Xray-core УДАЛЁН — только массив noises,
+а полей noise/fragment в sockopt никогда не было):
+    "noises": [{"type": "rand", "packet": "10-20", "delay": "5-10"}]
+    type:   "rand" / "str" / "hex" / "base64"
+    packet: диапазон размера шумового пакета в байтах (для rand)
     delay:  задержка перед шумом в мс
 
-Sing-box dial_fields.noise (v1.9+):
+Sing-box dial_fields.noise (NekoBox/Hiddify-форки):
     "noise": {"enabled": true, "type": "rand", "packet": "10-20", "delay": "5-10"}
 
 ВАЖНО: серверный /etc/xray/config.json не затрагивается.
 
 Публичное API:
-    build_noise_sockopt(packets, length, interval, noise_packet, noise_delay)
-        → dict sockopt с fragment + noise
+    build_singbox_noise_dial(packets, length, interval, noise_packet, noise_delay)
+        → dial_fields для sing-box (NekoBox/Hiddify)
     do_fragment_noise_menu()
         → интерактивное меню (Меню 4 → F6)
 ───────────────────────────────────────────────────────────────────────────────
@@ -76,7 +78,8 @@ from chimera.modules.box_renderer import (
     _box_info, _box_warn, _box_desc, _get_box_width,
 )
 from chimera.modules.fragment_config import (
-    build_fragment_sockopt, _validate_range_str, _FRAGMENT_PRESETS,
+    build_fragment_outbound, build_fragment_sockopt,
+    _validate_range_str, _FRAGMENT_PRESETS,
 )
 
 # ── Константы ─────────────────────────────────────────────────────────────
@@ -94,30 +97,11 @@ _NOISE_PRESETS = {
 }
 
 # ── Публичное API ──────────────────────────────────────────────────────────
-
-def build_noise_sockopt(
-    packets: str = "1-3",
-    length: str  = "3-7",
-    interval: str = "10-20",
-    noise_packet: str = "20-50",
-    noise_delay: str  = "10-20",
-) -> dict:
-    """
-    Возвращает sockopt с fragment + noise.
-    Используется fragment_link.py, fragment_presets.py.
-
-    noise_packet: диапазон размера шумового пакета в байтах ("20-50")
-    noise_delay:  задержка перед шумом в мс ("10-20")
-    """
-    sockopt = build_fragment_sockopt(packets, length, interval)
-    sockopt["noise"] = [
-        {
-            "type":   "rand",
-            "packet": noise_packet,
-            "delay":  noise_delay,
-        }
-    ]
-    return sockopt
+#
+# Прежняя build_noise_sockopt (fragment+noise прямо в sockopt) УДАЛЕНА —
+# это была невалидная схема (ядро игнорирует такие поля). Xray-комбо
+# «fragment + noise» строится теперь одной функцией
+# fragment_config.build_fragment_outbound(noise_packet=..., noise_delay=...).
 
 
 def build_singbox_noise_dial(
@@ -194,9 +178,12 @@ def _build_xray_noise_json(
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 
-    sockopt = build_noise_sockopt(
+    # Валидная схема Xray-core: fragment+noises — в settings freedom-outbound,
+    # основной outbound цепляется через sockopt.dialerProxy.
+    fragment_outbound = build_fragment_outbound(
         frag_packets, frag_length, frag_interval, noise_packet, noise_delay
     )
+    sockopt = build_fragment_sockopt(frag_packets, frag_length, frag_interval)
 
     if proto == "xhttp":
         outbound = {
@@ -253,6 +240,7 @@ def _build_xray_noise_json(
         ],
         "outbounds": [
             outbound,
+            fragment_outbound,
             {"protocol": "freedom",   "tag": "direct"},
             {"protocol": "blackhole", "tag": "block"},
         ],

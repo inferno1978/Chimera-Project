@@ -85,7 +85,9 @@ from chimera.modules.box_renderer import (
     _box_top, _box_sep, _box_bottom, _box_row, _box_item, _box_back,
     _box_info, _box_warn, _box_desc, _get_box_width,
 )
-from chimera.modules.fragment_config import build_fragment_sockopt
+from chimera.modules.fragment_config import (
+    build_fragment_outbound, build_fragment_sockopt,
+)
 
 # ── Константы ─────────────────────────────────────────────────────────────
 _STATE_FILE = Path("/var/lib/xray-installer/state.json")
@@ -179,7 +181,11 @@ def _build_xray_mux_json(state: dict, frag_packets: str, frag_length: str,
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 
+    # Валидная схема Xray-core: fragment — в settings freedom-outbound,
+    # основной outbound цепляется через sockopt.dialerProxy (mux — на уровне
+    # протокола, с dialerProxy совместим).
     sockopt = build_fragment_sockopt(frag_packets, frag_length, frag_interval)
+    fragment_outbound = build_fragment_outbound(frag_packets, frag_length, frag_interval)
     mux     = build_mux_outbound_patch(concurrency, xudp)
 
     # Mux несовместим с xtls-rprx-vision — при mux flow убираем.
@@ -246,6 +252,7 @@ def _build_xray_mux_json(state: dict, frag_packets: str, frag_length: str,
         ],
         "outbounds": [
             outbound,
+            fragment_outbound,
             {"protocol": "freedom",   "tag": "direct"},
             {"protocol": "blackhole", "tag": "block"},
         ],

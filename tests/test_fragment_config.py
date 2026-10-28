@@ -5,10 +5,16 @@ tests/test_fragment_config.py
 Unit-тесты для chimera/modules/fragment_config.py.
 
 Покрывает:
-  1. build_fragment_sockopt — генерация sockopt dict
-  2. _validate_range_str — валидация диапазонов "3-7"
-  3. _FRAGMENT_PRESETS — структура пресетов
-  4. generate_fragment_client_config — генерация конфига (mocked state)
+  1. build_fragment_sockopt — sockopt основного outbound (dialerProxy)
+  2. build_fragment_outbound — freedom-outbound с settings.fragment(+noises)
+  3. _validate_range_str — валидация диапазонов "3-7"
+  4. _FRAGMENT_PRESETS — структура пресетов
+  5. generate_fragment_client_config — генерация конфига (mocked state)
+
+Валидная схема Xray-core (infra/conf/freedom.go + transport_sockopt.go):
+fragment/noises живут в settings freedom-outbound, основной outbound
+цепляется через streamSettings.sockopt.dialerProxy. Поля fragment/noise
+внутри sockopt ядром НЕ поддерживались (плацебо до фикса 2026-10-28).
 """
 from __future__ import annotations
 
@@ -40,7 +46,7 @@ def _setup_core_in_sysmodules():
 
 
 class TestBuildFragmentSockopt(unittest.TestCase):
-    """build_fragment_sockopt — pure dict builder."""
+    """build_fragment_sockopt — sockopt ОСНОВНОГО (proxy) outbound."""
 
     def setUp(self):
         _setup_core_in_sysmodules()
@@ -51,19 +57,27 @@ class TestBuildFragmentSockopt(unittest.TestCase):
         # TFO (tcpFastOpen) УБРАН из дефолта — инцидент 28.08.2026 (DPI
         # резал data-in-SYN). Проверяем что базовые поля на месте.
         for key in ("tcpKeepAliveInterval", "tcpKeepAliveIdle",
-                     "tcpUserTimeout", "tcpCongestion", "fragment"):
+                     "tcpUserTimeout", "tcpCongestion", "dialerProxy"):
             self.assertIn(key, s)
         self.assertNotIn("tcpFastOpen", s,
                          "TFO не должен быть в sockopt по умолчанию")
+        # Регрессия плацебо-схемы: в sockopt основного outbound НЕТ полей
+        # fragment/noise — фрагментацию выполняет freedom-outbound.
+        self.assertNotIn("fragment", s)
+        self.assertNotIn("noise", s)
 
     def test_default_values(self):
-        from chimera.modules.fragment_config import build_fragment_sockopt
+        from chimera.modules.fragment_config import (
+            build_fragment_sockopt, FRAGMENT_OUTBOUND_TAG,
+        )
         s = build_fragment_sockopt()
         self.assertNotIn("tcpFastOpen", s)
         self.assertEqual(s["tcpCongestion"], "bbr")
-        self.assertEqual(s["fragment"]["packets"], "1-3")
-        self.assertEqual(s["fragment"]["length"], "3-7")
-        self.assertEqual(s["fragment"]["interval"], "10-20")
+        self.assertEqual(s["tcpKeepAliveInterval"], 15)
+        self.assertEqual(s["tcpKeepAliveIdle"], 60)
+        self.assertEqual(s["tcpUserTimeout"], 30000)
+        # основное соединение набирается через freedom-outbound
+        self.assertEqual(s["dialerProxy"], FRAGMENT_OUTBOUND_TAG)
 
     def test_tfo_added_when_enabled(self):
         """При включённом TFO (override) поле tcpFastOpen появляется."""
@@ -76,12 +90,96 @@ class TestBuildFragmentSockopt(unittest.TestCase):
         finally:
             tfo_settings.clear_tfo_override()
 
-    def test_custom_values(self):
+    def test_custom_values_ignored_signature_compat(self):
+        """packets/length/interval сохранены в сигнатуре только для
+        совместимости вызовов (fragment_link/mux/fuzzer): на результат они
+        НЕ влияют — значения фрагментации задаёт build_fragment_outbound,
+        здесь всегда dialerProxy без placebo-ключей."""
         from chimera.modules.fragment_config import build_fragment_sockopt
         s = build_fragment_sockopt(packets="5-10", length="100-200", interval="50-100")
-        self.assertEqual(s["fragment"]["packets"], "5-10")
-        self.assertEqual(s["fragment"]["length"], "100-200")
-        self.assertEqual(s["fragment"]["interval"], "50-100")
+        self.assertEqual(s["dialerProxy"], "fragment")
+        self.assertNotIn("fragment", s)
+        self.assertNotIn("noise", s)
+
+
+class TestBuildFragmentOutbound(unittest.TestCase):
+    """build_fragment_outbound — freedom-outbound (валидная схема Xray-core)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_returns_freedom_outbound_with_fragment_settings(self):
+        from chimera.modules.fragment_config import (
+            build_fragment_outbound, FRAGMENT_OUTBOUND_TAG,
+        )
+        ob = build_fragment_outbound()
+        self.assertEqual(ob["tag"], FRAGMENT_OUTBOUND_TAG)
+        self.assertEqual(ob["protocol"], "freedom")
+        frag = ob["settings"]["fragment"]
+        self.assertEqual(frag["packets"], "1-3")
+        self.assertEqual(frag["length"], "3-7")
+        self.assertEqual(frag["interval"], "10-20")
+        # без noise-аргументов — ни noises, ни сингулярного noise
+        self.assertNotIn("noises", ob["settings"])
+        self.assertNotIn("noise", ob["settings"])
+
+    def test_custom_values(self):
+        from chimera.modules.fragment_config import build_fragment_outbound
+        ob = build_fragment_outbound(
+            packets="5-10", length="100-200", interval="50-100")
+        self.assertEqual(ob["settings"]["fragment"]["packets"], "5-10")
+        self.assertEqual(ob["settings"]["fragment"]["length"], "100-200")
+        self.assertEqual(ob["settings"]["fragment"]["interval"], "50-100")
+
+    def test_noises_added_when_noise_args_present(self):
+        """noise_packet+noise_delay → массив noises в settings (комбо)."""
+        from chimera.modules.fragment_config import build_fragment_outbound
+        ob = build_fragment_outbound(noise_packet="100-200", noise_delay="50-100")
+        noises = ob["settings"]["noises"]
+        self.assertIsInstance(noises, list)
+        self.assertEqual(len(noises), 1)
+        self.assertEqual(noises[0]["type"], "rand")
+        self.assertEqual(noises[0]["packet"], "100-200")
+        self.assertEqual(noises[0]["delay"], "50-100")
+        # сингулярный "noise" из Xray-core удалён — только массив noises
+        self.assertNotIn("noise", ob["settings"])
+
+    def test_noises_omitted_when_single_noise_arg(self):
+        """Комбо «обе или ни одной»: один noise-аргумент — noises НЕТ."""
+        from chimera.modules.fragment_config import build_fragment_outbound
+        ob = build_fragment_outbound(noise_packet="100-200")
+        self.assertNotIn("noises", ob["settings"])
+        self.assertNotIn("noise", ob["settings"])
+
+    def test_custom_tag(self):
+        from chimera.modules.fragment_config import build_fragment_outbound
+        ob = build_fragment_outbound(tag="frag-custom")
+        self.assertEqual(ob["tag"], "frag-custom")
+
+    def test_tcp_tuning_in_stream_settings_sockopt(self):
+        """TCP-тюнинг продублирован на freedom-outbound: фактический dial
+        выполняет именно он (без dialerProxy — это терминальный dialer)."""
+        from chimera.modules.fragment_config import build_fragment_outbound
+        sso = build_fragment_outbound()["streamSettings"]["sockopt"]
+        for key in ("tcpKeepAliveInterval", "tcpKeepAliveIdle",
+                    "tcpUserTimeout", "tcpCongestion"):
+            self.assertIn(key, sso)
+        self.assertEqual(sso["tcpCongestion"], "bbr")
+        self.assertNotIn("tcpFastOpen", sso)
+        self.assertNotIn("dialerProxy", sso)
+        # fragment/noise в sockopt — невалидная схема, их тут быть не должно
+        self.assertNotIn("fragment", sso)
+        self.assertNotIn("noise", sso)
+
+    def test_tfo_added_when_enabled(self):
+        from chimera.modules import tfo_settings
+        from chimera.modules.fragment_config import build_fragment_outbound
+        tfo_settings.set_tfo_override(True)
+        try:
+            sso = build_fragment_outbound()["streamSettings"]["sockopt"]
+            self.assertTrue(sso.get("tcpFastOpen"))
+        finally:
+            tfo_settings.clear_tfo_override()
 
 
 class TestValidateRangeStr(unittest.TestCase):
@@ -255,8 +353,16 @@ class TestGenerateFragmentClientConfig(unittest.TestCase):
         self.assertEqual(rs["publicKey"], "PUBKEY")
         self.assertEqual(rs["shortId"], "abcd1234")
         self.assertEqual(rs["spiderX"], "/")
-        # фрагментация на месте
-        self.assertEqual(ss["sockopt"]["fragment"]["length"], "3-7")
+        # фрагментация на месте — валидная схема: freedom-outbound
+        frag_obs = [ob for ob in data["outbounds"] if ob.get("tag") == "fragment"]
+        self.assertEqual(len(frag_obs), 1,
+                         "должен быть ровно один fragment-outbound")
+        self.assertEqual(frag_obs[0]["protocol"], "freedom")
+        self.assertEqual(frag_obs[0]["settings"]["fragment"]["length"], "3-7")
+        # основной outbound цепляется через dialerProxy, без placebo-ключей
+        self.assertEqual(ss["sockopt"]["dialerProxy"], "fragment")
+        self.assertNotIn("fragment", ss["sockopt"])
+        self.assertNotIn("noise", ss["sockopt"])
 
     def test_generates_xhttp_reality_config_awg_sni(self):
         """xhttp_reality + AWG Mode B: SNI = reality_dest (serverNames)."""
@@ -297,8 +403,8 @@ class TestGenerateFragmentClientConfig(unittest.TestCase):
             self.assertTrue(c.isalnum() or c in "-_.")
 
     def test_generates_config_with_tlshello_packets(self):
-        """packets='tlshello' проходит насквозь в sockopt.fragment
-        (рецепт DPI/CHECKER окт-2026)."""
+        """packets='tlshello' проходит насквозь в settings.fragment
+        freedom-outbound (рецепт DPI/CHECKER окт-2026)."""
         from chimera.modules.fragment_config import generate_fragment_client_config
         self._state.write_text(json.dumps({
             "domain": "vpn.example.com",
@@ -312,17 +418,69 @@ class TestGenerateFragmentClientConfig(unittest.TestCase):
                 "tlshello", "10-20", "10-20", label="tlshello_recipe")
         self.assertIsNotNone(result)
         data = json.loads(result.read_text())
-        frag = (data["outbounds"][0]["streamSettings"]["sockopt"]["fragment"])
+        proxy = data["outbounds"][0]
+        sockopt = proxy["streamSettings"]["sockopt"]
+        frag_ob = [ob for ob in data["outbounds"]
+                   if ob.get("tag") == "fragment"][0]
+        frag = frag_ob["settings"]["fragment"]
         self.assertEqual(frag["packets"], "tlshello")
         self.assertEqual(frag["length"], "10-20")
         self.assertEqual(frag["interval"], "10-20")
-        # noise не добавлен — комбо опционально
-        self.assertNotIn("noise",
-                         data["outbounds"][0]["streamSettings"]["sockopt"])
+        # основной outbound: dialerProxy есть, fragment-ключа нет
+        self.assertEqual(sockopt["dialerProxy"], "fragment")
+        self.assertNotIn("fragment", sockopt)
+        # noise не добавлен — комбо опционально (ни noises, ни noise)
+        self.assertNotIn("noises", frag_ob["settings"])
+        self.assertNotIn("noise", frag_ob["settings"])
+        self.assertNotIn("noise", sockopt)
+
+    def test_fragment_outbound_settings_passthrough(self):
+        """Значения packets/length/interval доезжают в settings.fragment
+        freedom-outbound без искажений (не в sockopt!)."""
+        from chimera.modules.fragment_config import generate_fragment_client_config
+        self._state.write_text(json.dumps({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+        }))
+        with self._patch()[0], self._patch()[1]:
+            result = generate_fragment_client_config(
+                "5-10", "100-200", "50-100", label="values_passthrough")
+        self.assertIsNotNone(result)
+        data = json.loads(result.read_text())
+        frag_ob = [ob for ob in data["outbounds"]
+                   if ob.get("tag") == "fragment"][0]
+        self.assertEqual(frag_ob["settings"]["fragment"],
+                         {"packets": "5-10", "length": "100-200",
+                          "interval": "50-100"})
+
+    def test_outbound_tags_unique(self):
+        """Теги всех outbound уникальны (proxy/fragment/direct/block)."""
+        from chimera.modules.fragment_config import generate_fragment_client_config
+        self._state.write_text(json.dumps({
+            "domain": "vpn.example.com",
+            "uuid": "test-uuid",
+            "protocol_mode": "reality",
+            "public_key": "PUBKEY",
+            "short_id": "abcd1234",
+        }))
+        with self._patch()[0], self._patch()[1]:
+            result = generate_fragment_client_config(
+                "1-3", "3-7", "10-20", label="tags_unique")
+        self.assertIsNotNone(result)
+        data = json.loads(result.read_text())
+        tags = [ob.get("tag") for ob in data["outbounds"]]
+        self.assertEqual(len(tags), len(set(tags)),
+                         f"теги outbound должны быть уникальны: {tags}")
+        for expected in ("proxy", "fragment", "direct", "block"):
+            self.assertIn(expected, tags)
 
     def test_generates_config_with_fragment_and_noise(self):
         """Комбо fragment+noise одной генерацией: noise_packet+noise_delay
-        → sockopt.noise появляется; без них — нет (обратная совместимость)."""
+        → noises в settings freedom-outbound; без них — нет (обратная
+        совместимость)."""
         from chimera.modules.fragment_config import generate_fragment_client_config
         self._state.write_text(json.dumps({
             "domain": "vpn.example.com",
@@ -338,11 +496,19 @@ class TestGenerateFragmentClientConfig(unittest.TestCase):
         self.assertIsNotNone(result)
         data = json.loads(result.read_text())
         sockopt = data["outbounds"][0]["streamSettings"]["sockopt"]
-        self.assertEqual(sockopt["fragment"]["length"], "10-20")
-        self.assertIn("noise", sockopt)
-        self.assertEqual(sockopt["noise"][0]["type"], "rand")
-        self.assertEqual(sockopt["noise"][0]["packet"], "10-20")
-        self.assertEqual(sockopt["noise"][0]["delay"], "5-10")
+        frag_ob = [ob for ob in data["outbounds"]
+                   if ob.get("tag") == "fragment"][0]
+        self.assertEqual(frag_ob["settings"]["fragment"]["length"], "10-20")
+        noises = frag_ob["settings"]["noises"]
+        self.assertEqual(noises[0]["type"], "rand")
+        self.assertEqual(noises[0]["packet"], "10-20")
+        self.assertEqual(noises[0]["delay"], "5-10")
+        # основной outbound чист: dialerProxy, без fragment/noise
+        self.assertEqual(sockopt["dialerProxy"], "fragment")
+        self.assertNotIn("fragment", sockopt)
+        self.assertNotIn("noise", sockopt)
+        # сингулярный noise (удалён из Xray-core) не появляется нигде
+        self.assertNotIn("noise", frag_ob["settings"])
 
 
 class TestClientFragmentSettings(unittest.TestCase):

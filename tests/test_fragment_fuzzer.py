@@ -75,8 +75,33 @@ class TestBuildTestClientConfigXhttpReality(unittest.TestCase):
         self.assertEqual(rs["shortId"], "abcd1234")
         self.assertEqual(rs["spiderX"], "/")
         self.assertNotIn("tlsSettings", ss)
-        # фрагментация на месте (вся суть fuzzer'а)
-        self.assertEqual(ss["sockopt"]["fragment"]["length"], "3-7")
+        # фрагментация на месте (вся суть fuzzer'а) — валидная схема:
+        # freedom-outbound + dialerProxy на основном outbound
+        frag_obs = [o for o in cfg["outbounds"] if o.get("tag") == "fragment"]
+        self.assertEqual(len(frag_obs), 1)
+        self.assertEqual(frag_obs[0]["protocol"], "freedom")
+        self.assertEqual(frag_obs[0]["settings"]["fragment"]["length"], "3-7")
+        self.assertEqual(ss["sockopt"]["dialerProxy"], "fragment")
+        self.assertNotIn("fragment", ss["sockopt"])
+        self.assertNotIn("noise", ss["sockopt"])
+
+    def test_fragment_outbound_and_unique_tags(self):
+        """fragment-outbound в конфиге fuzzer'а с точными settings.fragment;
+        теги outbound уникальны (proxy/fragment/direct)."""
+        cfg = self._build({**self._state, "protocol_mode": "reality",
+                           "reality_dest": "dest.example.com:443"})
+        frag_obs = [o for o in cfg["outbounds"] if o.get("tag") == "fragment"]
+        self.assertEqual(len(frag_obs), 1)
+        self.assertEqual(frag_obs[0]["protocol"], "freedom")
+        self.assertEqual(
+            frag_obs[0]["settings"]["fragment"],
+            {"packets": "1-3", "length": "3-7", "interval": "10-20"})
+        self.assertNotIn("noises", frag_obs[0]["settings"])
+        tags = [o.get("tag") for o in cfg["outbounds"]]
+        self.assertEqual(len(tags), len(set(tags)),
+                         f"теги outbound должны быть уникальны: {tags}")
+        for expected in ("proxy", "fragment", "direct"):
+            self.assertIn(expected, tags)
 
     def test_xhttp_reality_awg_sni(self):
         """xhttp_reality + AWG Mode B: SNI = reality_dest (serverNames)."""

@@ -206,8 +206,20 @@ class TestBuildXrayClientJson(unittest.TestCase):
     def test_fragment_included_when_all_params_present(self):
         from chimera.modules.fragment_link import _build_xray_client_json
         cfg = _build_xray_client_json(self._state(), "1-3", "3-7", "10-20")
+        # валидная схема: freedom-outbound с settings.fragment присутствует,
+        # основной outbound цепляется через sockopt.dialerProxy
+        frag_obs = [ob for ob in cfg["outbounds"] if ob.get("tag") == "fragment"]
+        self.assertEqual(len(frag_obs), 1)
+        self.assertEqual(frag_obs[0]["protocol"], "freedom")
+        self.assertEqual(frag_obs[0]["settings"]["fragment"]["packets"], "1-3")
+        self.assertEqual(frag_obs[0]["settings"]["fragment"]["length"], "3-7")
+        self.assertEqual(frag_obs[0]["settings"]["fragment"]["interval"], "10-20")
         proxy = [ob for ob in cfg["outbounds"] if ob["tag"] == "proxy"][0]
-        self.assertIn("fragment", proxy.get("streamSettings", {}).get("sockopt", {}))
+        sockopt = proxy["streamSettings"]["sockopt"]
+        self.assertEqual(sockopt["dialerProxy"], "fragment")
+        # регрессия плацебо-схемы: fragment/noise в sockopt — невалидно
+        self.assertNotIn("fragment", sockopt)
+        self.assertNotIn("noise", sockopt)
 
     def test_fragment_omitted_when_params_empty(self):
         from chimera.modules.fragment_link import _build_xray_client_json
@@ -215,37 +227,64 @@ class TestBuildXrayClientJson(unittest.TestCase):
         proxy = [ob for ob in cfg["outbounds"] if ob["tag"] == "proxy"][0]
         sockopt = proxy.get("streamSettings", {}).get("sockopt", {})
         self.assertNotIn("fragment", sockopt)
+        # без fragment-параметров: dialerProxy НЕТ и fragment-outbound НЕТ
+        self.assertNotIn("dialerProxy", sockopt)
+        self.assertNotIn("noise", sockopt)
+        tags = [ob.get("tag") for ob in cfg["outbounds"]]
+        self.assertNotIn("fragment", tags)
+
+    def test_outbound_tags_unique(self):
+        """Теги outbound уникальны (proxy/fragment/direct/block)."""
+        from chimera.modules.fragment_link import _build_xray_client_json
+        cfg = _build_xray_client_json(self._state(), "1-3", "3-7", "10-20")
+        tags = [ob["tag"] for ob in cfg["outbounds"]]
+        self.assertEqual(len(tags), len(set(tags)),
+                         f"теги outbound должны быть уникальны: {tags}")
 
     def test_tlshello_packets_passthrough(self):
-        """packets='tlshello' проходит в sockopt.fragment без искажений."""
+        """packets='tlshello' проходит в settings.fragment freedom-outbound
+        без искажений."""
         from chimera.modules.fragment_link import _build_xray_client_json
         cfg = _build_xray_client_json(self._state(), "tlshello", "10-20", "10-20")
-        proxy = [ob for ob in cfg["outbounds"] if ob["tag"] == "proxy"][0]
-        frag = proxy["streamSettings"]["sockopt"]["fragment"]
+        frag_ob = [ob for ob in cfg["outbounds"] if ob.get("tag") == "fragment"][0]
+        frag = frag_ob["settings"]["fragment"]
         self.assertEqual(frag["packets"], "tlshello")
         self.assertEqual(frag["length"], "10-20")
+        self.assertEqual(frag["interval"], "10-20")
 
     def test_noise_added_when_params_present(self):
-        """Комбо fragment+noise: noise_packet+noise_delay → sockopt.noise."""
+        """Комбо fragment+noise: noises в settings freedom-outbound."""
         from chimera.modules.fragment_link import _build_xray_client_json
         cfg = _build_xray_client_json(
             self._state(), "1-3", "10-20", "10-20",
             noise_packet="20-50", noise_delay="10-20")
+        frag_ob = [ob for ob in cfg["outbounds"] if ob.get("tag") == "fragment"][0]
+        self.assertIn("fragment", frag_ob["settings"])
+        noises = frag_ob["settings"]["noises"]
+        self.assertEqual(noises[0]["type"], "rand")
+        self.assertEqual(noises[0]["packet"], "20-50")
+        self.assertEqual(noises[0]["delay"], "10-20")
+        # сингулярный noise (удалён из Xray-core) не появляется
+        self.assertNotIn("noise", frag_ob["settings"])
+        # основной outbound: dialerProxy, без fragment/noise-ключей
         proxy = [ob for ob in cfg["outbounds"] if ob["tag"] == "proxy"][0]
         sockopt = proxy["streamSettings"]["sockopt"]
-        self.assertIn("fragment", sockopt)
-        self.assertIn("noise", sockopt)
-        self.assertEqual(sockopt["noise"][0]["type"], "rand")
-        self.assertEqual(sockopt["noise"][0]["packet"], "20-50")
-        self.assertEqual(sockopt["noise"][0]["delay"], "10-20")
+        self.assertEqual(sockopt["dialerProxy"], "fragment")
+        self.assertNotIn("fragment", sockopt)
+        self.assertNotIn("noise", sockopt)
 
     def test_noise_omitted_when_params_absent(self):
-        """Без noise-параметров sockopt.noise нет (обратная совместимость)."""
+        """Без noise-параметров noises на fragment-outbound нет (обратная
+        совместимость), в sockopt тоже нет ни noises, ни noise."""
         from chimera.modules.fragment_link import _build_xray_client_json
         cfg = _build_xray_client_json(self._state(), "1-3", "10-20", "10-20")
+        frag_ob = [ob for ob in cfg["outbounds"] if ob.get("tag") == "fragment"][0]
+        self.assertNotIn("noises", frag_ob["settings"])
+        self.assertNotIn("noise", frag_ob["settings"])
         proxy = [ob for ob in cfg["outbounds"] if ob["tag"] == "proxy"][0]
         sockopt = proxy["streamSettings"]["sockopt"]
         self.assertNotIn("noise", sockopt)
+        self.assertNotIn("noises", sockopt)
 
 
 class TestBuildSingboxJson(unittest.TestCase):

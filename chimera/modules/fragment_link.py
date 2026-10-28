@@ -93,6 +93,7 @@ from chimera.modules.box_renderer import (
     _box_info, _box_warn, _box_ok, _box_desc, _box_link, _get_box_width,
 )
 from chimera.modules.fragment_config import (
+    build_fragment_outbound,
     build_fragment_sockopt,
     _FRAGMENT_PRESETS,
     _validate_range_str,
@@ -245,7 +246,8 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
                              interval: str,
                              noise_packet: Optional[str] = None,
                              noise_delay: Optional[str] = None) -> dict:
-    """Полный клиентский Xray config.json с fragment (+ опц. noise) в sockopt."""
+    """Полный клиентский Xray config.json: fragment (+ опц. noise) в freedom-outbound,
+    основной outbound цепляется через sockopt.dialerProxy (валидная схема Xray-core)."""
     proto      = state.get("protocol_mode", "reality")
     domain     = state.get("domain", "")
     port       = int(state.get("server_port", 443))
@@ -258,19 +260,18 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
     fp         = state.get("fingerprint", "chrome") or "chrome"
     sni        = _resolve_sni(state)
 
-    # TFO — только по настройке tfo_settings (дефолт ВЫКЛ,
-    # инцидент 28.08.2026: DPI резал data-in-SYN).
-    # Комбо fragment+noise: noise-параметры (обе или ни одной) — ленивый
-    # импорт fragment_noise (он импортирует build_fragment_sockopt
-    # из fragment_config — топ-левел импорт дал бы circular import).
+    # Валидная схема Xray-core: fragment(+опц. noises) живут в settings
+    # freedom-outbound, основной outbound цепляется через sockopt.dialerProxy
+    # (прежде fragment/noise клали прямо в sockopt — ядро молча игнорировало
+    # эти поля, фрагментация не работала). Без fragment-параметров — обычный
+    # sockopt без dialerProxy.
     from chimera.modules.tfo_settings import tfo_sockopt
-    if noise_packet and noise_delay:
-        from chimera.modules.fragment_noise import build_noise_sockopt
-        sockopt = build_noise_sockopt(packets, length, interval,
-                                      noise_packet, noise_delay)
-    elif packets and length and interval:
+    if packets and length and interval:
+        fragment_outbound = build_fragment_outbound(
+            packets, length, interval, noise_packet, noise_delay)
         sockopt = build_fragment_sockopt(packets, length, interval)
     else:
+        fragment_outbound = None
         sockopt = {
             **tfo_sockopt(),
             "tcpKeepAliveInterval": 15,
@@ -335,6 +336,7 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
         ],
         "outbounds": [
             outbound,
+            *([fragment_outbound] if fragment_outbound else []),
             {"protocol": "freedom", "tag": "direct"},
             {"protocol": "blackhole", "tag": "block"},
         ],

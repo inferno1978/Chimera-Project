@@ -179,9 +179,37 @@ class TestXhttpRealityBranches(unittest.TestCase):
         self.assertEqual(rs["shortId"], "abcd1234")
         self.assertEqual(rs["spiderX"], "/")
         self.assertNotIn("tlsSettings", ss)
-        # mux присутствует, fragment в sockopt
+        # mux присутствует (уровень протокола — совместим с dialerProxy);
+        # fragment — в settings freedom-outbound (валидная схема Xray-core)
         self.assertTrue(ob["mux"]["enabled"])
-        self.assertEqual(ss["sockopt"]["fragment"]["length"], "3-7")
+        frag_obs = [o for o in cfg["outbounds"] if o.get("tag") == "fragment"]
+        self.assertEqual(len(frag_obs), 1)
+        self.assertEqual(frag_obs[0]["protocol"], "freedom")
+        self.assertEqual(frag_obs[0]["settings"]["fragment"]["length"], "3-7")
+        # основной outbound цепляется через dialerProxy, без placebo-ключей
+        self.assertEqual(ss["sockopt"]["dialerProxy"], "fragment")
+        self.assertNotIn("fragment", ss["sockopt"])
+        self.assertNotIn("noise", ss["sockopt"])
+
+    def test_xray_json_fragment_outbound_and_unique_tags(self):
+        """fragment-outbound с точными settings.fragment + уникальные теги
+        (валидная схема: mux-конфиг тоже несёт freedom-outbound)."""
+        from chimera.modules.fragment_mux import _build_xray_mux_json
+        cfg = _build_xray_mux_json(self._state, "tlshello", "10-20", "10-20",
+                                   8, 16)
+        frag_obs = [o for o in cfg["outbounds"] if o.get("tag") == "fragment"]
+        self.assertEqual(len(frag_obs), 1)
+        self.assertEqual(frag_obs[0]["protocol"], "freedom")
+        self.assertEqual(
+            frag_obs[0]["settings"]["fragment"],
+            {"packets": "tlshello", "length": "10-20", "interval": "10-20"})
+        # без noise-аргументов noises не появляется
+        self.assertNotIn("noises", frag_obs[0]["settings"])
+        tags = [o.get("tag") for o in cfg["outbounds"]]
+        self.assertEqual(len(tags), len(set(tags)),
+                         f"теги outbound должны быть уникальны: {tags}")
+        for expected in ("proxy", "fragment", "direct", "block"):
+            self.assertIn(expected, tags)
 
     def test_singbox_json_transport_xhttp_tls_reality_no_flow(self):
         from chimera.modules.fragment_mux import _build_singbox_mux_json
