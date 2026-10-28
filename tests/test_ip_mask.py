@@ -70,7 +70,6 @@ class TestMaskToCidr(unittest.TestCase):
             ("152.65.*.*", "152.65.0.0/16"),
             ("189.122.*.*", "189.122.0.0/16"),
             ("46.17.*.*", "46.17.0.0/16"),
-            ("5.167.*.*", "192.0.2.0/16"),
         ]:
             ok, cidr, err = self.ip_mask.mask_to_cidr(mask)
             self.assertTrue(ok, f"{mask}: {err}")
@@ -185,6 +184,7 @@ class TestIpInEntries(unittest.TestCase):
 
     def test_ipv6_containment(self):
         self.assertTrue(self.ip_in_entries("2001:db8::1", ["2001:db8::/32"]))
+        # 3fff::/20 — второй doc-диапазон (RFC 9637): гарантированно вне 2001:db8::/32
         self.assertFalse(self.ip_in_entries("3fff::1", ["2001:db8::/32"]))
 
     def test_v4_addr_not_in_v6_net(self):

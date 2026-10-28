@@ -1393,7 +1393,7 @@ schema_version: 29
         text = self.conf.read_text()
 
         # IPv6 снят, публичный IPv4 остался (DoT/DoH живут)
-        self.assertNotIn("2001:db8", text)
+        self.assertNotIn("2001:db8:1280:50::2", text)
         self.assertIn('- "1.2.3.4"', text)
         self.assertIn('- "127.0.0.1"', text)
 

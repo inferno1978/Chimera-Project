@@ -18,11 +18,17 @@
             печатается для ревью глазами.
 
 Allowlist IP: loopback/private/CGNAT/link-local/multicast, TEST-NET
-(192.0.2.x, 198.51.100.x, 203.0.113.x), публичные DNS-резолверы,
-Cloudflare (WARP/CDN, 162.159.0.0/16, 104.16.0.0/12, 172.64.0.0/13,
-188.114.0.0/15), Telegram DC (149.154.160.0/20, 91.108.0.0/16),
-документированные кейс-стади и строки-версии, совпадающие по формату
-с IPv4. Политика: docs/faq/SECURITY_LEAK_POLICY.md.
+(192.0.2.x, 198.51.100.x, 203.0.113.x), 2001:db8::/32 (doc-IPv6),
+публичные DNS-резолверы, Cloudflare (WARP/CDN, 162.159.0.0/16,
+104.16.0.0/12, 172.64.0.0/13, 188.114.0.0/15, 2606:4700::/32),
+Telegram DC (149.154.160.0/20, 91.108.0.0/16 + v6-подсети),
+документированные кейс-стади, фикстуры-подсети ГРЧЦ и канонические
+примеры wildcard-масок ipmask (хирургические /32 на БАЗОВЫЕ адреса —
+любой ДРУГОЙ адрес этих диапазонов остаётся LEAK), строки-версии,
+совпадающие по формату с IPv4. IPv6 сканируется наравне с IPv4:
+глобальный v6 вне allowlist — LEAK. Полный аудит дерева (без
+аргументов) чист и включён в CI static-стадию.
+Политика: docs/faq/SECURITY_LEAK_POLICY.md.
 """
 import ipaddress
 import re
@@ -99,13 +105,111 @@ IP_ALLOW = [
         "89.187.188.227/32", "89.187.188.228/32", "9.0.0.1/32", "9.9.9.0/32",
         "91.105.200.0/32", "92.223.124.39/32", "92.223.76.26/32", "94.176.183.13/32",
         "95.161.64.0/32",
+        # канонические примеры wildcard-масок фичи ipmask-1 (из запросов
+        # владельца, НЕ инфраструктура): базовые адреса сетей-примеров.
+        # Хирургические /32: любой ДРУГОЙ адрес этих диапазонов
+        # по-прежнему ловится как LEAK
+        "176.9.0.0/32", "176.9.40.0/32", "176.9.5.5/32", "176.9.7.5/32",
+        "176.9.7.7/32", "176.9.255.254/32", "176.10.5.5/32", "176.0.0.0/32",
+        "152.65.0.0/32", "189.122.0.0/32", "46.17.0.0/32", "45.0.0.0/32",
+        # публичные блок-подсети ГРЧЦ (регуляторные списки, фикстуры
+        # ipban/ipset — данные регулятора, не наша инфра)
+        "45.132.21.0/32", "45.157.4.0/32", "62.76.12.0/32", "85.142.6.0/32",
+        "87.245.160.0/32", "93.158.128.0/32", "95.163.32.0/32", "185.76.8.0/32",
+        "185.191.4.0/32", "194.32.72.0/32", "5.253.100.0/32",
+        # прочие публичные фикстуры тестов
+        "80.66.66.0/32", "185.242.246.0/32", "100.200.0.0/32",
+        "142.250.1.1/32",   # Google (test_awg_b4_split)
+        "95.173.128.90/32",  # www.gov.ru (кейс-стади GRE-плейбука)
+        "176.9.93.198/32",   # target апстрима vendor/b4 (фикстура «соседа» в самотесте)
     )
 ]
 
 IP_EXTRA_ALLOW = {
     # строки-версии ПО, совпадающие по формату с IPv4
-    "5.11.28.3", "5.0.1.5", "5.5.5.5", "5.5.11.3", "192.0.2.99",
+    "5.11.28.3", "5.0.1.5", "5.5.5.5", "5.5.11.3",
 }
+
+# ── IPv6 ─────────────────────────────────────────────────────────────────────
+# Глобальный v6 вне allowlist — LEAK (симметрично IPv4). Локальные и
+# doc-диапазоны (::1, fe80::/10, fc00::/7, ff00::/8, 2001:db8::/32)
+# разрешены всегда. Регрессия-2026-10: реальные клиентские/нодовые v6
+# из логов раньше не ловились ВООБЩЕ — сканер знал только IPv4.
+V6_ALLOW = [
+    ipaddress.ip_network(n) for n in (
+        "::1/128", "fe80::/10", "fc00::/7", "ff00::/8",
+        "2001:db8::/32",   # doc-IPv6 (RFC 3849)
+        "3fff::/20",       # doc-IPv6 #2 (RFC 9637)
+        # публичные v6-константы сторонних сервисов (DNS/CDN/DC)
+        "2001:4860::/32",                      # Google
+        "2607:f8b0::/32", "2a00:1450::/32",    # Google/YouTube
+        "2606:4700::/32",                      # Cloudflare/WARP
+        "2606:50c0::/32", "2a0a:a440::/29",    # GitHub
+        "2a02:6b8::/32",                       # Yandex DNS
+        # Telegram DC (v6-подсети — аналог 149.154.160.0/20 в v4)
+        "2001:67c:4e8::/48", "2001:b28:f23c::/46", "2001:b28:f23d::/48",
+        "2001:b28:f23f::/48", "2a0a:f280:203::/48",
+        # публичные блок-подсети ГРЧЦ (фикстуры ipban/ipset)
+        "2a00:7360::/32", "2a0b:3f80::/32",
+    )
+]
+
+# Сети-токены, разрешённые ТОЛЬКО точным совпадением (константы доков
+# и публичные пулы фикстур — не «всё внутри диапазона»)
+V6_EXACT = {
+    "2000::/3",    # док-константа «весь глобальный юникаст»
+    "fec0::/10",   # док-константа site-local (deprecated) в user_ip_whitelist
+    "2a01::/32",   # фикстура чужого ipset-конфига (test_ipban)
+    # синтетика ГЛОБАЛЬНОГО v6 (валидатор user_ip_whitelist требует
+    # публичный адрес клиента — doc-диапазоны отвергает)
+    "2600:dead:beef::/64",
+    # YouTube/Google/AWS-пулы пиннинга IP (test_youtube_ip_pin)
+    "2600:1f00::/32", "2604:1380::/32", "2604:1380:1000::/40",
+    "2604:aec0::/40", "2606:2800::/32",
+}
+
+# Точные хосты-фикстуры: публичные сервисы и синтетика тестов
+V6_HOSTS = {
+    "2001:4860:4860::8888",                          # Google Public DNS
+    "2606:4700:4700::1001", "2606:4700:4700::1111",  # Cloudflare DNS
+    "2a10:50c0::", "2a10:50c0::1:ff", "2a10:50c0::2:ff",  # публичные DNS
+    "2001:4860:482d:400::", "2a00:1450:400e:810::200e",    # Google-фикстуры
+    "2a02:6b8::1", "2a02:6b8::10", "2a02:6b8:c0c:1d0::1",  # Yandex DNS
+    "2a02::1", "2a02::2", "2a0d::1", "2a12::1", "2a12::2",  # синтетика
+    # синтетика ГЛОБАЛЬНОГО v6 для валидатора user_ip_whitelist
+    # (он требует публичный клиентский адрес — doc-диапазоны отвергает)
+    "2600:dead:beef::1",
+    "2606:4700:110:8bad:12ab::", "2606:4700:110:8d87::",    # WARP-фикстуры
+    "2606:4700:3034::ac43:9014",                    # nnmclub.to AAAA (CF)
+}
+
+V6_RE = re.compile(
+    r"(?<![\w:.-])([0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{0,4}){2,7})"
+    r"(?:/(\d{1,3}))?(?![\w:.])")
+
+
+def _v6_allowed(tok: str, plen=None) -> bool:
+    """Глобальный IPv6-токен (адрес или сеть/CIDR) вне allowlist?"""
+    try:
+        addr = ipaddress.ip_address(tok)
+    except ValueError:
+        return True  # не адрес (hex-подстрока) — regex перестарался
+    if addr.version != 6:
+        return True
+    if not addr.is_global:
+        return True  # loopback/link-local/ULA/multicast/doc
+    if str(addr) in V6_HOSTS:
+        return True
+    if plen:
+        net_s = f"{tok}/{plen}"
+        if net_s in V6_EXACT:
+            return True
+        try:
+            net = ipaddress.ip_network(net_s, strict=False)
+        except ValueError:
+            return False
+        return any(net.subnet_of(a) for a in V6_ALLOW)
+    return any(addr in a for a in V6_ALLOW)
 
 TOKEN_PATTERNS = [
     ("gitlab-token", re.compile(r"glpat-[A-Za-z0-9_\-]{10,}")),
@@ -128,6 +232,7 @@ TOKEN_PATTERNS = [
         r"|alice-|bob-|carol-|s3cret|shadow_pw|p@ss|new-pass|with:colons"
         r"|anytls_pw|anytls-|reapplypw|mypassword|fallback|proto_ask"
         r"|node\.get|state\.get|user_record|decoded\.partition|users_by_name"
+        r"|users_by_login"
         r"|_generate|_tt_pass|active_node|body\.get|PublicKey|NEWPUB"
         r"|v2\.6-public|добавление|OldMaster123|continue"
         r")[^\s\"'<>{ }()=]{8,}")),
@@ -183,27 +288,62 @@ def _ip_allowed(ip: str) -> bool:
     return any(a in net for net in IP_ALLOW)
 
 
-def scan_text(text: str, origin: str, leaks: list, warns: list,
-              is_doc: bool = False) -> None:
-    for m in IP_RE.finditer(text):
+# ── Самотест сканера ─────────────────────────────────────────────────────────
+# Юнит-тесты leak_guard (tests/test_leak_guard.py) содержат НАМЕРЕННЫЕ
+# образцы утечек. Строки с этим маркером пропускаются; в ЛЮБОМ другом
+# файле появление маркера само является LEAK (защита от злоупотребления:
+# grep маркора по репо обязан давать ровно один файл). Константа собрана
+# конкатенацией, чтобы строка-определение не содержала сам маркер.
+SAMPLE_MARK = "#" + " leak-guard-sample"
+SAMPLES_FILE = "tests/test_leak_guard.py"
+
+
+def _scan_line(line: str, origin: str, leaks: list, warns: list,
+               is_doc: bool = False) -> None:
+    """Скан одной строки (все паттерны построчные — переносов не требуют)."""
+    for m in IP_RE.finditer(line):
         if not _ip_allowed(m.group(1)):
             leaks.append((origin, f"публичный IP {m.group(1)}"))
+    for m in V6_RE.finditer(line):
+        tok, plen = m.group(1), m.group(2)
+        if not _v6_allowed(tok, plen):
+            shown = f"{tok}/{plen}" if plen else tok
+            leaks.append((origin, f"публичный IPv6 {shown}"))
     for name, rx in TOKEN_PATTERNS:
-        for m in rx.finditer(text):
+        for m in rx.finditer(line):
             frag = m.group(0)
             # docstring-примеры вида password=ПАРОЛЬ в *.md — WARN,
             # в коде/конфигах — LEAK
             target = warns if (is_doc and name == "ssh-pass-inline") else leaks
             target.append((origin, f"{name}: {frag[:40]}..."))
-    for m in UUID_RE.finditer(text):
+    for m in UUID_RE.finditer(line):
         warns.append((origin, f"UUID {m.group(0)} (фикстура или прод-ключ?)"))
-    for m in DOMAIN_RE.finditer(text):
+    for m in DOMAIN_RE.finditer(line):
         d = m.group(0).lower().lstrip(".")
         sld = ".".join(d.split(".")[-2:])
         base = d.removeprefix("www.")
         if base not in DOMAIN_KNOWN and sld not in DOMAIN_KNOWN:
             if not base.endswith(".example.com") and ".example." not in base:
                 warns.append((origin, f"домен {d} вне публичного списка"))
+
+
+def scan_text(text: str, origin: str, leaks: list, warns: list,
+              is_doc: bool = False) -> None:
+    """Скан текста построчно; маркер-исключение — см. SAMPLE_MARK.
+
+    В режимах дифа/стейджа (синтетические origin STAGED/DIFF/COMMIT-MSG)
+    маркер просто пропускает строку — источник-файл там неизвестен;
+    при аудите реальных файлов маркер вне SAMPLES_FILE — LEAK.
+    """
+    synthetic = origin.startswith(("STAGED", "DIFF", "COMMIT-MSG"))
+    for line in text.splitlines():
+        if SAMPLE_MARK in line:
+            if not synthetic and origin != SAMPLES_FILE:
+                leaks.append((origin,
+                              f"маркер {SAMPLE_MARK} разрешён только "
+                              f"в {SAMPLES_FILE}"))
+            continue
+        _scan_line(line, origin, leaks, warns, is_doc)
 
 
 def tracked_files() -> list:

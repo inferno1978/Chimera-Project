@@ -1,9 +1,9 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
-# Обновлён 2026-10-28 (v3): 310 модулей = 307 + dpi_gate/mask_gate/
-# dpi_response (треугольник AIVPN-идей: ML-гейт маскировки, CI-гейт
-# маскировки, авто-реакция на DPI). Список АВТО-сверяется с файлами:
-# каждый test_*.py обязан быть здесь (полный охват), каждая строка —
-# существующим файлом.
+# Обновлён 2026-10-29 (v4): 311 модулей = 310 + test_leak_guard (гард
+# гигиены репо: зачистка исторических IP → TEST-NET/doc-диапазоны,
+# IPv6-сканер leak_guard, полный аудит дерева в CI static). Список
+# АВТО-сверяется с файлами: каждый test_*.py обязан быть здесь
+# (полный охват), каждая строка — существующим файлом.
 #
 # Предыстория: baseline 2026-10-26 выделял 30 «env-класс» модулей — красных
 # ТОЛЬКО на хосте раннера ci-de (живая chimera-нода). 2026-10-27 корневое
@@ -164,6 +164,7 @@ tests.test_ip_mask
 tests.test_ipban
 tests.test_ipset_boot_sync
 tests.test_ipset_persist
+tests.test_leak_guard
 tests.test_linkqr_lib
 tests.test_logrotate
 tests.test_mieru

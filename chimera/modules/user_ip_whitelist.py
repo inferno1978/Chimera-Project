@@ -1136,7 +1136,7 @@ def _tui_manage_single_user(core, users: list[dict]) -> None:
             print()
             print(f"{DIM}  Формат: IP (5.6.7.8), CIDR (5.6.7.0/24) или маска (176.9.*.*).{NC}")
             print(f"{DIM}  Маска покрывает подсеть целиком: 176.9.*.* = 176.9.0.0/16.{NC}")
-            print(f"{DIM}  Допускается IPv6 (2600:dead:beef::/64).{NC}")
+            print(f"{DIM}  Допускается IPv6 (2600:dead:beef::/64 — публичный адрес/подсеть).{NC}")
             print(f"{DIM}  Подсказка: пусть клиент откроет https://2ip.ru с устройства.{NC}")
             try:
                 new_ip = input(f"{CYAN}  IP/CIDR/маска (5.6.7.8 / 5.6.7.0/24 / 176.9.*.*):{NC} ").strip()

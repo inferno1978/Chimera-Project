@@ -119,8 +119,8 @@ class TestValidateIpOrCidr(unittest.TestCase):
         ok, norm, _ = _validate_ip_or_cidr("5.6.7.0/24")
         self.assertEqual(norm, "5.6.7.0/24")
         # IPv6 — компресия ::.
-        ok, norm, _ = _validate_ip_or_cidr("2001:db8:0000:0000:0000:0000:0000:0001")
-        self.assertEqual(norm, "2001:db8::1")
+        ok, norm, _ = _validate_ip_or_cidr("2600:dead:beef:0000:0000:0000:0000:0001")
+        self.assertEqual(norm, "2600:dead:beef::1")
 
 
 class TestAddRemoveGetUserIPs(unittest.TestCase):
@@ -206,13 +206,13 @@ class TestAddRemoveGetUserIPs(unittest.TestCase):
         with patch.object(user_ip_whitelist, "rebuild_clients_ipset", return_value=True), \
              self._patch_users_file()[0], self._patch_users_file()[1]:
             ok, _ = user_ip_whitelist.add_ip_to_user("alice@example.com",
-                                                       "2001:db8:0000:0000:0000:0000:0000:0001")
+                                                       "2600:dead:beef:0000:0000:0000:0000:0001")
         self.assertTrue(ok)
         #  проверяем detailed формат с нормализованным IP.
         users = json.loads(self._users_file.read_text())
         allowed = users[0]["allowed_ips"]
         self.assertEqual(len(allowed), 1)
-        self.assertEqual(allowed[0]["ip"], "2001:db8::1")
+        self.assertEqual(allowed[0]["ip"], "2600:dead:beef::1")
 
     def test_add_ip_to_nonexistent_user(self):
         from chimera.modules import user_ip_whitelist
@@ -327,7 +327,7 @@ class TestCollectAllUserIps(unittest.TestCase):
         from chimera.modules import user_ip_whitelist
         self._users_file.write_text(json.dumps([
             {"uuid": "u1", "email": "a@x", "allowed_ips": ["5.6.7.8", "1.2.3.4"]},
-            {"uuid": "u2", "email": "b@x", "allowed_ips": ["2001:db8::1", "5.6.8.0/24"]},
+            {"uuid": "u2", "email": "b@x", "allowed_ips": ["2600:dead:beef::1", "5.6.8.0/24"]},
             {"uuid": "u3", "email": "c@x"},  # без IPs
         ]))
         from chimera.modules import users_manager
@@ -336,7 +336,7 @@ class TestCollectAllUserIps(unittest.TestCase):
             v4, v6 = user_ip_whitelist._collect_all_user_ips()
         # v4: 5.6.7.8, 1.2.3.4, 5.6.8.0/24
         self.assertEqual(len(v4), 3)
-        # v6: 2001:db8::1
+        # v6: 2600:dead:beef::1
         self.assertEqual(len(v6), 1)
 
     def test_collect_dedup_across_users(self):
