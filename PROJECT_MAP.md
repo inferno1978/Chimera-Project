@@ -252,12 +252,15 @@
 
 ---
 
-## 16. DPI-детекторы
+## 16. DPI-детекторы и гейты маскировки
 
 | Файл | За что отвечает |
 |---|---|
-| `dpi_detector.py` | Детектор DPI-зондирования (анализ error.log на паттерны зондов) |
+| `dpi_detector.py` | Детектор DPI-зондирования (анализ error.log на паттерны зондов) + меню-хаб: пункты R (dpi_response) и G (mask_gate/dpi_gate) |
 | `dpi_censor_check.py` | Проверка цензора DPI (внешние тесты, автообновление апстрима Runnin4ik/dpi-detector в runtime-копию /var/lib/xray-installer/dpi-detector/) |
+| `dpi_gate.py` | ML-гейт «похож ли UDP-трафик на маску» (идея AIVPN dpi_gate): 23 признака окна 24 пакета (арифметика f32 бит-в-бит AIVPN-совместима, schema v2), GBDT-инференс из JSON-модели (плоские деревья как в aivpn model.rs), свой PCAP-парсер (EN10MB/RAW, LE/BE) без зависимостей, синтетический baseline, отчёты без адресов (flow-теги SHA-256). Меню: selftest эталона AIVPN, оценка PCAP. CLI: `--dpi-gate-eval <pcap> [port]`. Обучение: scripts/dpi_gate_train.py (sklearn-экспорт, гиперпараметры AIVPN 120/3/0.15) |
+| `mask_gate.py` | Гейт маскировки (идея AIVPN make mask-gate, адаптация под REALITY/xHTTP): live-захват tcpdump на порт Xray + тест-зонд → классификация ndpiReader (clean/fail-списки TCP+UDP) + tshark-структура + builtin-фолбэк (свой парсер TLS-записей/QUIC-формы, работает без инструментов). Вердикты PASS/SUSPECT/FAIL/INSUFFICIENT/SKIP, отчёты без адресов. Меню + CLI: `--mask-gate [port]`, `--mask-gate-pcap <file> [port]` |
+| `dpi_response.py` | Авто-реакция на DPI-атаку (треугольник dpi_detector → fragment_fuzzer → credential_rotation; идея «rotate without disconnect» AIVPN): уровни notify/fuzz/rotate, ночное окно ротации 03-06, cooldown 6ч, ≤2 ротаций/сутки, деградация в notify-only при сбоях, авто-возврат в auto после 6ч тишины, deepcopy-state (фикс мутируемых дефолтов), cron каждые 5 мин. CLI: `--dpi-response` |
 
 ---
 

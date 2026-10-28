@@ -127,6 +127,92 @@ if "--dpi-check" in sys.argv:
         print(f"[DPI] Заблокировано: {n}")
     sys.exit(0)
 
+# --- DPI-Response: авто-реакция на DPI-атаку (из cron каждые 5 мин) ---
+if "--dpi-response" in sys.argv:
+    if os.geteuid() != 0:
+        print("ERROR: требуются права root", file=sys.stderr)
+        sys.exit(1)
+    from chimera.modules.dpi_response import dpi_response_run_once
+    out = dpi_response_run_once()
+    if out.get("level", 0) > 0:
+        print(f"[DPI-RESPONSE] level={out['level']} actions={out['actions']}")
+    sys.exit(0)
+
+# --- Mask Gate: гейт маскировки (live-захват + nDPI/tshark/builtin) ---
+if "--mask-gate" in sys.argv:
+    if os.geteuid() != 0:
+        print("ERROR: требуются права root (tcpdump)", file=sys.stderr)
+        sys.exit(1)
+    from chimera.modules.mask_gate import (
+        run_mask_gate, get_xray_port_from_state, generate_probe_traffic,
+        get_server_ip_from_state)
+    _port = None
+    _argv = sys.argv[sys.argv.index("--mask-gate") + 1:]
+    if _argv and _argv[0].isdigit():
+        _port = int(_argv[0])
+    if _port is None:
+        _port = get_xray_port_from_state()
+    if _port is None:
+        print("ERROR: порт Xray не найден (укажите: --mask-gate <port>)",
+              file=sys.stderr)
+        sys.exit(1)
+    _ip = get_server_ip_from_state()
+    if _ip:
+        generate_probe_traffic(_ip, _port, count=3)
+    _rep = run_mask_gate(port=_port, live=True)
+    print(f"[MASK-GATE] verdict={_rep['verdict']} flows={_rep['flows']} "
+          f"clean={_rep['clean_flows']} suspect={_rep['suspect_flows']} "
+          f"fail={_rep['fail_flows']}")
+    for _r in _rep.get("reasons", []):
+        print(f"  • {_r}")
+    sys.exit(0 if _rep["verdict"] in ("PASS", "SUSPECT") else 1)
+
+# --- Mask Gate: offline-оценка готового PCAP ---
+if "--mask-gate-pcap" in sys.argv:
+    _idx = sys.argv.index("--mask-gate-pcap")
+    if _idx + 1 >= len(sys.argv):
+        print("ERROR: укажите путь: --mask-gate-pcap <file.pcap> [port]",
+              file=sys.stderr)
+        sys.exit(1)
+    _pcap = sys.argv[_idx + 1]
+    _port = int(sys.argv[_idx + 2]) if _idx + 2 < len(sys.argv) and sys.argv[_idx + 2].isdigit() else None
+    from chimera.modules.mask_gate import run_mask_gate
+    _rep = run_mask_gate(pcap_path=_pcap, port=_port, live=False)
+    print(f"[MASK-GATE] verdict={_rep['verdict']} flows={_rep['flows']} "
+          f"clean={_rep['clean_flows']} suspect={_rep['suspect_flows']} "
+          f"fail={_rep['fail_flows']}")
+    for _r in _rep.get("reasons", []):
+        print(f"  • {_r}")
+    sys.exit(0 if _rep["verdict"] in ("PASS", "SUSPECT") else 1)
+
+# --- DPI Gate: оценка PCAP через GBDT-модель ---
+if "--dpi-gate-eval" in sys.argv:
+    _idx = sys.argv.index("--dpi-gate-eval")
+    if _idx + 1 >= len(sys.argv):
+        print("ERROR: укажите путь: --dpi-gate-eval <file.pcap> [udp_port]",
+              file=sys.stderr)
+        sys.exit(1)
+    _pcap = sys.argv[_idx + 1]
+    _port = int(sys.argv[_idx + 2]) if _idx + 2 < len(sys.argv) and sys.argv[_idx + 2].isdigit() else None
+    from chimera.modules.dpi_gate import evaluate_pcap, save_report
+    try:
+        _rep = evaluate_pcap(Path(_pcap), port=_port)
+    except Exception as _e:
+        print(f"ERROR: {_e}", file=sys.stderr)
+        sys.exit(2)
+    if not _rep.get("ok"):
+        print(f"ERROR: {_rep.get('detail', 'ошибка')}", file=sys.stderr)
+        sys.exit(2)
+    _p = save_report(_rep)
+    print(f"[DPI-GATE] overall={_rep['overall']} flows={_rep['flows']} "
+          f"tunnel={_rep['tunnel_flows']} benign={_rep['benign_flows']}")
+    for _fr in _rep.get("flow_reports", [])[:20]:
+        print(f"  {_fr['flow']} pkts={_fr['packets']:>4} → {_fr['verdict']:<10} "
+              f"p_tunnel_max={_fr['p_tunnel_max']:.3f}")
+    if _p:
+        print(f"  отчёт: {_p}")
+    sys.exit(0 if _rep["overall"] != "tunnel" else 1)
+
 # --- Smart Balancer (из cron каждые N минут) ---
 if "--smart-balance" in sys.argv:
     if os.geteuid() != 0:

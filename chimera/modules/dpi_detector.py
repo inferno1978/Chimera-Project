@@ -598,6 +598,8 @@ def do_manage_dpi_detector() -> None:
         _box_item("3", f"Запустить анализ прямо сейчас")
         _box_item("4", f"📋 Последние строки лога")
         _box_item("5", f"Управление whitelist")
+        _box_item("R", f"⚡ Авто-реакция на DPI (dpi_response)")
+        _box_item("G", f"🎭 Гейты маскировки (mask gate / dpi gate)")
         _box_row()
         _box_back()
         _box_bottom()
@@ -695,6 +697,28 @@ def do_manage_dpi_detector() -> None:
                     _dpi_state_save(cfg)
                     success(f"Удалён: {removed}")
             input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "r":
+            try:
+                from chimera.modules.dpi_response import do_manage_dpi_response
+                do_manage_dpi_response()
+            except Exception as e:
+                warn(f"dpi_response недоступен: {e}")
+                input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "g":
+            try:
+                from chimera.modules.mask_gate import do_manage_mask_gate
+                do_manage_mask_gate()
+            except Exception as e:
+                warn(f"mask_gate недоступен: {e}")
+                input(f"{BLUE}Нажмите Enter...{NC}")
+            try:
+                from chimera.modules.dpi_gate import do_manage_dpi_gate
+                do_manage_dpi_gate()
+            except Exception as e:
+                warn(f"dpi_gate недоступен: {e}")
+                input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch in ("q", ""):
             break
