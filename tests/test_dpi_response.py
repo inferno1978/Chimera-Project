@@ -225,7 +225,19 @@ class TestActionRotate(DrTestBase):
         self.assertEqual(res["skipped"], "cooldown")
 
     def test_rotate_daily_limit(self):
-        cfg = self._cfg_with_window_now()
+        # Фейк-время 12:00 текущего дня: детерминизм против ночных запусков
+        # (реальная запись «сегодня 01:00» при запуске теста в 00-07 утра
+        # ловила бы cooldown раньше daily_limit). Окно тоже под фейк-время.
+        class NoonDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                real = datetime.now()
+                return cls(real.year, real.month, real.day, 12, 0, 0)
+
+        cfg = dr.state_load()
+        cfg["action_rotate"] = True
+        cfg["rotate_window_start"] = 12   # под фейк-время 12:00
+        cfg["rotate_window_end"] = 13
         today = datetime.now().strftime("%Y-%m-%d")
         # последняя ротация позавчера (cooldown прошёл), но сегодня уже 2
         cfg["history"] = [
@@ -233,7 +245,8 @@ class TestActionRotate(DrTestBase):
             {"action": "rotate", "ts": f"{today}T00:01:00"},
             {"action": "rotate", "ts": f"{today}T01:00:00"},
         ]
-        res = dr.action_rotate(cfg)
+        with patch.object(dr, "datetime", NoonDatetime):
+            res = dr.action_rotate(cfg)
         self.assertFalse(res["ok"])
         self.assertEqual(res["skipped"], "daily_limit")
 
