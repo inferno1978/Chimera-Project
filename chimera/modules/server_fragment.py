@@ -1,37 +1,51 @@
 """
 chimera/modules/server_fragment.py
 ───────────────────────────────────────────────────────────────────────────────
-Server-side TLS fragmentation — sockopt.fragment на INBOUND-стороне сервера.
+Server-side TLS segmentation — закрываем асимметрию ClientHello/ServerHello.
 
-АРХИТЕКТУРА:
-  Сейчас fragment_config.py применяется только к CLIENT-конфигу (outbound),
-  что бьёт по исходящему TLS ClientHello. Но ТСПУ смотрит трафик в обе
-  стороны: если сервер шлёт ServerHello + Certificate одним куском, DPI
-  видит асимметрию (ClientHello дроблённый, ServerHello цельный) и
-  классифицирует соединение как прокси.
+АРХИТЕКТУРА (v4.28, после фикса схемного бага):
+  Клиентский fragment (freedom-outbound + dialerProxy, см. fragment_config.py)
+  дробит ClientHello на мелкие TCP-кусочки. Но ТСПУ с двунаправленной
+  аналитикой видит асимметрию: ClientHello дроблёный, а ServerHello +
+  Certificate (3–5 КБ у REALITY) уходят цельными 1448-байтовыми
+  сегментами. Это маркер прокси.
 
-  Решение: включить sockopt.fragment на inbound в /etc/xray/config.json.
-  Xray-core поддерживает fragment на inbound с v1.8.13+ — поле
-  `streamSettings.sockopt.fragment` на inbound-блоке VLESS+REALITY.
+  Историческая справка: до v4.28 модуль писал `sockopt.fragment` в inbound —
+  ПЛАЦЕБО: поля fragment в streamSettings.sockopt не существует, Xray-core
+  молча его игнорировал (см. CHANGELOG, коммит 4341601). Серверной
+  фрагментации ответов в Xray-core нет вообще.
 
-  Работает так: ядро дробит первые N TCP-сегментов ответа сервера
-  (ServerHello + Cert + ServerKeyExchange) на мелкие части с задержкой.
-  DPI теряет цельную сигнатуру и не может сопоставить её с реальным
-  Cloudflare-ответом (который виден в dest-домене REALITY).
+  РАБОЧИЕ механизмы (TCP-уровень, ядро Linux):
+    A. sockopt.tcpMaxSeg на REALITY-inbound (основной, ядро Xray ≥ 26.7.11):
+       Xray применяет TCP_MAXSEG к listening-сокету ДО listen() (Control-
+       callback), ядро наследует значение в принятые соединения и КАПИТИТ
+       SEND MSS (сервер→клиент). Проверено эмпирически на 5.x/6.x ядре:
+       set 1300 → snd_mss 1288 (−12 байт TCP-timestamps). Живёт в
+       config.json → переживает ребут, реаплаится хуком rebuild.
+    B. iptables/ip6tables mangle PREROUTING TCPMSS (fallback, ядро Xray
+       < 26.7.11 или явный выбор): переписываем MSS в SYN клиентов на
+       наши inbound-порты → стек ограничивает send-MSS ответов. Тот же
+       паттерн, что уже живёт на нодах (telemt-ios-mss-fix).
+
+  Оба механизма ограничивают размер СЕГМЕНТОВ на всё время соединения
+  (не только handshake): ServerHello+Cert режется на куски ≤ MSS.
+  Это не micro-fragment по 10–20 байт — TCP-уровень не умеет задержки
+  между кусками; клиентский fragment остаётся обязательным, этот модуль
+  только выравнивает ответную картину.
 
 ВНИМАНИЕ:
   • Применяется ТОЛЬКО к inbound VLESS+REALITY. На xHTTP inbound
     бесполезно (там TLS терминирует nginx, не Xray).
-  • Совместим с mode A и mode B (Entry-нода).
-  • После применения нужен restart xray.
+  • Механизм A требует рестарта xray (поле в config.json); механизм B
+    применяется мгновенно, без рестарта.
   • При пересоздании config.json (reconfigure, switch-mode) настройки
-    слетают — поэтому модуль хранит параметры в state.json и патчит
-    config.json повторно через server_fragment_reapply_after_rebuild().
+    механизма A слетают — модуль хранит параметры в state.json и
+    пере-применяет через server_fragment_reapply_after_rebuild().
 
 ТОЧКИ ВЫЗОВА:
   • do_server_fragment_menu()                 — TUI-меню
-  • server_fragment_enable()                  — применить fragment на inbound
-  • server_fragment_disable()                 — снять fragment с inbound
+  • server_fragment_enable()                  — применить сегментацию
+  • server_fragment_disable()                 — снять сегментацию
   • server_fragment_status()                  — dict состояния
   • server_fragment_reapply_after_rebuild()   — хук после пересоздания config
 ───────────────────────────────────────────────────────────────────────────────
@@ -41,6 +55,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -99,34 +114,57 @@ _XRAY_CONFIG     = Path("/etc/xray/config.json")
 _XRAY_CONFIG_ALT = Path("/usr/local/etc/xray/config.json")
 _STATE_FILE      = Path("/var/lib/xray-installer/state.json")
 
-# Пресеты server-side fragment (вдвое мягче клиентского — бьём по ответу,
-# который обычно крупнее ClientHello и быстрее детектируется)
+# Границы MSS (валидатор): TCP_MIN_MSS..стандартный Ethernet-MSS
+_MSS_MIN = 536
+_MSS_MAX = 1460
+
+# Пресеты server-side сегментации. MSS капает SEND-сегменты сервера на всё
+# время соединения: ServerHello + Cert (3–5 КБ у REALITY) режется на
+# ceil(размер / MSS) кусков. Меньше MSS — больше кусков, больше пакетный
+# оверхед на всём исходящем трафике коннекта.
 _PRESETS = {
     "aggressive": {
-        "packets":  "1-3",
-        "length":   "1-3",
-        "interval": "5-10",
-        "desc":     "Агрессивная (1–3 байта) — максимальный обход DPI на ответе",
+        "mss":      800,
+        "desc":     "Агрессивная (MSS 800) — ответ в 5–8 сегментах, оверхед ~45%",
     },
     "balanced": {
-        "packets":  "1-3",
-        "length":   "3-7",
-        "interval": "10-20",
-        "desc":     "Сбалансированная (3–7 байт) — рекомендуется",
+        "mss":      1300,
+        "desc":     "Сбалансированная (MSS 1300) — рекомендуется, оверхед ~11%",
     },
     "light": {
-        "packets":  "1-2",
-        "length":   "5-15",
-        "interval": "20-50",
-        "desc":     "Лёгкая (5–15 байт) — минимальный оверхед",
+        "mss":      1400,
+        "desc":     "Лёгкая (MSS 1400) — 3 сегмента, минимальный оверхед",
     },
     "custom": {
-        "packets":  "",
-        "length":   "",
-        "interval": "",
-        "desc":     "Пользовательская — ввести вручную",
+        "mss":      0,
+        "desc":     "Пользовательская — ввести MSS вручную",
     },
 }
+
+# Первая версия Xray-core с полем sockopt.tcpMaxSeg (появилось в v26.7.11,
+# применяется на inbound-listener через Control-callback ДО listen()).
+_TCPMAXSEG_MIN_VERSION = (26, 7, 11)
+
+# Комментарий iptables-правил (для идентификации и идемпотентного удаления)
+_IPT_COMMENT = "chimera-server-frag"
+
+# Механизмы
+MECH_SOCKOPT = "tcpMaxSeg"     # поле в config.json, ядро Xray >= 26.7.11
+MECH_TCPMSS  = "tcpmss"        # iptables mangle PREROUTING TCPMSS clamp
+
+
+# ── subprocess helper (локальный) ────────────────────────────────────────────
+def _run(cmd: list, capture: bool = False, check: bool = False,
+         quiet: bool = False, timeout: int = 60):
+    import subprocess
+    kw: dict = {"check": check}
+    if capture:
+        kw.update(capture_output=True, text=True, encoding="utf-8",
+                  errors="replace", timeout=timeout)
+    elif quiet:
+        kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                  timeout=timeout)
+    return subprocess.run(cmd, **kw)
 
 
 # ── Xray config helpers ──────────────────────────────────────────────────────
@@ -201,18 +239,34 @@ def _xray_test_and_restart() -> bool:
     return True
 
 
-# ── subprocess helper (локальный) ────────────────────────────────────────────
-def _run(cmd: list, capture: bool = False, check: bool = False,
-         quiet: bool = False, timeout: int = 60):
-    import subprocess
-    kw: dict = {"check": check}
-    if capture:
-        kw.update(capture_output=True, text=True, encoding="utf-8",
-                  errors="replace", timeout=timeout)
-    elif quiet:
-        kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                  timeout=timeout)
-    return subprocess.run(cmd, **kw)
+# ── Версия ядра Xray / feature-detect ────────────────────────────────────────
+
+def _xray_core_version() -> Optional[tuple]:
+    """
+    Парсит `xray version` → кортеж чисел. Примеры:
+      "Xray 26.10.21 (Xray, Penetrates Everything.) ..."  → (26, 10, 21)
+      "Xray 1.8.24 ..."                                   → (1, 8, 24)
+    Возвращает None, если бинарник не найден/не разобран.
+    """
+    for bin_path in ("/usr/local/bin/xray", "/usr/bin/xray"):
+        if not Path(bin_path).exists():
+            continue
+        r = _run([bin_path, "version"], capture=True, quiet=True,
+                 check=False, timeout=20)
+        out = (r.stdout or "") + (r.stderr or "")
+        m = re.search(r'Xray\s+v?(\d+(?:\.\d+)+)', out)
+        if m:
+            try:
+                return tuple(int(x) for x in m.group(1).split('.'))
+            except ValueError:
+                continue
+    return None
+
+
+def _core_supports_tcp_max_seg() -> bool:
+    """Ядро Xray понимает sockopt.tcpMaxSeg на inbound (>= 26.7.11)?"""
+    v = _xray_core_version()
+    return v is not None and v >= _TCPMAXSEG_MIN_VERSION
 
 
 # ── State helpers ────────────────────────────────────────────────────────────
@@ -245,28 +299,52 @@ def _save_server_fragment_state(sf: dict) -> None:
     _save_state(st)
 
 
+def _migrate_legacy_state(sf: dict) -> dict:
+    """
+    Легаси-миграция (state v4.27 и старше): ключи packets/length/interval —
+    параметры плацебо-схемы sockopt.fragment. Маппим пресет на MSS,
+    старые ключи выбрасываем. enabled сохраняем: юзер хотел сегментацию —
+    теперь она заработает по-настоящему (см. CHANGELOG v4.28).
+    """
+    if any(k in sf for k in ("packets", "length", "interval")):
+        legacy_mss = {"aggressive": 800, "balanced": 1300, "light": 1400}
+        if not sf.get("mss"):
+            sf["mss"] = legacy_mss.get(sf.get("preset", "balanced"), 1300)
+        for k in ("packets", "length", "interval"):
+            sf.pop(k, None)
+    return sf
+
+
 def _ensure_state() -> dict:
     st = _load_state()
-    if "server_fragment" not in st:
-        st["server_fragment"] = {
-            "enabled":  False,
-            "preset":   "balanced",
-            "packets":  "1-3",
-            "length":   "3-7",
-            "interval": "10-20",
-            "last_applied": "",
+    sf = st.get("server_fragment")
+    if sf is None:
+        sf = {
+            "enabled":       False,
+            "preset":        "balanced",
+            "mss":           1300,
+            "mechanism":     "",
+            "ports":         [],
+            "last_applied":  "",
         }
+        st["server_fragment"] = sf
         _save_state(st)
-    return st["server_fragment"]
+    else:
+        migrated = _migrate_legacy_state(dict(sf))
+        if migrated != sf:
+            st["server_fragment"] = migrated
+            _save_state(st)
+            sf = migrated
+    if "mss" not in sf:
+        sf.setdefault("mss", 1300)
+    return sf
 
 
-# ── Поиск подходящего inbound ────────────────────────────────────────────────
+# ── Поиск подходящих inbound'ов ──────────────────────────────────────────────
 
 def _find_reality_inbound(cfg: dict) -> Optional[dict]:
     """
-    Находит inbound VLESS+REALITY — на него имеет смысл вешать server-side
-    fragment (т.к. именно там сервер шлёт ServerHello + Cert, который DPI
-    может проанализировать).
+    Находит ПЕРВЫЙ inbound VLESS+REALITY (для обратной совместимости).
     """
     for inb in cfg.get("inbounds", []):
         if inb.get("protocol") != "vless":
@@ -277,8 +355,31 @@ def _find_reality_inbound(cfg: dict) -> Optional[dict]:
     return None
 
 
+def _reality_inbounds(cfg: dict) -> list:
+    """Все inbound VLESS+REALITY — сегментацию вешаем на каждый."""
+    out = []
+    for inb in cfg.get("inbounds", []):
+        if inb.get("protocol") != "vless":
+            continue
+        ss = inb.get("streamSettings", {})
+        if ss.get("security") == "reality":
+            out.append(inb)
+    return out
+
+
+def _reality_inbound_ports(cfg: dict) -> list:
+    """Порты всех VLESS+REALITY inbound (int, отсортированные, уникальные)."""
+    ports = []
+    for inb in _reality_inbounds(cfg):
+        try:
+            ports.append(int(inb.get("port")))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(ports))
+
+
 def _find_xhttp_inbound(cfg: dict) -> Optional[dict]:
-    """Находит inbound VLESS+xHTTP (для информативности — фрагмент тут не нужен)."""
+    """Находит inbound VLESS+xHTTP (для информативности — сегментация тут не нужна)."""
     for inb in cfg.get("inbounds", []):
         if inb.get("protocol") != "vless":
             continue
@@ -288,36 +389,147 @@ def _find_xhttp_inbound(cfg: dict) -> Optional[dict]:
     return None
 
 
+# ── iptables TCPMSS (механизм B — fallback для ядер < 26.7.11) ──────────────
+
+def _run_soft(cmd: list, capture: bool = False, timeout: int = 15):
+    """_run, не падающий на отсутствующем/недоступном бинарнике (iptables/ip).
+    Возвращает CompletedProcess с rc=127 — вызов site'ы трактуют как «нет правила»."""
+    import subprocess
+    try:
+        return _run(cmd, capture=capture, quiet=True, check=False, timeout=timeout)
+    except (FileNotFoundError, PermissionError, OSError):
+        return subprocess.CompletedProcess(cmd, 127, stdout="", stderr="")
+
+
+def _has_global_ipv6() -> bool:
+    """Есть ли на ноде глобальный IPv6 (нужна ли ip6tables-ветка)?"""
+    r = _run_soft(["ip", "-6", "addr", "show", "scope", "global"], capture=True)
+    out = (r.stdout or "").strip()
+    return bool(out) and "inet6" in out
+
+
+def _build_tcpmss_rule(ports: list, mss: int, ipv6: bool = False) -> list:
+    """
+    Чистый билдер правила (для тестов): возвращает argv БЕЗ позиции вставки.
+      ["iptables", "-t", "mangle", "-p", "tcp", "-m", "tcp", "--dport", "443",
+       "--syn", "-m", "comment", "--comment", "chimera-server-frag",
+       "-j", "TCPMSS", "--set-mss", "1300"]
+    """
+    binname = "ip6tables" if ipv6 else "iptables"
+    ports_u = sorted({int(p) for p in ports})
+    cmd = [binname, "-t", "mangle"]
+    if len(ports_u) == 1:
+        cmd += ["-p", "tcp", "-m", "tcp", "--dport", str(ports_u[0])]
+    else:
+        cmd += ["-p", "tcp", "-m", "multiport", "--dports",
+                ",".join(str(p) for p in ports_u)]
+    cmd += ["--syn", "-m", "comment", "--comment", _IPT_COMMENT,
+            "-j", "TCPMSS", "--set-mss", str(int(mss))]
+    return cmd
+
+
+def _install_tcpmss_rules(ports: list, mss: int) -> int:
+    """
+    Ставит TCPMSS-правила в mangle/PREROUTING (v4 + v6 при глобальном IPv6).
+    Идемпотентно: перед вставкой проверяет -C. Возвращает число применённых
+    правил (0 = ничего не потребовалось или ошибка).
+    """
+    if not ports:
+        return 0
+    installed = 0
+    families = [False]                       # IPv4 — всегда
+    if _has_global_ipv6():
+        families.append(True)                # IPv6 — если есть глобальный адрес
+    for ipv6 in families:
+        base = _build_tcpmss_rule(ports, mss, ipv6=ipv6)
+        # уже стоит? (iptables -t mangle -C PREROUTING <rule>)
+        check = _run_soft(base[:3] + ["-C", "PREROUTING"] + base[3:])
+        if check.returncode == 0:
+            continue
+        ins = _run_soft(base[:3] + ["-I", "PREROUTING", "1"] + base[3:])
+        if ins.returncode == 0:
+            installed += 1
+        else:
+            error(f"Не удалось установить TCPMSS-правило ({'ip6tables' if ipv6 else 'iptables'})")
+    return installed
+
+
+def _remove_tcpmss_rules() -> int:
+    """
+    Снимает все наши TCPMSS-правила из mangle/PREROUTING (v4+v6).
+    Возвращает число удалённых правил. Идемпотентно.
+    """
+    removed = 0
+    for binname in ("iptables", "ip6tables"):
+        r = _run_soft([binname, "-t", "mangle", "-S", "PREROUTING"], capture=True)
+        for line in (r.stdout or "").splitlines():
+            if _IPT_COMMENT not in line or not line.startswith("-A "):
+                continue
+            # "-A PREROUTING <body>" → "iptables -t mangle -D PREROUTING <body>"
+            del_spec = line.replace("-A PREROUTING ", "", 1)
+            dr = _run_soft([binname, "-t", "mangle", "-D", "PREROUTING"]
+                           + shlex.split(del_spec))
+            if dr.returncode == 0:
+                removed += 1
+    return removed
+
+
+def _count_tcpmss_rules() -> int:
+    """Сколько наших TCPMSS-правил сейчас стоит (v4+v6)."""
+    count = 0
+    for binname in ("iptables", "ip6tables"):
+        r = _run_soft([binname, "-t", "mangle", "-S", "PREROUTING"], capture=True)
+        for line in (r.stdout or "").splitlines():
+            if _IPT_COMMENT in line and line.startswith("-A "):
+                count += 1
+    return count
+
+
 # ── Публичный API ────────────────────────────────────────────────────────────
+
+def _resolve_mss(preset: str, mss) -> int:
+    """Пресет + опциональное переопределение → валидный MSS. Кидает ValueError."""
+    if preset not in _PRESETS:
+        raise ValueError(f"Неизвестный пресет: {preset}")
+    value = mss if mss else _PRESETS[preset]["mss"]
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"MSS должен быть числом: {value!r}")
+    if not (_MSS_MIN <= value <= _MSS_MAX):
+        raise ValueError(f"MSS вне диапазона {_MSS_MIN}–{_MSS_MAX}: {value}")
+    if preset == "custom" and not mss:
+        raise ValueError("Custom пресет требует задания mss")
+    return value
+
 
 def server_fragment_enable(
     preset: str = "balanced",
-    packets: str = "",
-    length: str = "",
-    interval: str = "",
+    mss = None,
     restart: bool = True,
 ) -> bool:
     """
-    Включает sockopt.fragment на VLESS+REALITY inbound.
+    Включает серверную сегментацию ответов (ServerHello + Cert).
+
+    Механизм выбирается автоматически по версии ядра Xray:
+      • ядро >= 26.7.11 → sockopt.tcpMaxSeg на каждом REALITY-inbound
+        (в config.json; требуется рестарт xray);
+      • старее → iptables/ip6tables mangle PREROUTING TCPMSS --set-mss
+        (мгновенно, без рестарта; требует re-apply после ребута).
+
+    Попутно вычищает легаси-плацебо sockopt.fragment из inbound (v4.27-).
 
     Args:
-      preset:    один из _PRESETS — берёт packets/length/interval из пресета
-      packets/length/interval: если заданы — переопределяют пресет
-      restart:   перезапустить xray после применения
+      preset:  aggressive / balanced / light / custom
+      mss:     переопределение MSS (для custom — обязателен)
+      restart: перезапустить xray при изменении config.json
 
     Возвращает True при успехе.
     """
-    if preset not in _PRESETS:
-        error(f"Неизвестный пресет: {preset}")
-        return False
-
-    p = _PRESETS[preset]
-    pkts = packets  or p["packets"]
-    lng  = length   or p["length"]
-    ivl  = interval or p["interval"]
-
-    if preset == "custom" and not (pkts and lng and ivl):
-        error("Custom пресет требует задания packets/length/interval")
+    try:
+        mss_val = _resolve_mss(preset, mss)
+    except ValueError as e:
+        error(str(e))
         return False
 
     cfg = _load_xray_config()
@@ -325,96 +537,128 @@ def server_fragment_enable(
         error("config.json не найден — сначала установите VLESS-сервер")
         return False
 
-    inb = _find_reality_inbound(cfg)
-    if inb is None:
-        # Проверим, может это xHTTP-режим
+    inbounds = _reality_inbounds(cfg)
+    if not inbounds:
         xh = _find_xhttp_inbound(cfg)
         if xh is not None:
-            error("Server-side fragment неприменим в xHTTP-режиме: TLS терминирует nginx,")
-            error("не Xray. Включите REALITY-режим или фрагментируйте ответ в nginx (отдельная задача).")
+            error("Server-side сегментация неприменима в xHTTP-режиме: TLS терминирует nginx,")
+            error("не Xray. Включите REALITY-режим (сегментацию ответа nginx — отдельная задача).")
         else:
             error("Не найден VLESS+REALITY inbound в config.json")
         return False
 
-    # Вставляем/обновляем sockopt.fragment в streamSettings
-    ss = inb.setdefault("streamSettings", {})
-    sockopt = ss.setdefault("sockopt", {})
-    # Сохраняем существующие настройки sockopt (tcpFastOpen и пр.)
-    sockopt["fragment"] = {
-        "packets":  pkts,
-        "length":   lng,
-        "interval": ivl,
-    }
+    ports = _reality_inbound_ports(cfg)
+    mechanism = MECH_SOCKOPT if _core_supports_tcp_max_seg() else MECH_TCPMSS
 
-    if not _save_xray_config(cfg):
-        return False
+    original_cfg = json.loads(json.dumps(cfg))   # для отката
+    config_changed = False
+    ipt_installed = 0
 
-    info(f"Server-side fragment применён: preset={preset} "
-         f"packets={pkts} length={lng} interval={ivl}ms")
+    for inb in inbounds:
+        ss = inb.setdefault("streamSettings", {})
+        sockopt = ss.setdefault("sockopt", {})
+        # Легаси-чистка: плацебо-поле fragment в sockopt не существует
+        if "fragment" in sockopt:
+            sockopt.pop("fragment", None)
+            config_changed = True
+        if mechanism == MECH_SOCKOPT:
+            if sockopt.get("tcpMaxSeg") != mss_val:
+                sockopt["tcpMaxSeg"] = mss_val
+                config_changed = True
+        else:
+            # старому ядру поле незнакомо (lenient-игнор) — не мусорим
+            if "tcpMaxSeg" in sockopt:
+                sockopt.pop("tcpMaxSeg", None)
+                config_changed = True
 
-    if restart:
-        if not _xray_test_and_restart():
-            # Откатываем фрагмент
-            warn("Откатываю fragment из-за ошибки перезапуска xray")
-            cfg2 = _load_xray_config()
-            if cfg2:
-                inb2 = _find_reality_inbound(cfg2)
-                if inb2:
-                    sockopt2 = inb2.get("streamSettings", {}).get("sockopt", {})
-                    sockopt2.pop("fragment", None)
-                    _save_xray_config(cfg2)
+    # ── Механизм A: правка config.json + рестарт ─────────────────────────────
+    if config_changed:
+        if not _save_xray_config(cfg):
+            return False
+        info(f"Server-side сегментация: механизм {BOLD}{mechanism}{NC}, "
+             f"preset={preset} mss={mss_val}, inbound-порты {ports}")
+
+        if restart:
+            if not _xray_test_and_restart():
+                warn("Откатываю изменения из-за ошибки перезапуска xray")
+                _remove_tcpmss_rules()
+                _save_xray_config(original_cfg)
+                _xray_test_and_restart()
+                return False
+
+    # ── Механизм B: iptables TCPMSS ──────────────────────────────────────────
+    if mechanism == MECH_TCPMSS:
+        ipt_installed = _install_tcpmss_rules(ports, mss_val)
+        if _count_tcpmss_rules() == 0:
+            error("TCPMSS-правила не установлены (iptables недоступен?) — откат")
+            if config_changed:
+                _save_xray_config(original_cfg)
+                if restart:
                     _xray_test_and_restart()
             return False
+        info(f"TCPMSS clamp: mangle/PREROUTING --set-mss {mss_val} на порты {ports}")
 
-    # Сохраняем в state
+    # ── State ────────────────────────────────────────────────────────────────
     sf = _ensure_state()
     sf.update({
         "enabled":       True,
         "preset":        preset,
-        "packets":       pkts,
-        "length":        lng,
-        "interval":      ivl,
+        "mss":           mss_val,
+        "mechanism":     mechanism,
+        "ports":         ports,
         "last_applied":  time.strftime("%Y-%m-%d %H:%M:%S"),
     })
     _save_server_fragment_state(sf)
 
-    success("Server-side TLS fragmentation активирована")
-    _log("INFO", f"Server fragment enabled: preset={preset}, "
-                  f"packets={pkts} length={lng} interval={ivl}")
+    success("Server-side TLS сегментация активирована "
+            f"({mechanism}, MSS {mss_val})")
+    _log("INFO", f"Server segment enabled: mechanism={mechanism}, preset={preset}, "
+                  f"mss={mss_val}, ports={ports}")
     return True
 
 
 def server_fragment_disable(restart: bool = True) -> bool:
-    """Снимает sockopt.fragment с REALITY inbound."""
+    """Снимает серверную сегментацию: tcpMaxSeg из config + TCPMSS-правила."""
     cfg = _load_xray_config()
     if cfg is None:
         return False
 
-    inb = _find_reality_inbound(cfg)
-    if inb is None:
-        warn("VLESS+REALITY inbound не найден — снимать нечего")
+    config_changed = False
+    inbounds = _reality_inbounds(cfg)
+    if not inbounds:
+        warn("VLESS+REALITY inbound не найден — снимаю только TCPMSS-правила")
     else:
-        sockopt = inb.get("streamSettings", {}).get("sockopt", {})
-        if "fragment" in sockopt:
-            sockopt.pop("fragment")
-            info("Удаляю sockopt.fragment из REALITY inbound")
-        else:
-            info("sockopt.fragment уже отсутствует — изменений не требуется")
+        for inb in inbounds:
+            sockopt = inb.get("streamSettings", {}).get("sockopt", {})
+            if "tcpMaxSeg" in sockopt:
+                sockopt.pop("tcpMaxSeg", None)
+                config_changed = True
+            if "fragment" in sockopt:      # легаси-плацебо
+                sockopt.pop("fragment", None)
+                config_changed = True
+        if not config_changed:
+            info("tcpMaxSeg в конфиге уже отсутствует — изменений не требуется")
 
-    if not _save_xray_config(cfg):
-        return False
-
-    if restart:
-        if not _xray_test_and_restart():
+    if config_changed:
+        if not _save_xray_config(cfg):
             return False
+        if restart:
+            if not _xray_test_and_restart():
+                return False
+
+    removed = _remove_tcpmss_rules()
+    if removed:
+        info(f"Снято TCPMSS-правил: {removed}")
 
     sf = _ensure_state()
     sf["enabled"] = False
+    sf["mechanism"] = ""
+    sf["ports"] = []
     sf["last_disabled"] = time.strftime("%Y-%m-%d %H:%M:%S")
     _save_server_fragment_state(sf)
 
-    success("Server-side TLS fragmentation отключена")
-    _log("INFO", "Server fragment disabled")
+    success("Server-side TLS сегментация отключена")
+    _log("INFO", "Server segment disabled")
     return True
 
 
@@ -422,54 +666,69 @@ def server_fragment_status() -> dict:
     """
     Возвращает dict:
       enabled (bool)            — по state.json
-      preset, packets, length, interval — параметры
-      in_config (bool)          — реально ли есть в config.json
+      preset, mss, mechanism    — параметры и выбранный механизм
+      ports (list)              — inbound-порты REALITY
+      in_config (bool)          — tcpMaxSeg реально в config.json на всех inbound
+      config_mss (int|None)     — значение tcpMaxSeg из config.json
+      legacy_fragment (bool)    — в config осталось плацебо sockopt.fragment
+      iptables_rules (int)      — сколько наших TCPMSS-правил стоит
+      core_version (str)        — версия ядра Xray ("26.10.21" / "1.8.24" / "")
+      core_supported (bool)     — ядро >= 26.7.11 (понимает tcpMaxSeg)
       inbound_protocol (str)    — "reality" / "xhttp" / "none"
       last_applied, last_disabled
     """
     sf = _ensure_state()
+    core_v = _xray_core_version()
     result = {
         "enabled":          sf.get("enabled", False),
         "preset":           sf.get("preset", ""),
-        "packets":          sf.get("packets", ""),
-        "length":           sf.get("length", ""),
-        "interval":         sf.get("interval", ""),
+        "mss":              sf.get("mss", 0),
+        "mechanism":        sf.get("mechanism", ""),
+        "ports":            sf.get("ports", []),
+        "in_config":        False,
+        "config_mss":       None,
+        "legacy_fragment":  False,
+        "iptables_rules":   0,
+        "core_version":     ".".join(str(x) for x in core_v) if core_v else "",
+        "core_supported":   core_v is not None and core_v >= _TCPMAXSEG_MIN_VERSION,
+        "inbound_protocol": "none",
         "last_applied":     sf.get("last_applied", ""),
         "last_disabled":    sf.get("last_disabled", ""),
-        "in_config":        False,
-        "inbound_protocol": "none",
     }
 
     cfg = _load_xray_config()
     if cfg:
-        inb = _find_reality_inbound(cfg)
-        if inb:
+        inbounds = _reality_inbounds(cfg)
+        if inbounds:
             result["inbound_protocol"] = "reality"
-            sockopt = inb.get("streamSettings", {}).get("sockopt", {})
-            frag = sockopt.get("fragment")
-            if frag:
-                result["in_config"] = True
+            result["ports"] = _reality_inbound_ports(cfg)
+            have = [inb.get("streamSettings", {}).get("sockopt", {}).get("tcpMaxSeg")
+                    for inb in inbounds]
+            result["config_mss"] = have[0] if have and have[0] is not None else None
+            result["in_config"] = bool(have) and all(v is not None for v in have)
+            result["legacy_fragment"] = any(
+                "fragment" in inb.get("streamSettings", {}).get("sockopt", {})
+                for inb in inbounds)
         elif _find_xhttp_inbound(cfg):
             result["inbound_protocol"] = "xhttp"
 
+    result["iptables_rules"] = _count_tcpmss_rules()
     return result
 
 
 def server_fragment_reapply_after_rebuild() -> None:
     """
     Хук для вызова после пересоздания config.json (reconfigure, switch_mode,
-    migration import). Если в state включён fragment — пере-применяем его
-    к свежему config.json.
+    migration import). Если в state включена сегментация — пере-применяем её
+    к свежему config.json (+ TCPMSS-правила, если механизм B).
     """
     sf = _load_server_fragment_state()
     if not sf.get("enabled"):
         return
-    info("Server-side fragment был включён — пере-применяю после пересоздания config")
+    info("Server-side сегментация была включена — пере-применяю после пересоздания config")
     server_fragment_enable(
         preset=sf.get("preset", "balanced"),
-        packets=sf.get("packets", ""),
-        length=sf.get("length", ""),
-        interval=sf.get("interval", ""),
+        mss=sf.get("mss") or None,
         restart=True,
     )
 
@@ -479,19 +738,19 @@ def server_fragment_reapply_after_rebuild() -> None:
 def _format_status_line(st: dict) -> str:
     if not st["enabled"]:
         return f"{YELLOW}отключён{NC}"
-    cfg_col = GREEN if st["in_config"] else RED
+    cfg_col = GREEN if st["in_config"] or st["iptables_rules"] else RED
     parts = [
         f"{GREEN}включён{NC}",
-        f"{cfg_col}config {'✓' if st['in_config'] else '✗'}{NC}",
-        f"{CYAN}{st['preset']}{NC}",
-        f"{DIM}p={st['packets']} l={st['length']} i={st['interval']}{NC}",
+        f"{CYAN}{st['mechanism'] or '?'}{NC}",
+        f"{CYAN}MSS {st['mss']}{NC}",
+        f"{cfg_col}применён {'✓' if (st['in_config'] or st['iptables_rules']) else '✗'}{NC}",
     ]
     return "  │  ".join(parts)
 
 
 def do_server_fragment_menu() -> None:
     """
-    TUI-меню управления server-side TLS fragmentation.
+    TUI-меню управления server-side TLS сегментацией.
     Вызывается из _menu_diagnostics() (пункт "SF").
     """
     _ensure_state()
@@ -501,40 +760,46 @@ def do_server_fragment_menu() -> None:
         print()
         st = server_fragment_status()
 
-        _box_top("🖥️   SERVER-SIDE TLS FRAGMENTATION")
+        _box_top("🖥️   SERVER-SIDE TLS СЕГМЕНТАЦИЯ")
         _box_row(f"  Статус: {_format_status_line(st)}")
         if st["inbound_protocol"] == "xhttp":
-            _box_row(f"  Режим: {YELLOW}xHTTP{NC} {DIM}— fragment неприменим (TLS терминирует nginx){NC}")
+            _box_row(f"  Режим: {YELLOW}xHTTP{NC} {DIM}— неприменимо (TLS терминирует nginx){NC}")
         elif st["inbound_protocol"] == "reality":
-            _box_row(f"  Режим: {GREEN}VLESS+REALITY{NC} {DIM}— fragment активен на inbound{NC}")
+            _box_row(f"  Режим: {GREEN}VLESS+REALITY{NC} {DIM}порты {st['ports']}{NC}")
         else:
             _box_row(f"  Режим: {RED}не установлен{NC} {DIM}— сначала установите VLESS-сервер{NC}")
+        _box_row(f"  Ядро Xray: {CYAN}{st['core_version'] or '?'}{NC} "
+                 f"{DIM}({'tcpMaxSeg поддерживается' if st['core_supported'] else 'старое — fallback iptables TCPMSS'}){NC}")
+        if st["legacy_fragment"]:
+            _box_warn("В config найдено легаси-плацебо sockopt.fragment — "
+                      "будет вычищено при следующем применении")
         _box_sep()
         _box_desc(
-            "Server-side TLS fragmentation дробит ответ сервера "
-            "(ServerHello + Certificate + ServerKeyExchange) на мелкие TCP-сегменты. "
-            "Клиентский fragment бьёт по ClientHello, этот — по ServerHello. "
-            "Вместе они дают симметричную картину, не детектируемую ТСПУ."
+            "Сегментация ответа сервера: ServerHello + Certificate "
+            "(3–5 КБ у REALITY) режутся на TCP-сегменты ≤ MSS. "
+            "Клиентский fragment бьёт по ClientHello, этот — по ответу. "
+            "Механизм: sockopt.tcpMaxSeg на inbound (ядро ≥ 26.7.11) "
+            "или iptables TCPMSS clamp на старых ядрах."
         )
         _box_sep()
         _box_row()
 
         if st["inbound_protocol"] == "reality":
             if st["enabled"]:
-                _box_item("1", f"🔴 Выключить fragment     {DIM}(снять sockopt.fragment с inbound){NC}")
-                _box_item("2", f"🔁 Сменить пресет        {DIM}(пере-применить с другими параметрами){NC}")
-                _box_item("3", f"⚙️  Custom параметры      {DIM}(ввести packets/length/interval){NC}")
+                _box_item("1", f"🔴 Выключить сегментацию  {DIM}(снять tcpMaxSeg + TCPMSS-правила){NC}")
+                _box_item("2", f"🔁 Сменить пресет        {DIM}(пере-применить с другим MSS){NC}")
+                _box_item("3", f"⚙️  Custom MSS            {DIM}(ввести вручную 536–1460){NC}")
             else:
-                _box_item("1", f"⚡ Агрессивная  {DIM}(1–3 байта, макс. обход DPI на ответе){NC}")
-                _box_item("2", f"✅ Сбалансированная  {DIM}(3–7 байт, рекомендуется){NC}")
-                _box_item("3", f"🔆 Лёгкая  {DIM}(5–15 байт, минимальный оверхед){NC}")
-                _box_item("4", f"⚙️  Пользовательская  {DIM}(ввести вручную){NC}")
+                _box_item("1", f"⚡ Агрессивная   {DIM}(MSS 800 — ответ в 5–8 сегментах, оверхед ~45%){NC}")
+                _box_item("2", f"✅ Сбалансированная  {DIM}(MSS 1300 — рекомендуется, оверхед ~11%){NC}")
+                _box_item("3", f"🔆 Лёгкая   {DIM}(MSS 1400 — 3 сегмента, минимальный оверхед){NC}")
+                _box_item("4", f"⚙️  Пользовательская  {DIM}(ввести MSS вручную){NC}")
         else:
             _box_row(f"  {DIM}Действия недоступны — требуется VLESS+REALITY inbound{NC}")
 
         _box_sep()
         _box_item("S", f"📊 Подробный статус")
-        _box_item("I", f"📖 Информация / зачем это нужно")
+        _box_item("I", f"📖 Информация / как это работает")
         _box_row()
         _box_item_exit("0", "← Назад")
         _box_bottom()
@@ -556,11 +821,11 @@ def do_server_fragment_menu() -> None:
                 continue
 
         if st["enabled"]:
-            # Меню при включённом fragment
+            # Меню при включённой сегментации
             if ch == "1":
                 print()
-                warn("Отключение снимет фрагментацию с ServerHello.")
-                warn("Трафик снова станет видимым ТСПУ по асимметрии.")
+                warn("Отключение снимет сегментацию ServerHello.")
+                warn("Ответ снова станет цельным — ТСПУ увидит асимметрию.")
                 try:
                     confirm = input(f"\n{YELLOW}Продолжить? (y/N):{NC} ").strip().lower()
                 except KeyboardInterrupt:
@@ -575,10 +840,10 @@ def do_server_fragment_menu() -> None:
                 # Сменить пресет
                 print()
                 _box_top("🔁  ВЫБОР НОВОГО ПРЕСЕТА")
-                _box_item("1", f"⚡ Агрессивная  {DIM}(1–3 байта){NC}")
-                _box_item("2", f"✅ Сбалансированная  {DIM}(3–7 байт){NC}")
-                _box_item("3", f"🔆 Лёгкая  {DIM}(5–15 байт){NC}")
-                _box_item("4", f"⚙️  Custom  {DIM}(ввести вручную){NC}")
+                _box_item("1", f"⚡ Агрессивная  {DIM}(MSS 800){NC}")
+                _box_item("2", f"✅ Сбалансированная  {DIM}(MSS 1300){NC}")
+                _box_item("3", f"🔆 Лёгкая  {DIM}(MSS 1400){NC}")
+                _box_item("4", f"⚙️  Custom  {DIM}(ввести MSS вручную){NC}")
                 _box_bottom()
                 try:
                     sub = input(f"{CYAN}Пресет:{NC} ").strip()
@@ -599,7 +864,7 @@ def do_server_fragment_menu() -> None:
                 input(f"\n{BLUE}Нажмите Enter...{NC}")
 
         else:
-            # Меню при выключенном fragment
+            # Меню при выключенной сегментации
             preset_map = {"1": "aggressive", "2": "balanced", "3": "light"}
             if ch in preset_map:
                 server_fragment_enable(preset=preset_map[ch])
@@ -618,94 +883,106 @@ def do_server_fragment_menu() -> None:
 
 
 def _prompt_custom_and_apply() -> None:
-    """Запрашивает packets/length/interval и применяет custom-пресет."""
+    """Запрашивает MSS и применяет custom-пресет."""
     print()
-    info("Введите параметры фрагментации (N или N-M):")
+    info(f"Введите MSS ({_MSS_MIN}–{_MSS_MAX}):")
     try:
-        pkts = input(f"  {CYAN}packets {DIM}(напр. 1-3){NC}: ").strip() or "1-3"
-        lng  = input(f"  {CYAN}length  {DIM}(напр. 3-7){NC}: ").strip() or "3-7"
-        ivl  = input(f"  {CYAN}interval{DIM}(мс, напр. 10-20){NC}: ").strip() or "10-20"
+        raw = input(f"  {CYAN}MSS {DIM}(напр. 1300){NC}: ").strip() or "1300"
     except KeyboardInterrupt:
         return
 
-    # Простая валидация
-    def _ok_range(v: str) -> bool:
-        parts = v.split("-")
-        if len(parts) not in (1, 2):
-            return False
-        try:
-            nums = [int(p) for p in parts]
-            return all(n > 0 for n in nums) and (len(nums) == 1 or nums[0] <= nums[1])
-        except ValueError:
-            return False
-
-    if not (_ok_range(pkts) and _ok_range(lng) and _ok_range(ivl)):
-        warn("Некорректный формат. Ожидается N или N-M с положительными числами")
+    try:
+        mss_val = int(raw)
+    except ValueError:
+        warn(f"Некорректное число: {raw}")
+        time.sleep(2)
+        return
+    if not (_MSS_MIN <= mss_val <= _MSS_MAX):
+        warn(f"MSS вне диапазона {_MSS_MIN}–{_MSS_MAX}")
         time.sleep(2)
         return
 
-    server_fragment_enable(preset="custom", packets=pkts, length=lng, interval=ivl)
+    server_fragment_enable(preset="custom", mss=mss_val)
 
 
 def _show_detailed_status(st: dict) -> None:
     print()
-    _box_top("📊  ПОДРОБНЫЙ СТАТУС SERVER FRAGMENT")
+    _box_top("📊  ПОДРОБНЫЙ СТАТУС SERVER SEGMENT")
     _box_row(f"  Глобально:    "
              f"{GREEN}включён{NC}" if st["enabled"]
              else f"  Глобально:    {YELLOW}отключён{NC}")
+    _box_row(f"  Механизм:      {CYAN}{st['mechanism'] or '—'}{NC}")
+    _box_row(f"  MSS:           {CYAN}{st['mss'] or '—'}{NC} "
+             f"{DIM}(эффективный на проводе ≈ MSS − 12 из-за timestamps){NC}")
+    _box_row(f"  Inbound:       {CYAN}{st['inbound_protocol']}{NC} "
+             f"{DIM}порты {st['ports'] or '—'}{NC}")
+    _box_row(f"  Ядро Xray:     {CYAN}{st['core_version'] or '?'}{NC} "
+             f"{DIM}({'≥ 26.7.11' if st['core_supported'] else '< 26.7.11'}){NC}")
     _box_row(f"  В config.json: "
-             f"{GREEN}есть{NC}" if st["in_config"]
-             else f"{RED}отсутствует{NC}")
-    _box_row(f"  Inbound:       {CYAN}{st['inbound_protocol']}{NC}")
-    if st["enabled"]:
+             f"{GREEN}tcpMaxSeg={st['config_mss']}{NC}" if st["in_config"]
+             else f"  В config.json: {RED}отсутствует{NC}")
+    _box_row(f"  TCPMSS-правил: {CYAN}{st['iptables_rules']}{NC} "
+             f"{DIM}(mangle/PREROUTING){NC}")
+    if st["preset"]:
         _box_row(f"  Пресет:        {CYAN}{st['preset']}{NC}")
-        _box_row(f"  packets:       {DIM}{st['packets']}{NC}")
-        _box_row(f"  length:        {DIM}{st['length']} байт{NC}")
-        _box_row(f"  interval:      {DIM}{st['interval']} мс{NC}")
     if st["last_applied"]:
         _box_row(f"  Посл. apply:   {DIM}{st['last_applied']}{NC}")
     if st["last_disabled"]:
         _box_row(f"  Посл. disable: {DIM}{st['last_disabled']}{NC}")
     _box_sep()
-    if st["enabled"] and not st["in_config"]:
-        _box_warn("ВНИМАНИЕ: в state включён, но в config отсутствует!")
+    if st["enabled"] and not (st["in_config"] or st["iptables_rules"]):
+        _box_warn("ВНИМАНИЕ: в state включён, но механизм не применён!")
         _box_warn("Возможно, config.json был пересоздан. Пере-примените через меню.")
-    elif not st["enabled"] and st["in_config"]:
-        _box_warn("ВНИМАНИЕ: в state выключен, но в config ещё присутствует!")
+    if st["legacy_fragment"]:
+        _box_warn("В config осталось легаси-плацебо sockopt.fragment (v4.27-):")
+        _box_warn("любое применение/отключение его вычистит.")
+    if not st["enabled"] and st["in_config"]:
+        _box_warn("ВНИМАНИЕ: в state выключен, но tcpMaxSeg ещё в config!")
         _box_warn("Это рассинхрон — нажмите Выключить для очистки.")
     _box_bottom()
 
 
 def _show_info() -> None:
     print()
-    _box_top("📖  ЗАЧЕМ НУЖЕН SERVER-SIDE FRAGMENT")
+    _box_top("📖  КАК РАБОТАЕТ SERVER-SIDE СЕГМЕНТАЦИЯ")
     _box_row()
     _box_row(f"  {BOLD}Проблема:{NC}")
     _box_row(f"  Клиентский fragment (меню F1) бьёт только ClientHello —")
     _box_row(f"  исходящий от клиента TLS-handshake. Серверный ответ")
-    _box_row(f"  (ServerHello + Certificate) уходит цельным куском.")
+    _box_row(f"  (ServerHello + Certificate, 3–5 КБ у REALITY) уходит")
+    _box_row(f"  цельными крупными сегментами. ТСПУ с двунаправленной")
+    _box_row(f"  аналитикой видит асимметрию — сильный маркер прокси.")
     _box_row()
-    _box_row(f"  ТСПУ с двунаправленной DPI-аналитикой видит асимметрию:")
-    _box_row(f"  входящий TLS дроблёный, ответный — цельный. Это")
-    _box_row(f"  сильный маркер прокси-сервера.")
+    _box_row(f"  {BOLD}Решение (TCP-уровень):{NC}")
+    _box_row(f"  Ядро Linux ограничивает send-MSS соединений:")
+    _box_row(f"  • sockopt.tcpMaxSeg на REALITY-inbound (ядро Xray ≥ 26.7.11)")
+    _box_row(f"    — применяется к listen-сокету ДО listen(), наследуется")
+    _box_row(f"    всеми принятыми соединениями, капит send-MSS;")
+    _box_row(f"  • старые ядра: iptables mangle PREROUTING TCPMSS —")
+    _box_row(f"    переписывает MSS в SYN клиентов (тот же паттерн,")
+    _box_row(f"    что telemt-ios-mss-fix).")
     _box_row()
-    _box_row(f"  {BOLD}Решение:{NC}")
-    _box_row(f"  sockopt.fragment на inbound VLESS+REALITY заставляет")
-    _box_row(f"  Xray дробить первые N TCP-сегментов ответа сервера.")
-    _box_row(f"  Теперь обе стороны TLS-handshake выглядят одинаково")
-    _box_row(f"  фрагментированно — DPI теряет сигнатуру.")
+    _box_row(f"  ServerHello + Cert режется на куски ≤ MSS (при 1300 —")
+    _box_row(f"  3–4 сегмента). DPI теряет цельную сигнатуру ответа.")
+    _box_row()
+    _box_row(f"  {BOLD}Честные ограничения:{NC}")
+    _box_row(f"  • Это НЕ micro-fragment: куски ≤ MSS, а не 10–20 байт,")
+    _box_row(f"    и БЕЗ задержек между ними — TCP-уровень так не умеет.")
+    _box_row(f"    Клиентский fragment остаётся обязательным.")
+    _box_row(f"  • MSS действует на всё соединение (весь исходящий")
+    _box_row(f"    трафик): при 1300 ≈ +11% пакетов к ответному потоку.")
+    _box_row(f"  • До v4.28 модуль писал sockopt.fragment в inbound —")
+    _box_row(f"    плацебо (поля не существует, ядро его игнорировало).")
     _box_row()
     _box_row(f"  {BOLD}Совместимость:{NC}")
-    _box_row(f"  • Xray-core v1.8.13+")
-    _box_row(f"  • Только VLESS+REALITY (на xHTTP TLS терминирует nginx)")
-    _box_row(f"  • Mode A и Mode B (Entry-нода)")
-    _box_row(f"  • Не конфликтует с клиентским fragment — это ортогональные слои")
-    _box_row()
-    _box_row(f"  {BOLD}Рекомендация:{NC}")
-    _box_row(f"  Используйте тот же пресет, что и на клиенте, или на 1 шаг")
-    _box_row(f"  мягче (серверные ответы крупнее, дробить легче).")
+    _box_row(f"  • Механизм A: Xray-core ≥ 26.7.11, рестарт xray")
+    _box_row(f"  • Механизм B: любые ядра, мгновенно; после ребута")
+    _box_row(f"    правила реаплаятся (config rebuild хук уже вшит)")
+    _box_row(f"  • Только VLESS+REALITY; mode A и mode B (Entry-нода)")
+    _box_row(f"  • REALITY и так шлёт подлинный handshake сайта-цели;")
+    _box_row(f"    сегментация — второй слой маскировки")
     _box_row()
     _box_row(f"  {BOLD}Связка:{NC}")
-    _box_row(f"  Client fragment (F1) + Server fragment (SF) =")
-    _box_row(f"  симметричная двунаправленная фрагментация TLS.")
+    _box_row(f"  Client fragment (F1) + Server segment (SF) =")
+    _box_row(f"  симметричная двунаправленная картина TLS-handshake.")
     _box_bottom()
