@@ -222,11 +222,13 @@ class TestClassifyFlows(unittest.TestCase):
 class TestRunNdpiParser(unittest.TestCase):
     """Парсер вывода ndpiReader (mock subprocess)."""
 
-    def test_run_ndpi_parses_table(self):
+    def test_run_ndpi_parses_numbered_proto(self):
+        """ndpiReader 4.x формат: [proto: 91/TLS] — имя после номера/слэша."""
         sample = (
             "\n"
-            "  1\t192.0.2.10:443      <->  192.0.2.20:50000   [proto: TLS]\n"
-            "  2\t192.0.2.10:443      <->  192.0.2.21:50001   [proto: WireGuard]\n"
+            "Detected protocols:\n"
+            "  1\tTCP 192.0.2.10:443 <-> 192.0.2.20:50000 [proto: 91/TLS][Encrypted][Confidence: Match by port]\n"
+            "  2\tTCP 192.0.2.10:443 <-> 192.0.2.21:50001 [proto: 89/WireGuard][Encrypted]\n"
         )
         with patch.object(mg, "_shutil_which", return_value="/usr/bin/ndpiReader"), \
              patch("subprocess.run") as mock_run:
@@ -238,6 +240,20 @@ class TestRunNdpiParser(unittest.TestCase):
         # адреса обезличены (flow-теги, не сырые IP)
         for f in flows:
             self.assertTrue(f["flow"].startswith("flow_"))
+
+    def test_run_ndpi_parses_legacy_proto(self):
+        """Старый формат: [proto: TLS] и Detected protocol: QUIC."""
+        sample = (
+            "\n"
+            "  1\t192.0.2.10:443      <->  192.0.2.20:50000   [proto: TLS]\n"
+            "  2\t192.0.2.11:8443     <->  192.0.2.21:50001   Detected protocol: QUIC\n"
+        )
+        with patch.object(mg, "_shutil_which", return_value="/usr/bin/ndpiReader"), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=sample, returncode=0)
+            flows = mg.run_ndpi(Path("/tmp/fake.pcap"))
+        self.assertIsNotNone(flows)
+        self.assertEqual({f["classification"] for f in flows}, {"TLS", "QUIC"})
 
     def test_run_ndpi_none_when_binary_missing(self):
         with patch.object(mg, "_shutil_which", return_value=None):

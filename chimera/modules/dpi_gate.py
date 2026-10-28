@@ -257,9 +257,15 @@ def quic_short_pkt(total: int, byte0: int, seed: int) -> bytes:
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. GBDT-ИНФЕРЕНС (JSON-модель, формат плоских узлов AIVPN model.rs)
 # ══════════════════════════════════════════════════════════════════════════════
-def load_model(path: Path = MODEL_PATH) -> Optional[dict]:
+def load_model(path: Optional[Path] = None) -> Optional[dict]:
     """JSON: {schema_version, feature_schema_version, window, classes,
-              base_score, threshold, trees: [{nodes: [...]}]}"""
+              base_score, threshold, trees: [{nodes: [...]}]}
+
+    path=None → MODEL_PATH (runtime-резолв, не дефолт-аргумент — иначе
+    патчинг MODEL_PATH в тестах не работает при существующей прод-модели).
+    """
+    if path is None:
+        path = MODEL_PATH
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception:

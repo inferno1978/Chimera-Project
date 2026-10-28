@@ -243,16 +243,18 @@ def run_ndpi(pcap_path: Path, ndpi_bin: Optional[str] = None) -> Optional[list]:
     except Exception:
         return None
     flows = []
-    # Формат v2: "  1  192.0.2.1:443  <->  192.0.2.2:54321  [proto: TLS]"
-    # а также "... Detected protocol: TLS" на строке потока.
-    # Пороги захвата групп — протокол после '[proto: ' или 'Detected protocol: '.
+    # Формат ndpiReader 4.x -v 2:
+    #   "  1  TCP 192.0.2.10:55993 <-> 192.0.2.20:443 [proto: 91/TLS]..."
+    #   протокол = номер/имя; берём ИМЯ после слэша. Fallback — старый
+    #   формат "[proto: TLS]" и "Detected protocol: TLS".
     for line in out.splitlines():
         m = re.search(
             r"(\d+\.\d+\.\d+\.\d+):(\d+)\s*<->\s*"
             r"(\d+\.\d+\.\d+\.\d+):(\d+)", line)
         if not m:
             continue
-        pm = (re.search(r"\[proto:\s*([A-Za-z0-9_.+-]+)\s*\]", line)
+        pm = (re.search(r"\[proto:\s*\d+/([A-Za-z0-9_.+-]+)\s*\]", line)
+              or re.search(r"\[proto:\s*([A-Za-z0-9_.+-]+)\s*\]", line)
               or re.search(r"Detected protocol:\s*([A-Za-z0-9_.+-]+)", line,
                            re.IGNORECASE))
         if not pm:
