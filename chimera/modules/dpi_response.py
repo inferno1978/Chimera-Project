@@ -406,22 +406,43 @@ def dpi_response_run_once() -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # 4. CRON
 # ══════════════════════════════════════════════════════════════════════════════
+def _resolve_installer_path() -> str:
+    """Путь main.py для cron-строки.
+
+    sys.argv[0] валиден только при запуске скриптом (main.py --dpi-response).
+    При `python -c "from ... import dpi_response; dpi_response.cron_install()"`
+    argv[0] == '-c' — тогда main.py ищется рядом с пакетом (chimera/../main.py).
+    """
+    argv0 = sys.argv[0] if sys.argv else ""
+    try:
+        p = Path(argv0).resolve()
+        if p.name == "main.py" and p.is_file():
+            return str(p)
+    except Exception:
+        pass
+    # fallback: main.py рядом с пакетом chimera/
+    pkg_root = Path(__file__).resolve().parent.parent  # .../chimera
+    for cand in (pkg_root / "main.py", pkg_root.parent / "main.py"):
+        if cand.is_file():
+            return str(cand)
+    return "/opt/chimera/main.py"  # канонический путь установки
+
+
 def cron_install() -> None:
     try:
         CRON_FILE.parent.mkdir(parents=True, exist_ok=True)
-        installer = str(Path(sys.argv[0]).resolve())
+        installer = _resolve_installer_path()
         cron_line = (f"*/5 * * * * root /usr/bin/python3 {installer} "
-                     f">> /var/log/chimera.log 2>&1\n")
+                     f"--dpi-response >> /var/log/chimera.log 2>&1\n")
         CRON_FILE.write_text(
             "# chimera-dpi-response — авто-реакция на DPI-зондирование\n"
             "# Генерируется chimera/modules/dpi_response.py\n"
             "SHELL=/bin/bash\n"
             "PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin\n"
-            f"{cron_line}".replace(">> /var/log/chimera.log 2>&1",
-                                   "--dpi-response >> /var/log/chimera.log 2>&1"),
+            f"{cron_line}",
             encoding="utf-8")
         CRON_FILE.chmod(0o644)
-        _log("INFO", "cron установлен (каждые 5 мин)")
+        _log("INFO", f"cron установлен (каждые 5 мин, installer={installer})")
     except Exception as e:
         _log("WARN", f"cron install failed: {e}")
 
