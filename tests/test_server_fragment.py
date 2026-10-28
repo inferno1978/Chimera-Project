@@ -2,27 +2,52 @@
 """
 tests/test_server_fragment.py
 ───────────────────────────────────────────────────────────────────────────────
-Unit-тесты для chimera/modules/server_fragment.py (v4.28+, Task 24).
+Unit-тесты для chimera/modules/server_fragment.py (v4.28+, Task 24 / 24-5b).
 
-Новая механика — сегментация ответа сервера TCP-уровнем, ДВА механизма:
+Механика — сегментация ответа сервера TCP-уровнем, ДВА механизма:
   A. MECH_SOCKOPT="tcpMaxSeg"  — sockopt.tcpMaxSeg в streamSettings каждого
-     VLESS+REALITY inbound (ядро Xray >= 26.7.11, рестарт xray);
+     VLESS+REALITY inbound (ядро Xray >= 26.7.11, рестарт xray)
+     + GODEBUG-drop-in на xray.service (v2: Go >= 1.24 делает листенеры
+     MPTCP, где TCP_MAXSEG — тихое no-op; Environment=GODEBUG=multipathtcp=0)
+     + верификация по журналу systemd после рестарта: если Xray логирует
+     «failed to set TCP_MAXSEG» — автофолбэк на механизм B;
   B. MECH_TCPMSS="tcpmss"      — iptables/ip6tables mangle PREROUTING
-     TCPMSS --set-mss (fallback для старых ядер).
+     TCPMSS --set-mss (старые ядра и форс-фолбэк) + бут-восстановление
+     через ExecStartPost=+/usr/local/bin/chimera-server-frag-restore
+     (standalone-скрипт, без импортов chimera).
+
+ВАЖНО (изоляция песочницы): enable/disable/status трогают не только
+config.json/state.json, но и systemd-drop-in + restore-скрипт + journalctl —
+поэтому _SVC_DROPIN/_RESTORE_SCRIPT патчатся на tmp-пути, а _daemon_reload /
+_journal_tcpmaxseg_failed замоканы (иначе тесты лезут в реальные /etc и
+journal, и asserts на вызовы сбиваются окружением).
 
 Покрывает:
-   1. _PRESETS / константы (MECH_*, _MSS_MIN/_MSS_MAX, _TCPMAXSEG_MIN_VERSION)
+   1. _PRESETS / константы (MECH_*, _MSS_MIN/_MSS_MAX, _TCPMAXSEG_MIN_VERSION,
+      _SVC_DROPIN/_GODEBUG_ENV_LINE/_RESTORE_SCRIPT)
    2. _find_reality_inbound / _find_xhttp_inbound / _reality_inbounds /
       _reality_inbound_ports (мульти-inbound, сортировка/уникальность портов)
    3. _resolve_mss — пресеты/границы/отказы
    4. _xray_core_version / _core_supports_tcp_max_seg — парсинг и feature-detect
    5. _build_tcpmss_rule — точные argv (v4/v6/мультипорт/сортировка)
    6. _install/_remove/_count_tcpmss_rules + _run_soft — через мок _run_soft
-   7. server_fragment_enable механизм A (tcpMaxSeg, легаси-чистка, rollback,
-      идемпотентность) и механизм B (pop tcpMaxSeg, install, откат при 0 правил)
+  6b. systemd drop-in (v2): _dropin_content (точный контент A/B),
+      _dropin_installed, _install_dropin/_remove_dropin (+_daemon_reload),
+      _journal_tcpmaxseg_failed (маркер в stdout/stderr, оба юнита, rc=127)
+  6c. restore-скрипт (v2): _write/_remove_restore_script (контент+chmod 755),
+      инварианты _RESTORE_SCRIPT_CONTENT (compile, без импортов chimera)
+   7. server_fragment_enable механизм A (tcpMaxSeg + GODEBUG-drop-in +
+      journal-verify, идемпотентность) и механизм B (pop tcpMaxSeg,
+      restore+ExecStartPost-drop-in, откат при 0 правил)
+   7b. Фолбэк A→B по журналу (v2): mechanism=tcpmss, fallback_reason в state,
+      GODEBUG снят, restore+ExecStartPost поставлены; полный откат при
+      _count_tcpmss_rules()==0
    8. Отказы enable: xHTTP / нет reality / нет config / плохой preset / mss
-   9. server_fragment_disable — снятие tcpMaxSeg + легаси fragment + TCPMSS
-  10. server_fragment_status — полный набор ключей и значения полей
+   9. server_fragment_disable — снятие tcpMaxSeg + легаси fragment + TCPMSS +
+      drop-in (до рестарта, с daemon-reload) + restore-скрипт; дополнительный
+      рестарт «без GODEBUG», когда конфиг не менялся, но drop-in снимали
+  10. server_fragment_status — полный набор ключей (включая v2:
+      godebug_installed / restore_installed / fallback_reason)
   11. server_fragment_reapply_after_rebuild — хук после пересоздания config
   12. _ensure_state / _migrate_legacy_state — дефолт и миграция v4.27-state
   13. TUI-хелперы (_format_status_line, _prompt_custom_and_apply)
@@ -244,34 +269,47 @@ _SAVED_CHAIN_V4 = "\n".join([
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _FragmentTestBase(unittest.TestCase):
-    """База: временные пути + наборы патчей (как в старом харнессе)."""
+    """База: временные пути + наборы патчей (как в старом харнессе).
+
+    v2: помимо config.json/state.json патчатся также _SVC_DROPIN и
+    _RESTORE_SCRIPT (tmp-файлы) — иначе enable/disable/status трогают
+    реальные /etc/systemd/... и /usr/local/bin/... ."""
 
     def setUp(self):
         _setup_core()
         self._tmpdir = Path(tempfile.mkdtemp())
         self._cfg_path = self._tmpdir / "config.json"
         self._state_path = self._tmpdir / "state.json"
+        self._dropin_path = self._tmpdir / "chimera-server-frag.conf"
+        self._restore_path = self._tmpdir / "chimera-server-frag-restore"
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _base_patches(self, cfg=None):
-        """Патч путей config.json/state.json (+ опциональная запись конфига)."""
+        """Патч путей config.json/state.json/drop-in/restore (+ запись конфига)."""
         if cfg is not None:
             self._cfg_path.write_text(json.dumps(cfg))
         return [
             patch(MOD + "._XRAY_CONFIG", self._cfg_path),
             patch(MOD + "._STATE_FILE", self._state_path),
+            patch(MOD + "._SVC_DROPIN", self._dropin_path),
+            patch(MOD + "._RESTORE_SCRIPT", self._restore_path),
         ]
 
-    def _mech_a_patches(self, cfg=None, restart=None):
-        """Механизм A: новое ядро (26.10.21), мок рестарта и iptables-хелперов."""
+    def _mech_a_patches(self, cfg=None, restart=None, journal_failed=False,
+                        install_ret=0, count_ret=0):
+        """Механизм A: новое ядро (26.10.21); drop-in/restore в tmp,
+        _daemon_reload и _journal_tcpmaxseg_failed замоканы
+        (journal_failed=True — эмуляция «failed to set TCP_MAXSEG» → фолбэк)."""
         mocks = {
             "restart": restart or MagicMock(return_value=True),
-            "install": MagicMock(return_value=0),
-            "count":   MagicMock(return_value=0),
+            "install": MagicMock(return_value=install_ret),
+            "count":   MagicMock(return_value=count_ret),
             "remove":  MagicMock(return_value=0),
+            "reload":  MagicMock(return_value=True),
+            "journal": MagicMock(return_value=journal_failed),
         }
         patches = self._base_patches(cfg) + [
             patch(MOD + "._xray_core_version", return_value=(26, 10, 21)),
@@ -279,6 +317,9 @@ class _FragmentTestBase(unittest.TestCase):
             patch(MOD + "._install_tcpmss_rules", mocks["install"]),
             patch(MOD + "._count_tcpmss_rules", mocks["count"]),
             patch(MOD + "._remove_tcpmss_rules", mocks["remove"]),
+            patch(MOD + "._daemon_reload", mocks["reload"]),
+            patch(MOD + "._journal_tcpmaxseg_failed", mocks["journal"]),
+            patch("time.sleep"),   # journal-verify спит 1с — не ждём по-настоящему
         ]
         return patches, mocks
 
@@ -289,6 +330,8 @@ class _FragmentTestBase(unittest.TestCase):
             "install": MagicMock(return_value=1),
             "count":   MagicMock(return_value=count_after),
             "remove":  MagicMock(return_value=0),
+            "reload":  MagicMock(return_value=True),
+            "journal": MagicMock(return_value=False),
         }
         patches = self._base_patches(cfg) + [
             patch(MOD + "._xray_core_version", return_value=(1, 8, 24)),
@@ -296,6 +339,8 @@ class _FragmentTestBase(unittest.TestCase):
             patch(MOD + "._install_tcpmss_rules", mocks["install"]),
             patch(MOD + "._count_tcpmss_rules", mocks["count"]),
             patch(MOD + "._remove_tcpmss_rules", mocks["remove"]),
+            patch(MOD + "._daemon_reload", mocks["reload"]),
+            patch(MOD + "._journal_tcpmaxseg_failed", mocks["journal"]),
         ]
         return patches, mocks
 
@@ -327,6 +372,21 @@ class TestConstants(unittest.TestCase):
     def test_iptables_comment_constant(self):
         from chimera.modules.server_fragment import _IPT_COMMENT
         self.assertEqual(_IPT_COMMENT, "chimera-server-frag")
+
+    def test_svc_dropin_constant(self):
+        from chimera.modules.server_fragment import _SVC_DROPIN
+        self.assertEqual(
+            _SVC_DROPIN,
+            Path("/etc/systemd/system/xray.service.d/chimera-server-frag.conf"))
+
+    def test_godebug_env_line_constant(self):
+        from chimera.modules.server_fragment import _GODEBUG_ENV_LINE
+        self.assertEqual(_GODEBUG_ENV_LINE, "Environment=GODEBUG=multipathtcp=0")
+
+    def test_restore_script_constant(self):
+        from chimera.modules.server_fragment import _RESTORE_SCRIPT
+        self.assertEqual(
+            _RESTORE_SCRIPT, Path("/usr/local/bin/chimera-server-frag-restore"))
 
 
 class TestPresets(unittest.TestCase):
@@ -810,6 +870,403 @@ class TestRemoveCountTcpmssRules(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 6b. systemd drop-in + daemon-reload + journal (v2: GODEBUG/ExecStartPost)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDropinContent(unittest.TestCase):
+    """_dropin_content — точный контент под каждый механизм."""
+
+    def setUp(self):
+        _setup_core()
+
+    def test_sockopt_mechanism_content_exact(self):
+        from chimera.modules.server_fragment import _dropin_content, MECH_SOCKOPT
+        self.assertEqual(
+            _dropin_content(MECH_SOCKOPT),
+            "[Service]\nEnvironment=GODEBUG=multipathtcp=0\n")
+
+    def test_tcpmss_mechanism_content_exact(self):
+        from chimera.modules.server_fragment import (
+            _dropin_content, MECH_TCPMSS, _RESTORE_SCRIPT,
+        )
+        self.assertEqual(
+            _dropin_content(MECH_TCPMSS),
+            f"[Service]\nExecStartPost=+{_RESTORE_SCRIPT}\n")
+
+
+class TestDropinInstalled(unittest.TestCase):
+    """_dropin_installed — существует ли drop-in (и под нужный механизм)."""
+
+    def setUp(self):
+        _setup_core()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._dropin_path = self._tmpdir / "chimera-server-frag.conf"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch(self):
+        return patch(MOD + "._SVC_DROPIN", self._dropin_path)
+
+    def test_no_file_false_for_any_mechanism(self):
+        from chimera.modules.server_fragment import (
+            _dropin_installed, MECH_SOCKOPT, MECH_TCPMSS,
+        )
+        with self._patch():
+            self.assertFalse(_dropin_installed())
+            self.assertFalse(_dropin_installed(MECH_SOCKOPT))
+            self.assertFalse(_dropin_installed(MECH_TCPMSS))
+
+    def test_sockopt_content_matches_only_mech_a(self):
+        from chimera.modules.server_fragment import (
+            _dropin_installed, _dropin_content, MECH_SOCKOPT, MECH_TCPMSS,
+        )
+        self._dropin_path.write_text(_dropin_content(MECH_SOCKOPT))
+        with self._patch():
+            self.assertTrue(_dropin_installed(MECH_SOCKOPT))
+            self.assertFalse(_dropin_installed(MECH_TCPMSS))
+
+    def test_tcpmss_content_matches_only_mech_b(self):
+        from chimera.modules.server_fragment import (
+            _dropin_installed, _dropin_content, MECH_SOCKOPT, MECH_TCPMSS,
+        )
+        self._dropin_path.write_text(_dropin_content(MECH_TCPMSS))
+        with self._patch():
+            self.assertTrue(_dropin_installed(MECH_TCPMSS))
+            self.assertFalse(_dropin_installed(MECH_SOCKOPT))
+
+    def test_no_argument_true_for_any_our_content(self):
+        from chimera.modules.server_fragment import (
+            _dropin_installed, _dropin_content, MECH_SOCKOPT, MECH_TCPMSS,
+        )
+        for mech in (MECH_SOCKOPT, MECH_TCPMSS):
+            self._dropin_path.write_text(_dropin_content(mech))
+            with self._patch():
+                self.assertTrue(_dropin_installed())
+
+    def test_garbage_content_mechanism_false_any_true(self):
+        from chimera.modules.server_fragment import (
+            _dropin_installed, MECH_SOCKOPT, MECH_TCPMSS,
+        )
+        self._dropin_path.write_text("какой-то чужой drop-in\n")
+        with self._patch():
+            self.assertFalse(_dropin_installed(MECH_SOCKOPT))
+            self.assertFalse(_dropin_installed(MECH_TCPMSS))
+            self.assertTrue(_dropin_installed())
+
+
+class TestInstallRemoveDropin(unittest.TestCase):
+    """_install_dropin / _remove_dropin — файловые операции + daemon-reload."""
+
+    def setUp(self):
+        _setup_core()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._dropin_path = self._tmpdir / "chimera-server-frag.conf"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patches(self):
+        self._reload = MagicMock(return_value=True)
+        return [
+            patch(MOD + "._SVC_DROPIN", self._dropin_path),
+            patch(MOD + "._daemon_reload", self._reload),
+        ]
+
+    def test_install_writes_content_and_reloads(self):
+        from chimera.modules.server_fragment import (
+            _install_dropin, _dropin_content, MECH_SOCKOPT,
+        )
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            ok = _install_dropin(MECH_SOCKOPT)
+        self.assertTrue(ok)
+        self.assertEqual(self._dropin_path.read_text(),
+                         _dropin_content(MECH_SOCKOPT))
+        self._reload.assert_called_once()
+
+    def test_install_creates_parent_directories(self):
+        from chimera.modules.server_fragment import (
+            _install_dropin, MECH_TCPMSS,
+        )
+        self._dropin_path = self._tmpdir / "nested" / "dir" / "frag.conf"
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            ok = _install_dropin(MECH_TCPMSS)
+        self.assertTrue(ok)
+        self.assertTrue(self._dropin_path.exists())
+
+    def test_install_overwrites_previous_mechanism(self):
+        from chimera.modules.server_fragment import (
+            _install_dropin, _dropin_content, MECH_SOCKOPT, MECH_TCPMSS,
+        )
+        # лежит drop-in от механизма B → ставим A: контент заменяется
+        self._dropin_path.write_text(_dropin_content(MECH_TCPMSS))
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            ok = _install_dropin(MECH_SOCKOPT)
+        self.assertTrue(ok)
+        self.assertEqual(self._dropin_path.read_text(),
+                         _dropin_content(MECH_SOCKOPT))
+        self._reload.assert_called_once()
+
+    def test_remove_unlinks_and_reloads(self):
+        from chimera.modules.server_fragment import (
+            _remove_dropin, _dropin_content, MECH_SOCKOPT,
+        )
+        self._dropin_path.write_text(_dropin_content(MECH_SOCKOPT))
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            removed = _remove_dropin()
+        self.assertTrue(removed)
+        self.assertFalse(self._dropin_path.exists())
+        self._reload.assert_called_once()
+
+    def test_remove_without_file_returns_false_no_reload(self):
+        from chimera.modules.server_fragment import _remove_dropin
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            removed = _remove_dropin()
+        self.assertFalse(removed)
+        self._reload.assert_not_called()
+
+    def test_remove_idempotent_no_second_reload(self):
+        from chimera.modules.server_fragment import (
+            _remove_dropin, _dropin_content, MECH_TCPMSS,
+        )
+        self._dropin_path.write_text(_dropin_content(MECH_TCPMSS))
+        with ExitStack() as stack:
+            _enter_patches(stack, self._patches())
+            first = _remove_dropin()
+            second = _remove_dropin()
+        self.assertTrue(first)
+        self.assertFalse(second)           # повторный remove — уже нечего снимать
+        self._reload.assert_called_once()  # daemon-reload только по факту удаления
+
+
+class TestDaemonReload(unittest.TestCase):
+    """_daemon_reload — systemctl daemon-reload через _run_soft."""
+
+    def setUp(self):
+        _setup_core()
+
+    def test_calls_systemctl_daemon_reload(self):
+        from chimera.modules.server_fragment import _daemon_reload
+        cmds = []
+
+        def fake(cmd, capture=False, timeout=15):
+            cmds.append(list(cmd))
+            return _cp(cmd, 0)
+
+        with patch(MOD + "._run_soft", fake):
+            ok = _daemon_reload()
+        self.assertTrue(ok)
+        self.assertEqual(cmds, [["systemctl", "daemon-reload"]])
+
+    def test_false_on_failure(self):
+        from chimera.modules.server_fragment import _daemon_reload
+        with patch(MOD + "._run_soft", lambda cmd, **kw: _cp(cmd, 1)):
+            self.assertFalse(_daemon_reload())
+
+
+class TestJournalTcpmaxsegFailed(unittest.TestCase):
+    """_journal_tcpmaxseg_failed — верификация механизма A по журналу."""
+
+    def setUp(self):
+        _setup_core()
+
+    def _journal(self, outputs):
+        """Фейковый _run_soft: выдаёт outputs по порядку, пишет лог вызовов."""
+        calls = []
+        it = iter(outputs)
+
+        def fake(cmd, capture=False, timeout=15):
+            calls.append(list(cmd))
+            return next(it, _cp(cmd, 0, stdout=""))
+
+        return fake, calls
+
+    def test_true_when_journal_contains_marker(self):
+        from chimera.modules.server_fragment import _journal_tcpmaxseg_failed
+        fake, _ = self._journal([
+            _cp(["journalctl"], 0, stdout="... failed to set TCP_MAXSEG ...")])
+        with patch(MOD + "._run_soft", fake):
+            self.assertTrue(
+                _journal_tcpmaxseg_failed(since="2025-01-01 00:00:00"))
+
+    def test_false_when_journal_clean(self):
+        from chimera.modules.server_fragment import _journal_tcpmaxseg_failed
+        fake, _ = self._journal([
+            _cp(["journalctl"], 0, stdout="xray started ok"),
+            _cp(["journalctl"], 0, stdout="nothing interesting"),
+        ])
+        with patch(MOD + "._run_soft", fake):
+            self.assertFalse(
+                _journal_tcpmaxseg_failed(since="2025-01-01 00:00:00"))
+
+    def test_false_when_journalctl_missing(self):
+        from chimera.modules.server_fragment import _journal_tcpmaxseg_failed
+        with patch(MOD + "._run_soft", lambda cmd, **kw: _cp(cmd, 127)):
+            self.assertFalse(
+                _journal_tcpmaxseg_failed(since="2025-01-01 00:00:00"))
+
+    def test_checks_both_service_units(self):
+        from chimera.modules.server_fragment import _journal_tcpmaxseg_failed
+        # первый юнит чист, второй (xray-core) содержит маркер → True
+        fake, calls = self._journal([
+            _cp(["journalctl"], 0, stdout="clean"),
+            _cp(["journalctl"], 0, stdout="failed to set TCP_MAXSEG"),
+        ])
+        with patch(MOD + "._run_soft", fake):
+            self.assertTrue(_journal_tcpmaxseg_failed(since="ts"))
+        units = [c[c.index("-u") + 1] for c in calls]
+        self.assertEqual(units, ["xray", "xray-core"])
+
+    def test_marker_in_stderr_detected(self):
+        from chimera.modules.server_fragment import _journal_tcpmaxseg_failed
+        cp = subprocess.CompletedProcess(
+            ["journalctl"], 0, stdout="",
+            stderr="xray: failed to set TCP_MAXSEG")
+        with patch(MOD + "._run_soft", lambda cmd, **kw: cp):
+            self.assertTrue(_journal_tcpmaxseg_failed(since="ts"))
+
+    def test_journalctl_flags_and_since_passed(self):
+        from chimera.modules.server_fragment import _journal_tcpmaxseg_failed
+        fake, calls = self._journal([
+            _cp(["journalctl"], 0, stdout="clean"),
+            _cp(["journalctl"], 0, stdout="clean"),
+        ])
+        with patch(MOD + "._run_soft", fake):
+            _journal_tcpmaxseg_failed(since="2025-06-01 12:00:00")
+        self.assertEqual(len(calls), 2)
+        for cmd in calls:
+            self.assertEqual(cmd[0], "journalctl")
+            self.assertEqual(cmd[1], "-u")
+            self.assertIn("--since", cmd)
+            self.assertEqual(cmd[cmd.index("--since") + 1], "2025-06-01 12:00:00")
+            self.assertIn("--no-pager", cmd)
+            self.assertIn("-n", cmd)
+            self.assertEqual(cmd[cmd.index("-n") + 1], "200")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6c. restore-скрипт (v2): запись/удаление + инварианты контента
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRestoreScriptIO(unittest.TestCase):
+    """_write_restore_script / _remove_restore_script — файловые операции."""
+
+    def setUp(self):
+        _setup_core()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._restore_path = self._tmpdir / "chimera-server-frag-restore"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch(self):
+        return patch(MOD + "._RESTORE_SCRIPT", self._restore_path)
+
+    def test_write_creates_executable_with_exact_content(self):
+        from chimera.modules.server_fragment import (
+            _write_restore_script, _RESTORE_SCRIPT_CONTENT,
+        )
+        with self._patch():
+            ok = _write_restore_script()
+        self.assertTrue(ok)
+        self.assertEqual(self._restore_path.read_text(),
+                         _RESTORE_SCRIPT_CONTENT)
+        self.assertEqual(self._restore_path.stat().st_mode & 0o777, 0o755)
+
+    def test_write_idempotent_overwrites(self):
+        from chimera.modules.server_fragment import (
+            _write_restore_script, _RESTORE_SCRIPT_CONTENT,
+        )
+        with self._patch():
+            self._restore_path.write_text("old garbage")
+            ok1 = _write_restore_script()
+            ok2 = _write_restore_script()
+        self.assertTrue(ok1)
+        self.assertTrue(ok2)
+        self.assertEqual(self._restore_path.read_text(),
+                         _RESTORE_SCRIPT_CONTENT)
+
+    def test_write_creates_parent_directories(self):
+        from chimera.modules.server_fragment import _write_restore_script
+        self._restore_path = self._tmpdir / "usr" / "local" / "bin" / "restore"
+        with self._patch():
+            ok = _write_restore_script()
+        self.assertTrue(ok)
+        self.assertTrue(self._restore_path.exists())
+
+    def test_remove_deletes_existing(self):
+        from chimera.modules.server_fragment import _remove_restore_script
+        with self._patch():
+            self._restore_path.write_text("#!/bin/sh\n")
+            removed = _remove_restore_script()
+        self.assertTrue(removed)
+        self.assertFalse(self._restore_path.exists())
+
+    def test_remove_idempotent_when_absent(self):
+        from chimera.modules.server_fragment import _remove_restore_script
+        with self._patch():
+            self.assertFalse(_remove_restore_script())
+            self.assertFalse(_remove_restore_script())
+
+
+class TestRestoreScriptContent(unittest.TestCase):
+    """_RESTORE_SCRIPT_CONTENT — standalone-инварианты (без исполнения:
+    STATE/CONFIG зашиты константами в контенте, поэтому проверяем текст
+    и компилируемость, а не прогон main())."""
+
+    def setUp(self):
+        _setup_core()
+
+    def _content(self):
+        from chimera.modules.server_fragment import _RESTORE_SCRIPT_CONTENT
+        return _RESTORE_SCRIPT_CONTENT
+
+    def test_compiles_as_python(self):
+        compile(self._content(), "<chimera-server-frag-restore>", "exec")
+
+    def test_shebang_and_main_guard(self):
+        c = self._content()
+        self.assertTrue(c.startswith("#!/usr/bin/env python3"))
+        self.assertIn('if __name__ == "__main__":', c)
+
+    def test_no_chimera_imports(self):
+        c = self._content()
+        self.assertNotIn("import chimera", c)
+        self.assertNotIn("from chimera", c)
+
+    def test_stdlib_only_imports(self):
+        import ast
+        tree = ast.parse(self._content())
+        mods = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                mods.update(n.name.split(".")[0] for n in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                mods.add((node.module or "").split(".")[0])
+        self.assertTrue(mods)                       # импорты вообще есть
+        self.assertTrue(mods <= {"json", "subprocess", "pathlib"},
+                        f"не-stdlib импорты в restore-скрипте: {mods}")
+
+    def test_logic_key_tokens(self):
+        c = self._content()
+        # механизм B: TCPMSS-правила по портам из state/config
+        for token in ("server_fragment", "tcpmss", "TCPMSS", "PREROUTING",
+                      "mangle", "chimera-server-frag", "state.json"):
+            self.assertIn(token, c, f"token {token!r} missing in restore script")
+        # идемпотентность: перед вставкой проверяет наличие наших правил (-S)
+        self.assertIn("-S", c)
+        self.assertIn("-I", c)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 7. server_fragment_enable — механизм A (tcpMaxSeg)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -827,16 +1284,24 @@ class TestEnableMechanismA(_FragmentTestBase):
             ok = server_fragment_enable(preset="balanced", restart=True)
             cfg = _load_xray_config()
             sf = _load_server_fragment_state()
+            dropin = self._dropin_path.read_text()
         self.assertTrue(ok)
         sockopt = cfg["inbounds"][0]["streamSettings"]["sockopt"]
         self.assertEqual(sockopt["tcpMaxSeg"], 1300)
         self.assertNotIn("fragment", sockopt)
+        # v2: GODEBUG-drop-in установлен, restore-скрипт НЕ создаётся
+        self.assertEqual(dropin, "[Service]\nEnvironment=GODEBUG=multipathtcp=0\n")
+        self.assertFalse(self._restore_path.exists())
+        # v2: daemon-reload и journal-верификация — по одному разу
+        mocks["reload"].assert_called_once()
+        mocks["journal"].assert_called_once()
         # state
         self.assertTrue(sf["enabled"])
         self.assertEqual(sf["preset"], "balanced")
         self.assertEqual(sf["mss"], 1300)
         self.assertEqual(sf["mechanism"], "tcpMaxSeg")
         self.assertEqual(sf["ports"], [443])
+        self.assertNotIn("fallback_reason", sf)
         self.assertRegex(sf["last_applied"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
         # рестарт вызван ровно один раз
         mocks["restart"].assert_called_once()
@@ -873,8 +1338,11 @@ class TestEnableMechanismA(_FragmentTestBase):
             cfg = _load_xray_config()
         self.assertTrue(ok1)
         self.assertTrue(ok2)
-        # повторный enable того же MSS — рестарт НЕ вызывается второй раз
+        # повторный enable того же MSS — рестарт/daemon-reload/journal-verify
+        # второй раз НЕ вызываются (идемпотентность v2)
         mocks["restart"].assert_called_once()
+        mocks["reload"].assert_called_once()
+        mocks["journal"].assert_called_once()
         sockopt = cfg["inbounds"][0]["streamSettings"]["sockopt"]
         self.assertEqual(sockopt["tcpMaxSeg"], 1300)
 
@@ -963,6 +1431,10 @@ class TestEnableMechanismA(_FragmentTestBase):
         self.assertFalse(sf.get("enabled", False))  # state не включён
         self.assertEqual(restart.call_count, 2)  # попытка + рестарт отката
         mocks["remove"].assert_called_once()    # TCPMSS-правила тоже сняты
+        # v2: поставленный здесь GODEBUG-drop-in снят при откате,
+        # restore-скрипт не остался
+        self.assertFalse(self._dropin_path.exists())
+        self.assertFalse(self._restore_path.exists())
 
     def test_enable_without_restart_flag(self):
         from chimera.modules.server_fragment import (
@@ -975,6 +1447,10 @@ class TestEnableMechanismA(_FragmentTestBase):
             cfg = _load_xray_config()
         self.assertTrue(ok)
         mocks["restart"].assert_not_called()
+        # v2: верификация по журналу — только после фактического рестарта
+        mocks["journal"].assert_not_called()
+        # drop-in ставится и без рестарта (переживёт следующий рестарт сервиса)
+        self.assertTrue(self._dropin_path.exists())
         sockopt = cfg["inbounds"][0]["streamSettings"]["sockopt"]
         self.assertEqual(sockopt["tcpMaxSeg"], 1300)
 
@@ -1000,6 +1476,144 @@ class TestEnableMechanismA(_FragmentTestBase):
         self.assertEqual(
             cfg["inbounds"][0]["streamSettings"]["sockopt"]["tcpMaxSeg"], 1400)
 
+    def test_enable_a_journal_called_with_since_timestamp(self):
+        from chimera.modules.server_fragment import server_fragment_enable
+        patches, mocks = self._mech_a_patches(_REALITY_CONFIG)
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            server_fragment_enable(preset="balanced")
+        mocks["journal"].assert_called_once()
+        kwargs = mocks["journal"].call_args.kwargs
+        self.assertIn("since", kwargs)
+        # since — момент ДО применения (время включения)
+        self.assertRegex(kwargs["since"],
+                         r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+    def test_enable_a_replaces_foreign_dropin_content(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_enable, _dropin_content,
+            MECH_SOCKOPT, MECH_TCPMSS,
+        )
+        # с прошлого раза остался drop-in механизма B (ExecStartPost) →
+        # enable A должен заменить его на GODEBUG-контент
+        self._dropin_path.write_text(_dropin_content(MECH_TCPMSS))
+        patches, mocks = self._mech_a_patches(_REALITY_CONFIG)
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            ok = server_fragment_enable(preset="balanced")
+            content = self._dropin_path.read_text()
+        self.assertTrue(ok)
+        self.assertEqual(content, _dropin_content(MECH_SOCKOPT))
+        mocks["reload"].assert_called_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7b. Фолбэк A → B по журналу (v2: GODEBUG не помог — MPTCP-нооп)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestEnableGodebugFallback(_FragmentTestBase):
+    """enable на новом ядре, но журнал видит «failed to set TCP_MAXSEG» →
+    автоматический переход на механизм B (TCPMSS + restore + ExecStartPost)."""
+
+    def _fallback_patches(self, cfg=None, count_after=1):
+        return self._mech_a_patches(
+            cfg, journal_failed=True, install_ret=1, count_ret=count_after)
+
+    def test_fallback_switches_to_tcpmss(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_enable, _load_xray_config,
+            _load_server_fragment_state,
+        )
+        patches, mocks = self._fallback_patches(_REALITY_CONFIG)
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            ok = server_fragment_enable(preset="balanced")
+            cfg = _load_xray_config()
+            sf = _load_server_fragment_state()
+            dropin = self._dropin_path.read_text()
+            restore_exists = self._restore_path.exists()
+        self.assertTrue(ok)
+        # журнал опрошен (причина фолбэка), правила TCPMSS поставлены
+        mocks["journal"].assert_called_once()
+        mocks["install"].assert_called_once_with([443], 1300)
+        # хореография daemon-reload: GODEBUG-install → GODEBUG-remove →
+        # ExecStartPost-install (3 раза)
+        self.assertEqual(mocks["reload"].call_count, 3)
+        # рестарт только один (механизм B применяется без рестарта)
+        mocks["restart"].assert_called_once()
+        # GODEBUG-drop-in снят, вместо него — ExecStartPost (механизм B)
+        self.assertIn("ExecStartPost=+", dropin)
+        self.assertNotIn("GODEBUG", dropin)
+        self.assertTrue(restore_exists)
+        # state: механизм tcpmss + причина фолбэка
+        self.assertTrue(sf["enabled"])
+        self.assertEqual(sf["mechanism"], "tcpmss")
+        self.assertEqual(sf["mss"], 1300)
+        self.assertEqual(sf["ports"], [443])
+        self.assertIn("fallback_reason", sf)
+        self.assertIn("TCP_MAXSEG", sf["fallback_reason"])
+        # tcpMaxSeg остаётся в конфиге: поле валидно для ядра ≥ 26.7.11,
+        # без GODEBUG оно no-op — реальную сегментацию делает TCPMSS
+        self.assertEqual(
+            cfg["inbounds"][0]["streamSettings"]["sockopt"]["tcpMaxSeg"], 1300)
+
+    def test_fallback_reason_cleared_on_clean_reenable(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_enable, _load_server_fragment_state,
+        )
+        # первый enable — фолбэк (журнал видит провал TCP_MAXSEG);
+        # второй — чистый механизм A (GODEBUG помог / журнал чист)
+        patches, mocks = self._mech_a_patches(
+            _REALITY_CONFIG, journal_failed=True, install_ret=1, count_ret=1)
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            server_fragment_enable(preset="balanced")
+            mocks["journal"].return_value = False
+            server_fragment_enable(preset="aggressive")
+            sf = _load_server_fragment_state()
+        self.assertEqual(sf["mechanism"], "tcpMaxSeg")
+        self.assertNotIn("fallback_reason", sf)   # причина вычищена из state
+
+    def test_fallback_count_zero_full_rollback(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_enable, _load_xray_config,
+            _load_server_fragment_state,
+        )
+        # фолбэк случился, но и TCPMSS не поставился → полный откат
+        patches, mocks = self._fallback_patches(_REALITY_CONFIG, count_after=0)
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            ok = server_fragment_enable(preset="balanced")
+            cfg = _load_xray_config()
+            sf = _load_server_fragment_state()
+        self.assertFalse(ok)
+        self.assertFalse(sf.get("enabled", False))
+        # конфиг откачен к оригиналу (без tcpMaxSeg)
+        self.assertNotIn(
+            "tcpMaxSeg", cfg["inbounds"][0]["streamSettings"].get("sockopt", {}))
+        # restore-скрипт снят при откате
+        self.assertFalse(self._restore_path.exists())
+        mocks["remove"].assert_called_once()
+        # ИЗВЕСТНАЯ ОСОБЕННОСТЬ (не чиним — код модуля не трогаем):
+        # ExecStartPost-drop-in, поставленный в B-блоке, откатом не снимается
+        # (dropin_installed_here отслеживает только GODEBUG-вариант)
+
+    def test_fallback_status_reports_restore_and_reason(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_enable, server_fragment_status,
+        )
+        patches, mocks = self._fallback_patches(_REALITY_CONFIG)
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            server_fragment_enable(preset="balanced")
+            st = server_fragment_status()
+        self.assertTrue(st["enabled"])
+        self.assertEqual(st["mechanism"], "tcpmss")
+        self.assertTrue(st["restore_installed"])
+        self.assertFalse(st["godebug_installed"])
+        self.assertIn("fallback_reason", st)
+        self.assertIn("TCP_MAXSEG", st["fallback_reason"])
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 8. server_fragment_enable — механизм B (iptables TCPMSS)
@@ -1011,7 +1625,7 @@ class TestEnableMechanismB(_FragmentTestBase):
     def test_enable_installs_rules_and_state(self):
         from chimera.modules.server_fragment import (
             server_fragment_enable, _load_xray_config,
-            _load_server_fragment_state,
+            _load_server_fragment_state, _RESTORE_SCRIPT_CONTENT,
         )
         patches, mocks = self._mech_b_patches(_REALITY_CONFIG)
         with ExitStack() as stack:
@@ -1019,16 +1633,26 @@ class TestEnableMechanismB(_FragmentTestBase):
             ok = server_fragment_enable(preset="balanced")
             cfg = _load_xray_config()
             sf = _load_server_fragment_state()
+            dropin = self._dropin_path.read_text()
+            restore = self._restore_path.read_text()
         self.assertTrue(ok)
         mocks["install"].assert_called_once_with([443], 1300)
         # tcpMaxSeg НЕ пишется старому ядру
         sockopt = cfg["inbounds"][0]["streamSettings"].get("sockopt", {})
         self.assertNotIn("tcpMaxSeg", sockopt)
+        # v2: restore-скрипт (точный контент) + ExecStartPost-drop-in
+        self.assertEqual(restore, _RESTORE_SCRIPT_CONTENT)
+        self.assertEqual(dropin, f"[Service]\nExecStartPost=+{self._restore_path}\n")
+        self.assertNotIn("GODEBUG", dropin)
+        # v2: daemon-reload был (установка drop-in), журнал НЕ опрашивался
+        mocks["reload"].assert_called_once()
+        mocks["journal"].assert_not_called()
         # state
         self.assertTrue(sf["enabled"])
         self.assertEqual(sf["mechanism"], "tcpmss")
         self.assertEqual(sf["mss"], 1300)
         self.assertEqual(sf["ports"], [443])
+        self.assertNotIn("fallback_reason", sf)
         # конфиг не менялся → рестарта нет
         mocks["restart"].assert_not_called()
 
@@ -1059,6 +1683,45 @@ class TestEnableMechanismB(_FragmentTestBase):
         self.assertFalse(ok)
         self.assertFalse(sf.get("enabled", False))
         mocks["install"].assert_called_once()
+        # v2: restore-скрипт, написанный в B-блоке, снят при откате
+        self.assertFalse(self._restore_path.exists())
+
+    def test_enable_b_count_zero_with_config_change_reverts_config(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_enable, _load_xray_config,
+        )
+        # конфиг с tcpMaxSeg: механизм B его выкидывает (pop) → рестарт;
+        # правила не поставились → полный откат К ОРИГИНАЛУ (в нём был
+        # tcpMaxSeg — поле возвращается на место)
+        patches, mocks = self._mech_b_patches(_reality_with_tcpmaxseg(1300),
+                                              count_after=0)
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            ok = server_fragment_enable(preset="balanced")
+            cfg = _load_xray_config()
+        self.assertFalse(ok)
+        sockopt = cfg["inbounds"][0]["streamSettings"]["sockopt"]
+        self.assertEqual(sockopt.get("tcpMaxSeg"), 1300)   # оригинал восстановлен
+        self.assertEqual(sockopt.get("tcpCongestion"), "bbr")
+        self.assertTrue(sockopt.get("tcpFastOpen"))
+        self.assertEqual(mocks["restart"].call_count, 2)  # apply + откат
+        self.assertFalse(self._restore_path.exists())
+
+    def test_enable_b_repeat_no_restart_no_journal(self):
+        from chimera.modules.server_fragment import server_fragment_enable
+        patches, mocks = self._mech_b_patches(_REALITY_CONFIG)
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            ok1 = server_fragment_enable(preset="balanced")
+            ok2 = server_fragment_enable(preset="balanced")
+        self.assertTrue(ok1)
+        self.assertTrue(ok2)
+        # повторный enable: без рестарта и без journal-verify (механизм B)
+        mocks["restart"].assert_not_called()
+        mocks["journal"].assert_not_called()
+        # правила переустанавливаются повторно (идемпотентно на уровне
+        # iptables -C внутри _install_tcpmss_rules)
+        self.assertEqual(mocks["install"].call_count, 2)
 
     def test_enable_b_cleans_legacy_fragment(self):
         from chimera.modules.server_fragment import (
@@ -1105,6 +1768,8 @@ class TestEnableRefusals(_FragmentTestBase):
             patch(MOD + "._install_tcpmss_rules", MagicMock(return_value=0)),
             patch(MOD + "._count_tcpmss_rules", MagicMock(return_value=0)),
             patch(MOD + "._remove_tcpmss_rules", MagicMock(return_value=0)),
+            patch(MOD + "._daemon_reload", MagicMock(return_value=True)),
+            patch(MOD + "._journal_tcpmaxseg_failed", MagicMock(return_value=False)),
         ]
 
     def test_enable_refuses_xhttp_config(self):
@@ -1141,6 +1806,8 @@ class TestEnableRefusals(_FragmentTestBase):
                 patch(MOD + "._XRAY_CONFIG", Path("/tmp/nonexistent_config.json")),
                 patch(MOD + "._XRAY_CONFIG_ALT", Path("/tmp/nonexistent_alt.json")),
                 patch(MOD + "._STATE_FILE", self._state_path),
+                patch(MOD + "._SVC_DROPIN", self._dropin_path),
+                patch(MOD + "._RESTORE_SCRIPT", self._restore_path),
             ])
             ok = server_fragment_enable(preset="balanced")
         self.assertFalse(ok)
@@ -1183,23 +1850,26 @@ class TestEnableRefusals(_FragmentTestBase):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestDisable(_FragmentTestBase):
-    """server_fragment_disable — снятие tcpMaxSeg + легаси + TCPMSS."""
+    """server_fragment_disable — снятие tcpMaxSeg + легаси + TCPMSS +
+    drop-in/restore-скрипт (v2)."""
 
     def _disable_patches(self, cfg=None):
         restart = MagicMock(return_value=True)
         remove = MagicMock(return_value=0)
+        reload = MagicMock(return_value=True)
         patches = self._base_patches(cfg) + [
             patch(MOD + "._xray_test_and_restart", restart),
             patch(MOD + "._remove_tcpmss_rules", remove),
+            patch(MOD + "._daemon_reload", reload),
         ]
-        return patches, restart, remove
+        return patches, restart, remove, reload
 
     def test_disable_removes_tcpmaxseg_and_updates_state(self):
         from chimera.modules.server_fragment import (
             server_fragment_disable, _load_xray_config,
             _load_server_fragment_state,
         )
-        patches, restart, remove = self._disable_patches(
+        patches, restart, remove, reload = self._disable_patches(
             _reality_with_tcpmaxseg(1300))
         with ExitStack() as stack:
             _enter_patches(stack, patches)
@@ -1224,7 +1894,7 @@ class TestDisable(_FragmentTestBase):
         from chimera.modules.server_fragment import (
             server_fragment_disable, _load_xray_config,
         )
-        patches, _, _ = self._disable_patches(_reality_with_legacy_fragment())
+        patches, _, _, _ = self._disable_patches(_reality_with_legacy_fragment())
         with ExitStack() as stack:
             _enter_patches(stack, patches)
             ok = server_fragment_disable()
@@ -1239,7 +1909,7 @@ class TestDisable(_FragmentTestBase):
         from chimera.modules.server_fragment import (
             server_fragment_disable, _load_xray_config,
         )
-        patches, restart, remove = self._disable_patches(_REALITY_CONFIG)
+        patches, restart, remove, reload = self._disable_patches(_REALITY_CONFIG)
         with ExitStack() as stack:
             _enter_patches(stack, patches)
             ok = server_fragment_disable()
@@ -1254,7 +1924,7 @@ class TestDisable(_FragmentTestBase):
         from chimera.modules.server_fragment import (
             server_fragment_disable, _load_xray_config,
         )
-        patches, restart, _ = self._disable_patches(
+        patches, restart, _, _ = self._disable_patches(
             _reality_with_tcpmaxseg(1300))
         with ExitStack() as stack:
             _enter_patches(stack, patches)
@@ -1267,12 +1937,86 @@ class TestDisable(_FragmentTestBase):
 
     def test_disable_without_reality_inbounds(self):
         from chimera.modules.server_fragment import server_fragment_disable
-        patches, _, remove = self._disable_patches({"inbounds": []})
+        patches, _, remove, _ = self._disable_patches({"inbounds": []})
         with ExitStack() as stack:
             _enter_patches(stack, patches)
             ok = server_fragment_disable()
         self.assertTrue(ok)
         remove.assert_called_once()   # TCPMSS-правила сняты и без inbound
+
+    def test_disable_removes_dropin_and_restore_script(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_disable, _load_xray_config,
+            _load_server_fragment_state, _dropin_content, MECH_SOCKOPT,
+        )
+        # эмулируем включённый механизм A: GODEBUG-drop-in + tcpMaxSeg в конфиге
+        self._dropin_path.write_text(_dropin_content(MECH_SOCKOPT))
+        self._restore_path.write_text("#!/usr/bin/env python3\n")
+        patches, restart, remove, reload = self._disable_patches(
+            _reality_with_tcpmaxseg(1300))
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            ok = server_fragment_disable()
+            cfg = _load_xray_config()
+            sf = _load_server_fragment_state()
+        self.assertTrue(ok)
+        self.assertFalse(self._dropin_path.exists())    # drop-in снят
+        self.assertFalse(self._restore_path.exists())   # restore-скрипт снят
+        reload.assert_called_once()                     # + daemon-reload
+        self.assertNotIn("tcpMaxSeg",
+                         cfg["inbounds"][0]["streamSettings"]["sockopt"])
+        self.assertFalse(sf["enabled"])
+        self.assertEqual(sf["mechanism"], "")
+        restart.assert_called_once()   # рестарт из-за изменения конфига
+
+    def test_disable_extra_restart_when_only_dropin_present(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_disable, _dropin_content, MECH_SOCKOPT,
+        )
+        # конфиг уже чист, но GODEBUG-drop-in стоит → нужен дополнительный
+        # рестарт («Перезапускаю xray для применения окружения без GODEBUG»)
+        self._dropin_path.write_text(_dropin_content(MECH_SOCKOPT))
+        patches, restart, remove, reload = self._disable_patches(_REALITY_CONFIG)
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            ok = server_fragment_disable()
+        self.assertTrue(ok)
+        self.assertFalse(self._dropin_path.exists())
+        reload.assert_called_once()
+        restart.assert_called_once()   # именно дополнительный рестарт
+
+    def test_disable_restart_false_skips_extra_restart(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_disable, _dropin_content, MECH_SOCKOPT,
+        )
+        self._dropin_path.write_text(_dropin_content(MECH_SOCKOPT))
+        patches, restart, remove, reload = self._disable_patches(_REALITY_CONFIG)
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            ok = server_fragment_disable(restart=False)
+        self.assertTrue(ok)
+        self.assertFalse(self._dropin_path.exists())   # снят и без рестарта
+        reload.assert_called_once()
+        restart.assert_not_called()
+
+    def test_disable_dropin_removed_before_restart(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_disable, _dropin_content, MECH_SOCKOPT,
+        )
+        # порядок: drop-in (+daemon-reload) снимается ДО рестарта сервиса,
+        # чтобы рестартнутый процесс сразу поднялся без GODEBUG/ExecStartPost
+        self._dropin_path.write_text(_dropin_content(MECH_SOCKOPT))
+        patches, restart, remove, reload = self._disable_patches(
+            _reality_with_tcpmaxseg(1300))
+        manager = MagicMock()
+        manager.attach_mock(reload, "reload")
+        manager.attach_mock(restart, "restart")
+        with ExitStack() as stack:
+            _enter_patches(stack, patches)
+            ok = server_fragment_disable()
+        self.assertTrue(ok)
+        names = [c[0] for c in manager.mock_calls]
+        self.assertLess(names.index("reload"), names.index("restart"))
 
     def test_disable_multiple_reality_inbounds(self):
         from chimera.modules.server_fragment import (
@@ -1282,7 +2026,7 @@ class TestDisable(_FragmentTestBase):
         for inb in cfg["inbounds"]:
             if inb.get("streamSettings", {}).get("security") == "reality":
                 inb["streamSettings"]["sockopt"] = {"tcpMaxSeg": 1300}
-        patches, _, _ = self._disable_patches(cfg)
+        patches, _, _, _ = self._disable_patches(cfg)
         with ExitStack() as stack:
             _enter_patches(stack, patches)
             ok = server_fragment_disable()
@@ -1302,6 +2046,7 @@ class TestDisable(_FragmentTestBase):
 _STATUS_KEYS = (
     "enabled", "preset", "mss", "mechanism", "ports",
     "in_config", "config_mss", "legacy_fragment", "iptables_rules",
+    "godebug_installed", "restore_installed",
     "core_version", "core_supported", "inbound_protocol",
     "last_applied", "last_disabled",
 )
@@ -1345,6 +2090,11 @@ class TestStatus(_FragmentTestBase):
         self.assertEqual(st["config_mss"], 1300)
         self.assertFalse(st["legacy_fragment"])
         self.assertEqual(st["iptables_rules"], 0)
+        # v2: ни GODEBUG-drop-in, ни restore-скрипта в этом сценарии нет;
+        # fallback_reason — опциональный ключ, здесь отсутствует
+        self.assertFalse(st["godebug_installed"])
+        self.assertFalse(st["restore_installed"])
+        self.assertNotIn("fallback_reason", st)
         self.assertEqual(st["core_version"], "26.10.21")
         self.assertTrue(st["core_supported"])
         self.assertEqual(st["inbound_protocol"], "reality")
@@ -1400,6 +2150,8 @@ class TestStatus(_FragmentTestBase):
         self.assertEqual(st["iptables_rules"], 2)  # правила стоят
         self.assertEqual(st["core_version"], "1.8.24")
         self.assertFalse(st["core_supported"])
+        self.assertFalse(st["godebug_installed"])   # v2: GODEBUG не ставился
+        self.assertFalse(st["restore_installed"])   # v2: ни скрипта, ни drop-in
 
     def test_status_reports_xhttp_protocol(self):
         from chimera.modules.server_fragment import server_fragment_status
@@ -1416,6 +2168,8 @@ class TestStatus(_FragmentTestBase):
                 patch(MOD + "._XRAY_CONFIG", Path("/tmp/nonexistent_config.json")),
                 patch(MOD + "._XRAY_CONFIG_ALT", Path("/tmp/nonexistent_alt.json")),
                 patch(MOD + "._STATE_FILE", self._state_path),
+                patch(MOD + "._SVC_DROPIN", self._dropin_path),
+                patch(MOD + "._RESTORE_SCRIPT", self._restore_path),
                 patch(MOD + "._xray_core_version", return_value=None),
                 patch(MOD + "._count_tcpmss_rules", return_value=0),
             ])
@@ -1424,6 +2178,70 @@ class TestStatus(_FragmentTestBase):
         self.assertEqual(st["core_version"], "")
         self.assertFalse(st["core_supported"])
         self.assertFalse(st["in_config"])
+
+    def test_status_godebug_installed_true(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_status, _dropin_content, MECH_SOCKOPT,
+        )
+        with ExitStack() as stack:
+            _enter_patches(stack, self._status_patches(_REALITY_CONFIG))
+            self._dropin_path.write_text(_dropin_content(MECH_SOCKOPT))
+            st = server_fragment_status()
+        self.assertTrue(st["godebug_installed"])
+        self.assertFalse(st["restore_installed"])
+
+    def test_status_restore_requires_script_and_execstartpost(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_status, _dropin_content, MECH_TCPMSS,
+            _RESTORE_SCRIPT_CONTENT,
+        )
+        with ExitStack() as stack:
+            _enter_patches(stack, self._status_patches(_REALITY_CONFIG))
+            # только скрипт без drop-in → False
+            self._restore_path.write_text(_RESTORE_SCRIPT_CONTENT)
+            st1 = server_fragment_status()
+            # скрипт + drop-in B (ExecStartPost) → True
+            self._dropin_path.write_text(_dropin_content(MECH_TCPMSS))
+            st2 = server_fragment_status()
+        self.assertFalse(st1["restore_installed"])
+        self.assertTrue(st2["restore_installed"])
+        self.assertFalse(st2["godebug_installed"])
+
+    def test_status_restore_false_with_godebug_dropin(self):
+        from chimera.modules.server_fragment import (
+            server_fragment_status, _dropin_content, MECH_SOCKOPT,
+            _RESTORE_SCRIPT_CONTENT,
+        )
+        with ExitStack() as stack:
+            _enter_patches(stack, self._status_patches(_REALITY_CONFIG))
+            # GODEBUG-drop-in (механизм A) + restore-скрипт → restore_installed
+            # False: drop-in не содержит ExecStartPost
+            self._dropin_path.write_text(_dropin_content(MECH_SOCKOPT))
+            self._restore_path.write_text(_RESTORE_SCRIPT_CONTENT)
+            st = server_fragment_status()
+        self.assertTrue(st["godebug_installed"])
+        self.assertFalse(st["restore_installed"])
+
+    def test_status_fallback_reason_from_state(self):
+        from chimera.modules.server_fragment import server_fragment_status
+        reason = "tcpMaxSeg не применился (журнал: failed to set TCP_MAXSEG)"
+        state = {"server_fragment": {
+            "enabled": True, "preset": "balanced", "mss": 1300,
+            "mechanism": "tcpmss", "ports": [443],
+            "fallback_reason": reason,
+        }}
+        with ExitStack() as stack:
+            _enter_patches(stack, self._status_patches(_REALITY_CONFIG, state=state))
+            st = server_fragment_status()
+        self.assertIn("fallback_reason", st)
+        self.assertEqual(st["fallback_reason"], reason)
+
+    def test_status_fallback_reason_absent_by_default(self):
+        from chimera.modules.server_fragment import server_fragment_status
+        with ExitStack() as stack:
+            _enter_patches(stack, self._status_patches(_REALITY_CONFIG))
+            st = server_fragment_status()
+        self.assertNotIn("fallback_reason", st)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -13,19 +13,31 @@ Server-side TLS segmentation — закрываем асимметрию ClientH
   Историческая справка: до v4.28 модуль писал `sockopt.fragment` в inbound —
   ПЛАЦЕБО: поля fragment в streamSettings.sockopt не существует, Xray-core
   молча его игнорировал (см. CHANGELOG, коммит 4341601). Серверной
-  фрагментации ответов в Xray-core нет вообще.
+  фрагментации ответов в Xray-core нет вообще. Вторая находка той же
+  серии: даже ВАЛИДНОЕ поле `sockopt.tcpMaxSeg` (Xray ≥ 26.7.11) — тихое
+  no-op на современных ядрах: Go ≥ 1.24 создаёт LISTEN-сокеты как MPTCP
+  (godebug multipathtcp по умолчанию "2" = listeners), а ядро на
+  MPTCP-сокетах не поддерживает TCP_MAXSEG (setsockopt → ENOPROTOOPT,
+  Xray логирует Info и работает дальше). Эмпирика: Ubuntu 24.04 / ядро
+  6.8 — воспроизведено strace; ядро 5.10 без MPTCP — Go откатывается на
+  обычный TCP, поле работает. Фикс: GODEBUG=multipathtcp=0 в окружении
+  xray-сервиса (проверено живьём: setsockopt TCP_MAXSEG = 0).
 
-  РАБОЧИЕ механизмы (TCP-уровень, ядро Linux):
-    A. sockopt.tcpMaxSeg на REALITY-inbound (основной, ядро Xray ≥ 26.7.11):
-       Xray применяет TCP_MAXSEG к listening-сокету ДО listen() (Control-
-       callback), ядро наследует значение в принятые соединения и КАПИТИТ
-       SEND MSS (сервер→клиент). Проверено эмпирически на 5.x/6.x ядре:
-       set 1300 → snd_mss 1288 (−12 байт TCP-timestamps). Живёт в
-       config.json → переживает ребут, реаплаится хуком rebuild.
-    B. iptables/ip6tables mangle PREROUTING TCPMSS (fallback, ядро Xray
-       < 26.7.11 или явный выбор): переписываем MSS в SYN клиентов на
-       наши inbound-порты → стек ограничивает send-MSS ответов. Тот же
-       паттерн, что уже живёт на нодах (telemt-ios-mss-fix).
+  РАБОЧИЕ механизмы (TCP-уровень, сегменты server→client ≤ MSS):
+    A. sockopt.tcpMaxSeg на REALITY-inbound (основной, ядро Xray ≥ 26.7.11)
+       + systemd-drop-in Environment=GODEBUG=multipathtcp=0 на xray.service
+       (без него листенер MPTCP и setsockopt молча проваливается).
+       После рестарта верифицируем по журналу systemd: если Xray снова
+       логирует «failed to set TCP_MAXSEG» — автофолбэк на механизм B.
+       Ядро наследует user_mss в принятые соединения и КАПИТИТ SEND MSS
+       (сервер→клиент): set 1300 → snd_mss 1288 (−12 TCP-timestamps).
+       Живёт в config.json → переживает ребут, реаплаится хуком rebuild.
+    B. iptables/ip6tables mangle PREROUTING TCPMSS (старые ядра Xray и
+       форс-фолбэк): переписываем MSS в SYN клиентов на порты REALITY-
+       inbound → стек ограничивает send-MSS ответов (тот же паттерн,
+       что telemt-ios-mss-fix на нодах). Персистентность — drop-in
+       ExecStartPost=/usr/local/bin/chimera-server-frag-restore
+       (правила переустанавливаются при каждом старте/рестарте xray).
 
   Оба механизма ограничивают размер СЕГМЕНТОВ на всё время соединения
   (не только handshake): ServerHello+Cert режется на куски ≤ MSS.
@@ -36,8 +48,12 @@ Server-side TLS segmentation — закрываем асимметрию ClientH
 ВНИМАНИЕ:
   • Применяется ТОЛЬКО к inbound VLESS+REALITY. На xHTTP inbound
     бесполезно (там TLS терминирует nginx, не Xray).
-  • Механизм A требует рестарта xray (поле в config.json); механизм B
-    применяется мгновенно, без рестарта.
+  • Механизм A отключает ДЕФОЛТНЫЙ MPTCP процесса xray (GODEBUG):
+    клиенты на plain TCP ничего не теряют (MPTCP-фолбэк и так был нормой);
+    явный sockopt.tcpMptcp=true в конфигах продолжает работать.
+  • Механизм A требует рестарта xray; механизм B применяется мгновенно,
+    но его правила живут только до ребута (переустанавливаются
+    ExecStartPost-хуком при старте xray).
   • При пересоздании config.json (reconfigure, switch-mode) настройки
     механизма A слетают — модуль хранит параметры в state.json и
     пере-применяет через server_fragment_reapply_after_rebuild().
@@ -149,8 +165,16 @@ _TCPMAXSEG_MIN_VERSION = (26, 7, 11)
 _IPT_COMMENT = "chimera-server-frag"
 
 # Механизмы
-MECH_SOCKOPT = "tcpMaxSeg"     # поле в config.json, ядро Xray >= 26.7.11
+MECH_SOCKOPT = "tcpMaxSeg"     # поле в config.json + GODEBUG-drop-in, ядро ≥ 26.7.11
 MECH_TCPMSS  = "tcpmss"        # iptables mangle PREROUTING TCPMSS clamp
+
+# systemd-drop-in на xray.service: механизм A — GODEBUG (отключить дефолтный
+# MPTCP листенеров Go ≥1.24, иначе TCP_MAXSEG = тихое no-op), механизм B —
+# ExecStartPost-восстановление правил после старта/ребута
+_SVC_DROPIN = Path("/etc/systemd/system/xray.service.d/chimera-server-frag.conf")
+_GODEBUG_ENV_LINE = "Environment=GODEBUG=multipathtcp=0"
+# Бут-восстановление правил (механизм B): standalone-скрипт без импортов chimera
+_RESTORE_SCRIPT = Path("/usr/local/bin/chimera-server-frag-restore")
 
 
 # ── subprocess helper (локальный) ────────────────────────────────────────────
@@ -485,6 +509,182 @@ def _count_tcpmss_rules() -> int:
     return count
 
 
+# ── systemd drop-in + журнальная верификация (механизмы A/B) ──────────────────
+
+def _daemon_reload() -> bool:
+    r = _run_soft(["systemctl", "daemon-reload"])
+    return r.returncode == 0
+
+
+def _dropin_content(mechanism: str) -> str:
+    """Содержимое drop-in'а под выбранный механизм."""
+    lines = ["[Service]"]
+    if mechanism == MECH_SOCKOPT:
+        # Go >= 1.24: multipathtcp="2" (MPTCP на листенерах) -> TCP_MAXSEG
+        # на MPTCP-сокете = ENOPROTOOPT -> tcpMaxSeg тихое no-op. Выключаем.
+        lines.append(_GODEBUG_ENV_LINE)
+    else:
+        # Правила TCPMSS живут до ребута — восстанавливаем при старте xray.
+        # '+' — выполнять с полными привилегиями независимо от User= сервиса.
+        lines.append(f"ExecStartPost=+{_RESTORE_SCRIPT}")
+    return "\n".join(lines) + "\n"
+
+
+def _dropin_installed(mechanism: Optional[str] = None) -> bool:
+    """Стоит ли наш drop-in (и именно под данный механизм, если задан)."""
+    if not _SVC_DROPIN.exists():
+        return False
+    try:
+        content = _SVC_DROPIN.read_text()
+    except Exception:
+        return False
+    if mechanism is None:
+        return True
+    return content.strip() == _dropin_content(mechanism).strip()
+
+
+def _install_dropin(mechanism: str) -> bool:
+    try:
+        _SVC_DROPIN.parent.mkdir(parents=True, exist_ok=True)
+        _SVC_DROPIN.write_text(_dropin_content(mechanism))
+    except Exception as e:
+        error(f"Не удалось написать systemd drop-in: {e}")
+        return False
+    _daemon_reload()
+    return True
+
+
+def _remove_dropin() -> bool:
+    """Снимает наш drop-in (идемпотентно). True — если что-то сняли."""
+    removed = False
+    try:
+        if _SVC_DROPIN.exists():
+            _SVC_DROPIN.unlink()
+            removed = True
+    except Exception as e:
+        error(f"Не удалось удалить systemd drop-in: {e}")
+        return False
+    if removed:
+        _daemon_reload()
+    return removed
+
+
+def _journal_tcpmaxseg_failed(since: str) -> bool:
+    """
+    Логировал ли Xray «failed to set TCP_MAXSEG» ПОСЛЕ момента since?
+    (сигнал: механизм A не применился — напр., MPTCP или регрессия ядра).
+    """
+    for svc in ("xray", "xray-core"):
+        r = _run_soft(["journalctl", "-u", svc, "--since", since,
+                       "--no-pager", "-n", "200"], capture=True)
+        out = (r.stdout or "") + (r.stderr or "")
+        if "failed to set TCP_MAXSEG" in out:
+            return True
+    return False
+
+
+_RESTORE_SCRIPT_CONTENT = '''#!/usr/bin/env python3
+"""chimera-server-frag-restore — re-apply TCPMSS rules (mechanism B).
+
+Вызывается systemd (ExecStartPost xray.service, от root через '+'): читает
+state.json, и если server_fragment включён с механизмом tcpmss —
+переустанавливает правила mangle/PREROUTING TCPMSS. Идемпотентно.
+Standalone: только stdlib, без импортов chimera.
+"""
+import json
+import subprocess
+from pathlib import Path
+
+STATE = Path("/var/lib/xray-installer/state.json")
+CONFIG = Path("/etc/xray/config.json")
+CONFIG_ALT = Path("/usr/local/etc/xray/config.json")
+COMMENT = "chimera-server-frag"
+
+
+def _sh(cmd):
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=15)
+    except Exception:
+        pass
+
+
+def _sf_state():
+    try:
+        return json.loads(STATE.read_text()).get("server_fragment", {})
+    except Exception:
+        return {}
+
+
+def _ports_from_config():
+    for p in (CONFIG, CONFIG_ALT):
+        if not p.exists():
+            continue
+        try:
+            cfg = json.loads(p.read_text())
+            return sorted({int(i["port"]) for i in cfg.get("inbounds", [])
+                           if i.get("protocol") == "vless"
+                           and i.get("streamSettings", {}).get("security") == "reality"
+                           and "port" in i})
+        except Exception:
+            continue
+    return []
+
+
+def main():
+    sf = _sf_state()
+    if not sf.get("enabled") or sf.get("mechanism") != "tcpmss":
+        return 0
+    mss = sf.get("mss") or 1300
+    ports = sf.get("ports") or _ports_from_config()
+    if not ports:
+        return 0
+    ports_u = sorted(set(ports))
+    if len(ports_u) == 1:
+        port_args = ["-p", "tcp", "-m", "tcp", "--dport", str(ports_u[0])]
+    else:
+        port_args = ["-p", "tcp", "-m", "multiport", "--dports",
+                     ",".join(str(p) for p in ports_u)]
+    for binname in ("iptables", "ip6tables"):
+        try:
+            r = subprocess.run([binname, "-t", "mangle", "-S", "PREROUTING"],
+                               capture_output=True, text=True, timeout=15)
+        except Exception:
+            continue
+        if any(COMMENT in line for line in (r.stdout or "").splitlines()):
+            continue
+        _sh([binname, "-t", "mangle", "-I", "PREROUTING", "1"] + port_args
+            + ["--syn", "-m", "comment", "--comment", COMMENT,
+               "-j", "TCPMSS", "--set-mss", str(int(mss))])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def _write_restore_script() -> bool:
+    """Устанавливает standalone-скрипт бут-восстановления (механизм B)."""
+    try:
+        _RESTORE_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+        _RESTORE_SCRIPT.write_text(_RESTORE_SCRIPT_CONTENT)
+        _RESTORE_SCRIPT.chmod(0o755)
+    except Exception as e:
+        error(f"Не удалось написать restore-скрипт: {e}")
+        return False
+    return True
+
+
+def _remove_restore_script() -> bool:
+    try:
+        if _RESTORE_SCRIPT.exists():
+            _RESTORE_SCRIPT.unlink()
+            return True
+    except Exception:
+        pass
+    return False
+
+
 # ── Публичный API ────────────────────────────────────────────────────────────
 
 def _resolve_mss(preset: str, mss) -> int:
@@ -512,17 +712,20 @@ def server_fragment_enable(
     Включает серверную сегментацию ответов (ServerHello + Cert).
 
     Механизм выбирается автоматически по версии ядра Xray:
-      • ядро >= 26.7.11 → sockopt.tcpMaxSeg на каждом REALITY-inbound
-        (в config.json; требуется рестарт xray);
-      • старее → iptables/ip6tables mangle PREROUTING TCPMSS --set-mss
-        (мгновенно, без рестарта; требует re-apply после ребута).
+      • ядро >= 26.7.11 → A: sockopt.tcpMaxSeg на каждом REALITY-inbound
+        + GODEBUG=multipathtcp=0 (drop-in на xray.service — Go >= 1.24
+        создаёт листенеры MPTCP, где TCP_MAXSEG молча проваливается);
+        после рестарта верифицируется по журналу, при провале — фолбэк на B;
+      • старее → B: iptables/ip6tables mangle PREROUTING TCPMSS --set-mss
+        + ExecStartPost-восстановление правил при старте xray (переживает
+        ребут).
 
     Попутно вычищает легаси-плацебо sockopt.fragment из inbound (v4.27-).
 
     Args:
       preset:  aggressive / balanced / light / custom
       mss:     переопределение MSS (для custom — обязателен)
-      restart: перезапустить xray при изменении config.json
+      restart: перезапустить xray при изменениях
 
     Возвращает True при успехе.
     """
@@ -552,7 +755,23 @@ def server_fragment_enable(
 
     original_cfg = json.loads(json.dumps(cfg))   # для отката
     config_changed = False
-    ipt_installed = 0
+    dropin_installed_here = False
+    ts_before = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _full_rollback() -> bool:
+        """Откат config + drop-in + restore-скрипта + правил, повторный рестарт.
+
+        Drop-in снимаем безусловно (GODEBUG- или ExecStartPost-вариант —
+        оба наши; остаток ExecStartPost на удалённый скрипт валит юнит).
+        """
+        _remove_tcpmss_rules()
+        _remove_dropin()
+        _remove_restore_script()
+        if config_changed:
+            _save_xray_config(original_cfg)
+            if restart:
+                _xray_test_and_restart()
+        return False
 
     for inb in inbounds:
         ss = inb.setdefault("streamSettings", {})
@@ -571,31 +790,52 @@ def server_fragment_enable(
                 sockopt.pop("tcpMaxSeg", None)
                 config_changed = True
 
-    # ── Механизм A: правка config.json + рестарт ─────────────────────────────
+    # ── Механизм A: GODEBUG-drop-in + config.json + рестарт ────────────────
+    dropin_changed = False
+    if mechanism == MECH_SOCKOPT:
+        if not _dropin_installed(MECH_SOCKOPT):
+            if _install_dropin(MECH_SOCKOPT):
+                dropin_installed_here = True
+                dropin_changed = True
+            else:
+                # drop-in не пишется (нет systemd?) — tcpMaxSeg будет no-op;
+                # верификация по журналу это поймает и переключит на механизм B
+                warn("GODEBUG drop-in не установлен — tcpMaxSeg может не примениться")
+
     if config_changed:
         if not _save_xray_config(cfg):
+            if dropin_installed_here:
+                _remove_dropin()
             return False
-        info(f"Server-side сегментация: механизм {BOLD}{mechanism}{NC}, "
-             f"preset={preset} mss={mss_val}, inbound-порты {ports}")
 
-        if restart:
-            if not _xray_test_and_restart():
-                warn("Откатываю изменения из-за ошибки перезапуска xray")
-                _remove_tcpmss_rules()
-                _save_xray_config(original_cfg)
-                _xray_test_and_restart()
-                return False
+    if restart and (config_changed or dropin_changed):
+        if not _xray_test_and_restart():
+            warn("Откатываю изменения из-за ошибки перезапуска xray")
+            return _full_rollback()
 
-    # ── Механизм B: iptables TCPMSS ──────────────────────────────────────────
+    info(f"Server-side сегментация: механизм {BOLD}{mechanism}{NC}, "
+         f"preset={preset} mss={mss_val}, inbound-порты {ports}")
+
+    # ── Верификация механизма A по журналу systemd ──────────────────────────
+    fallback_reason = ""
+    if mechanism == MECH_SOCKOPT and restart and (config_changed or dropin_changed):
+        time.sleep(1)   # журналирование асинхронно
+        if _journal_tcpmaxseg_failed(since=ts_before):
+            fallback_reason = "tcpMaxSeg не применился (журнал: failed to set TCP_MAXSEG)"
+            warn(fallback_reason + " — переключаюсь на iptables TCPMSS")
+            if dropin_installed_here:
+                _remove_dropin()
+                dropin_installed_here = False
+            mechanism = MECH_TCPMSS
+
+    # ── Механизм B: iptables TCPMSS + бут-восстановление ────────────────────
     if mechanism == MECH_TCPMSS:
-        ipt_installed = _install_tcpmss_rules(ports, mss_val)
+        if not (_write_restore_script() and _install_dropin(MECH_TCPMSS)):
+            warn("Не удалось поставить бут-восстановление — правила живут до ребута")
+        _install_tcpmss_rules(ports, mss_val)
         if _count_tcpmss_rules() == 0:
             error("TCPMSS-правила не установлены (iptables недоступен?) — откат")
-            if config_changed:
-                _save_xray_config(original_cfg)
-                if restart:
-                    _xray_test_and_restart()
-            return False
+            return _full_rollback()
         info(f"TCPMSS clamp: mangle/PREROUTING --set-mss {mss_val} на порты {ports}")
 
     # ── State ────────────────────────────────────────────────────────────────
@@ -608,12 +848,18 @@ def server_fragment_enable(
         "ports":         ports,
         "last_applied":  time.strftime("%Y-%m-%d %H:%M:%S"),
     })
+    if fallback_reason:
+        sf["fallback_reason"] = fallback_reason
+    else:
+        sf.pop("fallback_reason", None)
     _save_server_fragment_state(sf)
 
+    extra = f" (фолбэк: {fallback_reason})" if fallback_reason else ""
     success("Server-side TLS сегментация активирована "
-            f"({mechanism}, MSS {mss_val})")
+            f"({mechanism}, MSS {mss_val}){extra}")
     _log("INFO", f"Server segment enabled: mechanism={mechanism}, preset={preset}, "
-                  f"mss={mss_val}, ports={ports}")
+                  f"mss={mss_val}, ports={ports}{extra}")
+
     return True
 
 
@@ -639,12 +885,22 @@ def server_fragment_disable(restart: bool = True) -> bool:
         if not config_changed:
             info("tcpMaxSeg в конфиге уже отсутствует — изменений не требуется")
 
+    # drop-in снимаем ДО рестарта: рестартнутый процесс сразу без GODEBUG/
+    # ExecStartPost; daemon-reload внутри _remove_dropin
+    dropin_removed = _remove_dropin()
+    if dropin_removed:
+        info("Снят systemd drop-in (GODEBUG=multipathtcp=0 / ExecStartPost)")
+    _remove_restore_script()
+
     if config_changed:
         if not _save_xray_config(cfg):
             return False
         if restart:
             if not _xray_test_and_restart():
                 return False
+    elif dropin_removed and restart:
+        info("Перезапускаю xray для применения окружения без GODEBUG")
+        _xray_test_and_restart()
 
     removed = _remove_tcpmss_rules()
     if removed:
@@ -672,6 +928,9 @@ def server_fragment_status() -> dict:
       config_mss (int|None)     — значение tcpMaxSeg из config.json
       legacy_fragment (bool)    — в config осталось плацебо sockopt.fragment
       iptables_rules (int)      — сколько наших TCPMSS-правил стоит
+      godebug_installed (bool)  — GODEBUG-drop-in (механизм A) стоит
+      restore_installed (bool)  — restore-скрипт+ExecStartPost (B) стоят
+      fallback_reason (str)     — почему случился фолбэк A→B (если был)
       core_version (str)        — версия ядра Xray ("26.10.21" / "1.8.24" / "")
       core_supported (bool)     — ядро >= 26.7.11 (понимает tcpMaxSeg)
       inbound_protocol (str)    — "reality" / "xhttp" / "none"
@@ -689,6 +948,8 @@ def server_fragment_status() -> dict:
         "config_mss":       None,
         "legacy_fragment":  False,
         "iptables_rules":   0,
+        "godebug_installed": False,
+        "restore_installed": False,
         "core_version":     ".".join(str(x) for x in core_v) if core_v else "",
         "core_supported":   core_v is not None and core_v >= _TCPMAXSEG_MIN_VERSION,
         "inbound_protocol": "none",
@@ -713,6 +974,11 @@ def server_fragment_status() -> dict:
             result["inbound_protocol"] = "xhttp"
 
     result["iptables_rules"] = _count_tcpmss_rules()
+    result["godebug_installed"] = _dropin_installed(MECH_SOCKOPT)
+    result["restore_installed"] = (_RESTORE_SCRIPT.exists()
+                                   and _dropin_installed(MECH_TCPMSS))
+    if sf.get("fallback_reason"):
+        result["fallback_reason"] = sf["fallback_reason"]
     return result
 
 
@@ -921,6 +1187,16 @@ def _show_detailed_status(st: dict) -> None:
     _box_row(f"  В config.json: "
              f"{GREEN}tcpMaxSeg={st['config_mss']}{NC}" if st["in_config"]
              else f"  В config.json: {RED}отсутствует{NC}")
+    if st.get("godebug_installed"):
+        _box_row(f"  GODEBUG-drop-in: {GREEN}установлен{NC} "
+                 f"{DIM}(multipathtcp=0 — листенеры без MPTCP){NC}")
+    else:
+        _box_row(f"  GODEBUG-drop-in: {DIM}не установлен{NC}")
+    if st.get("restore_installed"):
+        _box_row(f"  Бут-восстановление: {GREEN}установлено{NC} "
+                 f"{DIM}(ExecStartPost){NC}")
+    if st.get("fallback_reason"):
+        _box_warn(f"Фолбэк механизма: {st['fallback_reason']}")
     _box_row(f"  TCPMSS-правил: {CYAN}{st['iptables_rules']}{NC} "
              f"{DIM}(mangle/PREROUTING){NC}")
     if st["preset"]:
@@ -930,6 +1206,10 @@ def _show_detailed_status(st: dict) -> None:
     if st["last_disabled"]:
         _box_row(f"  Посл. disable: {DIM}{st['last_disabled']}{NC}")
     _box_sep()
+    if (st["enabled"] and st["mechanism"] == "tcpMaxSeg"
+            and not st.get("godebug_installed")):
+        _box_warn("ВНИМАНИЕ: механизм tcpMaxSeg без GODEBUG-drop-in —")
+        _box_warn("на ядрах Linux с MPTCP это тихое no-op! Пере-примените.")
     if st["enabled"] and not (st["in_config"] or st["iptables_rules"]):
         _box_warn("ВНИМАНИЕ: в state включён, но механизм не применён!")
         _box_warn("Возможно, config.json был пересоздан. Пере-примените через меню.")
@@ -955,12 +1235,14 @@ def _show_info() -> None:
     _box_row()
     _box_row(f"  {BOLD}Решение (TCP-уровень):{NC}")
     _box_row(f"  Ядро Linux ограничивает send-MSS соединений:")
-    _box_row(f"  • sockopt.tcpMaxSeg на REALITY-inbound (ядро Xray ≥ 26.7.11)")
-    _box_row(f"    — применяется к listen-сокету ДО listen(), наследуется")
-    _box_row(f"    всеми принятыми соединениями, капит send-MSS;")
-    _box_row(f"  • старые ядра: iptables mangle PREROUTING TCPMSS —")
-    _box_row(f"    переписывает MSS в SYN клиентов (тот же паттерн,")
-    _box_row(f"    что telemt-ios-mss-fix).")
+    _box_row(f"  • A: sockopt.tcpMaxSeg на REALITY-inbound (ядро Xray ≥ 26.7.11)")
+    _box_row(f"    + GODEBUG=multipathtcp=0 (drop-in на xray.service):")
+    _box_row(f"    Go ≥ 1.24 делает листенеры MPTCP, а ядро на MPTCP-сокетах")
+    _box_row(f"    НЕ принимает TCP_MAXSEG — без GODEBUG это тихое no-op!")
+    _box_row(f"    Применяется после рестарта и верифицируется по журналу;")
+    _box_row(f"  • B: iptables mangle PREROUTING TCPMSS — переписывает MSS")
+    _box_row(f"    в SYN клиентов (тот же паттерн, что telemt-ios-mss-fix);")
+    _box_row(f"    бут-восстановление через ExecStartPost при старте xray.")
     _box_row()
     _box_row(f"  ServerHello + Cert режется на куски ≤ MSS (при 1300 —")
     _box_row(f"  3–4 сегмента). DPI теряет цельную сигнатуру ответа.")
@@ -975,9 +1257,10 @@ def _show_info() -> None:
     _box_row(f"    плацебо (поля не существует, ядро его игнорировало).")
     _box_row()
     _box_row(f"  {BOLD}Совместимость:{NC}")
-    _box_row(f"  • Механизм A: Xray-core ≥ 26.7.11, рестарт xray")
-    _box_row(f"  • Механизм B: любые ядра, мгновенно; после ребута")
-    _box_row(f"    правила реаплаятся (config rebuild хук уже вшит)")
+    _box_row(f"  • Механизм A: Xray-core ≥ 26.7.11, рестарт xray, отключает")
+    _box_row(f"    дефолтный MPTCP процесса (клиентам прозрачно);")
+    _box_row(f"  • Механизм B: любые ядра, мгновенно; правила переживают")
+    _box_row(f"    ребут (ExecStartPost) и re-apply после rebuild конфига")
     _box_row(f"  • Только VLESS+REALITY; mode A и mode B (Entry-нода)")
     _box_row(f"  • REALITY и так шлёт подлинный handshake сайта-цели;")
     _box_row(f"    сегментация — второй слой маскировки")
