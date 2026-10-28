@@ -363,6 +363,28 @@ PCAP_MAGIC_SWAPPED = 0xD4C3B2A1
 PCAP_MAGIC_NSEC_LE = 0xA1B23C4D
 DLT_EN10MB = 1
 DLT_RAW = 101
+DLT_LINUX_SLL = 113    # tcpdump -i any (старый формат)
+DLT_LINUX_SLL2 = 276   # tcpdump -i any (новый формат, Linux ≥ 5.2)
+
+# Заголовки канального уровня для SLL/SLL2 (Linux cooked capture)
+SLL_HDR_LEN = 16       # [pkttype u16][hatype u16][halen u16][addr u8*8][protocol u16]
+SLL2_HDR_LEN = 20      # [protocol u16][reserved u16][ifindex u32][hatype u16]
+                       # [pkttype u8][addr_len u8][addr u8*8]
+
+
+def _ipv4_from_sll(link: bytes, dlt: int) -> Optional[bytes]:
+    """IPv4 из Linux cooked capture (SLL/SLL2) — tcpdump -i any."""
+    if dlt == DLT_LINUX_SLL:
+        if len(link) < SLL_HDR_LEN:
+            return None
+        ethertype = (link[14] << 8) | link[15]
+        return link[SLL_HDR_LEN:] if ethertype == 0x0800 else None
+    # SLL2: protocol в начале заголовка
+    if len(link) < SLL2_HDR_LEN:
+        return None
+    ethertype = (link[0] << 8) | link[1]
+    return link[SLL2_HDR_LEN:] if ethertype == 0x0800 else None
+    return None
 
 
 def parse_pcap(path: Path) -> list:
@@ -446,10 +468,13 @@ def udp_flows_from_pcap(path: Path, port: Optional[int] = None) -> dict:
     records = parse_pcap(path)
     flows = {}
     for rec in records:
-        if rec["dlt"] == DLT_EN10MB:
+        dlt = rec["dlt"]
+        if dlt == DLT_EN10MB:
             ip = _ipv4_from_ethernet(rec["data"])
-        elif rec["dlt"] == DLT_RAW:
+        elif dlt == DLT_RAW:
             ip = _ipv4_from_raw(rec["data"])
+        elif dlt in (DLT_LINUX_SLL, DLT_LINUX_SLL2):
+            ip = _ipv4_from_sll(rec["data"], dlt)
         else:
             continue
         if ip is None:

@@ -278,6 +278,31 @@ class TestPcapParser(unittest.TestCase):
         flows = dg.udp_flows_from_pcap(p)
         self.assertEqual(len(flows), 0)
 
+    def test_udp_flows_linux_sll(self):
+        """DLT 113 (tcpdump -i any, старый SLL): ethertype на offset 14."""
+        ip = ipv4_udp_packet("192.0.2.10", "192.0.2.20", 5000, 443,
+                             dg.stun_pkt(56, 76))
+        sll = (struct.pack(">HHH", 0, 1, 6) + b"\x00" * 8
+               + struct.pack(">H", 0x0800) + ip)
+        p = self.tmp / "sll.pcap"
+        write_pcap(p, [sll], dlt=113)
+        flows = dg.udp_flows_from_pcap(p)
+        self.assertEqual(len(flows), 1)
+        key = next(iter(flows))
+        self.assertEqual(key[3], 443)
+
+    def test_udp_flows_linux_sll2(self):
+        """DLT 276 (tcpdump -i any, SLL2): protocol на offset 0 (ndpiReader
+        4.x этот DLT не читает — наш парсер должен)."""
+        ip = ipv4_udp_packet("198.51.100.10", "198.51.100.20", 5000, 8443,
+                             dg.stun_pkt(20, 40))
+        sll2 = (struct.pack(">HH", 0x0800, 0) + struct.pack(">I", 2)
+                + struct.pack(">H", 1) + bytes([0, 6]) + b"\x00" * 8 + ip)
+        p = self.tmp / "sll2.pcap"
+        write_pcap(p, [sll2], dlt=276)
+        flows = dg.udp_flows_from_pcap(p)
+        self.assertEqual(len(flows), 1)
+
 
 class TestEvaluatePcap(unittest.TestCase):
     """Полный прогон evaluate_pcap (модель в tmp)."""

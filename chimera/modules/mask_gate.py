@@ -43,7 +43,8 @@ from typing import Optional
 
 # Реиспользуем PCAP-парсер и логгер из dpi_gate
 from chimera.modules.dpi_gate import (
-    parse_pcap, DLT_EN10MB, DLT_RAW, _log,
+    parse_pcap, DLT_EN10MB, DLT_RAW, DLT_LINUX_SLL, DLT_LINUX_SLL2,
+    _ipv4_from_sll, _log,
 )
 
 # ── Пути и константы ──────────────────────────────────────────────────────────
@@ -104,6 +105,8 @@ def _ipv4_from_link(dlt: int, link: bytes) -> Optional[bytes]:
         return link[14:] if ethertype == 0x0800 else None
     if dlt == DLT_RAW:
         return link if link and link[0] >> 4 == 4 else None
+    if dlt in (DLT_LINUX_SLL, DLT_LINUX_SLL2):
+        return _ipv4_from_sll(link, dlt)
     return None
 
 
@@ -555,14 +558,41 @@ def _quick_udp_shape(pkt: bytes) -> str:
     return "suspect"         # сырой UDP — не похож ни на QUIC, ни на STUN
 
 
-def _live_capture(port: int, capture_secs: int,
-                  interface: str = "any") -> Optional[Path]:
-    """tcpdump-захват на порт → /tmp/chimera_mask_gate/*.pcap."""
+def _default_capture_interface() -> str:
+    """Интерфейс default-route для live-захвата.
+
+    ВАЖНО: НЕ «any» — tcpdump -i any пишет Linux SLL/SLL2 (DLT 113/276),
+    которые ndpiReader 4.x не читает («Unsupported datalink 276»). Конкретный
+    интерфейс даёт DLT_EN10MB, который понимают все инструменты.
+    """
     try:
+        out = subprocess.run(
+            ["ip", "route", "show", "default"],
+            capture_output=True, text=True, timeout=10).stdout
+        for word in out.split():
+            if word.startswith("dev"):
+                continue
+        # формат: "default via X dev eth0 proto ..."
+        parts = out.split()
+        if "dev" in parts:
+            return parts[parts.index("dev") + 1]
+    except Exception:
+        pass
+    return "eth0"
+
+
+def _live_capture(port: int, capture_secs: int,
+                  interface: Optional[str] = None) -> Optional[Path]:
+    """tcpdump-захват на порт → /tmp/chimera_mask_gate/*.pcap.
+
+    interface=None → интерфейс default route (см. _default_capture_interface).
+    """
+    try:
+        iface = interface or _default_capture_interface()
         CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
         pcap = CAPTURE_DIR / f"mg_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pcap"
         cmd = ["timeout", str(int(capture_secs)), _shutil_which(TCPDUMP_BIN),
-               "-i", interface, "-U", "-w", str(pcap),
+               "-i", iface, "-U", "-w", str(pcap),
                f"port {int(port)}", "-c", "40000"]
         subprocess.run(cmd, capture_output=True, timeout=int(capture_secs) + 10)
         if pcap.exists() and pcap.stat().st_size > 24:
