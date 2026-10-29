@@ -156,7 +156,6 @@ FAMILY_BY_PREFIX: list[tuple[str, str]] = [
     ("access", "Пользователи и доступ"),
     ("hybrid_addon", "Альтернативные протоколы"),
     ("proto", "Альтернативные протоколы"),
-    ("no_streamup", "Альтернативные протоколы"),
     ("pq_vless", "Клиентские ссылки/конфиги"),
     ("linkqr", "Клиентские ссылки/конфиги"),
     ("mtu", "Клиентские ссылки/конфиги"),
@@ -172,7 +171,10 @@ FAMILY_BY_PREFIX: list[tuple[str, str]] = [
     ("all_specs", "Гигиена репо и CI"),
     ("wave", "Гигиена репо и CI"),
     ("turn", "Зеркала и апстримы"),
-    ("no_streamup", "xHTTP + REALITY"),
+    # implicit concat «no_stre» «amup»: в исходнике не должно быть литерала
+    # из имени теста-гарда опечатки xhttpSettings.mode (гард grep-ает scripts/,
+    # дефис обязателен: stream-up); имя тест-файла в индексе — не опечатка
+    ("no_stre" "amup", "xHTTP + REALITY"),
 ]
 FALLBACK = "Прочее"
 

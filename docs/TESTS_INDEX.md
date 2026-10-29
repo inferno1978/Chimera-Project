@@ -40,32 +40,6 @@
 | [`test_awg_transport_31.py`](../tests/test_awg_transport_31.py) | Unit-тесты AWG 3.1 в awg_transport.py — Mode B (транспорт exit-ноды). | ✓ |
 | [`test_awg_ui_smoke.py`](../tests/test_awg_ui_smoke.py) | UI-smoke стилизации AWG-семейства (кейс стилизации AWG TUI, окт.2026). | ✓ |
 
-## Альтернативные протоколы (21)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_csqtt_manual_binary.py`](../tests/test_csqtt_manual_binary.py) | Unit-тесты ГОТОВЫЙ бинарь csqtt-server, собранный на другой машине | ✓ |
-| [`test_csqtt_packages.py`](../tests/test_csqtt_packages.py) | Unit-тесты для chimera/modules/csqtt_packages.py. | ✓ |
-| [`test_csqtt_uninstall_state.py`](../tests/test_csqtt_uninstall_state.py) | Unit-тесты починки трёх живых кейсов CSQTT: | ✓ |
-| [`test_fptn.py`](../tests/test_fptn.py) | Unit-тесты для chimera/modules/fptn.py. | ✓ |
-| [`test_hybrid_addon.py`](../tests/test_hybrid_addon.py) | Unit-тесты для chimera/modules/hybrid_addon.py. | ✓ |
-| [`test_naiveproxy.py`](../tests/test_naiveproxy.py) | Unit-тесты для chimera/modules/naiveproxy.py. | ✓ |
-| [`test_naiveproxy_fptn_mirrors.py`](../tests/test_naiveproxy_fptn_mirrors.py) | Unit-тесты для mirror-реестров и specs Волны 4 (naiveproxy + fptn): | ✓ |
-| [`test_naiveproxy_stats.py`](../tests/test_naiveproxy_stats.py) | Unit-тесты для chimera/modules/naiveproxy_stats.py. | ✓ |
-| [`test_no_streamup_typo.py`](../tests/test_no_streamup_typo.py) | Регрессионный тест на опечатку "streamup" (без дефиса). | ✓ |
-| [`test_olcrtc.py`](../tests/test_olcrtc.py) | Unit-тесты для chimera/modules/olcrtc.py — переработанная версия с manager panel. | ✓ |
-| [`test_proto_common.py`](../tests/test_proto_common.py) | Unit-тесты для chimera/modules/proto_common.py — общие хелперы | ✓ |
-| [`test_proto_port_username_v424.py`](../tests/test_proto_port_username_v424.py) | Тесты для v4.24 — выбор порта + имя первого пользователя в протоколах: | ✓ |
-| [`test_slipgate.py`](../tests/test_slipgate.py) | Unit-тесты для chimera/modules/slipgate.py. | ✓ |
-| [`test_trusttunnel.py`](../tests/test_trusttunnel.py) | Unit-тесты для chimera/modules/trusttunnel.py (main module). | ✓ |
-| [`test_trusttunnel_user_lifecycle.py`](../tests/test_trusttunnel_user_lifecycle.py) | Unit-тесты для TrustTunnelAdapter + batched restart mechanism in user_lifecycle.py. | ✓ |
-| [`test_turnable.py`](../tests/test_turnable.py) | Unit-тесты для chimera/modules/turnable.py. | ✓ |
-| [`test_turntunnel.py`](../tests/test_turntunnel.py) | Unit-тесты для chimera/modules/turntunnel.py. | ✓ |
-| [`test_turntunnel_links.py`](../tests/test_turntunnel_links.py) | Unit-тесты для chimera/modules/turntunnel_links.py. | ✓ |
-| [`test_wdtt.py`](../tests/test_wdtt.py) | Unit-тесты для chimera/modules/wdtt.py. | ✓ |
-| [`test_wdtt_webdav_mirrors.py`](../tests/test_wdtt_webdav_mirrors.py) | Unit-тесты для mirror-реестров и PackageSpecs Волны 2: | ✓ |
-| [`test_webdav_tunnel.py`](../tests/test_webdav_tunnel.py) | Unit-тесты для chimera/modules/webdav_tunnel.py. | ✓ |
-
 ## Мониторинг и трафик (20)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -90,6 +64,31 @@
 | [`test_traffic_dispatcher.py`](../tests/test_traffic_dispatcher.py) | Unit-тесты на мультипротокольный диспетчер трафика: | ✓ |
 | [`test_traffic_history.py`](../tests/test_traffic_history.py) | Unit-тесты для chimera/modules/traffic_history.py. | ✓ |
 | [`test_traffic_tracking.py`](../tests/test_traffic_tracking.py) | Unit-тесты для chimera/modules/traffic_tracking.py. | ✓ |
+
+## Альтернативные протоколы (20)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_csqtt_manual_binary.py`](../tests/test_csqtt_manual_binary.py) | Unit-тесты ГОТОВЫЙ бинарь csqtt-server, собранный на другой машине | ✓ |
+| [`test_csqtt_packages.py`](../tests/test_csqtt_packages.py) | Unit-тесты для chimera/modules/csqtt_packages.py. | ✓ |
+| [`test_csqtt_uninstall_state.py`](../tests/test_csqtt_uninstall_state.py) | Unit-тесты починки трёх живых кейсов CSQTT: | ✓ |
+| [`test_fptn.py`](../tests/test_fptn.py) | Unit-тесты для chimera/modules/fptn.py. | ✓ |
+| [`test_hybrid_addon.py`](../tests/test_hybrid_addon.py) | Unit-тесты для chimera/modules/hybrid_addon.py. | ✓ |
+| [`test_naiveproxy.py`](../tests/test_naiveproxy.py) | Unit-тесты для chimera/modules/naiveproxy.py. | ✓ |
+| [`test_naiveproxy_fptn_mirrors.py`](../tests/test_naiveproxy_fptn_mirrors.py) | Unit-тесты для mirror-реестров и specs Волны 4 (naiveproxy + fptn): | ✓ |
+| [`test_naiveproxy_stats.py`](../tests/test_naiveproxy_stats.py) | Unit-тесты для chimera/modules/naiveproxy_stats.py. | ✓ |
+| [`test_olcrtc.py`](../tests/test_olcrtc.py) | Unit-тесты для chimera/modules/olcrtc.py — переработанная версия с manager panel. | ✓ |
+| [`test_proto_common.py`](../tests/test_proto_common.py) | Unit-тесты для chimera/modules/proto_common.py — общие хелперы | ✓ |
+| [`test_proto_port_username_v424.py`](../tests/test_proto_port_username_v424.py) | Тесты для v4.24 — выбор порта + имя первого пользователя в протоколах: | ✓ |
+| [`test_slipgate.py`](../tests/test_slipgate.py) | Unit-тесты для chimera/modules/slipgate.py. | ✓ |
+| [`test_trusttunnel.py`](../tests/test_trusttunnel.py) | Unit-тесты для chimera/modules/trusttunnel.py (main module). | ✓ |
+| [`test_trusttunnel_user_lifecycle.py`](../tests/test_trusttunnel_user_lifecycle.py) | Unit-тесты для TrustTunnelAdapter + batched restart mechanism in user_lifecycle.py. | ✓ |
+| [`test_turnable.py`](../tests/test_turnable.py) | Unit-тесты для chimera/modules/turnable.py. | ✓ |
+| [`test_turntunnel.py`](../tests/test_turntunnel.py) | Unit-тесты для chimera/modules/turntunnel.py. | ✓ |
+| [`test_turntunnel_links.py`](../tests/test_turntunnel_links.py) | Unit-тесты для chimera/modules/turntunnel_links.py. | ✓ |
+| [`test_wdtt.py`](../tests/test_wdtt.py) | Unit-тесты для chimera/modules/wdtt.py. | ✓ |
+| [`test_wdtt_webdav_mirrors.py`](../tests/test_wdtt_webdav_mirrors.py) | Unit-тесты для mirror-реестров и PackageSpecs Волны 2: | ✓ |
+| [`test_webdav_tunnel.py`](../tests/test_webdav_tunnel.py) | Unit-тесты для chimera/modules/webdav_tunnel.py. | ✓ |
 
 ## Ядро и TUI (16)
 
@@ -462,9 +461,10 @@
 | [`test_config_backup.py`](../tests/test_config_backup.py) | Unit-тесты для chimera/modules/config_backup.py. | ✓ |
 | [`test_migration.py`](../tests/test_migration.py) | Unit-тесты для chimera/modules/migration.py. | ✓ |
 
-## xHTTP + REALITY (2)
+## xHTTP + REALITY (3)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
 |---|---|---|
+| [`test_no_streamup_typo.py`](../tests/test_no_streamup_typo.py) | Регрессионный тест на опечатку "streamup" (без дефиса). | ✓ |
 | [`test_xhttp_cdn_masking.py`](../tests/test_xhttp_cdn_masking.py) | Unit-тесты для chimera/modules/xhttp_cdn_masking.py — экспертный профиль XHTTP | ✓ |
 | [`test_xhttp_path_gen.py`](../tests/test_xhttp_path_gen.py) | Unit-тесты для chimera/modules/xhttp_path_gen.py — генератор случайного | ✓ |
