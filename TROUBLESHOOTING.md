@@ -194,6 +194,32 @@ which xray
 
 ---
 
+## git pull: divergent branches / unmerged files / SyntaxError в main.py
+
+**Симптомы:**
+
+```
+hint: You have divergent branches and need to specify how to reconcile them.
+fatal: Need to specify how to reconcile divergent branches.
+```
+```
+error: Pulling is not possible because you have unmerged files.
+```
+```
+File "/opt/chimera/main.py", line 219
+    >>>>>>> 8c9baf2...
+            ^
+SyntaxError: invalid decimal literal
+```
+
+Дополнительно на клонах с gitlab-зеркала: `git checkout main` → «pathspec 'main' did not match», `git reset --hard origin/main` → «unknown revision» (у зеркала ветка `chimera-v5`, у Forgejo — `main`).
+
+**Причина:** 29.10.2026 история репозитория переписана (зачистка секретов) и force-push во все зеркала. Клон, сделанный до rewrite, не имеет общей истории с новой веткой — `git pull` даёт divergent branches, merge-конфликты во всех изменённых файлах; недомерженный merge оставляет маркеры `<<<<<<<`/`>>>>>>>` прямо в коде, и Python падает на них с `SyntaxError: invalid decimal literal`.
+
+**Лечение:** команда миграции — раздел [«Миграция старых клонов»](INSTALL.md#миграция-старых-клонов-после-rewrite-истории-29102026) в INSTALL.md. Выполняется один раз; после неё `git pull` снова работает как fast-forward.
+
+---
+
 ## Диагностика одной командой
 
 ```bash

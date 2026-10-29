@@ -248,6 +248,7 @@ sudo python3 main.py
 | [`NNM_BYPASS_FAQ.md`](docs/faq/NNM_BYPASS_FAQ.md) | NNM-Club Bypass (b4): SNI-блок за Cloudflare, сет NNM-Fat-v1 |
 | [`OWN_DOH_FAQ.md`](docs/faq/OWN_DOH_FAQ.md) | Собственные DoH-резолверы в сетах b4 (миграция с Cloudflare) |
 | [`BOOTSTRAP_SECURITY.md`](docs/faq/BOOTSTRAP_SECURITY.md) | Модель доверия bootstrap: Ed25519-подпись, ротация ключей, компрометация |
+| [`GIT_REWRITE_MIGRATION_FAQ.md`](docs/faq/GIT_REWRITE_MIGRATION_FAQ.md) | Миграция старых клонов после rewrite истории 29.10.2026: divergent branches, unmerged files, SyntaxError в main.py |
 | [`CHAIN_RELAY_FAQ.md`](docs/faq/CHAIN_RELAY_FAQ.md) | Chain Relay: релеи каскада, порты, диагностика |
 | [`ICMP_GATE_FAQ.md`](docs/faq/ICMP_GATE_FAQ.md) | ICMP Gate: маскировка пинга, доверенные роли, PMTUD |
 | [`MIERU_FAQ.md`](docs/faq/MIERU_FAQ.md) | Mieru: установка, каскад, статистика |

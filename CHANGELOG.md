@@ -23,6 +23,20 @@
 
 ---
 
+# Changelog new entry — FIX(docs): инструкция миграции старых клонов после rewrite истории — divergent branches на git pull, конфликт-маркеры в main.py (SyntaxError: invalid decimal literal) (29 Oct 2026)
+
+## КОНТЕКСТ (живой инцидент, сервер энд-юзера vm1130476): после rewrite истории 29.10.2026 (зачистка секретов, force-push во все зеркала) клоны, созданные ДО rewrite, не имеют общей истории с новой веткой. `git pull` на них даёт «divergent branches / Need to specify how to reconcile», при попытке merge — конфликты во всех изменённых файлах; недомерженный merge оставляет маркеры `<<<<<<<`/`>>>>>>>` прямо в коде → `python3 main.py` падает с `SyntaxError: invalid decimal literal` (main.py:219). Дополнительный слой на клонах с gitlab-зеркала: локальная ветка называется `chimera-v5`, а у каноничного Forgejo — `main`, поэтому `git checkout main` → «pathspec did not match», `git reset --hard origin/main` → «unknown revision» (remote-ref отсутствует). Юзер без знаний о rewrite не может диагностировать причину — git честно предлагает «выбрать стратегию reconcile», что только усугубляет конфликт.
+
+**РЕШЕНИЕ (только docs, нулевая правка кода):**
+
+1. **INSTALL.md** — новый раздел «Миграция старых клонов (после rewrite истории 29.10.2026)» сразу после блока ручной установки: объяснение причины + готовый paste-safe блок (merge --abort / rebase --abort → опциональный тарбол-бэкап локальных правок → remote set-url на каноничный Forgejo → fetch → `checkout -f -B main origin/main` → удаление старой ветки → проверки: grep маркеров конфликтов, py_compile, git log). Выполняется один раз, после него pull снова fast-forward.
+2. **TROUBLESHOOTING.md** — новая секция «git pull: divergent branches / unmerged files / SyntaxError в main.py» с полными текстами всех трёх симптомов (включая pathspec/unknown revision для gitlab-клонов) и ссылкой на раздел INSTALL.md.
+3. **docs/faq/GIT_REWRITE_MIGRATION_FAQ.md** (новый) — симптом/причина/лечение/«это повторится?» + ветка «не помогло» (недоступность Forgejo с некоторых сетей — временный fallback на gitlab-зеркало веткой chimera-v5). Добавлен в таблицу FAQ в README.md.
+
+**Решение по зеркалам:** gitlab/github-фallback в bootstrap.sh и INSTALL.md НЕ удаляются — зеркала живы и синхронны (проверено с IP энд-юзеров в момент инцидента); фикс — миграционная инструкция, а не отключение fallback.
+
+**Тесты:** не требуется (чистая документация); ссылки в INSTALL/TROUBLESHOOTING/README ведут на реально созданные файлы и разделы.
+
 # Changelog new entry — FIX(cdn_ranges)/FEAT(autoban): провайдер cloudflare_dns — публичные DNS-резолверы Cloudflare (1.1.1.1/1.0.0.1 и семья) под гардом авто-бана, /32-точечно (29 Oct 2026)
 
 ## КОНТЕКСТ (живая нода vds13195, найдено при деплое CDN-фикса 5020c40): функциональная проверка гарда на ноде вскрыла дыру — `_fw_ban('1.1.1.1')` возвращал True и ставил ufw-правило. Причина: 1.1.1.1 НЕ входит в официальные proxy-списки cloudflare.com/ips (там только edge/прокси-сети 104.16.0.0/13, 172.64.0.0/13 и т.д.), а резолвер — отдельная инфраструктура CF (AS13335, сеть 1.1.1.0/24 — совместная с APNIC). Реальный кейс той же ноды: 1.1.1.1 банился авто-баном ДВАЖДЫ (2026-10-22, 10 ошибок; 2026-10-27, 11 ошибок) — источники: health-пробы CF-резолвера, не атака. Риск: бан 1.1.1.1 ничего не защищает (атакующий не может спуфить source TCP-handshake'ом), но если нода использует 1.1.1.1 как DNS-апстрим — «ufw deny from 1.1.1.1» режет DNS-ОТВЕТЫ, резолв на ноде отваливается целиком (тихий self-DoS DNS).

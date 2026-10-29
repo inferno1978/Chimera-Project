@@ -141,6 +141,29 @@ python3 verify.py
 sudo python3 main.py
 ```
 
+### Миграция старых клонов (после rewrite истории 29.10.2026)
+
+29.10.2026 история репозитория была переписана (зачистка секретов) и force-push во все зеркала. Клон, сделанный **до** rewrite, не имеет общей истории с новой веткой: `git pull` даёт `divergent branches` / `unmerged files` / конфликты, а недомерженный merge оставляет маркеры `<<<<<<<`/`>>>>>>>` прямо в коде → `SyntaxError: invalid decimal literal` в main.py. Лечение — один раз выполнить миграцию на новую историю:
+
+```bash
+cd /opt/chimera
+# 1) отменить зависший merge/rebase (если был)
+git merge --abort 2>/dev/null; git rebase --abort 2>/dev/null; true
+# 2) (опционально) бэкап локальных правок, если что-то меняли руками:
+#    tar czf /root/chimera-pre-fix-$(date +%F-%H%M).tgz --exclude=.git -C /opt chimera
+# 3) каноничный remote + новая история
+git remote set-url origin https://git.chimeraprodvpn.online/inferno1978/chimera.git
+git fetch origin
+git checkout -f -B main origin/main
+git branch -D chimera-v5 2>/dev/null   # старая ветка больше не нужна
+# 4) проверка: маркеров конфликтов нет, синтаксис валиден
+grep -nE '^(<<<<<<<|=======|>>>>>>>)' main.py
+python3 -m py_compile main.py && echo OK
+git log --oneline -1
+```
+
+Подробности и причины — [docs/faq/GIT_REWRITE_MIGRATION_FAQ.md](docs/faq/GIT_REWRITE_MIGRATION_FAQ.md).
+
 ---
 
 ## Требования
