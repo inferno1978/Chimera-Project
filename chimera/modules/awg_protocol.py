@@ -156,24 +156,25 @@ def awg31_generate_header_protection_key() -> str:
     return base64.b64encode(os.urandom(32)).decode("ascii")
 
 
-def awg31_generate_extra_params(rng: Optional[random.Random] = None) -> dict:
-    """Генерирует 9 дополнительных параметров AWG 3.1.
+def awg31_roll_range_params(r: random.Random) -> dict:
+    """Единая арифметика тайминговых окон AWG 3.1 — ЕДИНЫЙ ИСТОЧНИК.
 
-    Диапазоны — констрейнты GenerateObfuscation31 (3x-ui 3.8.5),
-    идентичны wpp_awg._parameters("awg31") — единый отпечаток генерации
-    по всему проекту:
-      HeaderProtectionKey      — 44-символьный base64 ключ
-      ContentPaddingAddition   — "8-24 .. +8-40"
-      RekeyAfterTime           — "100-120 .. +10-40"
-      RekeyTimeout             — "3-6 .. +1-4"
-      RejectAfterTime          — rekey_high + 30-60 .. +30-90
-      KeepaliveTimeout         — "8-12 .. +2-8"
-      MaxHandshakeAttempts     — "15-25 .. +5-25"
-      RandomTrailers           — "on"
-      DisableCookies           — "on"
+    Раньше формула жила в двух местах (awg31_generate_extra_params и
+    wpp_awg._parameters) и чинилась синхронно в двух файлах (45bcb9b:
+    кап RejectAfterTime). Теперь оба генератора берут числа отсюда,
+    ключи переименовывают вызывающие (snake_case / PascalCase WPP).
+
+    Порядок вызовов r.randint закреплён (сид-детерминизм
+    test_awg_protocol_31, rng-двойник «максимального пути»):
+      низы: cp_low, rekey_low, rekey_high_width, reject_low_width,
+      timeout_low, keepalive_low, attempts_low; затем ширины: cp_width,
+      rekey_timeout_width, reject_width (с капом), keepalive_width,
+      attempts_width.
+
+    Кап 300 (AWG31_RANGE_KEYS): reject_low ≤ 220, ширина 30..90
+    ограничивается головником окна — без капа max = 310 > 300
+    (регрессия 45bcb9b: ~0.06% генераций не проходили кросс-валидацию).
     """
-    r = rng or random
-
     cp_low = r.randint(8, 24)
     rekey_low = r.randint(100, 120)
     rekey_high = rekey_low + r.randint(10, 40)
@@ -181,19 +182,43 @@ def awg31_generate_extra_params(rng: Optional[random.Random] = None) -> dict:
     timeout_low = r.randint(3, 6)
     keepalive_low = r.randint(8, 12)
     attempts_low = r.randint(15, 25)
-
     return {
-        "header_protection_key": awg31_generate_header_protection_key(),
         "content_padding_addition": "%d-%d" % (cp_low, cp_low + r.randint(8, 40)),
         "rekey_after_time": "%d-%d" % (rekey_low, rekey_high),
         "rekey_timeout": "%d-%d" % (timeout_low, timeout_low + r.randint(1, 4)),
-        # кап 300 (AWG31_RANGE_KEYS): reject_low ≤ 220, ширина 30..90
-        # ограничивается головником окна — без капа max = 310 > 300
-        # (регрессия: ~0.06% генераций не проходили кросс-валидацию)
         "reject_after_time": "%d-%d" % (
             reject_low, reject_low + r.randint(30, min(90, 300 - reject_low))),
         "keepalive_timeout": "%d-%d" % (keepalive_low, keepalive_low + r.randint(2, 8)),
         "max_handshake_attempts": "%d-%d" % (attempts_low, attempts_low + r.randint(5, 25)),
+    }
+
+
+def awg31_generate_extra_params(rng: Optional[random.Random] = None) -> dict:
+    """Генерирует 9 дополнительных параметров AWG 3.1.
+
+    Диапазоны — констрейнты GenerateObfuscation31 (3x-ui 3.8.5).
+    Арифметика — единый источник awg31_roll_range_params (общий с
+    wpp_awg._parameters — единый отпечаток генерации по всему проекту):
+      HeaderProtectionKey      — 44-символьный base64 ключ
+      ContentPaddingAddition   — "8-24 .. +8-40"
+      RekeyAfterTime           — "100-120 .. +10-40"
+      RekeyTimeout             — "3-6 .. +1-4"
+      RejectAfterTime          — rekey_high + 30-60 .. +30-90 (кап 300)
+      KeepaliveTimeout         — "8-12 .. +2-8"
+      MaxHandshakeAttempts     — "15-25 .. +5-25"
+      RandomTrailers           — "on"
+      DisableCookies           — "on"
+    """
+    r = rng or random
+    rolled = awg31_roll_range_params(r)
+    return {
+        "header_protection_key": awg31_generate_header_protection_key(),
+        "content_padding_addition": rolled["content_padding_addition"],
+        "rekey_after_time": rolled["rekey_after_time"],
+        "rekey_timeout": rolled["rekey_timeout"],
+        "reject_after_time": rolled["reject_after_time"],
+        "keepalive_timeout": rolled["keepalive_timeout"],
+        "max_handshake_attempts": rolled["max_handshake_attempts"],
         "random_trailers": "on",
         "disable_cookies": "on",
     }

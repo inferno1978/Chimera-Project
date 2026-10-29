@@ -264,7 +264,7 @@ class FallbackConfig:
 #  ЧТЕНИЕ КОНФИГА
 # ══════════════════════════════════════════════════════════════════════════════
 
-def read_fallback_config(config_file: Path = _FALLBACK_STATE_FILE) -> FallbackConfig:
+def read_fallback_config(config_file: Optional[Path] = None) -> FallbackConfig:
     """
     Читает параметры секции [middle_proxy] из отдельного файла состояния
     инсталлера (_FALLBACK_STATE_FILE), НЕ из telemt.toml — see комментарий
@@ -272,6 +272,7 @@ def read_fallback_config(config_file: Path = _FALLBACK_STATE_FILE) -> FallbackCo
     Если секция отсутствует или файл не найден — возвращает дефолты.
     Полностью безопасна: никогда не бросает исключений.
     """
+    config_file = Path(config_file) if config_file else _FALLBACK_STATE_FILE
     cfg = FallbackConfig()
     if not config_file.exists():
         return cfg
@@ -308,11 +309,12 @@ def read_fallback_config(config_file: Path = _FALLBACK_STATE_FILE) -> FallbackCo
     return cfg
 
 
-def read_runtime_middle_proxy(config_file: Path = _CONFIG_FILE) -> Optional[bool]:
+def read_runtime_middle_proxy(config_file: Optional[Path] = None) -> Optional[bool]:
     """
     Читает значение use_middle_proxy из [general] секции telemt.toml.
     Возвращает True/False/None (None = не найдено).
     """
+    config_file = Path(config_file) if config_file else _CONFIG_FILE
     if not config_file.exists():
         return None
     try:
@@ -331,7 +333,7 @@ def read_runtime_middle_proxy(config_file: Path = _CONFIG_FILE) -> Optional[bool
 
 def append_fallback_section(
     fb: FallbackConfig,
-    config_file: Path = _FALLBACK_STATE_FILE,
+    config_file: Optional[Path] = None,
 ) -> None:
     """
     Добавляет или обновляет секцию [middle_proxy] в отдельном файле
@@ -345,6 +347,7 @@ def append_fallback_section(
     Если нет — добавляет в конец файла (файл создаётся, если его ещё нет).
     Не меняет остальные части файла.
     """
+    config_file = Path(config_file) if config_file else _FALLBACK_STATE_FILE
     if not config_file.exists():
         config_file.parent.mkdir(parents=True, exist_ok=True)
         config_file.write_text("", encoding="utf-8")
@@ -696,7 +699,7 @@ class FallbackOrchestrator:
     def __init__(
         self,
         fb_config: FallbackConfig,
-        config_file: Path = _CONFIG_FILE,
+        config_file: Optional[Path] = None,
         service: str = _SERVICE_NAME,
         probe: Optional[MiddleProxyProbe] = None,
         on_fallback: Optional[Callable[[str], None]] = None,
@@ -708,6 +711,7 @@ class FallbackOrchestrator:
         probe       — объект MiddleProxyProbe (подменяется в тестах)
         on_fallback — callback при срабатывании fallback (для UI/алертов)
         """
+        config_file = Path(config_file) if config_file else _CONFIG_FILE
         self._fb         = fb_config
         self._cfg_file   = config_file
         self._service    = service
@@ -1003,7 +1007,7 @@ class FallbackOrchestrator:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_post_install_fallback_check(
-    config_file: Path = _CONFIG_FILE,
+    config_file: Optional[Path] = None,
     service: str = _SERVICE_NAME,
     warmup_wait: int = 10,
 ) -> Optional[str]:
@@ -1017,6 +1021,7 @@ def run_post_install_fallback_check(
       None   — fallback не нужен (ME доступен или fallback отключён)
       str    — сообщение об ошибке/fallback для отображения в UI
     """
+    config_file = Path(config_file) if config_file else _CONFIG_FILE
     fb_config = read_fallback_config()
     want_middle = read_runtime_middle_proxy(config_file)
 
@@ -1050,7 +1055,7 @@ def run_post_install_fallback_check(
 #  UI: МЕНЮ НАСТРОЙКИ FALLBACK (вызывается из меню установки Telemt)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def me_probe_menu(config_file: Path = _CONFIG_FILE) -> FallbackConfig:
+def me_probe_menu(config_file: Optional[Path] = None) -> FallbackConfig:
     """
     Интерактивное меню настройки параметров fallback.
     Вызывается из _run_install_inner() перед записью конфига.
@@ -1058,6 +1063,7 @@ def me_probe_menu(config_file: Path = _CONFIG_FILE) -> FallbackConfig:
 
     Текущие настройки читаются из существующего конфига (если есть).
     """
+    config_file = Path(config_file) if config_file else _CONFIG_FILE
     current = read_fallback_config()
 
     _BOX_W = 66
@@ -1181,11 +1187,12 @@ def me_probe_menu(config_file: Path = _CONFIG_FILE) -> FallbackConfig:
 #  UI: СТАТУС FALLBACK (для меню Telemt → пункт статуса)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fallback_status_line(config_file: Path = _CONFIG_FILE) -> str:
+def fallback_status_line(config_file: Optional[Path] = None) -> str:
     """
     Краткая строка статуса для отображения в _box_kv в меню Telemt.
     Читает конфиг и возвращает цветную строку.
     """
+    config_file = Path(config_file) if config_file else _CONFIG_FILE
     fb  = read_fallback_config()
     cur = read_runtime_middle_proxy(config_file)
 

@@ -13,7 +13,9 @@
 # CHIMERA_TEST_ISOLATE=0 до запуска.
 #
 # Режимы:
-#   static <py312>   — compileall + PEP 701-сканер + full_test.py +
+#   static <py312>   — compileall + PEP 701-сканер + const-default
+#                      сканер (path-константы в дефолт-аргументах —
+#                      класс cb461fa/3783ee3) + full_test.py +
 #                      test_py_compat (запускать под python3.12: сканеру
 #                      нужен токенайзер 3.12, см. scripts/fstring_compat_scan.py)
 #                      + leak_guard (ПОЛНЫЙ аудит дерева: IP v4/v6, токены,
@@ -92,17 +94,19 @@ run_modules() {  # $1=список-файл, $2=блокирующий(0/1)
 
 case "$MODE" in
   static)
-    header "[1/5] compileall (python3 = $($PY --version 2>&1))"
+    header "[1/6] compileall (python3 = $($PY --version 2>&1))"
     "$PY" -m compileall -q chimera main.py full_test.py smoke_test_modules.py || fail=1
-    header "[2/5] PEP 701 / pre-3.12 f-string сканер"
+    header "[2/6] PEP 701 / pre-3.12 f-string сканер"
     "$PY" scripts/fstring_compat_scan.py || fail=1
-    header "[3/5] full_test.py (статанализ: пути/права/дубликаты/гигиена)"
+    header "[3/6] const-default сканер (path-константы в дефолт-аргументах)"
+    "$PY" scripts/const_default_scan.py || fail=1
+    header "[4/6] full_test.py (статанализ: пути/права/дубликаты/гигиена)"
     "$PY" full_test.py >/tmp/ci_full_test.log 2>&1
     rc=$?; tail -3 /tmp/ci_full_test.log
     [ $rc -ne 0 ] && { echo "full_test.py rc=$rc"; fail=1; }
-    header "[4/5] test_py_compat (гард совместимости + самопроверка сканера)"
+    header "[5/6] test_py_compat (гард совместимости + самопроверка сканера)"
     "$PY" -m unittest tests.test_py_compat -q || fail=1
-    header "[5/5] leak_guard (полный аудит дерева: IP v4/v6, токены, домены)"
+    header "[6/6] leak_guard (полный аудит дерева: IP v4/v6, токены, домены)"
     "$PY" scripts/leak_guard.py || fail=1
     ;;
   gate)

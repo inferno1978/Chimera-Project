@@ -323,3 +323,4 @@ tests.test_xray_safe_restart
 tests.test_youtube_ip_pin
 tests.test_youtube_route
 tests.test_youtube_route_v5013
+tests.test_const_default_scan

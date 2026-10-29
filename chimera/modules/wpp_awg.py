@@ -14,6 +14,10 @@ import secrets
 import subprocess
 import tempfile
 
+# Единый источник арифметики AWG 3.1 (кап RejectAfterTime и пр.) —
+# раньше дублировался здесь и в awg_protocol, чинился синхронно (45bcb9b)
+from chimera.modules.awg_protocol import awg31_roll_range_params
+
 AWG = "/usr/local/bin/awg"
 CONFIG_DIR = "/etc/web-proxy-panel/awg"
 SERVICE_TEMPLATE = "web-panel-proxy-awg@{}.service"
@@ -132,13 +136,12 @@ def _parameters(protocol):
         "H3": headers[2], "H4": headers[3],
     }
     if protocol == "awg31":
-        cp_low = rng.randint(8, 24)
-        rekey_low = rng.randint(100, 120)
-        rekey_high = rekey_low + rng.randint(10, 40)
-        reject_low = rekey_high + rng.randint(30, 60)
-        timeout_low = rng.randint(3, 6)
-        keepalive_low = rng.randint(8, 12)
-        attempts_low = rng.randint(15, 25)
+        # Единая арифметика AWG 3.1 — awg_protocol.awg31_roll_range_params
+        # (единый отпечаток генерации по всему проекту; кап RejectAfterTime
+        # чинится в одном месте). Порядок вызовов rng внутри wpp меняется
+        # (окна теперь разыгрываются до I1-I5) — безопасно: rng здесь
+        # secrets.SystemRandom, сид-детерминизма на wpp-стороне нет.
+        rolled = awg31_roll_range_params(rng)
         # I2-I5 filled with neutral cross-engine decoy chains
         # (ARCHITECT-parity, see awg_presets.awg_generate_i2_i5).
         values.update({
@@ -148,15 +151,12 @@ def _parameters(protocol):
             "I4": _i_chain_field(rng),
             "I5": _i_chain_field(rng),
             "HeaderProtectionKey": _key(),
-            "ContentPaddingAddition": "%d-%d" % (cp_low, cp_low + rng.randint(8, 40)),
-            "RekeyAfterTime": "%d-%d" % (rekey_low, rekey_high),
-            "RekeyTimeout": "%d-%d" % (timeout_low, timeout_low + rng.randint(1, 4)),
-            # кап 300 (awg_protocol.AWG31_RANGE_KEYS, паритет с
-            # awg31_generate_extra_params): без капа max = 310 > 300
-            "RejectAfterTime": "%d-%d" % (
-                reject_low, reject_low + rng.randint(30, min(90, 300 - reject_low))),
-            "KeepaliveTimeout": "%d-%d" % (keepalive_low, keepalive_low + rng.randint(2, 8)),
-            "MaxHandshakeAttempts": "%d-%d" % (attempts_low, attempts_low + rng.randint(5, 25)),
+            "ContentPaddingAddition": rolled["content_padding_addition"],
+            "RekeyAfterTime": rolled["rekey_after_time"],
+            "RekeyTimeout": rolled["rekey_timeout"],
+            "RejectAfterTime": rolled["reject_after_time"],
+            "KeepaliveTimeout": rolled["keepalive_timeout"],
+            "MaxHandshakeAttempts": rolled["max_handshake_attempts"],
             "RandomTrailers": "on",
             "DisableCookies": "on",
         })
