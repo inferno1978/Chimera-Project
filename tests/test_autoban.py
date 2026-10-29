@@ -366,7 +366,13 @@ class TestCronScriptAsnLookup(unittest.TestCase):
         import re as _re
         src = (_PROJECT_ROOT / "chimera" / "modules" / "autoban.py").read_text()
         m = _re.search(r'py_body = f"""(.*?)"""', src, _re.DOTALL)
-        generated = eval(f'f"""{m.group(1)}"""', {"threshold": 20, "window": 10})
+        #  CDN-фикстура (фикс 2026-10-29): шаблон интерполирует список
+        # CIDR прокси-сетей (гвард автобана) — eval'у нужен _cdn_json,
+        # как и threshold/window.
+        from chimera.modules.cdn_ranges import cdn_cidrs_compact
+        generated = eval(f'f"""{m.group(1)}"""',
+                         {"threshold": 20, "window": 10,
+                          "_cdn_json": json.dumps(cdn_cidrs_compact())})
         m2 = _re.search(
             r"ASN_CACHE_F\s*=.*?(?=\n#  DoH-resolver|\ndef _resolve_fresh)",
             generated, _re.DOTALL)

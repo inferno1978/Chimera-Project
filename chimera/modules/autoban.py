@@ -54,6 +54,17 @@ _XRAY_BAN_CRON    = Path("/etc/cron.d/xray-autoban")
 _XRAY_BAN_SCRIPT  = Path("/usr/local/bin/xray-autoban.sh")
 _XRAY_BAN_LOG     = Path("/var/log/xray-autoban.log")
 _XRAY_BAN_REPORT  = Path("/var/log/xray-ban-report.txt")   # читаемый отчёт (7 дней)
+# error.log Xray — вынесен в константу модуля (был хардкод в теле
+# _autoban_run_once) для тестируемости (tests/test_cdn_ranges.py патчит).
+_XRAY_ERROR_LOG   = Path("/var/log/xray/error.log")
+
+#  CDN-ЗАЩИТА (инцидент 2026-10-29: 950 банов edge-IP Cloudflare на живой
+# ноде — домен за CF-прокси, error.log видит edge как источник TLS-ошибок,
+# бан=edge = self-DoS панели/подписок). Диапазоны и хелперы — отдельный
+# модуль (используется и TUI-путём, и встраивается в cron-шаблон).
+from chimera.modules.cdn_ranges import (
+    cdn_cidrs_compact, cdn_providers_label, ip_in_cdn,
+)
 
 # Пороги по умолчанию (сохраняются в state autoban.json)
 _BAN_THRESHOLD_DEFAULT   = 10   # ошибок за период
@@ -433,7 +444,14 @@ def _fw_ban(ip: str) -> bool:
     ufw-user-input, ПОСЛЕ allow-правил портов (configure_firewall →
     ufw allow 22/80/SERVER_PORT) → first-match-wins пропускал
     нарушителя на открытые порты, бан был декоративным.
+
+    CDN-ГАРД (инцидент 2026-10-29, 950 банов): IP прокси-сетей
+    (Cloudflare и др.) не баним НИКОГДА — домен/подписки за CF-прокси,
+    бан edge-IP = self-DoS при недостижимом реальном атакующем.
+    Возврат False без единого вызова ufw/iptables.
     """
+    if ip_in_cdn(ip):
+        return False
     core = _core_module()
     _run = core._run
 
@@ -801,6 +819,68 @@ def _fw_repair_order(banned: dict):
     return _fw_repair_order_cli(banned, _run)
 
 
+def _autoban_heal_cdn(cfg: dict) -> int:
+    """Снимает баны с CDN-сетей (Cloudflare и др.) из активного списка.
+
+    Инцидент 2026-10-29 (живая нода): 950 забаненных edge-IP Cloudflare —
+    домен за CF-прокси, автобан банил edge за TLS-ошибки сканеров, которые
+    CF пересылал на origin. Self-DoS: легитимные клиенты через забаненные
+    edge получали refuse.
+
+    Вызывается из _autoban_run_once() на каждом прогоне (TUI/CLI/cron) —
+    нода самолечится сразу после обновления, и из меню [C] вручную.
+    Мутирует cfg (banned + ban_history.unbanned_at), сохраняет state сама.
+    Возвращает число снятых CDN-банов (0 — лечить нечего).
+    """
+    banned = cfg.get("banned", {})
+    targets = [ip for ip in list(banned.keys()) if ip_in_cdn(ip)]
+    if not targets:
+        return 0
+
+    core = _core_module()
+    # FW-правила: батч (правка user.rules + один reload), не по-IP CLI
+    # (кейс vds14808: 199 IP по-одному = ~5 минут; у нас их 950).
+    try:
+        _fw_unban_batch(targets)
+    except Exception:
+        pass
+
+    _unban_ts = datetime.now().isoformat()
+    for ip in targets:
+        banned.pop(ip, None)
+        for hrec in reversed(cfg.get("ban_history", [])):
+            if hrec.get("ip") == ip and hrec.get("unbanned_at") is None:
+                hrec["unbanned_at"] = _unban_ts
+                break
+    cfg["banned"] = banned
+    _autoban_save(cfg)
+
+    # Лог + TG — одно событие на весь хил (анти-спам паттерн dpi_response),
+    # не по IP на каждый из 950.
+    try:
+        core.log_to_file("INFO",
+            f"AutoBan CDN-heal: {len(targets)} CDN IP разбанено "
+            f"({cdn_providers_label()})")
+    except Exception:
+        pass
+    try:
+        _XRAY_BAN_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _XRAY_BAN_LOG.open("a") as f:
+            f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] CDN AUTO-UNBAN: "
+                    f"{len(targets)} IP ({cdn_providers_label()}) — "
+                    f"баны CDN-сетей отключены\n")
+    except Exception:
+        pass
+    try:
+        core._tg_notify_event("autoban",
+            f"CDN-heal: <b>{len(targets)}</b> IP прокси-сетей "
+            f"({cdn_providers_label()}) разбанено автоматически — "
+            f"баны CDN-сетей больше не ставятся")
+    except Exception:
+        pass
+    return len(targets)
+
+
 def _autoban_run_once() -> int:
     """
     Сканирует error.log за последние N минут, считает TLS-ошибки по IP.
@@ -815,6 +895,16 @@ def _autoban_run_once() -> int:
     threshold = cfg.get("threshold", _BAN_THRESHOLD_DEFAULT)
     window    = cfg.get("window_min", _BAN_WINDOW_MINUTES)
     whitelist = set(cfg.get("whitelist", _BAN_WHITELIST_DEFAULT))
+
+    #  CDN-АВТО-ХИЛ (инцидент 2026-10-29): сначала снимаем баны CDN-сетей,
+    # поставленные старыми версиями (950 edge-IP Cloudflare на живой ноде).
+    # ДО проверки error.log — хил обязан сработать даже без лога.
+    try:
+        _autoban_heal_cdn(cfg)
+    except Exception:
+        pass
+    banned = cfg.get("banned", {})
+
     # Автоматически исключаем IP нод из цепочки — они появляются в error.log
     # как источники TLS-соединений и НЕ должны баниться
     for chain_ip in _autoban_get_chain_ips():
@@ -824,7 +914,7 @@ def _autoban_run_once() -> int:
     from chimera.modules.ip_mask import ip_in_entries
     banned    = cfg.get("banned", {})
 
-    error_log = Path("/var/log/xray/error.log")
+    error_log = _XRAY_ERROR_LOG
     if not error_log.exists():
         return 0
 
@@ -862,6 +952,11 @@ def _autoban_run_once() -> int:
             if not ip_m:
                 continue
             ip = ip_m.group(1)
+            #  CDN-ГАРД (инцидент 2026-10-29): edge-IP прокси-сетей
+            # (Cloudflare и др.) не считаем кандидатами на бан —
+            # за CF-прокси это self-DoS (банили edge, атакующий за CF).
+            if ip_in_cdn(ip):
+                continue
             if ip in whitelist or ip_in_entries(ip, whitelist):
                 continue
             ip_errors[ip] = ip_errors.get(ip, 0) + 1
@@ -926,6 +1021,10 @@ def _autoban_install_cron(threshold: int, window: int) -> None:
     success = core.success
 
     sh = _XRAY_BAN_SCRIPT
+    #  CDN-сети для встраивания в автономный cron-скрипт (инцидент
+    # 2026-10-29): скрипт не может import'ить chimera.modules.cdn_ranges,
+    # поэтому список CIDR интерполируется литералом при установке.
+    _cdn_json = json.dumps(cdn_cidrs_compact())
     # Используем heredoc + iptables-fallback для совместимости с Debian 13
     # (нет ufw по умолчанию, textwrap.dedent ломает shebang)
     py_body = f"""import json, re, subprocess, sys, time, shutil
@@ -963,6 +1062,10 @@ def fw_ban(ip):
     #  FIX (кейс AS25369): deny ПЕРВОЙ строкой ufw-user-input — обычный
     # `ufw deny` добавляется в конец, ПОСЛЕ allow-правил портов,
     # и не срабатывает для открытых портов (first-match-wins).
+    #  CDN-ГАРД (инцидент 2026-10-29): edge-IP прокси-сетей не баним —
+    # self-DoS за CF-прокси. _in_cdn определён ниже по коду скрипта.
+    if _in_cdn(ip):
+        return False
     if shutil.which('ufw'):
         return subprocess.run(['ufw','insert','1','deny','from',ip,'to','any','comment','xray-autoban'],
             capture_output=True).returncode == 0
@@ -1173,6 +1276,63 @@ def _wl_hit(ip):
 
 banned = cfg.get('banned', {{}})
 
+#  CDN-ЗАЩИТА (инцидент 2026-10-29: 950 банов edge-IP Cloudflare на живой
+# ноде — домен за CF-прокси, error.log видит edge как источник TLS-ошибок,
+# бан=edge = self-DoS). Список CIDR интерполируется при установке cron из
+# chimera/modules/cdn_ranges.py (cron-скрипт автономен — импорт невозможен).
+CDN_NETS = {_cdn_json}
+
+def _in_cdn(ip):
+    try:
+        _a = _ipa.ip_address(ip)
+    except ValueError:
+        return False
+    for _c in CDN_NETS:
+        try:
+            if _a in _ipa.ip_network(_c, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+#  АВТО-ХИЛ: снимаем баны CDN-сетей, поставленные старыми версиями
+# (инцидент 2026-10-29). До sys.exit(0) при отсутствии error.log и с
+# немедленной записью state — хил не должен теряться на раннем выходе.
+try:
+    _cdn_banned = [ip for ip in list(banned.keys()) if _in_cdn(ip)]
+except Exception:
+    _cdn_banned = []
+if _cdn_banned:
+    _ts_h = datetime.now().isoformat()
+    for _ip in _cdn_banned:
+        # FW: ufw delete (оба поколения правил — с comment и без),
+        # иначе iptables -D. Медленно по-IP — но это ОДНОКРАТНЫЙ хил.
+        if shutil.which('ufw'):
+            _r = subprocess.run(['ufw','delete','deny','from',_ip,'to','any'], capture_output=True)
+            if _r.returncode != 0:
+                _r = subprocess.run(['ufw','delete','deny','from',_ip,'to','any','comment','xray-autoban'], capture_output=True)
+        else:
+            _r = subprocess.run(['iptables','-D','INPUT','-s',_ip,'-j','DROP','-m','comment','--comment','xray-autoban'], capture_output=True)
+        banned.pop(_ip, None)
+        for _h in reversed(cfg.get('ban_history', [])):
+            if _h.get('ip') == _ip and _h.get('unbanned_at') is None:
+                _h['unbanned_at'] = _ts_h
+                break
+    cfg['banned'] = banned
+    try:
+        BAN_STATE.parent.mkdir(parents=True, exist_ok=True)
+        BAN_STATE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
+        BAN_STATE.chmod(0o600)
+    except Exception:
+        pass
+    try:
+        BAN_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(BAN_LOG, 'a') as _f:
+            _f.write(f'[{{datetime.now():%Y-%m-%d %H:%M:%S}}] CDN AUTO-UNBAN: {{len(_cdn_banned)}} IP — баны CDN-сетей отключены\\n')
+    except Exception:
+        pass
+    tg(f'CDN-heal: <b>{{len(_cdn_banned)}}</b> IP прокси-сетей (Cloudflare) разбанено автоматически — баны CDN больше не ставятся')
+
 error_log = Path('/var/log/xray/error.log')
 if not error_log.exists(): sys.exit(0)
 
@@ -1189,7 +1349,10 @@ for line in error_log.read_text(errors='replace').splitlines()[-5000:]:
         except: pass
     if not tls_re.search(line): continue
     im = ip_re.search(line)
-    if not im or _wl_hit(im.group(1)): continue
+    if not im: continue
+    #  CDN-ГАРД: edge-IP прокси-сетей не кандидаты на бан (self-DoS)
+    if _in_cdn(im.group(1)): continue
+    if _wl_hit(im.group(1)): continue
     ip_errors[im.group(1)] = ip_errors.get(im.group(1), 0) + 1
 
 for ip, cnt in ip_errors.items():
@@ -1426,6 +1589,9 @@ def do_manage_autoban() -> None:
         _box_row(f"  Порог:         {CYAN}{cfg.get('threshold', _BAN_THRESHOLD_DEFAULT)}{NC} ошибок "
               f"за {CYAN}{cfg.get('window_min', _BAN_WINDOW_MINUTES)}{NC} мин")
         _box_row(f"  Забанено IP:   {RED if banned else DIM}{len(banned)}{NC}")
+        #  CDN-защита (инцидент 2026-10-29): всегда активна — IP прокси-сетей
+        # (Cloudflare) не баним никогда; старые баны снимает авто-хил/меню [C].
+        _box_row(f"  CDN-защита:    {GREEN}АКТИВНА{NC} {DIM}— {cdn_providers_label()} не банится никогда{NC}")
 
         if banned:
             _box_row(f"  {BOLD}Забаненные IP:{NC}")
@@ -1453,6 +1619,7 @@ def do_manage_autoban() -> None:
         _box_item("4", f"Запустить проверку прямо сейчас")
         _box_item("5", f"Управление whitelist")
         _box_item("6", f"📜 История банов")
+        _box_item("C", f"☁️ Разбанить CDN IP  {DIM}(снять баны с прокси-сетей — {cdn_providers_label()}){NC}")
         _box_item("F", f"🔧 FW-порядок банов  {DIM}(переставить deny выше allow — миграция){NC}")
         _box_item("Q", f"Назад")
         _box_bottom()
@@ -1557,6 +1724,27 @@ def do_manage_autoban() -> None:
                 success(f"Забанено новых IP: {n}")
             else:
                 success("Новых нарушителей не обнаружено")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "c":
+            #  CDN-heal вручную (инцидент 2026-10-29): снимаем баны с
+            # прокси-сетей (Cloudflare) батчем + помечаем историю.
+            print()
+            _cdn_targets = [ip for ip in banned if ip_in_cdn(ip)]
+            if not _cdn_targets:
+                info(f"Банов CDN-сетей нет ({cdn_providers_label()} и так "
+                     f"защищены — гард стоит в скане и _fw_ban)")
+            else:
+                info(f"Снижаю deny-правила CDN-сетей батчем "
+                     f"({len(_cdn_targets)} IP, один reload)...")
+                _t0 = time.monotonic()
+                _n = _autoban_heal_cdn(cfg)
+                _dt = time.monotonic() - _t0
+                if _n:
+                    success(f"CDN-разбан: {_n} IP за {_dt:.1f}с "
+                            f"({cdn_providers_label()})")
+                else:
+                    warn("Хил не нашёл CDN-банов (список изменился?)")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "f":

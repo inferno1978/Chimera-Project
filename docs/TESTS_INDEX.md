@@ -2,7 +2,7 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **314** (гейт-манифест: **314**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **315** (гейт-манифест: **315**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
 ## AmneziaWG (transport Mode B + standalone 2.0) (30)
@@ -356,6 +356,18 @@
 | [`test_subscription_registry.py`](../tests/test_subscription_registry.py) | Тесты для реестра сателлитных протоколов в subscription.py: | ✓ |
 | [`test_subscription_uninstall.py`](../tests/test_subscription_uninstall.py) | Тесты для надёжного uninstall/stop сервиса vless-subscription. | ✓ |
 
+## Безопасность и баны (7)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_autoban.py`](../tests/test_autoban.py) | Unit-тесты для chimera/modules/autoban.py. | ✓ |
+| [`test_cdn_ranges.py`](../tests/test_cdn_ranges.py) | CDN-защита авто-бана (инцидент 2026-10-29: 950 банов edge-IP Cloudflare). | ✓ |
+| [`test_fail2ban_manager.py`](../tests/test_fail2ban_manager.py) | Unit-тесты для chimera/modules/fail2ban_manager.py. | ✓ |
+| [`test_honeypot.py`](../tests/test_honeypot.py) | Unit-тесты для chimera/modules/honeypot.py. | ✓ |
+| [`test_icmp_gate.py`](../tests/test_icmp_gate.py) | Unit-тесты для chimera/modules/icmp_gate.py. | ✓ |
+| [`test_ip_mask.py`](../tests/test_ip_mask.py) | Unit-тесты wildcard-масок IP (фича ipmask-1): 176.9.*.* → 176.9.0.0/16. | ✓ |
+| [`test_ipban.py`](../tests/test_ipban.py) | Unit-тесты для chimera/modules/ipban.py. | ✓ |
+
 ## DNS (DNSCrypt, правила, редирект) (7)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -391,17 +403,6 @@
 | [`test_warp_ssh_guard.py`](../tests/test_warp_ssh_guard.py) | Unit-тесты защиты SSH в chimera/modules/warp.py (живой кейс окт.2026 №12: | ✓ |
 | [`test_warp_subnet_table.py`](../tests/test_warp_subnet_table.py) | Unit-тесты «таблицы подсетей» — warpscout-дашборда Chimera | ✓ |
 | [`test_warp_telegram_probe.py`](../tests/test_warp_telegram_probe.py) | Unit-тесты интеграции идей warpscout / warpscout-tg в WARP-модуль Chimera. | ✓ |
-
-## Безопасность и баны (6)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_autoban.py`](../tests/test_autoban.py) | Unit-тесты для chimera/modules/autoban.py. | ✓ |
-| [`test_fail2ban_manager.py`](../tests/test_fail2ban_manager.py) | Unit-тесты для chimera/modules/fail2ban_manager.py. | ✓ |
-| [`test_honeypot.py`](../tests/test_honeypot.py) | Unit-тесты для chimera/modules/honeypot.py. | ✓ |
-| [`test_icmp_gate.py`](../tests/test_icmp_gate.py) | Unit-тесты для chimera/modules/icmp_gate.py. | ✓ |
-| [`test_ip_mask.py`](../tests/test_ip_mask.py) | Unit-тесты wildcard-масок IP (фича ipmask-1): 176.9.*.* → 176.9.0.0/16. | ✓ |
-| [`test_ipban.py`](../tests/test_ipban.py) | Unit-тесты для chimera/modules/ipban.py. | ✓ |
 
 ## DPI-детекторы и гейты (6)
 

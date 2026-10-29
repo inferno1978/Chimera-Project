@@ -1,8 +1,9 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
-# Обновлён 2026-10-29 (v6): 314 модулей = 312 + test_release_notes (гард
-# парсера Forgejo-Release: первая запись CHANGELOG при наличии преамбулы)
-# + test_tests_index (гард синхронизации: манифест ↔ файлы ↔
-# docs/TESTS_INDEX.md — миграция репо-гигиены 2026-10-29). Список
+# Обновлён 2026-10-29 (v7): 315 модулей = 314 + test_cdn_ranges (CDN-защита
+# авто-бана, инцидент 950 банов edge-IP Cloudflare: гард в скане/_fw_ban +
+# авто-хил старых банов, chimera/modules/cdn_ranges.py). Пред. v6: 314 =
+# 312 + test_release_notes (гард парсера Forgejo-Release) + test_tests_index
+# (гард синка манифест ↔ файлы ↔ docs/TESTS_INDEX.md). Список
 # АВТО-сверяется с файлами: каждый test_*.py обязан быть здесь
 # (полный охват), каждая строка — существующим файлом
 # (проверка — tests/test_tests_index.py).
@@ -64,6 +65,7 @@ tests.test_bootstrap_mirrors
 tests.test_box_renderer
 tests.test_cdn_masking_guide
 tests.test_cdn_masking_path_skip
+tests.test_cdn_ranges
 tests.test_certmon_v2
 tests.test_chain_lb_nodes
 tests.test_chain_nodes
