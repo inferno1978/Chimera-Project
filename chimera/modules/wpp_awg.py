@@ -151,7 +151,10 @@ def _parameters(protocol):
             "ContentPaddingAddition": "%d-%d" % (cp_low, cp_low + rng.randint(8, 40)),
             "RekeyAfterTime": "%d-%d" % (rekey_low, rekey_high),
             "RekeyTimeout": "%d-%d" % (timeout_low, timeout_low + rng.randint(1, 4)),
-            "RejectAfterTime": "%d-%d" % (reject_low, reject_low + rng.randint(30, 90)),
+            # кап 300 (awg_protocol.AWG31_RANGE_KEYS, паритет с
+            # awg31_generate_extra_params): без капа max = 310 > 300
+            "RejectAfterTime": "%d-%d" % (
+                reject_low, reject_low + rng.randint(30, min(90, 300 - reject_low))),
             "KeepaliveTimeout": "%d-%d" % (keepalive_low, keepalive_low + rng.randint(2, 8)),
             "MaxHandshakeAttempts": "%d-%d" % (attempts_low, attempts_low + rng.randint(5, 25)),
             "RandomTrailers": "on",

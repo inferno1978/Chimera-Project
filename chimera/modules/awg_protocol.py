@@ -187,7 +187,11 @@ def awg31_generate_extra_params(rng: Optional[random.Random] = None) -> dict:
         "content_padding_addition": "%d-%d" % (cp_low, cp_low + r.randint(8, 40)),
         "rekey_after_time": "%d-%d" % (rekey_low, rekey_high),
         "rekey_timeout": "%d-%d" % (timeout_low, timeout_low + r.randint(1, 4)),
-        "reject_after_time": "%d-%d" % (reject_low, reject_low + r.randint(30, 90)),
+        # кап 300 (AWG31_RANGE_KEYS): reject_low ≤ 220, ширина 30..90
+        # ограничивается головником окна — без капа max = 310 > 300
+        # (регрессия: ~0.06% генераций не проходили кросс-валидацию)
+        "reject_after_time": "%d-%d" % (
+            reject_low, reject_low + r.randint(30, min(90, 300 - reject_low))),
         "keepalive_timeout": "%d-%d" % (keepalive_low, keepalive_low + r.randint(2, 8)),
         "max_handshake_attempts": "%d-%d" % (attempts_low, attempts_low + r.randint(5, 25)),
         "random_trailers": "on",

@@ -150,6 +150,32 @@ class TestGenerate31ExtraParams(unittest.TestCase):
                          b["content_padding_addition"])
         self.assertEqual(a["rekey_after_time"], b["rekey_after_time"])
 
+    def test_reject_after_time_never_exceeds_cap(self):
+        # Регрессия (флак CI 29.10.2026): reject_low максимум 220
+        # (rekey_high 160 + 60), ширина +randint(30, 90) давала верх
+        # 310 при капе валидатора 300 → ~0.06% генераций невалидны
+        # (30 из 50000). Детерминированный максимальный путь: rng,
+        # всегда возвращающий верхнюю границу — без фикса даёт 310.
+        class _MaxRandint:
+            def randint(self, a, b):
+                return b
+
+        for _ in range(3):
+            p = awg31_generate_extra_params(_MaxRandint())
+            hi = int(p["reject_after_time"].split("-")[1])
+            self.assertLessEqual(hi, 300)
+            self.assertGreaterEqual(hi, 250)  # окно не вырождено
+            ok, err = awg31_validate_extra_params(p)
+            self.assertTrue(ok, msg=err)
+
+    def test_generation_statistically_valid(self):
+        # 2000 случайных генераций — все проходят кросс-валидацию
+        # (до фикса поймали бы невалидные с вероятностью ~70%)
+        for _ in range(2000):
+            ok, err = awg31_validate_extra_params(
+                awg31_generate_extra_params())
+            self.assertTrue(ok, msg=err)
+
 
 class TestValidate31ExtraParams(unittest.TestCase):
     def _valid(self):
