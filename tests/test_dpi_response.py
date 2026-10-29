@@ -77,11 +77,15 @@ class TestState(DrTestBase):
         cfg = dr.state_load()
         self.assertTrue(cfg["enabled"])
         self.assertEqual(cfg["probe_threshold"], 3)
+        self.assertEqual(cfg["probe_threshold_2"], 300)
+        self.assertEqual(cfg["notify_cooldown_min"], 60)
+        self.assertEqual(cfg["fuzz_cooldown_min"], 60)
         self.assertTrue(cfg["action_notify"])
         self.assertTrue(cfg["action_fuzz"])
         self.assertFalse(cfg["action_rotate"])
         self.assertEqual(cfg["mode"], "auto")
         self.assertIn("notifications", cfg["stats"])
+        self.assertIn("score_history", cfg["stats"])
 
     def test_state_save_and_load_roundtrip(self):
         cfg = dr.state_load()
@@ -120,13 +124,24 @@ class TestThreatLevel(DrTestBase):
         self.assertEqual(level, 0)
         self.assertEqual(reasons, [])
 
-    def test_level2_probes(self):
+    def test_level1_probes_background(self):
+        # фон зондирования: выше минимального порога, но ниже порога атаки
+        # и без скачка (пустая база) — уровень 1, а не 2
         cfg = dr.state_load()
         signals = {"probe_score": 5, "mask_gate": None, "dpi_gate": None,
                    "banned_now": 0}
         level, reasons = dr.threat_level(cfg, signals)
-        self.assertEqual(level, 2)
+        self.assertEqual(level, 1)
         self.assertTrue(any("зонды" in r for r in reasons))
+
+    def test_level2_probes_attack_threshold(self):
+        # score ≥ порога атаки → уровень 2
+        cfg = dr.state_load()
+        signals = {"probe_score": 400, "mask_gate": None, "dpi_gate": None,
+                   "banned_now": 0}
+        level, reasons = dr.threat_level(cfg, signals)
+        self.assertEqual(level, 2)
+        self.assertTrue(any("порога атаки" in r for r in reasons))
 
     def test_level2_mask_gate_fail(self):
         cfg = dr.state_load()
@@ -340,7 +355,7 @@ class TestRunOnce(DrTestBase):
         cfg["rotate_window_start"] = h
         cfg["rotate_window_end"] = h + 1
         dr.state_save(cfg)
-        signals = {"probe_score": 5, "mask_gate": None, "dpi_gate": None,
+        signals = {"probe_score": 400, "mask_gate": None, "dpi_gate": None,
                    "banned_now": 0}
         with patch.object(dr, "collect_signals", return_value=signals), \
              patch.object(dr, "_tg_notify", return_value=True), \
@@ -398,6 +413,118 @@ class TestCron(DrTestBase):
         self.assertEqual(dr.CRON_FILE.stat().st_mode & 0o777, 0o644)
         dr.cron_remove()
         self.assertFalse(dr.CRON_FILE.exists())
+
+
+class TestNotifyAntiSpam(DrTestBase):
+    """Анти-спам TG: уведомление — событие, а не каждый 5-минутный прогон.
+
+    Сценарий боевого инцидента: RU-нода с постоянным фоном зондирования
+    (score 26–150 при пороге 3) давала уровень 2 КАЖДЫЙ прогон крона →
+    десятки одинаковых алертов в TG за утро.
+    """
+
+    SIG_L1 = {"probe_score": 50, "mask_gate": None, "dpi_gate": None,
+              "banned_now": 0}           # уровень 1 (фон)
+    SIG_L2 = {"probe_score": 400, "mask_gate": None, "dpi_gate": None,
+              "banned_now": 0}           # уровень 2 (≥ порога атаки)
+    SIG_QUIET = {"probe_score": 0, "mask_gate": None, "dpi_gate": None,
+                 "banned_now": 0}
+
+    def setUp(self):
+        super().setUp()
+        cfg = dr.state_load()
+        cfg["action_fuzz"] = False       # изолируем логику уведомлений
+        dr.state_save(cfg)
+
+    def _run(self, signals):
+        with patch.object(dr, "collect_signals", return_value=signals), \
+             patch.object(dr, "_tg_notify", return_value=True):
+            return dr.dpi_response_run_once()
+
+    def test_same_level_silent_on_second_run(self):
+        out1 = self._run(self.SIG_L1)
+        self.assertIn("notify", out1["actions"])
+        out2 = self._run(self.SIG_L1)
+        self.assertNotIn("notify", out2["actions"])
+        self.assertIn("notify-skipped:cooldown", out2["actions"])
+        self.assertEqual(dr.state_load()["stats"]["notifications"], 1)
+
+    def test_escalation_notifies_immediately(self):
+        self._run(self.SIG_L1)
+        out = self._run(self.SIG_L2)
+        self.assertIn("notify", out["actions"])
+        cfg = dr.state_load()
+        self.assertEqual(cfg["stats"]["notifications"], 2)
+        self.assertEqual(cfg["stats"]["last_notify"]["level"], 2)
+
+    def test_reminder_after_cooldown_at_level2(self):
+        self._run(self.SIG_L2)
+        # состариваем last_notify на 2 часа — атака продолжается
+        cfg = dr.state_load()
+        cfg["stats"]["last_notify"]["ts"] = (
+            datetime.now() - timedelta(hours=2)).isoformat(timespec="seconds")
+        dr.state_save(cfg)
+        out = self._run(self.SIG_L2)
+        self.assertIn("notify", out["actions"])
+        self.assertEqual(dr.state_load()["stats"]["notifications"], 2)
+
+    def test_spike_against_baseline_elevates_level(self):
+        # база ~10 → score 200: 200 ≥ 4×max(10, 40)=160 → уровень 2
+        cfg = dr.state_load()
+        cfg["stats"]["score_history"] = [10, 12, 11, 9, 10]
+        dr.state_save(cfg)
+        signals = {"probe_score": 200, "mask_gate": None,
+                   "dpi_gate": None, "banned_now": 0}
+        level, reasons = dr.threat_level(cfg, signals)
+        self.assertEqual(level, 2)
+        self.assertTrue(any("скачок" in r for r in reasons))
+
+    def test_steady_background_is_level1(self):
+        # градация: 3 ≤ score < порога атаки, без скачка против базы — фон
+        cfg = dr.state_load()
+        cfg["stats"]["score_history"] = [40, 45, 42]
+        dr.state_save(cfg)
+        signals = {"probe_score": 50, "mask_gate": None,
+                   "dpi_gate": None, "banned_now": 0}
+        level, _ = dr.threat_level(cfg, signals)
+        self.assertEqual(level, 1)
+
+    def test_normalization_message_once(self):
+        self._run(self.SIG_L1)
+        out_q1 = self._run(self.SIG_QUIET)   # quiet_runs=1 — анти-дребезг
+        self.assertNotIn("notify-ok", out_q1["actions"])
+        out_q2 = self._run(self.SIG_QUIET)   # quiet_runs=2 → нормализация
+        self.assertIn("notify-ok", out_q2["actions"])
+        out_q3 = self._run(self.SIG_QUIET)   # уже отправлено — тишина
+        self.assertNotIn("notify-ok", out_q3["actions"])
+        cfg = dr.state_load()
+        self.assertEqual(cfg["stats"]["notifications"], 2)  # алерт + итог
+        self.assertIsNone(cfg["stats"]["last_notify"])
+
+    def test_flap_single_quiet_run_keeps_episode(self):
+        # один тихий прогон внутри эпизода не рвёт его и не плодит сообщения
+        self._run(self.SIG_L1)
+        self._run(self.SIG_QUIET)
+        out = self._run(self.SIG_L1)        # возврат фона — не новое событие
+        self.assertNotIn("notify", out["actions"])
+        self.assertNotIn("notify-ok", out["actions"])
+        self.assertEqual(dr.state_load()["stats"]["notifications"], 1)
+
+
+class TestFuzzCooldown(DrTestBase):
+    def test_fuzz_not_repeated_within_cooldown(self):
+        dr.state_save(dr.state_load())
+        signals = {"probe_score": 50, "mask_gate": None,
+                   "dpi_gate": None, "banned_now": 0}
+        with patch.object(dr, "collect_signals", return_value=signals), \
+             patch.object(dr, "_tg_notify", return_value=True), \
+             patch.object(dr, "action_fuzz", return_value={"ok": True}) as mock_fz:
+            out1 = dr.dpi_response_run_once()
+            out2 = dr.dpi_response_run_once()
+        self.assertIn("fuzz", out1["actions"])
+        self.assertIn("fuzz-skipped:cooldown", out2["actions"])
+        self.assertEqual(mock_fz.call_count, 1)
+        self.assertEqual(dr.state_load()["stats"]["fuzz_runs"], 1)
 
 
 if __name__ == "__main__":

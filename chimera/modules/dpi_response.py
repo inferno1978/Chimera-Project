@@ -16,6 +16,12 @@ rotate without disconnect» из AIVPN, адаптация под оркестр
   • Защиты: cooldown между ротациями (6 ч), max ротаций/сутки (2),
     ночной буфер 03:00–06:00, режим «только notify» при повторных
     неудачах, полный audit-trail в dpi_response.json
+  • Анти-спам уведомлений: TG — событие (старт эпизода / эскалация
+    уровня / скачок score против скользящей базы / напоминание при
+    удержании уровня 2 дольше notify_cooldown_min), а не каждый
+    5-минутный прогон крона. Фоновое зондирование (типично для
+    RU-нод: счётчик постоянно выше минимального порога) молча
+    пишется в лог/history; фаззер — не чаще fuzz_cooldown_min
   • Cron каждые 5 мин (main.py --dpi-response)
 
 State: /var/lib/xray-installer/dpi_response.json
@@ -48,21 +54,32 @@ CRON_FILE           = Path("/etc/cron.d/chimera-dpi-response")
 #    с ночным окном; включается оператором осознанно) ─────────────────────────
 DEFAULTS = {
     "enabled": True,              # cron-прогон активен
-    "probe_threshold": 3,         # зондов за окно → реакция
+    "probe_threshold": 3,         # зондов за окно → уровень 1 (подозрение)
+    "probe_threshold_2": 300,     # score за окно → уровень 2 (атака)
     "window_min": 30,             # окно агрегации зондов, мин
-    "action_notify": True,        # уровень 0: TG-уведомление
+    "action_notify": True,        # TG-уведомление (анти-спам — _notify_gate)
     "action_fuzz": True,          # уровень 1: авто-фаззер фрагментации
     "action_rotate": False,       # уровень 2: авто-ротация REALITY-ключей
+    "notify_cooldown_min": 60,    # анти-спам: пауза повторных уведомлений
+    "notify_spike_ratio": 4.0,    # score ≥ ratio×базы → уровень 2 (скачок)
+    "fuzz_cooldown_min": 60,      # анти-спам ресурса: пауза авто-фаззера
+    "spike_baseline_floor": 40,   # мин. база для детекта скачка (анти-шум)
     "rotate_window_start": 3,     # ночное окно: с 03:00
     "rotate_window_end": 6,       # до 06:00
     "rotate_cooldown_hours": 6,   # мин. пауза между ротациями
     "rotate_max_per_day": 2,      # предохранитель: не более 2 ротаций/сутки
     "history": [],                # журнал действий (последние 100)
     "stats": {"notifications": 0, "fuzz_runs": 0, "rotations": 0,
-              "last_probe_score": 0},
+              "last_probe_score": 0,
+              "score_history": [],   # скользящая база score (детект скачков)
+              "last_notify": None,   # {ts, level, score} последнего TG
+              "episode_start": None, # начало текущего эпизода (level ≥ 1)
+              "active_episode": False,
+              "quiet_runs": 0},      # тихих прогонов подряд (конец эпизода)
     "mode": "auto",               # auto | notify-only (после сбоев)
 }
 _MAX_HISTORY = 100
+_SCORE_WINDOW = 12  # прогонов крона (по 5 мин) в скользящей базе score
 
 
 def _log(level: str, msg: str) -> None:
@@ -109,6 +126,23 @@ def _history_append(cfg: dict, entry: dict) -> None:
     entry["ts"] = datetime.now().isoformat(timespec="seconds")
     cfg.setdefault("history", []).append(entry)
     cfg["history"] = cfg["history"][-_MAX_HISTORY:]
+
+
+def _last_action_ts(history: list, action: str) -> Optional[str]:
+    """ts последнего действия action в history (или None)."""
+    for h in reversed(history or []):
+        if isinstance(h, dict) and h.get("action") == action:
+            return h.get("ts")
+    return None
+
+
+def _score_baseline(cfg: dict) -> float:
+    """Средний score за последние _SCORE_WINDOW прогонов (база скачка)."""
+    hist = (cfg.get("stats") or {}).get("score_history")
+    if not isinstance(hist, list):
+        return 0.0
+    vals = [x for x in hist[-_SCORE_WINDOW:] if isinstance(x, (int, float))]
+    return sum(vals) / len(vals) if vals else 0.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -209,16 +243,35 @@ def _latest_json_report(directory: Path, prefix: str,
 
 
 def threat_level(cfg: dict, signals: dict) -> tuple:
-    """0 — тишина, 1 — подозрение, 2 — атака (зонды/FAIL-вердикты).
+    """0 — тишина, 1 — подозрение (фон зондирования), 2 — атака.
+
+    Уровень 2: score ≥ probe_threshold_2 (порог атаки), скачок против
+    скользящей базы (score ≥ notify_spike_ratio×базы) либо mask_gate
+    FAIL. Фоновое зондирование (score выше минимального порога, но без
+    скачка) — уровень 1: фиксируется в лог/history, не дёргает оператора.
 
     Возвращает (level, reasons[]).
     """
     reasons = []
     level = 0
-    if signals["probe_score"] >= cfg["probe_threshold"]:
-        level = 2
-        reasons.append(f"DPI-зонды: score {signals['probe_score']} "
+    score = signals["probe_score"]
+    if score >= cfg["probe_threshold"]:
+        level = 1
+        reasons.append(f"DPI-зонды: score {score} "
                        f"≥ порога {cfg['probe_threshold']}")
+        t2 = int(cfg.get("probe_threshold_2", 300))
+        if score >= t2:
+            level = 2
+            reasons.append(f"score {score} ≥ порога атаки ({t2})")
+        else:
+            base = _score_baseline(cfg)
+            if base > 0:
+                ratio = float(cfg.get("notify_spike_ratio", 4.0))
+                floor = float(cfg.get("spike_baseline_floor", 40))
+                if score >= ratio * max(base, floor):
+                    level = 2
+                    reasons.append(f"скачок: score {score} "
+                                   f"≥ {ratio:g}× базы ({base:.0f})")
     if signals["mask_gate"] == "FAIL":
         level = max(level, 2)
         reasons.append("mask_gate: FAIL (трафик классифицируется как VPN)")
@@ -237,6 +290,35 @@ def threat_level(cfg: dict, signals: dict) -> tuple:
 # ══════════════════════════════════════════════════════════════════════════════
 # 2. ДЕЙСТВИЯ
 # ══════════════════════════════════════════════════════════════════════════════
+def _notify_gate(cfg: dict, level: int) -> tuple:
+    """Анти-спам: решает, слать ли TG-уведомление в этом прогоне.
+
+    Слать, если:
+      • episode_start — первое уведомление эпизода (после тишины);
+      • escalate — уровень вырос относительно последнего уведомления;
+      • reminder — уровень 2 держится дольше notify_cooldown_min
+        (атака продолжается — оператору нужно напоминание).
+    Тот же уровень в рамках cooldown — молчим (фон пишется в лог).
+
+    Возвращает (send, why).
+    """
+    stats = cfg.get("stats") or {}
+    last = stats.get("last_notify") or {}
+    last_ts, last_lvl = last.get("ts"), int(last.get("level") or 0)
+    if not last_ts:
+        return True, "episode_start"
+    try:
+        dt = datetime.fromisoformat(str(last_ts))
+    except ValueError:
+        return True, "state_recovered"
+    if level > last_lvl:
+        return True, "escalate"
+    if (level >= 2 and datetime.now() - dt >=
+            timedelta(minutes=int(cfg.get("notify_cooldown_min", 60)))):
+        return True, "reminder"
+    return False, "cooldown"
+
+
 def _tg_notify(message: str) -> bool:
     """TG-уведомление через ядро (не падает, если TG не настроен)."""
     try:
@@ -338,8 +420,15 @@ def dpi_response_run_once() -> dict:
         return {"ran": False, "reason": "disabled"}
 
     signals = collect_signals(cfg)
-    cfg["stats"]["last_probe_score"] = signals["probe_score"]
+    stats = cfg["stats"]
+    score = int(signals["probe_score"])
+    stats["last_probe_score"] = score
     level, reasons = threat_level(cfg, signals)
+    # скользящая база для детекта скачков — прошлые окна (без текущего)
+    hist = stats.get("score_history")
+    hist = list(hist) if isinstance(hist, list) else []
+    hist.append(score)
+    stats["score_history"] = hist[-_SCORE_WINDOW:]
     outcome = {"ran": True, "level": level, "reasons": reasons,
                "signals": signals, "actions": []}
 
@@ -354,27 +443,75 @@ def dpi_response_run_once() -> dict:
                     _history_append(cfg, {"action": "auto-resume"})
             except (StopIteration, ValueError):
                 pass
+        # Конец эпизода: 2 тихих прогона подряд (анти-дребезг 1↔0) —
+        # одно итоговое сообщение вместо потока «нормализовалось»
+        stats["quiet_runs"] = int(stats.get("quiet_runs", 0)) + 1
+        if stats.get("active_episode") and stats["quiet_runs"] >= 2:
+            stats["active_episode"] = False
+            if cfg.get("action_notify") and stats.get("last_notify"):
+                dur = ""
+                try:
+                    if stats.get("episode_start"):
+                        mins = ((datetime.now()
+                                 - datetime.fromisoformat(str(stats["episode_start"])))
+                                .total_seconds() // 60)
+                        dur = f", эпизод ~{int(mins)} мин"
+                except ValueError:
+                    pass
+                _tg_notify(f"✅ DPI-фон нормализовался (уровень 0/2, "
+                           f"score={score}{dur})")
+                stats["notifications"] = int(stats.get("notifications", 0)) + 1
+                outcome["actions"].append("notify-ok")
+            stats["last_notify"] = None
+            stats["episode_start"] = None
         state_save(cfg)
         return outcome
 
-    # ── уровень ≥1: уведомление всегда ──
-    if cfg.get("action_notify"):
-        msg = (f"🛡️ DPI-активность (уровень {level}/2)\n"
-               + "\n".join(f"• {r}" for r in reasons)
-               + (f"\nprobe_score={signals['probe_score']}" ))
-        _tg_notify(msg)
-        cfg["stats"]["notifications"] = int(cfg["stats"].get("notifications", 0)) + 1
-        outcome["actions"].append("notify")
+    # ── уровень ≥ 1: эпизод активности (трекаем начало/конец) ──
+    stats["quiet_runs"] = 0
+    stats["active_episode"] = True
+    if not stats.get("episode_start"):
+        stats["episode_start"] = datetime.now().isoformat(timespec="seconds")
 
-    # ── уровень 1: фаззер (если включён и режим auto) ──
+    # ── уведомление TG — событие, а не каждый прогон (анти-спам) ──
+    if cfg.get("action_notify"):
+        send, why = _notify_gate(cfg, level)
+        if send:
+            msg = (f"🛡️ DPI-активность (уровень {level}/2)\n"
+                   + "\n".join(f"• {r}" for r in reasons)
+                   + (f"\nprobe_score={signals['probe_score']}" ))
+            _tg_notify(msg)
+            stats["notifications"] = int(stats.get("notifications", 0)) + 1
+            stats["last_notify"] = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "level": level, "score": score}
+            outcome["actions"].append("notify")
+        else:
+            outcome["actions"].append(f"notify-skipped:{why}")
+            _log("INFO", f"notify suppressed ({why}): "
+                         f"level={level} score={score}")
+
+    # ── уровень 1: фаззер (не чаще кулдауна — фон не должен молотить) ──
     fuzz_result = None
     if level >= 1 and cfg.get("action_fuzz") and cfg.get("mode") == "auto":
-        fuzz_result = action_fuzz()
-        cfg["stats"]["fuzz_runs"] = int(cfg["stats"].get("fuzz_runs", 0)) + 1
-        outcome["actions"].append("fuzz")
-        _history_append(cfg, {"action": "fuzz", "level": level,
-                              "ok": fuzz_result.get("ok"),
-                              "detail": fuzz_result.get("detail") or fuzz_result.get("error") or ""})
+        last_fuzz = _last_action_ts(cfg["history"], "fuzz")
+        fuzz_due = True
+        if last_fuzz:
+            try:
+                if (datetime.now() - datetime.fromisoformat(str(last_fuzz)) <
+                        timedelta(minutes=int(cfg.get("fuzz_cooldown_min", 60)))):
+                    fuzz_due = False
+            except ValueError:
+                pass
+        if fuzz_due:
+            fuzz_result = action_fuzz()
+            cfg["stats"]["fuzz_runs"] = int(cfg["stats"].get("fuzz_runs", 0)) + 1
+            outcome["actions"].append("fuzz")
+            _history_append(cfg, {"action": "fuzz", "level": level,
+                                  "ok": fuzz_result.get("ok"),
+                                  "detail": fuzz_result.get("detail") or fuzz_result.get("error") or ""})
+        else:
+            outcome["actions"].append("fuzz-skipped:cooldown")
 
     # ── уровень 2: ротация (если включена, фаззер не помог / не запускался) ──
     if (level >= 2 and cfg.get("action_rotate") and cfg.get("mode") == "auto"
@@ -489,9 +626,14 @@ def do_manage_dpi_response() -> None:
         print(f"  Cron (5 мин):     {GREEN + 'ВКЛЮЧЁН' + NC if cron_on else DIM + 'ОТКЛЮЧЁН' + NC}")
         print(f"  Режим:            {mode_color}{cfg['mode']}{NC} "
               f"{DIM}(notify-only = авто-действия выключены до разбора){NC}")
-        print(f"  Порог зондов:     {CYAN}{cfg['probe_threshold']}{NC} за {CYAN}{cfg['window_min']}{NC} мин")
-        print(f"  Уведомления TG:   {GREEN + 'да' + NC if cfg['action_notify'] else DIM + 'нет' + NC}")
-        print(f"  Авто-фаззер:      {GREEN + 'да' + NC if cfg['action_fuzz'] else DIM + 'нет' + NC}")
+        print(f"  Порог зондов:     {CYAN}{cfg['probe_threshold']}{NC} за {CYAN}{cfg['window_min']}{NC} мин "
+              f"{DIM}(атака lvl2: ≥{cfg['probe_threshold_2']}, "
+              f"спайк ×{cfg['notify_spike_ratio']:g} базы){NC}")
+        print(f"  Уведомления TG:   {GREEN + 'да' + NC if cfg['action_notify'] else DIM + 'нет' + NC} "
+              f"{DIM}(анти-спам: кулдаун {cfg['notify_cooldown_min']} мин, "
+              f"эскалация/спайк — сразу){NC}")
+        print(f"  Авто-фаззер:      {GREEN + 'да' + NC if cfg['action_fuzz'] else DIM + 'нет' + NC} "
+              f"{DIM}(не чаще раза в {cfg['fuzz_cooldown_min']} мин){NC}")
         print(f"  Авто-ротация:     {GREEN + 'да' + NC if cfg['action_rotate'] else DIM + 'нет' + NC} "
               f"{DIM}(окно {cfg['rotate_window_start']:02d}-{cfg['rotate_window_end']:02d}, "
               f"cooldown {cfg['rotate_cooldown_hours']}ч, ≤{cfg['rotate_max_per_day']}/сутки){NC}")
@@ -523,12 +665,21 @@ def do_manage_dpi_response() -> None:
             input(f"  {BLUE}Enter...{NC}")
         elif ch == "2":
             print()
-            raw_t = input(f"  Порог зондов [{cfg['probe_threshold']}]: ").strip()
+            raw_t = input(f"  Порог зондов, уровень 1 [{cfg['probe_threshold']}]: ").strip()
+            raw_t2 = input(f"  Порог атаки, уровень 2 [{cfg['probe_threshold_2']}]: ").strip()
             raw_w = input(f"  Окно, мин [{cfg['window_min']}]: ").strip()
+            raw_cd = input(f"  Кулдаун TG-уведомлений, мин [{cfg['notify_cooldown_min']}]: ").strip()
+            raw_fc = input(f"  Кулдаун авто-фаззера, мин [{cfg['fuzz_cooldown_min']}]: ").strip()
             if raw_t.isdigit() and int(raw_t) > 0:
                 cfg["probe_threshold"] = int(raw_t)
+            if raw_t2.isdigit() and int(raw_t2) > 0:
+                cfg["probe_threshold_2"] = int(raw_t2)
             if raw_w.isdigit() and int(raw_w) > 0:
                 cfg["window_min"] = int(raw_w)
+            if raw_cd.isdigit() and int(raw_cd) >= 0:
+                cfg["notify_cooldown_min"] = int(raw_cd)
+            if raw_fc.isdigit() and int(raw_fc) >= 0:
+                cfg["fuzz_cooldown_min"] = int(raw_fc)
             state_save(cfg)
             input(f"  {BLUE}Enter...{NC}")
         elif ch == "3":
