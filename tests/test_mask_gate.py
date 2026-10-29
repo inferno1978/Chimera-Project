@@ -410,6 +410,66 @@ class TestStateHelpers(unittest.TestCase):
             self.assertIsNone(mg.get_xray_port_from_state(p))
             self.assertIsNone(mg.get_xray_port_from_state(Path(td) / "no.json"))
 
+    def test_get_xray_port_from_config(self):
+        """Mode B chain: state.json порта не содержит — порт живёт
+        в /etc/xray/config.json. Воспроизводит прод-ноды: vless на 443
+        + dokodemo-door на loopback (их брать нельзя)."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "config.json"
+            # прод-формат: vless внешний + два dokodemo-door на 127.0.0.1
+            cfg.write_text(json.dumps({"inbounds": [
+                {"protocol": "vless", "port": 443, "listen": "::"},
+                {"protocol": "dokodemo-door", "port": 10085,
+                 "listen": "127.0.0.1"},
+                {"protocol": "dokodemo-door", "port": 10811,
+                 "listen": "127.0.0.1"},
+            ]}), encoding="utf-8")
+            self.assertEqual(mg.get_xray_port_from_config(cfg), 443)
+            # vless не первым: dokodemo-door скипается, vless всё равно найден
+            cfg.write_text(json.dumps({"inbounds": [
+                {"protocol": "dokodemo-door", "port": 10085,
+                 "listen": "127.0.0.1"},
+                {"protocol": "vless", "port": 8443},
+            ]}), encoding="utf-8")
+            self.assertEqual(mg.get_xray_port_from_config(cfg), 8443)
+            # порт-диапазон строкой — не берём
+            cfg.write_text(json.dumps({"inbounds": [
+                {"protocol": "vless", "port": "1000-2000"},
+            ]}), encoding="utf-8")
+            self.assertIsNone(mg.get_xray_port_from_config(cfg))
+            # не-vless внешний inbound — фолбэк
+            cfg.write_text(json.dumps({"inbounds": [
+                {"protocol": "trojan", "port": "9443"},
+            ]}), encoding="utf-8")
+            self.assertEqual(mg.get_xray_port_from_config(cfg), 9443)
+            # всё служебное/локальное → None; мусор/нет файла → None
+            cfg.write_text(json.dumps({"inbounds": [
+                {"protocol": "socks", "port": 1080, "listen": "127.0.0.1"},
+            ]}), encoding="utf-8")
+            self.assertIsNone(mg.get_xray_port_from_config(cfg))
+            cfg.write_text("{not json", encoding="utf-8")
+            self.assertIsNone(mg.get_xray_port_from_config(cfg))
+            self.assertIsNone(
+                mg.get_xray_port_from_config(Path(td) / "no.json"))
+
+    def test_get_xray_port_composite(self):
+        """state.json приоритетнее; пустой state.json → конфиг Xray;
+        нигде ничего → None (TUI предложит дефолт 443)."""
+        with tempfile.TemporaryDirectory() as td:
+            st = Path(td) / "state.json"
+            cfg = Path(td) / "config.json"
+            st.write_text(json.dumps({"PARAM_PORT": 2053}), encoding="utf-8")
+            cfg.write_text(json.dumps({"inbounds": [
+                {"protocol": "vless", "port": 443}]}), encoding="utf-8")
+            with patch.object(mg, "STATE_FILE", st), \
+                    patch.object(mg, "XRAY_CONFIG", cfg):
+                self.assertEqual(mg.get_xray_port(), 2053)  # state.json выиграл
+                st.write_text(json.dumps({"awg_installed": True}),
+                              encoding="utf-8")  # Mode B: порта нет
+                self.assertEqual(mg.get_xray_port(), 443)  # → конфиг Xray
+                cfg.write_text("{}", encoding="utf-8")
+                self.assertIsNone(mg.get_xray_port())      # нигде нет
+
     def test_get_server_ip_from_state(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "state.json"

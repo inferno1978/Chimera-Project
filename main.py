@@ -144,16 +144,17 @@ if "--mask-gate" in sys.argv:
         print("ERROR: требуются права root (tcpdump)", file=sys.stderr)
         sys.exit(1)
     from chimera.modules.mask_gate import (
-        run_mask_gate, get_xray_port_from_state, generate_probe_traffic,
+        run_mask_gate, get_xray_port, generate_probe_traffic,
         get_server_ip_from_state)
     _port = None
     _argv = sys.argv[sys.argv.index("--mask-gate") + 1:]
     if _argv and _argv[0].isdigit():
         _port = int(_argv[0])
     if _port is None:
-        _port = get_xray_port_from_state()
+        _port = get_xray_port()  # state.json → /etc/xray/config.json
     if _port is None:
-        print("ERROR: порт Xray не найден (укажите: --mask-gate <port>)",
+        print("ERROR: порт Xray не найден в state.json и /etc/xray/config.json"
+              " (укажите: --mask-gate <port>)",
               file=sys.stderr)
         sys.exit(1)
     _ip = get_server_ip_from_state()

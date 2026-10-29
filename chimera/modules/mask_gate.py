@@ -50,8 +50,13 @@ from chimera.modules.dpi_gate import (
 # ── Пути и константы ──────────────────────────────────────────────────────────
 _LIB_DIR    = Path("/var/lib/xray-installer")
 STATE_FILE  = _LIB_DIR / "state.json"
+XRAY_CONFIG = Path("/etc/xray/config.json")   # реальный порт VLESS живёт тут
 REPORT_DIR  = _LIB_DIR / "mask_gate"
 CAPTURE_DIR = Path("/tmp/chimera_mask_gate")
+
+# Локальные/служебные inbound Xray: не суть маскировки, скипаем
+_SKIP_PROTOCOLS = {"dokodemo-door", "dns", "blackhole", "socks", "http"}
+_LOOPBACK_LISTENS = {"127.0.0.1", "localhost", "::1"}
 
 TCPDUMP_BIN = "tcpdump"
 TSHARK_BIN  = "tshark"
@@ -663,10 +668,15 @@ def generate_probe_traffic(host: str, port: int, count: int = 6) -> int:
     return ok
 
 
-def get_xray_port_from_state(state_path: Path = STATE_FILE) -> Optional[int]:
-    """Порт Xray из state.json (PARAM_PORT / port / listen)."""
+def get_xray_port_from_state(state_path: Optional[Path] = None) -> Optional[int]:
+    """Порт Xray из state.json (PARAM_PORT / port / listen).
+
+    Путь резолвится в runtime (не дефолт-аргумент) — иначе патч STATE_FILE
+    в тестах не действует на прод-путь (урок cb461fa из dpi_gate.load_model).
+    """
+    state_path = Path(state_path) if state_path else STATE_FILE
     try:
-        st = json.loads(Path(state_path).read_text(encoding="utf-8"))
+        st = json.loads(state_path.read_text(encoding="utf-8"))
     except Exception:
         return None
     for key in ("PARAM_PORT", "port", "listen_port", "xray_port"):
@@ -688,9 +698,63 @@ def get_xray_port_from_state(state_path: Path = STATE_FILE) -> Optional[int]:
     return None
 
 
-def get_server_ip_from_state(state_path: Path = STATE_FILE) -> Optional[str]:
+def get_xray_port_from_config(config_path: Optional[Path] = None) -> Optional[int]:
+    """Порт основного inbound Xray из /etc/xray/config.json.
+
+    На установках Mode B chain (вся текущая линейка) state.json не содержит
+    порта Xray вовсе — там только ключи awg_*/chain_*. Реальный VLESS-порт
+    живёт в конфиге Xray: первый inbound с протоколом vless (или любой
+    не-служебный), слушающий не на loopback.
+    """
+    config_path = Path(config_path) if config_path else XRAY_CONFIG
     try:
-        st = json.loads(Path(state_path).read_text(encoding="utf-8"))
+        cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    inbounds = cfg.get("inbounds")
+    if not isinstance(inbounds, list):
+        return None
+
+    def _port_of(inb: dict) -> Optional[int]:
+        v = inb.get("port")
+        if isinstance(v, int) and 1 <= v <= 65535:
+            return v
+        if isinstance(v, str) and v.isdigit() and 1 <= int(v) <= 65535:
+            return int(v)
+        return None  # диапазоны "1000-2000" и мусор не берём
+
+    fallback = None
+    for inb in inbounds:
+        if not isinstance(inb, dict):
+            continue
+        proto = str(inb.get("protocol") or "").lower()
+        listen = str(inb.get("listen") or "").lower()
+        port = _port_of(inb)
+        if port is None:
+            continue
+        if proto in _SKIP_PROTOCOLS or listen in _LOOPBACK_LISTENS:
+            continue  # dokodemo-door на 127.0.0.1 — не то, что ищем
+        if proto == "vless":
+            return port  # основной кандидат — сразу
+        if fallback is None:
+            fallback = port  # не-vless внешний inbound (trojan/…) — запомнить
+    return fallback
+
+
+def get_xray_port() -> Optional[int]:
+    """Композитный резолвер порта: state.json → /etc/xray/config.json.
+
+    Порядок: legacy-инсталлы писали порт в state.json (PARAM_PORT и пр.),
+    Mode B chain — только в конфиге Xray.
+    """
+    return (get_xray_port_from_state()
+            or get_xray_port_from_config())
+
+
+def get_server_ip_from_state(state_path: Optional[Path] = None) -> Optional[str]:
+    state_path = Path(state_path) if state_path else STATE_FILE
+    try:
+        st = json.loads(state_path.read_text(encoding="utf-8"))
     except Exception:
         return None
     for key in ("PARAM_SERVER_IP", "server_ip", "public_ip", "ip"):
@@ -715,7 +779,7 @@ def do_manage_mask_gate() -> None:
             "tshark": _shutil_which(TSHARK_BIN),
             "ndpiReader": _shutil_which(NDPI_BIN),
         }
-        detected_port = get_xray_port_from_state()
+        detected_port = get_xray_port()
         rp = latest_report(max_age_secs=86400)
         print()
         print(f"  {BOLD}🎭  MASK GATE — гейт маскировки (идея AIVPN make mask-gate){NC}")
@@ -746,9 +810,13 @@ def do_manage_mask_gate() -> None:
         if ch == "1":
             print()
             port = detected_port
-            raw_p = input(f"  {BLUE}Порт Xray [{port or '443'}]:{NC} ").strip()
-            if raw_p.isdigit():
+            default_hint = str(port) if port else "443"
+            raw_p = input(f"  {BLUE}Порт Xray [{default_hint}]:{NC} ").strip()
+            if raw_p.isdigit() and 1 <= int(raw_p) <= 65535:
                 port = int(raw_p)
+            elif not raw_p and not port:
+                # Enter на пустом детекте = приняли подсказку [443]
+                port = 443
             if not port:
                 print(f"  {RED}Порт не определён{NC}")
                 input(f"  {BLUE}Enter...{NC}")
