@@ -705,7 +705,7 @@ class TestRemoteDefaultBranch(UpdaterTempBase):
 
     def test_parse_symref_line(self):
         cp = _cp(0, "ref: refs/heads/main\tHEAD\n"
-                    "c15473d6ba39043be1cdbafc59c17b6e5cc9c581\tHEAD\n")
+                    "380b51846017775da8c845e869e77ab56e838d7e\tHEAD\n")
         with patch.object(updater, "_git", return_value=cp):
             self.assertEqual(updater.remote_default_branch(self.repo), "main")
 

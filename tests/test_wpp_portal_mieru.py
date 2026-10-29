@@ -507,7 +507,7 @@ class TestUiMarkup(unittest.TestCase):
         self.assertIn("🟣 Mieru", html)
 
     def test_inline_onclick_quotes_escaped(self):
-        """Регрессия b8ff5f6: switchTab(\\'awg\\') с ОДНИМ бэкслешем на уровне
+        """Регрессия 5c4ee01: switchTab(\\'awg\\') с ОДНИМ бэкслешем на уровне
         Python «схлопывался» в switchTab('awg') и разрывал JS-строку
         (Uncaught SyntaxError: missing ) after argument list → весь
         скрипт-блок портала умирал: кнопки/вкладки/pwStrength).

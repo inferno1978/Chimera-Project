@@ -1064,7 +1064,7 @@ class TestMigrationOldToDetailed(unittest.TestCase):
 class TestCronObservability(unittest.TestCase):
     """cron-врапперы логируют stderr вместо /dev/null (кейс №10).
 
-    Битый враппер (без sys.path — чинено в 583379d) месяцами молча падал
+    Битый враппер (без sys.path — чинено в 19cdace) месяцами молча падал
     с ModuleNotFoundError, потому что весь вывод уходил в /dev/null 2>&1.
     """
 

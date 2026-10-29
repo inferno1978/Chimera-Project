@@ -729,7 +729,7 @@ class TestGeneratedBotHardening(unittest.TestCase):
         self.assertIn('f"API error {method} (попытка {_att}/3): {e}"', script)
 
     def test_api_proxy_support_present(self):
-        """Прокси из telegram.json (фикс 4e645199, рефактор 13.10.2026).
+        """Прокси из telegram.json (фикс 004cccf, рефактор 13.10.2026).
 
         Было: urllib + ProxyHandler. Стало: http.client keep-alive,
         _api_connect() открывает HTTP CONNECT-туннель при новом

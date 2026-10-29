@@ -673,7 +673,7 @@ class TestInnerScriptRealLinkqrLibIntegration(unittest.TestCase):
 class TestClientBotTemplateProxyIPv4Retries(unittest.TestCase):
     """Прокси/IPv4-first/ретраи в сгенерированном клиентском боте.
 
-    Фикс 4e645199 покрыл админ-бота, но ПРОПУСТИЛ клиентский шаблон —
+    Фикс 004cccf покрыл админ-бота, но ПРОПУСТИЛ клиентский шаблон —
     инцидент 08.10.2026, RU-2: клиентский бот продолжал ходить напрямую
     и умирал на мёртвом IPv6 (Errno 101, ~36ч дауна). Этот класс держит
     регрессию: прокси в api()/send_photo, ретраи, IPv4-first.

@@ -12,7 +12,7 @@ Server-side TLS segmentation — закрываем асимметрию ClientH
 
   Историческая справка: до v4.28 модуль писал `sockopt.fragment` в inbound —
   ПЛАЦЕБО: поля fragment в streamSettings.sockopt не существует, Xray-core
-  молча его игнорировал (см. CHANGELOG, коммит 4341601). Серверной
+  молча его игнорировал (см. CHANGELOG, коммит c485acc). Серверной
   фрагментации ответов в Xray-core нет вообще. Вторая находка той же
   серии: даже ВАЛИДНОЕ поле `sockopt.tcpMaxSeg` (Xray ≥ 26.7.11) — тихое
   no-op на современных ядрах: Go ≥ 1.24 создаёт LISTEN-сокеты как MPTCP
