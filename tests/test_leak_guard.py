@@ -68,11 +68,13 @@ class TestIpV4Allowlist(unittest.TestCase):
         (замаскированная под версию строка-клиентский-IP удалена);
         произвольный «версия-подобный» публичный адрес — LEAK."""
         self.assertEqual(lg.IP_EXTRA_ALLOW,
-                         {"5.11.28.3", "5.0.1.5", "5.5.5.5", "5.5.11.3"})
+                         {"5.11.28.3", "5.0.1.5", "5.5.5.5",
+                          "5.5.11.1", "5.5.11.2", "5.5.11.3"})
         self.assertIn("публичный IP 5.144.99.99", _ip_leaks("wl 5.144.99.99"))  # leak-guard-sample
 
     def test_version_strings_still_allowed(self):
-        for tok in ("5.11.28.3", "5.0.1.5", "5.5.5.5", "5.5.11.3"):
+        for tok in ("5.11.28.3", "5.0.1.5", "5.5.5.5",
+                    "5.5.11.1", "5.5.11.2", "5.5.11.3"):
             self.assertEqual(_ip_leaks(f"v{tok}"), [])
 
 
