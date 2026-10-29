@@ -133,6 +133,140 @@ class TestCdnRangesStatic(unittest.TestCase):
         self.assertFalse(ip_in_cdn("172.72.0.0"))
 
 
+class TestCloudflareDnsResolvers(unittest.TestCase):
+    """Публичные DNS-резолверы Cloudflare (1.1.1.1 и семья) — отдельный
+    провайдер cloudflare_dns.
+
+    НЕ входят в cloudflare.com/ips (только proxy/edge-сети) — но это та же
+    инфраструктура AS13335. Живой кейс vds13195: 1.1.1.1 банился ДВАЖДЫ
+    (2026-10-22 и 2026-10-27, 10–11 TLS-ошибок — health-пробы CF, не атака).
+    Бан 1.1.1.1 ничего не защищает, а при использовании его как DNS-апстрима
+    ноды режет DNS-ответы (ufw deny from 1.1.1.1) — резолв отваливается.
+    """
+
+    _RESOLVERS_V4 = ["1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2",
+                     "1.1.1.3", "1.0.0.3"]
+    # v6-аналоги живут внутри официального CLOUDFLARE_V6 2606:4700::/32 —
+    # отдельные записи не нужны, провайдер для них 'cloudflare' (общий /32)
+    _RESOLVERS_V6 = ["2606:4700:4700::1111", "2606:4700:4700::1001",
+                     "2606:4700:4700::1112", "2606:4700:4700::1002"]
+
+    def test_resolvers_in_cdn(self):
+        from chimera.modules.cdn_ranges import ip_in_cdn, cdn_provider_for
+        for ip in self._RESOLVERS_V4:
+            self.assertTrue(ip_in_cdn(ip),
+                            f"резолвер {ip} не распознан — гард не сработал бы")
+            self.assertEqual(cdn_provider_for(ip), "cloudflare_dns",
+                             f"{ip}: провайдер должен быть cloudflare_dns")
+        for ip in self._RESOLVERS_V6:
+            self.assertTrue(ip_in_cdn(ip),
+                            f"v6-резолвер {ip} не в CDN (2606:4700::/32)")
+
+    def test_resolver_neighbors_not_in_cdn(self):
+        """/32-точность: соседние 1.1.1.x — НЕ резолверы, банить можно.
+        (v6-соседи внутри 2606:4700::/32 легитимно в CDN — это весь CF.)"""
+        from chimera.modules.cdn_ranges import ip_in_cdn
+        for ip in ["1.1.1.0", "1.1.1.4", "1.1.1.255", "1.0.0.4"]:
+            self.assertFalse(ip_in_cdn(ip),
+                             f"{ip} ошибочно защищён — бан атакующих сузится")
+
+    def test_google_dns_still_bannable(self):
+        """Чужие публичные DNS (8.8.8.8) под гард НЕ попадают —
+        класс фикса строго «инфраструктура Cloudflare»."""
+        from chimera.modules.cdn_ranges import ip_in_cdn, cdn_provider_for
+        self.assertFalse(ip_in_cdn("8.8.8.8"))
+        self.assertFalse(ip_in_cdn("8.8.4.4"))
+        self.assertIsNone(cdn_provider_for("8.8.8.8"))
+
+    def test_label_mentions_cloudflare_dns(self):
+        from chimera.modules.cdn_ranges import cdn_providers_label
+        label = cdn_providers_label()
+        self.assertIn("Cloudflare", label)
+        self.assertIn("Cloudflare DNS", label)
+
+    def test_fw_ban_refuses_resolver(self):
+        """Живой кейс vds13195: _fw_ban(1.1.1.1) обязан отказать ДО фаервола
+        (раньше бан ставился — 2026-10-22/27)."""
+        _setup_core()
+        from chimera.modules import autoban
+
+        def _boom(*a, **k):
+            raise AssertionError("_fw_ban дошёл до фаервола для 1.1.1.1!")
+        with patch.object(autoban, "_core_module", _boom), \
+             patch("shutil.which", _boom):
+            for ip in self._RESOLVERS_V4[:2]:
+                self.assertFalse(autoban._fw_ban(ip),
+                                 f"_fw_ban не отказал для резолвера {ip}")
+
+    def test_scan_ignores_resolver_above_threshold(self):
+        """15 TLS-ошибок от 1.1.1.1 (порог 10) — не банится, атакующий рядом банится."""
+        _setup_core()
+        from chimera.modules import autoban
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            state, errlog = tmp / "autoban.json", tmp / "error.log"
+            state.write_text(json.dumps({
+                "enabled": True, "threshold": 10, "window_min": 10,
+                "whitelist": ["127.0.0.1", "::1"], "banned": {},
+                "ban_history": [],
+            }))
+            ts = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+            lines = []
+            for ip, n in {"1.1.1.1": 15, "203.0.113.66": 15}.items():
+                lines += [f"{ts} {ip}:8888 [tcp] tls: handshake failure: "
+                          f"remote error: tls: bad certificate"] * n
+            errlog.write_text("\n".join(lines) + "\n")
+            banned_calls: list = []
+            with patch.object(autoban, "_XRAY_BAN_STATE", state), \
+                 patch.object(autoban, "_XRAY_ERROR_LOG", errlog), \
+                 patch.object(autoban, "_autoban_get_chain_ips", lambda: []), \
+                 patch.object(autoban, "_fw_ban",
+                              lambda ip: (banned_calls.append(ip), True)[1]), \
+                 patch.object(autoban, "_fw_unban_batch", lambda ips: len(ips)):
+                autoban._autoban_run_once()
+            self.assertEqual(banned_calls, ["203.0.113.66"],
+                             f"скан предложил бан резолвера: {banned_calls}")
+            cfg = json.loads(state.read_text())
+            self.assertNotIn("1.1.1.1", cfg["banned"])
+            self.assertIn("203.0.113.66", cfg["banned"])
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_heal_unbans_resolver(self):
+        """Хил снимает бан 1.1.1.1, поставленный старой версией (кейс 10-22/27)."""
+        _setup_core()
+        from chimera.modules import autoban
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            state = tmp / "autoban.json"
+            ts_old = "2026-10-27T15:15:02"
+            state.write_text(json.dumps({
+                "enabled": True, "threshold": 10, "window_min": 10,
+                "whitelist": ["127.0.0.1", "::1"],
+                "banned": {"1.1.1.1": {"count": 11, "banned_at": ts_old,
+                                       "reason": "11 TLS errors in 10min"}},
+                "ban_history": [{"ip": "1.1.1.1", "banned_at": ts_old,
+                                 "unbanned_at": None, "count": 11,
+                                 "reason": "x", "asn": "AS13335",
+                                 "isp": "Cloudflare, Inc", "org": ""}],
+            }))
+            unban_targets: list = []
+            with patch.object(autoban, "_XRAY_BAN_STATE", state), \
+                 patch.object(autoban, "_fw_unban_batch",
+                              lambda ips: (unban_targets.extend(ips), len(ips))[1]):
+                cfg = autoban._autoban_load()
+                n = autoban._autoban_heal_cdn(cfg)
+            self.assertEqual(n, 1)
+            self.assertEqual(unban_targets, ["1.1.1.1"])
+            cfg = json.loads(state.read_text())
+            self.assertNotIn("1.1.1.1", cfg["banned"])
+            self.assertIsNotNone(cfg["ban_history"][0]["unbanned_at"])
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestFwBanCdnGuard(unittest.TestCase):
     """_fw_ban отказывает для CDN-IP ДО любого вызова ufw/iptables."""
 
