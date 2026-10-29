@@ -1,9 +1,11 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
-# Обновлён 2026-10-29 (v4): 311 модулей = 310 + test_leak_guard (гард
-# гигиены репо: зачистка исторических IP → TEST-NET/doc-диапазоны,
-# IPv6-сканер leak_guard, полный аудит дерева в CI static). Список
+# Обновлён 2026-10-29 (v6): 314 модулей = 312 + test_release_notes (гард
+# парсера Forgejo-Release: первая запись CHANGELOG при наличии преамбулы)
+# + test_tests_index (гард синхронизации: манифест ↔ файлы ↔
+# docs/TESTS_INDEX.md — миграция репо-гигиены 2026-10-29). Список
 # АВТО-сверяется с файлами: каждый test_*.py обязан быть здесь
-# (полный охват), каждая строка — существующим файлом.
+# (полный охват), каждая строка — существующим файлом
+# (проверка — tests/test_tests_index.py).
 #
 # Предыстория: baseline 2026-10-26 выделял 30 «env-класс» модулей — красных
 # ТОЛЬКО на хосте раннера ci-de (живая chimera-нода). 2026-10-27 корневое
@@ -324,3 +326,5 @@ tests.test_youtube_ip_pin
 tests.test_youtube_route
 tests.test_youtube_route_v5013
 tests.test_const_default_scan
+tests.test_release_notes
+tests.test_tests_index

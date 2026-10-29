@@ -10,15 +10,26 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
 
 def first_changelog_entry(changelog: Path) -> str:
+    """Первая запись `# Changelog new entry — …` независимо от преамбулы.
+
+    Line-anchored ((?m)^…): упоминание формата записи в тексте/преамбуле
+    (например, в бэктиках в шапке CHANGELOG.md) записью не считается.
+    Работает и без преамбулы (файл, начинающийся сразу с записи) —
+    миграция 2026-10-29 добавила преамбулу-политику над записями.
+    """
     text = changelog.read_text(encoding="utf-8")
-    # первая запись — до следующего разделителя записи (его может не быть)
-    parts = text.split("\n# Changelog new entry — ")
-    first = parts[0]
+    parts = re.split(r"(?m)^# Changelog new entry — ", text)
+    if len(parts) < 2:
+        return ""
+    first = parts[1]
+    # до следующего разделителя записи (уже вырезан split-ом); хвостовой
+    # мусор после конца первой записи отсутствует по построению split.
     lines = [l for l in first.strip().splitlines() if not l.strip().startswith("```")]
     return "\n".join(lines).strip()
 
