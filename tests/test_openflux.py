@@ -23,6 +23,8 @@ Unit-тесты для chimera/modules/openflux.py.
   10. download_manager: GO_TARBALL_SPEC / OPENFLUX_SRC_SPEC
       (зеркала, имена, min_size, _ref_slug), _ensure_go fallback-порядок,
       _resolve_main_sha / _fetch_sources (пин/main/fallback)
+  10b. _post_install_src_tarball — fresh-install/reinstall/мусорный
+      тарболл/нет tar (регрессия mkdir-бага 30.10.2026)
   11. bridge: _render_bridge_env_file / _render_bridge_unit
       (unprivileged, явный bind — не дефолт ':1080' апстрима),
       фрагмент mihomo, CLI-валидация bind/port
@@ -33,6 +35,7 @@ Unit-тесты для chimera/modules/openflux.py.
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -525,6 +528,83 @@ class TestOpenfluxPackages(OpenfluxTestCase):
         self.assertTrue(any("tar.gz/refs/heads/main" in u for u in urls))
         self.assertTrue(any("archive/refs/heads/main.tar.gz" in u
                             for u in urls))
+
+
+class TestPostInstallSrcTarball(OpenfluxTestCase):
+    """10b. _post_install_src_tarball — распаковка src-тарболла.
+
+    Регрессия 30.10.2026 (инцидент Andycar): mkdir создавал
+    target.parent (/opt/openflux), а не target (/opt/openflux/src) —
+    tar -C умирал «Cannot open: No such file or directory» на каждой
+    установке с чистого листа. tar -C требует СУЩЕСТВУЮЩИЙ каталог."""
+
+    def setUp(self):
+        super().setUp()
+        from chimera.modules import openflux_packages
+        self.pk = openflux_packages
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        # Изоляция: _SRC_DIR → tmp; прод /opt/openflux не трогаем
+        self.target = self.root / "src"
+        self._patcher = patch.object(self.pk, "_SRC_DIR", self.target)
+        self._patcher.start()
+        self.addCleanup(self._patcher.stop)
+
+    def _make_tarball(self, files: dict, top="OpenFlux-4619053") -> Path:
+        """Мини-репо: {относительный_путь: контент} → tar.gz с top-dir."""
+        src_dir = self.root / "tarball_src" / top
+        src_dir.mkdir(parents=True, exist_ok=True)
+        for rel, content in files.items():
+            p = src_dir / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+        tgz = self.root / "openflux-test.tar.gz"
+        subprocess.run(
+            ["tar", "-czf", str(tgz), "-C", str(src_dir.parent), top],
+            check=True)
+        return tgz
+
+    def test_fresh_install_unpacks_to_target(self):
+        # БАГ-РЕГРЕССИЯ: target НЕ существует (fresh install). До фикса
+        # mkdir создавал только родителя → tar -C падал «Cannot open»
+        tgz = self._make_tarball({
+            "go.mod": "module openflux\n",
+            "main.go": "package main\n",
+            "cmd/x.go": "package cmd\n",
+        })
+        self.assertFalse(self.target.exists())   # предусловие бага
+        ok = self.pk._post_install_src_tarball(tgz, [])
+        self.assertTrue(ok)
+        # strip-components: файлы в корне target, без top-level обёртки
+        self.assertTrue((self.target / "go.mod").exists())
+        self.assertTrue((self.target / "main.go").exists())
+        self.assertTrue((self.target / "cmd" / "x.go").exists())
+        self.assertFalse((self.target / "OpenFlux-4619053").exists())
+
+    def test_reinstall_over_existing_target(self):
+        # rm -rf старой копии + mkdir заново — переустановка не ломается
+        tgz = self._make_tarball({
+            "go.mod": "module openflux\n", "main.go": "package main\n"})
+        self.assertTrue(self.pk._post_install_src_tarball(tgz, []))
+        (self.target / "stale.txt").write_text("от прошлой версии")
+        self.assertTrue(self.pk._post_install_src_tarball(tgz, []))
+        # старый мусор вычищен, свежие файлы на месте
+        self.assertFalse((self.target / "stale.txt").exists())
+        self.assertTrue((self.target / "go.mod").exists())
+
+    def test_garbage_tarball_rejected_and_cleaned(self):
+        # нет go.mod → не исходники; target вычищается после провала
+        tgz = self._make_tarball({"README.md": "это не openflux\n"})
+        ok = self.pk._post_install_src_tarball(tgz, [])
+        self.assertFalse(ok)
+        self.assertFalse(self.target.exists())
+
+    def test_no_tar_binary(self):
+        tgz = self._make_tarball({
+            "go.mod": "module openflux\n", "main.go": "package main\n"})
+        with patch("shutil.which", return_value=None):
+            self.assertFalse(self.pk._post_install_src_tarball(tgz, []))
 
 
 class TestResolveMainSha(OpenfluxTestCase):

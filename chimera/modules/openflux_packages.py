@@ -38,6 +38,10 @@ from chimera.modules.download_manager import PackageSpec
 
 _INSTALL_TMP = Path("/tmp/openflux_dl")   # install_dests: post_install ставит сам
 _MANUAL_DIR = Path("/root")               # manual incoming (WinSCP-friendly)
+_SRC_DIR = Path("/opt/openflux/src")       # куда post_install распаковывает
+# _SRC_DIR — отдельная константа (не литерал в функции): тесты патчат её
+# на tmpdir (tests/test_openflux.py, TestPostInstallSrcTarball), не
+# трогая прод-путь /opt/openflux на живой ноде.
 
 _OWNER_REPO = "p1neappleXpress/OpenFlux"
 _GH_ARCHIVE = f"https://github.com/{_OWNER_REPO}/archive"
@@ -90,9 +94,15 @@ def _post_install_src_tarball(src: Path, dests: list) -> bool:
     if not shutil.which("tar"):
         print("  ✗ tar не найден — нечем распаковывать исходники")
         return False
-    target = Path("/opt/openflux/src")
+    target = _SRC_DIR
+    # rm -rf старой копии (переустановка поверх) → пересоздать САМ каталог.
+    # ВАЖНО: mkdir именно target, а не target.parent — tar -C требует
+    # СУЩЕСТВУЮЩИЙ каталог и не создаёт его сам (в отличие от go-тарболла,
+    # где -C /usr/local, а каталог go/ создаёт сам архив). Баг 30.10.2026:
+    # создавали родителя /opt/openflux, tar умирал на /opt/openflux/src
+    # «Cannot open: No such file or directory» на каждой установке.
     subprocess.run(["rm", "-rf", str(target)], check=False)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(
         ["tar", "--strip-components=1", "-C", str(target), "-xzf", str(src)],
         capture_output=True, text=True)

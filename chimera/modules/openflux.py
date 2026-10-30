@@ -1070,7 +1070,8 @@ def _run_install(cli_transport: Optional[str] = None,
     _box_info("Исходники OpenFlux (download_manager: codeload → gh-proxy)")
     commit = _fetch_sources(use_main=use_main)
     if commit is None:
-        _box_err("Не удалось скачать исходники (зеркала и /root провалились)")
+        _box_err("Не удалось подготовить исходники (скачивание или"
+                 " распаковка провалились — см. ошибки выше)")
         _box_info("Подсказка с URL для ручной загрузки — выше;"
                   " положите tarball в /root/ и повторите")
         _box_bot(); _pause(); return
@@ -1484,7 +1485,8 @@ def _update_sources() -> None:
     _box_row()
     commit = _fetch_sources(use_main=use_main)
     if commit is None:
-        _box_err("Не удалось скачать исходники (зеркала и /root провалились)")
+        _box_err("Не удалось подготовить исходники (скачивание или"
+                 " распаковка провалились — см. ошибки выше)")
         _box_bot(); _pause(); return
     _box_ok(f"Исходники: {commit[:12]}")
     if not _build_binary():
