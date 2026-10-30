@@ -102,6 +102,68 @@ class TestBuildFragmentSockopt(unittest.TestCase):
         self.assertNotIn("noise", s)
 
 
+class TestStreamFinalmask(unittest.TestCase):
+    """build_stream_finalmask/apply_stream_finalmask — DUAL-схема finalmask
+    (миграция Xray 26.10.29: freedom.fragment deprecated →
+    streamSettings.finalmask.tcp). Проставляется ВДОБАВОК к legacy-паре
+    (freedom.settings.fragment + sockopt.dialerProxy), а не вместо неё;
+    ядра < миграции поле молча игнорируют (encoding/json)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_structure_final_mask_recipe(self):
+        """Структура = «Final Mask» (пастбин DPI/CHECKER): tcp→[{type,
+        settings}], значения зеркалируют freedom.settings.fragment."""
+        from chimera.modules.fragment_config import build_stream_finalmask
+        fm = build_stream_finalmask("tlshello", "10-20", "10-20")
+        self.assertEqual(fm, {"tcp": [{
+            "type": "fragment",
+            "settings": {"packets": "tlshello", "length": "10-20",
+                         "interval": "10-20"},
+        }]})
+
+    def test_incomplete_params_return_none(self):
+        """Неполные параметры → None: proxy-outbound остаётся чистым
+        (как при пресете «0»)."""
+        from chimera.modules.fragment_config import build_stream_finalmask
+        self.assertIsNone(build_stream_finalmask("", "", ""))
+        self.assertIsNone(build_stream_finalmask("tlshello", "", "10-20"))
+        self.assertIsNone(build_stream_finalmask("", "10-20", "10-20"))
+
+    def test_env_knob_off(self):
+        """CHIMERA_FRAGMENT_FINALMASK=0 — escape-hatch (дефолт вкл)."""
+        import os
+        from chimera.modules.fragment_config import (
+            build_stream_finalmask, apply_stream_finalmask)
+        with patch.dict(os.environ, {"CHIMERA_FRAGMENT_FINALMASK": "0"}):
+            self.assertIsNone(
+                build_stream_finalmask("tlshello", "10-20", "10-20"))
+            ob = {"tag": "proxy", "streamSettings": {}}
+            self.assertIsNone(
+                apply_stream_finalmask(ob, "tlshello", "10-20", "10-20"))
+            self.assertNotIn("finalmask", ob["streamSettings"])
+        # дефолт (переменной нет) — включено
+        ob = {"tag": "proxy", "streamSettings": {}}
+        fm = apply_stream_finalmask(ob, "tlshello", "10-20", "10-20")
+        self.assertIsNotNone(fm)
+        self.assertEqual(ob["streamSettings"]["finalmask"], fm)
+
+    def test_apply_sets_on_stream_settings_keeps_legacy(self):
+        """finalmask проставляется в streamSettings, legacy-пара не тронута:
+        dual, а не замена."""
+        from chimera.modules.fragment_config import apply_stream_finalmask
+        ob = {"tag": "proxy",
+              "streamSettings": {"sockopt": {"dialerProxy": "fragment"}}}
+        fm = apply_stream_finalmask(ob, "tlshello", "10-20", "10-20")
+        self.assertEqual(
+            ob["streamSettings"]["finalmask"]["tcp"][0]["settings"]["packets"],
+            "tlshello")
+        self.assertIs(ob["streamSettings"]["finalmask"], fm)
+        self.assertEqual(
+            ob["streamSettings"]["sockopt"]["dialerProxy"], "fragment")
+
+
 class TestBuildFragmentOutbound(unittest.TestCase):
     """build_fragment_outbound — freedom-outbound (валидная схема Xray-core)."""
 
@@ -429,6 +491,13 @@ class TestGenerateFragmentClientConfig(unittest.TestCase):
         # основной outbound: dialerProxy есть, fragment-ключа нет
         self.assertEqual(sockopt["dialerProxy"], "fragment")
         self.assertNotIn("fragment", sockopt)
+        # DUAL-схема (31.10.2026): finalmask зеркалит fragment (миграция
+        # Xray 26.10.29: freedom.fragment deprecated → finalmask.tcp)
+        self.assertEqual(
+            proxy["streamSettings"]["finalmask"],
+            {"tcp": [{"type": "fragment",
+                      "settings": {"packets": "tlshello", "length": "10-20",
+                                   "interval": "10-20"}}]})
         # noise не добавлен — комбо опционально (ни noises, ни noise)
         self.assertNotIn("noises", frag_ob["settings"])
         self.assertNotIn("noise", frag_ob["settings"])

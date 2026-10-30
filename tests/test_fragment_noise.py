@@ -161,6 +161,12 @@ class TestBuildXrayNoiseJson(unittest.TestCase):
         self.assertNotIn("fragment", sockopt)
         self.assertNotIn("noise", sockopt)
         self.assertNotIn("noises", sockopt)
+        # DUAL-схема (31.10.2026): finalmask зеркалит fragment
+        fm = proxy["streamSettings"]["finalmask"]["tcp"][0]
+        self.assertEqual(fm["type"], "fragment")
+        self.assertEqual(fm["settings"],
+                         {"packets": "1-3", "length": "10-20",
+                          "interval": "10-20"})
 
     def test_outbound_tags_unique(self):
         """Теги outbound уникальны (proxy/fragment/direct/block)."""

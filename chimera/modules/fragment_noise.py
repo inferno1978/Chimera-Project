@@ -78,6 +78,7 @@ from chimera.modules.box_renderer import (
     _box_info, _box_warn, _box_desc, _get_box_width,
 )
 from chimera.modules.fragment_config import (
+    apply_stream_finalmask,
     build_fragment_outbound, build_fragment_sockopt,
     _validate_range_str, _FRAGMENT_PRESETS,
 )
@@ -229,6 +230,9 @@ def _build_xray_noise_json(
                 },
             },
         }
+
+    # DUAL-схема (31.10.2026): + finalmask вдобавок к legacy-паре.
+    apply_stream_finalmask(outbound, frag_packets, frag_length, frag_interval)
 
     return {
         "log": {"loglevel": "warning"},

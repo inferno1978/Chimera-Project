@@ -489,6 +489,13 @@ class TestExportFragmentAddon(unittest.TestCase):
         self.assertEqual(sockopt["dialerProxy"], "fragment")
         for placebo in ("fragment", "noise", "noises"):
             self.assertNotIn(placebo, sockopt)
+        # DUAL-схема (31.10.2026): finalmask зеркалит fragment (экспорт
+        # делегирует _build_xray_client_json — покрытие сквозное)
+        self.assertEqual(
+            proxy["streamSettings"]["finalmask"],
+            {"tcp": [{"type": "fragment",
+                      "settings": {"packets": "tlshello", "length": "10-20",
+                                   "interval": "10-20"}}]})
         tags = [ob.get("tag") for ob in xray_cfg["outbounds"]]
         self.assertEqual(len(tags), len(set(tags)),
                          f"теги outbound должны быть уникальны: {tags}")

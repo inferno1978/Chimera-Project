@@ -17,6 +17,15 @@ noises живут в settings freedom-outbound, основной outbound наб
 Поля fragment/noise ВНУТРИ sockopt ядром НЕ поддерживаются и молча
 игнорировались (плацебо до фикса 2026-10-28).
 
+DUAL-схема finalmask (31.10.2026): валидация Xray 26.10.29 предупреждает —
+freedom.fragment «deprecated, будет мигрировать в streamSettings.finalmask.tcp»
+(«Final Mask», пастбин DPI/CHECKER). Химера проставляет finalmask ВДОБАВОК к
+legacy-паре (freedom-outbound settings.fragment + sockopt.dialerProxy), а не
+вместо неё: ядра, не знающие finalmask (все от 1.8.3 до миграции), поле молча
+игнорируют (encoding/json) и работают по legacy-паре как раньше; ядра после
+миграции (freedom.fragment удалён) читают finalmask. Рубильник:
+CHIMERA_FRAGMENT_FINALMASK=0. См. build_stream_finalmask().
+
 ВАЖНО: фрагментация применяется ТОЛЬКО к исходящим соединениям (outbounds),
 и ТОЛЬКО в клиентском конфиге (не в серверном xray/config.json на VPS).
 Серверный config.json этим модулем не затрагивается ни при каких условиях.
@@ -209,6 +218,65 @@ def build_fragment_sockopt(
     }
 
 
+def _finalmask_enabled() -> bool:
+    """Рубильник dual-схемы finalmask: CHIMERA_FRAGMENT_FINALMASK=0 — выкл."""
+    return os.environ.get("CHIMERA_FRAGMENT_FINALMASK", "1").strip().lower() \
+        not in ("0", "off", "no", "false")
+
+
+def build_stream_finalmask(
+    packets: str = "",
+    length: str = "",
+    interval: str = "",
+) -> Optional[dict]:
+    """
+    streamSettings.finalmask основного (proxy) outbound — мишень миграции
+    Xray-core (валидация 26.10.29: freedom.fragment «deprecated, будет
+    мигрировать в streamSettings.finalmask.tcp»).
+
+    Формат — «Final Mask» (пастбин DPI/CHECKER, Remnawave):
+        {"tcp": [{"type": "fragment",
+                  "settings": {"packets": ..., "length": ..., "interval": ...}}]}
+
+    DUAL-схема Химеры: finalmask проставляется ВДОБАВОК к legacy-паре
+    (freedom-outbound settings.fragment + sockopt.dialerProxy), а не вместо.
+    Ядра, не знающие finalmask (всё от 1.8.3 до миграции), поле молча
+    игнорируют (encoding/json) и работают по legacy-паре — как раньше;
+    ядра после миграции (freedom.fragment удалён) читают finalmask.
+    Рубильник: CHIMERA_FRAGMENT_FINALMASK=0.
+
+    None — если параметры фрагментации неполные или рубильник выключен:
+    proxy-outbound остаётся чистым (как при пресете «0»).
+    """
+    if not _finalmask_enabled():
+        return None
+    if not (packets and length and interval):
+        return None
+    return {
+        "tcp": [{
+            "type": "fragment",
+            "settings": {
+                "packets":  packets,
+                "length":   length,
+                "interval": interval,
+            },
+        }],
+    }
+
+
+def apply_stream_finalmask(outbound: dict, packets: str, length: str,
+                           interval: str) -> Optional[dict]:
+    """
+    Проставляет streamSettings.finalmask на основной (proxy) outbound.
+    Вызывается генераторами (link/noise/mux/fuzzer/config) после сборки
+    outbound; возвращает finalmask (или None) для проверок вызывающего кода.
+    """
+    fm = build_stream_finalmask(packets, length, interval)
+    if fm:
+        outbound.setdefault("streamSettings", {})["finalmask"] = fm
+    return fm
+
+
 def generate_fragment_client_config(
     packets: str = "1-3",
     length: str = "3-7",
@@ -372,6 +440,11 @@ def generate_fragment_client_config(
                 },
             },
         }
+
+    # DUAL-схема (31.10.2026): + streamSettings.finalmask вдобавок к
+    # legacy-паре freedom.fragment+dialerProxy — подготовка к миграции
+    # Xray-core (26.10.29: freedom.fragment deprecated → finalmask.tcp).
+    apply_stream_finalmask(outbound, packets, length, interval)
 
     client_cfg = {
         "log": {"loglevel": "warning"},

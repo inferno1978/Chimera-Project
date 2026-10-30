@@ -190,6 +190,13 @@ class TestXhttpRealityBranches(unittest.TestCase):
         self.assertEqual(ss["sockopt"]["dialerProxy"], "fragment")
         self.assertNotIn("fragment", ss["sockopt"])
         self.assertNotIn("noise", ss["sockopt"])
+        # DUAL-схема (31.10.2026): finalmask зеркалит fragment (mux —
+        # уровень протокола, с dialerProxy/finalmask совместим)
+        self.assertEqual(
+            ss["finalmask"],
+            {"tcp": [{"type": "fragment",
+                      "settings": {"packets": "1-3", "length": "3-7",
+                                   "interval": "10-20"}}]})
 
     def test_xray_json_fragment_outbound_and_unique_tags(self):
         """fragment-outbound с точными settings.fragment + уникальные теги

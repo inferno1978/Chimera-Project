@@ -93,6 +93,7 @@ from chimera.modules.box_renderer import (
     _box_info, _box_warn, _box_ok, _box_desc, _box_link, _get_box_width,
 )
 from chimera.modules.fragment_config import (
+    apply_stream_finalmask,
     build_fragment_outbound,
     build_fragment_sockopt,
     _FRAGMENT_PRESETS,
@@ -381,6 +382,11 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
                 },
             },
         }
+
+    # DUAL-схема (31.10.2026): + finalmask вдобавок к legacy-паре
+    # (freedom.fragment+dialerProxy) — миграция Xray 26.10.29
+    # (freedom.fragment deprecated → streamSettings.finalmask.tcp).
+    apply_stream_finalmask(outbound, packets, length, interval)
 
     return {
         "log": {"loglevel": "warning"},

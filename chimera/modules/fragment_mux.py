@@ -86,6 +86,7 @@ from chimera.modules.box_renderer import (
     _box_info, _box_warn, _box_desc, _get_box_width,
 )
 from chimera.modules.fragment_config import (
+    apply_stream_finalmask,
     build_fragment_outbound, build_fragment_sockopt,
 )
 
@@ -241,6 +242,10 @@ def _build_xray_mux_json(state: dict, frag_packets: str, frag_length: str,
             },
             "mux": mux,
         }
+
+    # DUAL-схема (31.10.2026): + finalmask вдобавок к legacy-паре
+    # (mux — уровень протокола, с dialerProxy/finalmask совместим).
+    apply_stream_finalmask(outbound, frag_packets, frag_length, frag_interval)
 
     return {
         "log": {"loglevel": "warning"},

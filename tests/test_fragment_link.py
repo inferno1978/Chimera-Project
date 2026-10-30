@@ -315,6 +315,14 @@ class TestBuildXrayClientJson(unittest.TestCase):
         # регрессия плацебо-схемы: fragment/noise в sockopt — невалидно
         self.assertNotIn("fragment", sockopt)
         self.assertNotIn("noise", sockopt)
+        # DUAL-схема (31.10.2026): finalmask зеркалит fragment — миграция
+        # Xray 26.10.29 (freedom.fragment deprecated → finalmask.tcp);
+        # ядра < миграции поле молча игнорируют (encoding/json)
+        self.assertEqual(
+            proxy["streamSettings"]["finalmask"],
+            {"tcp": [{"type": "fragment",
+                      "settings": {"packets": "1-3", "length": "3-7",
+                                   "interval": "10-20"}}]})
 
     def test_fragment_omitted_when_params_empty(self):
         from chimera.modules.fragment_link import _build_xray_client_json
@@ -327,6 +335,8 @@ class TestBuildXrayClientJson(unittest.TestCase):
         self.assertNotIn("noise", sockopt)
         tags = [ob.get("tag") for ob in cfg["outbounds"]]
         self.assertNotIn("fragment", tags)
+        # без фрагментации — и finalmask нет (чистый baseline)
+        self.assertNotIn("finalmask", proxy.get("streamSettings", {}))
 
     def test_outbound_tags_unique(self):
         """Теги outbound уникальны (proxy/fragment/direct/block)."""
@@ -346,6 +356,11 @@ class TestBuildXrayClientJson(unittest.TestCase):
         self.assertEqual(frag["packets"], "tlshello")
         self.assertEqual(frag["length"], "10-20")
         self.assertEqual(frag["interval"], "10-20")
+        # finalmask-зеркало (рецепт «Final Mask» из пастбина DPI/CHECKER)
+        proxy = [ob for ob in cfg["outbounds"] if ob["tag"] == "proxy"][0]
+        self.assertEqual(
+            proxy["streamSettings"]["finalmask"]["tcp"][0]["settings"],
+            {"packets": "tlshello", "length": "10-20", "interval": "10-20"})
 
     def test_noise_added_when_params_present(self):
         """Комбо fragment+noise: noises в settings freedom-outbound."""

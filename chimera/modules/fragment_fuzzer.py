@@ -94,6 +94,7 @@ from chimera.modules.box_renderer import (
     _box_info, _box_warn, _box_desc, _box_ok, _get_box_width,
 )
 from chimera.modules.fragment_config import (
+    apply_stream_finalmask,
     build_fragment_outbound,
     build_fragment_sockopt,
     generate_fragment_client_config,
@@ -295,6 +296,10 @@ def _build_test_client_config(
                 },
             },
         }
+
+    # DUAL-схема (31.10.2026): + finalmask — фаззер сравнивает варианты,
+    # finalmask зеркалит fragment каждого варианта (честная матрица).
+    apply_stream_finalmask(outbound, packets, length, interval)
 
     return {
         "log": {"loglevel": "none"},
