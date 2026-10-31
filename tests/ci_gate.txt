@@ -1,7 +1,10 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
-# Обновлён 2026-10-29 (v7): 315 модулей = 314 + test_cdn_ranges (CDN-защита
-# авто-бана, инцидент 950 банов edge-IP Cloudflare: гард в скане/_fw_ban +
-# авто-хил старых банов, chimera/modules/cdn_ranges.py). Пред. v6: 314 =
+# Обновлён 2026-11-01 (v8): 316 модулей = 315 + test_librechat (LibreChat
+# AI-чат модуль: docker compose стек, download_manager/port_registry/
+# panel_nginx_front long_timeouts, обновления по паттерну b4 с откатом).
+# Пред. v7: 315 = 314 + test_cdn_ranges (CDN-защита авто-бана, инцидент
+# 950 банов edge-IP Cloudflare: гард в скане/_fw_ban + авто-хил старых
+# банов, chimera/modules/cdn_ranges.py). Пред. v6: 314 =
 # 312 + test_release_notes (гард парсера Forgejo-Release) + test_tests_index
 # (гард синка манифест ↔ файлы ↔ docs/TESTS_INDEX.md). Список
 # АВТО-сверяется с файлами: каждый test_*.py обязан быть здесь
@@ -170,6 +173,7 @@ tests.test_ipban
 tests.test_ipset_boot_sync
 tests.test_ipset_persist
 tests.test_leak_guard
+tests.test_librechat
 tests.test_linkqr_lib
 tests.test_logrotate
 tests.test_mieru

@@ -2991,6 +2991,7 @@ def do_manage_web_panel() -> None:
         _box_item("6", f"🌐 nginx front (TLS) — {'выключен' if not _nginx_front_enabled else 'настройки'}")
         _box_item("7", f"🧩 Triple Panel (Naive+Mieru+H2)  {DIM}(порт RIXXX-панели: установка/обновления/доступ){NC}")
         _box_item("8", f"🌐 WPP Web Panel  {DIM}(порт POLESNIESOVETI12/web-panel-proxy: VLESS/H2/AWG/MTProto/OpenFlux){NC}")
+        _box_item("9", f"🤖 LibreChat (AI-чат)  {DIM}(docker compose: GLM/custom endpoints, Agents, MCP){NC}")
         _box_item("0", f"{RED}🗑️  Удалить полностью{NC}")
         _box_item("Q", "Назад")
         _box_bottom()
@@ -3121,6 +3122,19 @@ def do_manage_web_panel() -> None:
                 do_wpp_panel_menu()
             except Exception as e:
                 warn(f"Не удалось открыть меню WPP Web Panel: {e}")
+                _input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "9":
+            #  LibreChat — self-hosted AI-чат платформа (docker compose:
+            #  api + admin-panel + mongodb + meili + vectordb + rag_api).
+            #  По образцу Triple Panel / WPP: автономный модуль с lazy
+            #  доступом к chimera._core, без правок _core.py. GLM (Z.ai)
+            #  подключается как custom endpoint (OpenAI-совместимый API).
+            try:
+                from chimera.modules.librechat import do_librechat_menu
+                do_librechat_menu()
+            except Exception as e:
+                warn(f"Не удалось открыть меню LibreChat: {e}")
                 _input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "0":

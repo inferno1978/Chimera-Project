@@ -251,6 +251,7 @@ def _generate_vhost(port: int,
                     websocket_origin_rewrite: bool = False,
                     panel_name_slug: str = "panel",
                     mcp_proxy: bool = False,
+                    long_timeouts: bool = False,
                     ) -> str:
     """Генерирует nginx vhost config.
 
@@ -267,6 +268,9 @@ def _generate_vhost(port: int,
         (MCP go-sdk запрещает не-loopback Host при loopback-бэкенде —
         DNS-rebinding защита), SSE без буферизации и долгим таймаутом
         (нужно для b4 >= 1.80, MCP-сервер панели).
+      long_timeouts: если True — proxy_read/send_timeout 3600s вместо 60s
+        (LLM-стримы/SSE: ответ модели может идти минутами без чанков;
+        нужно LibreChat; дефолт False — существующие панели не меняются).
     """
     # WebSocket origin rewrite block
     if websocket_origin_rewrite:
@@ -296,8 +300,11 @@ def _generate_vhost(port: int,
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_connect_timeout 30s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
+        # long_timeouts: LLM-стримы/SSE идут минутами без единого чанка —
+        # 60s обрывали бы ответ на середине (LibreChat). По умолчанию —
+        # прежние 60s (существующие панели не меняются).
+        proxy_send_timeout {3600 if long_timeouts else 60}s;
+        proxy_read_timeout {3600 if long_timeouts else 60}s;
         proxy_buffering off;
         proxy_request_buffering off;"""
 
@@ -403,6 +410,7 @@ def panel_nginx_front_install(
     backend_http_scheme: str = "http",
     cert_name_slug: "Optional[str]" = None,
     mcp_proxy: bool = False,
+    long_timeouts: bool = False,
 ) -> "tuple[bool, str]":
     """Устанавливает nginx front с TLS для панели.
 
@@ -420,6 +428,8 @@ def panel_nginx_front_install(
       cert_name_slug: slug для имени self-signed сертификата.
       mcp_proxy: True → добавить location /api/mcp (loopback-Host для
         MCP go-sdk, SSE без буферизации; b4 >= 1.80).
+      long_timeouts: True → proxy_read/send_timeout 3600s вместо 60s
+        (LLM-стримы/SSE — LibreChat; дефолт False — панели не меняются).
 
     Returns:
       (success, message)
@@ -513,6 +523,7 @@ def panel_nginx_front_install(
         websocket_origin_rewrite=websocket_origin_rewrite,
         panel_name_slug=cert_name_slug,
         mcp_proxy=mcp_proxy,
+        long_timeouts=long_timeouts,
     )
 
     # 4. Запись vhost + symlink.
