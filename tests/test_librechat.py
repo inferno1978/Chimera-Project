@@ -436,12 +436,16 @@ class TestRuntimeVersion(unittest.TestCase):
         # ProxyHandler({}) — на серверах с http_proxy 127.0.0.1 не должен
         # гнаться через прокси (урок triple_panel._smoke_check);
         # /api/version в новых образах УДАЛЁН (LIVE 01.11, 404) —
-        # смоук обязан идти на /api/config (публичный, без auth)
+        # смоук обязан идти на /api/config (публичный, без auth).
+        # (assertNotIn — только на КОДОВУЮ строку запроса: докстринг
+        # законно упоминает /api/version как историческую справку)
         import inspect
         src = inspect.getsource(lc._smoke_check)
         self.assertIn("ProxyHandler({})", src)
-        self.assertIn("/api/config", src)
-        self.assertNotIn("/api/version", src)
+        self.assertIn(
+            'opener.open(f"http://127.0.0.1:{port}/api/config"', src)
+        self.assertNotIn(
+            'opener.open(f"http://127.0.0.1:{port}/api/version"', src)
 
 
 # ════════════════════════════════════════════════════════════════════════════
