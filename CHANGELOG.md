@@ -23,6 +23,22 @@
 
 ---
 
+# Changelog new entry — FIX(panel_nginx_front): nginx-front порты НЕ регистрировались в port_registry — port_register после reload ловил собственного слушателя (тихий False, возврат не проверялся); реестр врал по всем 5 панелям годами (01 Nov 2026)
+
+## Контекст (инцидент 01.11, live vds13195): после включения nginx front LibreChat (3443) проверка реестра показала — НИ ОДНОГО nginx-front порта нет (b4 9743 / triple 9761 / wpp 9745 / subscription 6444 / librechat 3443), хотя все панели «установлены» и наружу работают. Реестр врал годами — требование «port_registry не вводит в заблуждение» (порт должен отражать ПЕРЕПРИМЕНЁННУЮ реальность) нарушалось по всем фронтам. Сопутствующий контекст пользователя: смена порта xray 8443→443 через TUI (25.10) в реестре отражена корректно (reconfigure.py:472-483: port_register(new)+port_unregister(old), запись vless/443 «VLESS (reconfigured to :443)», призрака 8443 нет) — механизм смены портов в реестре живой; дыра была именно в panel_nginx_front.
+
+## Корень: panel_nginx_front_install вызывает port_register в шаге 6 — ПОСЛЕ записи vhost и systemctl reload nginx (шаги 4-5). port_register (force=False) делает port_is_free, включая системных слушателей (ss): наш только что поднятый nginx = «system»-конфликт → return False БЕЗ исключения → try-блок доживал до ufw_open_port (UFW открывался — отсюда видимость панелей), а результат port_register никто не проверял. Второе следствие: повторная установка падала на шаге 1 — check_port_via_registry видел слушателя nginx и возвращал «Порт занят» (идемпотентности не было; librechat получил этот же класс бага в _install для web-порта 25.10 прошлого коммита — 5e628fb, там exclude_tag; здесь корень другой: свой СЛУШАТЕЛЬ, а не своя запись).
+
+## Решение:
+- шаг 6: port_register(..., force=True) — конфликт-проверка ДО поднятия слушателя уже сделана в шаге 1, здесь фиксация; возврат проверяется (reg_ok): провал → warn, не прерывает установку (UFW/vhost уже стоят);
+- шаг 1: check_port_via_registry(port, tag, ignore_system_nginx=True) — новый параметр: system-конфликт от слушателя nginx (наш собственный при пере-установке) не блокирует; чужой процесс (не-nginx) и чужие registry/UFW записи — честный конфликт как раньше; дефолт False — семантика остальных вызовов не изменилась.
+
+## Live-валидация (vds13195): (1) повторный запуск _nginx_install(False, «chat…») — больше НЕ падает «Порт 3443 занят: nginx» (идемпотентность восстановлена), шаг 6 зарегистрировал 3443 сам — запись chimera-librechat-nginx/3443 в реестре появилась без ручной санации; (2) санация исторических дыр force-регистрацией по живым слушателям: 9743/9761/9745/6444 — все OK, реальные слушатели ss: nginx на всех пяти портах. Финал реестра: 5/5 записей (service/port/proto/comment), совпадает со ss один-в-один.
+
+## Тесты: test_panel_nginx_front_input 5 (2+3): force=True + reg_ok в getsource (инсталла), ignore_system_nginx=True в шаге 1, семантика игнора на замоканном port_registry (nginx-слушатель пропущен / только nginx → свободен / xray-слушатель блокирует / дефолт без флага — прежний port_is_free; patch.dict подмена модуля с проверкой restore). Регресс: test_b4_mcp_nginx, test_librechat (43), test_rest_api_web_panel_firewall, test_subscription_nginx_front, test_port_registry — зелёные.
+
+---
+
 # Changelog new entry — FIX(librechat): LE-выпуск для ПОДДОМЕНА на занятом :80 — отдельный ACME-vhost с точным server_name + nginx front по домену chat.chimeraprodcdn.online:3443 (live, vds13195) (01 Nov 2026)
 
 ## Контекст: вывод LibreChat наружу по домену (заказ «nginx front вместе»). Аудит живого :80 на vds13195 ПЕРЕД запуском: единственный server-блок — ОСНОВНОЙ домен ноды (chimeraprodcdn.online), его acme-location жёстко указывает в /var/www/<основной>; Host=<поддомен> матчится этим же блоком (default) → LE-токен ищется в ЧУЖОМ root → 404 → certbot --webroot не смог бы выпустить серт для поддомена. У B4/Triple/WPP проблемы нет — они используют ОСНОВНОЙ домен, чей серт уже в letsencrypt/live. Порт 443 занят xray (переведён пользователем с 8443 25.10, port_registry синхронизирован: vless/443 «VLESS (reconfigured to :443)», reconfigure.py:472-483, старой записи 8443 нет — проверено живьём) — nginx front LibreChat на 3443, 443 не тронут.
