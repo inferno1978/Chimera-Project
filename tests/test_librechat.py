@@ -414,31 +414,34 @@ class TestSystemdUnit(unittest.TestCase):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  9. RUNTIME-ВЕРСИЯ (regex из /api/version)
+#  9. RUNTIME-ВЕРСИЯ (package.json из контейнера) + смоук /api/config
 # ════════════════════════════════════════════════════════════════════════════
 class TestRuntimeVersion(unittest.TestCase):
 
     def test_runtime_version_regex_variants(self):
-        # _runtime_version тянет тело через urllib; проверяем сам регекс
-        # на форматах, которые отдаёт LibreChat.
-        pattern = (r'"[^"]*version[^"]*"\s*:\s*"v?(\d+\.\d+\.\d+)"')
+        # _runtime_version парсит package.json из контейнера; проверяем
+        # сам регекс на форматах версий апстрима (вкл. rc-префиксы).
+        pattern = r'"version"\s*:\s*"v?(\d+\.\d+\.\d+[\w.-]*)"'
         for body, expected in [
-            ('{"versionNumber":"v0.8.8"}', "0.8.8"),
-            ('{"version":"v0.8.8","text":"LibreChat"}', "0.8.8"),
-            ('{"data":{"version":"0.7.7"}}', "0.7.7"),
-            ('{"lambdaVersion":"v0.8.8"}', "0.8.8"),
+            ('{"name":"librechat","version":"v0.8.8"}', "0.8.8"),
+            ('{"version":"0.8.8"}', "0.8.8"),
+            ('{"version":"v0.8.9-rc1"}', "0.8.9-rc1"),
+            ('{"version":"v1.0.0-beta.3"}', "1.0.0-beta.3"),
         ]:
-            m = re.search(pattern, body, re.IGNORECASE)
+            m = re.search(pattern, body)
             self.assertIsNotNone(m, body)
             self.assertEqual(m.group(1), expected, body)
 
     def test_smoke_check_no_proxy_leak(self):
         # ProxyHandler({}) — на серверах с http_proxy 127.0.0.1 не должен
-        # гнаться через прокси (урок triple_panel._smoke_check)
+        # гнаться через прокси (урок triple_panel._smoke_check);
+        # /api/version в новых образах УДАЛЁН (LIVE 01.11, 404) —
+        # смоук обязан идти на /api/config (публичный, без auth)
         import inspect
         src = inspect.getsource(lc._smoke_check)
         self.assertIn("ProxyHandler({})", src)
-        self.assertIn("/api/version", src)
+        self.assertIn("/api/config", src)
+        self.assertNotIn("/api/version", src)
 
 
 # ════════════════════════════════════════════════════════════════════════════

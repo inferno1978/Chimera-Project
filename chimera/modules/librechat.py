@@ -786,37 +786,41 @@ WantedBy=multi-user.target
     _run(["systemctl", "daemon-reload"], capture=True, check=False)
 
 # ════════════════════════════════════════════════════════════════════════════
-#  СМОУК (GET /api/version — как _smoke_check triple_panel, ProxyHandler({}))
+#  СМОУК (GET /api/config — публичный эндпоинт апстрима; ProxyHandler({}))
 # ════════════════════════════════════════════════════════════════════════════
 def _smoke_check(port: int, timeout: int = 5) -> bool:
-    """GET /api/version на локальный порт — api жив? (ProxyHandler({}) —
-    на серверах с http_proxy в окружении 127.0.0.1 гнался через прокси)."""
+    """GET /api/config на локальный порт — api жив? (ProxyHandler({}) —
+    на серверах с http_proxy в окружении 127.0.0.1 гнался через прокси).
+
+    /api/version в новых образах апстрима УДАЛЁН (404, LIVE-проверено
+    vds13195 01.11, образ v0.8.9-rc1) — смоук переведён на /api/config:
+    публичный, без авторизации, отвечает только на поднятом api.
+    """
     try:
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}))
-        with opener.open(f"http://127.0.0.1:{port}/api/version",
+        with opener.open(f"http://127.0.0.1:{port}/api/config",
                          timeout=timeout) as resp:
             return resp.status == 200
     except Exception:
         return False
 
-def _runtime_version(port: int, timeout: int = 5) -> str:
-    """Фактическая версия api из GET /api/version (regex из JSON-тела)."""
+def _runtime_version(timeout: int = 15) -> str:
+    """Фактическая версия api: package.json внутри контейнера
+    (docker exec — /api/version в новых образах удалён, LIVE 01.11)."""
     try:
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}))
-        with opener.open(f"http://127.0.0.1:{port}/api/version",
-                         timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", "replace")
-        m = re.search(r'"[^"]*version[^"]*"\s*:\s*"v?(\d+\.\d+\.\d+)"',
-                      body, re.IGNORECASE)
+        r = _run(["docker", "exec", "LibreChat",
+                  "cat", "/app/package.json"],
+                 capture=True, check=False, timeout=timeout)
+        body = (r.stdout or b"").decode("utf-8", "replace")
+        m = re.search(r'"version"\s*:\s*"v?(\d+\.\d+\.\d+[\w.-]*)"', body)
         return m.group(1) if m else ""
     except Exception:
         return ""
 
 def _wait_service_http(port: int, attempts: int = 60, delay: float = 3.0,
                        announce: bool = False) -> bool:
-    """Ждёт ответа GET /api/version (первый старт: mongo init + api boot)."""
+    """Ждёт ответа GET /api/config (первый старт: mongo init + api boot)."""
     for i in range(attempts):
         if _smoke_check(port):
             return True
@@ -1057,7 +1061,7 @@ def _install() -> bool:
         _box_warn(f"systemctl enable: rc={r.returncode}"
                   + (f" — {tail[-1][:70]}" if tail else ""))
     if _wait_service_http(port, attempts=80, delay=3, announce=True):
-        rt = _runtime_version(port)
+        rt = _runtime_version()
         if rt:
             state["runtime_version"] = rt
             _save_state(state)
@@ -1260,7 +1264,7 @@ def _update_stack() -> bool:
         return False
 
     # 5. успех
-    rt = _runtime_version(port)
+    rt = _runtime_version()
     state["version"] = _app_actual_version() or upstream
     state["runtime_version"] = rt or state["version"]
     _save_state(state)
