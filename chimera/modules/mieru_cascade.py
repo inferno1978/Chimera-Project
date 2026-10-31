@@ -2318,7 +2318,7 @@ def _prompt_exit() -> Optional[dict]:
         "hop_pattern": hop_custom,
         "socks_login": socks_login, "socks_password": socks_password,
         "enabled": True, "healthy": None, "latency_ms": None,
-        "last_check": "", "fail_streak": 0,
+        "last_check": "", "fail_streak": 0, "ok_streak": 0,
         "socks_port": 0, "redsocks_port": 0, "rpc_port": 0, "http_port": 0,
     }
 
@@ -2697,6 +2697,16 @@ def _ensure_local_services(st: dict) -> list:
 WEIGHTS_HYSTERESIS = 0.05   # 5 процентных пунктов по доле Exit-а
 WEIGHTS_REBUILD_COOLDOWN_S = 600   # весовой ребаланс — не чаще раза в 10 мин
 
+# Гистерезис health-вердиктов (анти-флап TG-алертов): DOWN — после
+# HEALTH_DOWN_AFTER подряд E2E-фейлов (как было, порог ≥2), а выход из
+# DOWN — только после HEALTH_UP_AFTER подряд E2E-успехов (ok_streak).
+# Один случайный пакет сквозь дырявый ингресс больше не объявляет
+# «восстановлен» через минуту после «недоступен» (живой кейс:
+# ZaNet-ингресс ee1 31.10.2026 — 30–50% потерь SYN, ТГ-поток
+# 🔴/🟢 каждые 5–10 мин на протяжении 3+ часов).
+HEALTH_DOWN_AFTER = 2   # фейлов подряд → healthy=False
+HEALTH_UP_AFTER = 3     # успехов подряд → healthy=True (выход из DOWN)
+
 
 def _shares_materially_changed(old_bal: Optional[dict],
                                new_bal: Optional[dict]) -> bool:
@@ -2752,10 +2762,22 @@ def _health_tick_locked(verbose: bool = False) -> dict:
         # e2e — авторитетный; TCP-only допускаем только как «скорее жив»
         # при прошлом healthy=True (кратковременный сбой цели E2E)
         if e2e_ok:
-            e["healthy"], e["fail_streak"] = True, 0
+            if e.get("healthy") is False:
+                # гистерезис: выход из DOWN — только после
+                # HEALTH_UP_AFTER успехов ПОДРЯД; одиночный успех на
+                # дырявом канале держит Exit в DOWN (анти-флап TG)
+                e["ok_streak"] = int(e.get("ok_streak") or 0) + 1
+                if e["ok_streak"] >= HEALTH_UP_AFTER:
+                    e["healthy"], e["fail_streak"] = True, 0
+                    e["ok_streak"] = 0
+            else:
+                # жив или первичное наблюдение (None) — как раньше
+                e["healthy"], e["fail_streak"] = True, 0
+                e["ok_streak"] = 0
         else:
             e["fail_streak"] = int(e.get("fail_streak", 0)) + 1
-            if e["fail_streak"] >= 2:
+            e["ok_streak"] = 0
+            if e["fail_streak"] >= HEALTH_DOWN_AFTER:
                 e["healthy"] = False
         e["latency_ms"] = latency
         e["last_check"] = _ts()
