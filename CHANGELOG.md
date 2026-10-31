@@ -39,6 +39,15 @@
 
 ## Тесты: tests/test_librechat.py — 34 (версии/зеркала/PackageSpec-инварианты/тарболл+traversal-guard/env-патч/compose-патч+идемпотентность/librechat.yaml-контракт/systemd/регекс runtime-версии/делегирование nginx front c long_timeouts/теги port_registry/пункт 9 хаба/меню-рендер/CLI/TTL-кэш) — все зелёные; соседи после правок: test_b4_mcp_nginx + test_rest_api_web_panel_firewall + test_port_registry + test_download_manager + test_triple_panel (292) и test_rest_api полный (55) — зелёные; ci_gate v8 (316), TESTS_INDEX регенерирован scripts/tests_index.py, test_tests_index (5) зелёный.
 
+## Live-валидация (vds13195, 01.11, полная установка стека на ноде): 5 живых инцидентов пойманы и закрыты (юнит-тесты такое не ловят — фиксы с регресс-тестами в каждом коммите):
+1. **TypeError на compose pull** (f5efeb0): _run (копия triple_panel) не принимал cwd, а _compose его передаёт — установка падала на первом pull. → _run(+cwd/timeout).
+2. **Self-конфликт port_registry при переустановке** (5e628fb): упавший ДО записи state запуск оставлял port_register(3080) — повторная установка вечно ждала «другой порт». → _ask_web_port(+exclude_tag) через port_is_free/port_get_conflicts exclude_service; _install снимает ВСЕ записи тега перед регистрацией.
+3. **Форматы секретов** (d9e5368): api: «CREDS_IV must be exactly 32 hexadecimal characters (16 bytes). Refusing startup» (token_hex(8) давал 16 символов); admin-panel: «SESSION_SECRET must be at least 32 characters (got 0)». → token_hex(16) для IV + ADMIN_PANEL_SESSION_SECRET.
+4. **Zod-валидация librechat.yaml** (4cb6c60): «endpoints.custom[0].models.default — expected array, received undefined → Exiting due to invalid configuration» — models.default обязателен МАССИВОМ даже при fetch: true. → default: ['glm-4.7'] + постоянный JWT_SECRET (убирает warn про временные секреты).
+5. **/api/version удалён из новых образов** (9c02f7d+20f5351): v0.8.9-rc1 отдаёт 404 при живом api. → смоук на /api/config (публичный, без auth; /api/endpoints = 401), runtime-версия через docker exec cat /app/package.json (регекс терпит rc-суффиксы).
+
+Итог live-прогона: все 6 контейнеров Up (api/admin-panel healthy), GET / → 200, /api/config → 200, admin-panel(3096) → 200, биндинги строго 127.0.0.1 (наружу не торчит ничего), `--smoke` exit 0, юнит active (exited) — RemainAfterExit. Тесты после всех фиксов: 37/37.
+
 ---
 
 # Changelog new entry — FEAT(mieru-cascade): гистерезис health-вердиктов — UP только после 3 E2E-успехов подряд (анти-флап TG-алертов) (31 Oct 2026)
