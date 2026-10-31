@@ -23,6 +23,23 @@
 
 ---
 
+# Changelog new entry — FIX(librechat): LE-выпуск для ПОДДОМЕНА на занятом :80 — отдельный ACME-vhost с точным server_name + nginx front по домену chat.chimeraprodcdn.online:3443 (live, vds13195) (01 Nov 2026)
+
+## Контекст: вывод LibreChat наружу по домену (заказ «nginx front вместе»). Аудит живого :80 на vds13195 ПЕРЕД запуском: единственный server-блок — ОСНОВНОЙ домен ноды (chimeraprodcdn.online), его acme-location жёстко указывает в /var/www/<основной>; Host=<поддомен> матчится этим же блоком (default) → LE-токен ищется в ЧУЖОМ root → 404 → certbot --webroot не смог бы выпустить серт для поддомена. У B4/Triple/WPP проблемы нет — они используют ОСНОВНОЙ домен, чей серт уже в letsencrypt/live. Порт 443 занят xray (переведён пользователем с 8443 25.10, port_registry синхронизирован: vless/443 «VLESS (reconfigured to :443)», reconfigure.py:472-483, старой записи 8443 нет — проверено живьём) — nginx front LibreChat на 3443, 443 не тронут.
+
+## Решение: chimera/modules/librechat.py — ACME :80-vhost для поддомена:
+- _render_acme_vhost(domain): listen 80 + server_name <поддомен> + acme-root /var/www/<поддомен>; location / → тихий 404 (не палим порт 3443 в Location-заголовке — маскировка, эталон b4);
+- _ensure_acme_vhost(domain): webroot mkdir + vhost + symlink + nginx -t + reload; идемпотентно; без nginx (CI) — тихий False; провал НЕ роняет установку (серт может уже существовать);
+- _nginx_install: LE-ветка зовёт _ensure_acme_vhost ДО panel_nginx_front_install (obtain_ssl_cert → certbot --webroot); self-signed-ветка не тронута;
+- _nginx_remove: _remove_acme_vhost() в обеих ветках (включая «уже выключен» — чистит осиротевший vhost после сбоя);
+- константы _ACME_SITE_NAME («chimera-librechat-acme»)/_SITES_AVAILABLE/_SITES_ENABLED.
+
+## Live-валидация (vds13195, 01.11): _nginx_install(False, "chat.chimeraprodcdn.online") с первого пролёта: LE-серт выпущен и валиден (issuer Let's Encrypt YE2, CN=chat.chimeraprodcdn.online, до 29.01.2027; renewal — webroot в renewal-conf + :80 acme-vhost остаётся), vhost :3443 (long_timeouts 3600s — LLM-стримы), UFW 3443/tcp ALLOW, port_registry chimera-librechat-nginx/3443, DOMAIN_CLIENT/SERVER → https://chat.chimeraprodcdn.online:3443 + пересоздание стека (контейнеры Up, admin-panel healthy). E2E: с ноды /api/config → 200 за 0.04с; снаружи (независимая сеть) /api/config → 200 за 2.1с, / → 200; :80 Host=chat → 404 (тихая маскировка, порт не палим); xray на 443 не тронут (ss: *:443 xray, *:3443 nginx). A-запись chat.chimeraprodcdn.online → 138.124.255.238 уже существовала в зоне (reg.ru) — добавлять не пришлось.
+
+## Тесты: test_librechat.py 43 (было 37, +6): рендер-контракт acme-vhost (root поддомена, 404, без 3443/301), порядок acme→certbot в LE-ветке, пропуск в self-signed, снятие при удалении (обе ветки), guard без nginx; существующий делегирующий тест дополнен подменой acme. Соседи зелёные: b4_mcp_nginx, rest_api_web_panel_firewall, port_registry, rest_api, triple_panel, download_manager, panel_nginx_front_input; TESTS_INDEX регенерирован, test_tests_index (5) зелёный.
+
+---
+
 # Changelog new entry — FEAT(librechat): модуль LibreChat — AI-чат платформа в Chimera по образцу B4 (docker compose, download_manager, port_registry, nginx front с long_timeouts) (01 Nov 2026)
 
 ## Контекст: заказ «поставить LibreChat на RU-ноду как модуль Химеры — по образцу B4: зашёл в TUI → тыкнул кнопку → поставилось; тыкнул → удалилось; доступ из локалки (SSH-туннель) и напрямую по домену с сертификатами; всё через download manager, port registry и прочие фичи; максимальная кастомизация; TUI в стиле проекта». Панель-образец — Triple Panel/WPP (панельный канон), версионный образец — dpi_bypass (B4). Live-проверки перед реализацией: api.z.ai из RU-ноды — 401 за 0.31с (OpenAI-совместимый вход жив, гео-блока нет); registry.librechat.ai/Docker Hub/ghcr.io из ноды — 307/401/401 (pull работает); апстрим v0.8.8 — compose-стек из 6 сервисов (api + admin-panel + mongodb + meilisearch + vectordb + rag_api), образы из собственного registry апстрима, mongo — bind mount ./data-node.
