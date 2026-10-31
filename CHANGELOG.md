@@ -23,7 +23,7 @@
 
 ---
 
-# Changelog new entry — FEAT(librechat-monitor): ops-слой LibreChat — health-tick */1 мин (systemd timer) + TG-репорт по смене состояния, EMA TTFB, self-heal/ремедии, cert-порог — полный parity b4_monitor (02 Nov 2026)
+# Changelog new entry — FEAT(librechat-monitor): ops-слой LibreChat — health-tick */1 мин (systemd timer) + TG-репорт по смене состояния, EMA TTFB, self-heal/ремедии, cert-порог — полный parity b4_monitor (31 Oct 2026)
 
 ## Контекст: по итогам вывода LibreChat наружу (chat.chimeraprodcdn.online:3443, LE, живой прод) стек остался без наблюдения: падение api/контейнеров, смерть nginx front и протухание сертификата обнаружились бы только жалобой пользователя. Заказ: «Health-тик LibreChat в ТГ-бот (аналог b4_monitor: systemd-timer */1 мин, EMA, репорт по смене) — делаем».
 
@@ -34,7 +34,7 @@
 - меню M в do_librechat_menu (матрица: сервис/api EMA/фронт/cert/политика/журнал, T/C/P/I/I10/I30/U — паттерн do_b4_monitor_menu); _uninstall LibreChat сносит монитор (шаг 3.5 — иначе тик алертит об удалённом стеке);
 - баг, пойманный тестом ДО продакшена: strptime %Z="GMT" даёт aware-datetime → вычитание наивного utcnow() = TypeError → _cert_days всегда None; таймзона теперь отбрасывается (rsplit), путь LE — константа LE_CERT_DIR (патчится в tmp).
 
-## Live-валидация (vds13195, 02.11): timer/cron установлены, тик пишет state (api OK, фронт OK, cert 88 дн., EMA ttfb), TG-слой — первое наблюдение молча (анти-спам по построению), события в чат по смене.
+## Live-валидация (vds13195, 31.10): timer/cron установлены, тик пишет state (api OK, фронт OK, cert 88 дн., EMA ttfb), TG-слой — первое наблюдение молча (анти-спам по построению), события в чат по смене.
 
 ## Тесты: новый tests/test_librechat_monitor.py — 35 (EMA/streak/curl-парсер 2xx-строгость/cert-парсер; тик: self-heal, api-деградация streak≥2 + ремедия + cooldown, фронт-ремедия nginx-reload при живом api, политики; TG: первое-молча, down/up, degraded/recovered, front, cert-порог по смене, stalled, действия по одному, events-фильтр; install: OnCalendar/wrapper bash -n/PYTHONPATH-safe/cron; AST-гард всех EVENT_KEYS в tg_bot). Соседи зелёные: test_librechat 43, test_tg_bot 39, test_b4_monitor 51, test_tui 8, test_tgmon_v2, test_tests_index 5, const_default_scan 0; ci_gate v9 (317), TESTS_INDEX регенерирован.
 
