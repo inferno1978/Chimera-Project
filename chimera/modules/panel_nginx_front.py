@@ -118,15 +118,35 @@ def _generate_self_signed_tls(public_ip: str,
 #  PORT REGISTRY
 # ══════════════════════════════════════════════════════════════════════════════
 
-def check_port_via_registry(port: int, service_tag: str) -> "tuple[bool, list[str]]":
+def check_port_via_registry(port: int, service_tag: str,
+                            ignore_system_nginx: bool = False) -> "tuple[bool, list[str]]":
     """Проверяет порт через port_registry (registry + system + ufw).
+
+    Args:
+      ignore_system_nginx: True → system-конфликт от слушателя 'nginx' НЕ
+        считается блокирующим (пере-установка nginx front: nginx уже
+        слушает этот порт с прошлого запуска — это наш собственный
+        слушатель, а не чужой захват). Слушатель-не-nginx — честный
+        конфликт, блокирует как раньше.
 
     Returns:
       (is_free, conflict_descriptions)
     """
     try:
-        from chimera.modules.port_registry import port_is_free
-        return port_is_free(port, "tcp", exclude_service=service_tag)
+        if not ignore_system_nginx:
+            from chimera.modules.port_registry import port_is_free
+            return port_is_free(port, "tcp", exclude_service=service_tag)
+        from chimera.modules.port_registry import port_get_conflicts
+        conflicts = port_get_conflicts(port, "tcp", exclude_service=service_tag)
+        blocking = []
+        for c in conflicts:
+            if (c.get("type") == "system"
+                    and "nginx" in str(c.get("service", ""))):
+                continue  # собственный слушатель nginx (пере-установка)
+            blocking.append(c)
+        if not blocking:
+            return True, []
+        return False, [c["detail"] for c in blocking]
     except Exception:
         # port_registry недоступен — не блокируем.
         return True, []
@@ -457,7 +477,11 @@ def panel_nginx_front_install(
         cert_name_slug = site_name.replace(".", "-").replace("_", "-")
 
     # 1. Проверка конфликтов порта через port_registry.
-    is_free, conflicts = check_port_via_registry(port, service_tag)
+    #    ignore_system_nginx=True: при ПОВТОРНОЙ установке nginx уже
+    #    слушает порт с прошлого запуска — это наш слушатель, а не
+    #    чужой захват (иначе пере-установка вечно падала бы «Порт занят»).
+    is_free, conflicts = check_port_via_registry(port, service_tag,
+                                                  ignore_system_nginx=True)
     if not is_free:
         warn(f"Порт {port} занят:")
         for c in conflicts[:3]:
@@ -565,12 +589,26 @@ def panel_nginx_front_install(
     # Иначе юзер видит 'nginx слушает порт, но извне недоступен' (как
     # было в баг-репорте SpecteR 22.08.2026 — порт 45443 назначен,
     # nginx слушал, но фаервол блокировал).
+    #
+    # РЕГИСТРАЦИЯ С force=True (инцидент 01.11, vds13195): к этому шагу
+    # nginx уже reload-нут и СЛУШАЕТ порт — без force port_is_free
+    # внутри port_register ловит нашего же слушателя («system»-конфликт)
+    # и тихо возвращает False, а возврат никто не проверял: в реестре
+    # не было НИ ОДНОГО nginx-front порта (b4 9743 / triple 9761 /
+    # wpp 9745 / subscription 6444 / librechat 3443), реестр врал —
+    # «не вводит в заблуждение» нарушался годами. Конфликт-проверка
+    # ДО поднятия слушателя уже сделана в шаге 1 — здесь фиксация.
     try:
         from chimera.modules.port_registry import (
             ufw_open_port, port_register,
         )
-        port_register(service_tag, port, "tcp",
-                      comment=f"{title} (nginx front, TLS, →127.0.0.1:{backend_port})")
+        reg_ok, reg_msg = port_register(
+            service_tag, port, "tcp",
+            comment=f"{title} (nginx front, TLS, →127.0.0.1:{backend_port})",
+            force=True)
+        if not reg_ok:
+            warn(f"  {YELLOW}port_registry: порт {port} НЕ зарегистрирован: "
+                 f"{reg_msg}{NC}")
         ufw_ok, ufw_msg = ufw_open_port(port, "tcp", service_tag,
                                         comment=f"{title} (nginx front, TLS)")
         if ufw_ok:
