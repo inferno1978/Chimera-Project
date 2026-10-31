@@ -2,7 +2,7 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **315** (гейт-манифест: **315**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **316** (гейт-манифест: **316**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
 ## AmneziaWG (transport Mode B + standalone 2.0) (30)
@@ -169,6 +169,24 @@
 | [`test_singbox_vless_ws_cdn_fix2.py`](../tests/test_singbox_vless_ws_cdn_fix2.py) | Тесты для v4.23.2 — 4 продакшн-фикса из v4.23.1: | ✓ |
 | [`test_singbox_vless_ws_cdn_fix3.py`](../tests/test_singbox_vless_ws_cdn_fix3.py) | Тесты для v4.23.3 — 2 фикса порядка операций: | ✓ |
 
+## Фрагментация TLS (fragment-стек) (13)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_fragment_config.py`](../tests/test_fragment_config.py) | Unit-тесты для chimera/modules/fragment_config.py. | ✓ |
+| [`test_fragment_customizer.py`](../tests/test_fragment_customizer.py) | Unit-тесты v4.31 «Fragment & FP Customizer». | ✓ |
+| [`test_fragment_fuzzer.py`](../tests/test_fragment_fuzzer.py) | Unit-тесты для chimera/modules/fragment_fuzzer.py. | ✓ |
+| [`test_fragment_guide.py`](../tests/test_fragment_guide.py) | Unit-тесты для chimera/modules/fragment_guide.py. | ✓ |
+| [`test_fragment_link.py`](../tests/test_fragment_link.py) | Unit-тесты для chimera/modules/fragment_link.py. | ✓ |
+| [`test_fragment_log_viewer.py`](../tests/test_fragment_log_viewer.py) | Unit-тесты для chimera/modules/fragment_log_viewer.py. | ✓ |
+| [`test_fragment_mux.py`](../tests/test_fragment_mux.py) | Unit-тесты для chimera/modules/fragment_mux.py. | ✓ |
+| [`test_fragment_noise.py`](../tests/test_fragment_noise.py) | Unit-тесты для chimera/modules/fragment_noise.py. | ✓ |
+| [`test_fragment_presets.py`](../tests/test_fragment_presets.py) | Unit-тесты для chimera/modules/fragment_presets.py. | ✓ |
+| [`test_fragment_share.py`](../tests/test_fragment_share.py) | Unit-тесты для chimera/modules/fragment_share.py. | ✓ |
+| [`test_fragment_stats.py`](../tests/test_fragment_stats.py) | Unit-тесты для chimera/modules/fragment_stats.py. | ✓ |
+| [`test_fragment_watchdog.py`](../tests/test_fragment_watchdog.py) | Unit-тесты для chimera/modules/fragment_watchdog.py. | ✓ |
+| [`test_server_fragment.py`](../tests/test_server_fragment.py) | Unit-тесты для chimera/modules/server_fragment.py (v4.28+, Task 24 / 24-5b). | ✓ |
+
 ## Клиентские ссылки/конфиги (12)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -185,23 +203,6 @@
 | [`test_linkqr_lib.py`](../tests/test_linkqr_lib.py) | Unit-тесты для chimera/modules/linkqr_lib.py. | ✓ |
 | [`test_mtu_tuning.py`](../tests/test_mtu_tuning.py) | Unit-тесты для chimera/modules/mtu_tuning.py. | ✓ |
 | [`test_pq_vless.py`](../tests/test_pq_vless.py) | Unit-тесты для chimera/modules/pq_vless.py. | ✓ |
-
-## Фрагментация TLS (fragment-стек) (12)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_fragment_config.py`](../tests/test_fragment_config.py) | Unit-тесты для chimera/modules/fragment_config.py. | ✓ |
-| [`test_fragment_fuzzer.py`](../tests/test_fragment_fuzzer.py) | Unit-тесты для chimera/modules/fragment_fuzzer.py. | ✓ |
-| [`test_fragment_guide.py`](../tests/test_fragment_guide.py) | Unit-тесты для chimera/modules/fragment_guide.py. | ✓ |
-| [`test_fragment_link.py`](../tests/test_fragment_link.py) | Unit-тесты для chimera/modules/fragment_link.py. | ✓ |
-| [`test_fragment_log_viewer.py`](../tests/test_fragment_log_viewer.py) | Unit-тесты для chimera/modules/fragment_log_viewer.py. | ✓ |
-| [`test_fragment_mux.py`](../tests/test_fragment_mux.py) | Unit-тесты для chimera/modules/fragment_mux.py. | ✓ |
-| [`test_fragment_noise.py`](../tests/test_fragment_noise.py) | Unit-тесты для chimera/modules/fragment_noise.py. | ✓ |
-| [`test_fragment_presets.py`](../tests/test_fragment_presets.py) | Unit-тесты для chimera/modules/fragment_presets.py. | ✓ |
-| [`test_fragment_share.py`](../tests/test_fragment_share.py) | Unit-тесты для chimera/modules/fragment_share.py. | ✓ |
-| [`test_fragment_stats.py`](../tests/test_fragment_stats.py) | Unit-тесты для chimera/modules/fragment_stats.py. | ✓ |
-| [`test_fragment_watchdog.py`](../tests/test_fragment_watchdog.py) | Unit-тесты для chimera/modules/fragment_watchdog.py. | ✓ |
-| [`test_server_fragment.py`](../tests/test_server_fragment.py) | Unit-тесты для chimera/modules/server_fragment.py (v4.28+, Task 24 / 24-5b). | ✓ |
 
 ## Mieru (12)
 

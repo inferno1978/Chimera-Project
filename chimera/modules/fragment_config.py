@@ -118,6 +118,12 @@ _FRAGMENT_PRESETS = {
         "interval": "20-50",
         "desc":     "Лёгкая (5–15 байт) — минимальный оверхед, базовая защита",
     },
+    "tlshello": {
+        "packets":  "tlshello",
+        "length":   "10-20",
+        "interval": "10-20",
+        "desc":     "tlshello-рецепт (DPI/CHECKER) — ClientHello целиком, 10–20 б / 10–20 мс",
+    },
     "custom": {
         "packets":  "",
         "length":   "",
@@ -125,6 +131,12 @@ _FRAGMENT_PRESETS = {
         "desc":     "Пользовательская — ввести параметры вручную",
     },
 }
+
+# v4.31: эффективный FP для генерации (кастомизируемый, не прибит гвоздями).
+# Хелпер из fingerprint_manager: override → state.fingerprint → chrome.
+def _effective_fp(state: dict, override: Optional[str] = None) -> str:
+    from chimera.modules.fingerprint_manager import resolve_client_fp
+    return resolve_client_fp(state, override)
 
 # ── Публичные функции ──────────────────────────────────────────────────────
 
@@ -284,6 +296,7 @@ def generate_fragment_client_config(
     label: str = "fragment",
     noise_packet: Optional[str] = None,
     noise_delay: Optional[str] = None,
+    fp_override: Optional[str] = None,
 ) -> Optional[Path]:
     """
     Генерирует клиентский конфиг Xray с фрагментацией и сохраняет его
@@ -293,6 +306,9 @@ def generate_fragment_client_config(
     noises в settings freedom-outbound — комбо «fragment + noise»
     одной генерацией (шум перед ClientHello: если DPI научился
     распознавать фрагменты).
+
+    fp_override (опционально, v4.31): TLS-fingerprint для этого конфига;
+    None → дефолт ноды (state.fingerprint), см. _effective_fp().
 
     Конфиг является КЛИЕНТСКИМ — он работает на устройстве пользователя
     и проксирует трафик через VPS. Серверный /etc/xray/config.json
@@ -319,6 +335,7 @@ def generate_fragment_client_config(
     short_id      = state.get("short_id", "")
     reality_dest  = state.get("reality_dest", "")
     xtls_flow     = state.get("xtls_flow", "xtls-rprx-vision")
+    fp_eff        = _effective_fp(state, fp_override)
 
     if not server_host or not uuid_val:
         _warn("В state.json нет domain/uuid — конфиг не может быть сгенерирован")
@@ -352,6 +369,7 @@ def generate_fragment_client_config(
                 "tlsSettings": {
                     "serverName":    server_host,
                     "allowInsecure": False,
+                    "fingerprint":   fp_eff,  # v4.31: единый настраиваемый FP
                 },
                 "xhttpSettings": {
                     "path": xhttp_path,
@@ -366,7 +384,7 @@ def generate_fragment_client_config(
         # фрагментация совместима — она на уровне TCP/TLS ClientHello).
         xhttp_path = state.get("xhttp_path", "/")
         xhttp_mode = state.get("xhttp_mode", "stream-up")
-        fp         = state.get("fingerprint", "chrome") or "chrome"
+        fp         = fp_eff  # v4.31: настраиваемый FP (не прибит гвоздями)
         # SNI по канону xhttp_reality (как _resolve_sni в fragment_link.py):
         # Mode B + AWG-exit → reality_dest (совпадает с serverNames сервера),
         # иначе — domain. Легаси-ветку reality ниже не трогаем.
@@ -432,7 +450,7 @@ def generate_fragment_client_config(
                 "sockopt":  sockopt,
                 "realitySettings": {
                     "show":        False,
-                    "fingerprint": "chrome",
+                    "fingerprint": fp_eff,  # v4.31: настраиваемый (был hardcode chrome)
                     "serverName":  sni,
                     "publicKey":   pub_key,
                     "shortId":     short_id,
@@ -543,8 +561,10 @@ def _validate_range_str(value: str, what: str) -> bool:
 def get_client_fragment_settings(state: dict) -> Optional[dict]:
     """Настройки fragment-аддона дефолтного экспорта.
 
-    Возвращает {"packets", "length", "interval"} или None = выключено
+    Возвращает {"packets", "length", "interval"[, "fp"]} или None = выключено
     (в т.ч. при неполных параметрах — честный экспорт не врёт).
+    "fp" (v4.31) — необязательный ключ: FP конкретно для fragment-аддона;
+    отсутствует → экспорт использует дефолт ноды (state.fingerprint).
     """
     cf = state.get("client_fragment") if isinstance(state, dict) else None
     if not isinstance(cf, dict) or not cf.get("enabled"):
@@ -554,7 +574,11 @@ def get_client_fragment_settings(state: dict) -> Optional[dict]:
     interval = str(cf.get("interval", "") or "").strip()
     if not (packets and length and interval):
         return None
-    return {"packets": packets, "length": length, "interval": interval}
+    out = {"packets": packets, "length": length, "interval": interval}
+    fp = str(cf.get("fp", "") or "").strip().lower()
+    if fp:
+        out["fp"] = fp
+    return out
 
 
 def _save_client_fragment_state(cf: dict) -> bool:
@@ -584,11 +608,17 @@ def do_export_fragment_toggle_menu() -> None:
     ВКЛ: do_generate_client_config (меню экспорта) дополнительно
     генерирует fragment-варианты конфигов — Xray JSON (v2rayNG/v2rayN),
     Sing-box JSON (Hiddify/NekoBox) и ссылки Happ/Incy/Nekoray с
-    fragment в URI. Серверный /etc/xray/config.json не затрагивается.
+    fragment в URI. Существующие файлы экспорта не меняются.
+
+    v4.31: + пресет tlshello, + FP для fragment-аддона (ключ client_fragment.fp
+    — если не задан, экспорт использует дефолт ноды state.fingerprint).
 
     Вызывается пунктом 5 меню do_fragment_config_menu (Меню 4 «Диагностика
     и мониторинг» → F1 → пункт 5).
     """
+    from chimera.modules.fingerprint_manager import (
+        XRAY_FP_LIST, reality_fp_warning, save_default_fingerprint,
+    )
     # Текущее состояние
     state: dict = {}
     if _STATE_FILE.exists():
@@ -611,6 +641,7 @@ def do_export_fragment_toggle_menu() -> None:
     if cur:
         _box_row(f"  {GREEN}● ВКЛЮЧЕНО{NC}: packets={cur['packets']}  "
                  f"length={cur['length']}б  interval={cur['interval']}мс")
+        _box_row(f"     FP fragment-аддона: {BOLD}{cur.get('fp', '(дефолт ноды: ' + str(state.get('fingerprint', 'chrome')) + ')')}{NC}")
     else:
         _box_row(f"  {DIM}○ ВЫКЛЮЧЕНО (дефолт){NC}")
     _box_sep()
@@ -620,6 +651,8 @@ def do_export_fragment_toggle_menu() -> None:
     _box_item("4", f"Включить — tlshello-рецепт  {DIM}packets=tlshello length=10-20б "
                    f"interval=10-20мс (DPI/CHECKER){NC}")
     _box_item("5", f"Включить — своя  {DIM}ввести packets/length/interval вручную{NC}")
+    _box_item("F", f"FP для fragment-аддона  {DIM}выбор fingerprint "
+                   f"(Enter = дефолт ноды){NC}")
     _box_sep()
     _box_item("0", f"{RED}Выключить{NC}  {DIM}(вернуть дефолтный экспорт без fragment){NC}")
     _box_row()
@@ -644,6 +677,40 @@ def do_export_fragment_toggle_menu() -> None:
     if ch == "0":
         if _save_client_fragment_state({"enabled": False}):
             _success("Fragment-аддон экспорта ВЫКЛЮЧЕН")
+        input(f"\n{BLUE}Нажмите Enter...{NC}")
+        return
+
+    if ch == "f":
+        # v4.31: FP именно для fragment-аддона (client_fragment.fp)
+        print()
+        _info("FP для fragment-аддона (пустой ввод = сброс на дефолт ноды):")
+        print(f"  {DIM}Доступные: {', '.join(XRAY_FP_LIST)}{NC}")
+        try:
+            raw = input(f"  {CYAN}FP (имя/Enter=сброс):{NC} ").strip().lower()
+        except KeyboardInterrupt:
+            return
+        if not raw:
+            if cur:
+                cf = dict(cur); cf.pop("fp", None)
+                if _save_client_fragment_state({"enabled": True, **cf}):
+                    _success("FP fragment-аддона сброшен — экспорт будет "
+                             "использовать дефолт ноды")
+            else:
+                _warn("Сначала включите аддон (1–5), затем задайте FP")
+            input(f"\n{BLUE}Нажмите Enter...{NC}")
+            return
+        if raw not in XRAY_FP_LIST:
+            _warn(f"Неизвестный FP: {raw!r} (ядро 26.10.29 отвергает "
+                  "неизвестные имена при парсинге)")
+            time.sleep(2)
+            return
+        w = reality_fp_warning(raw)
+        if w:
+            _warn(w)
+        cf = dict(cur or {})
+        if _save_client_fragment_state({"enabled": True, **cf, "fp": raw}):
+            _success(f"FP fragment-аддона: {raw} (применится в xray/singbox "
+                     "JSON и ссылках Happ/Incy/Neko)")
         input(f"\n{BLUE}Нажмите Enter...{NC}")
         return
 
@@ -674,6 +741,10 @@ def do_export_fragment_toggle_menu() -> None:
         time.sleep(1)
         return
 
+    # v4.31: сохраняем выбранный ранее FP аддона, если он был
+    if cur and cur.get("fp"):
+        cf["fp"] = cur["fp"]
+
     if _save_client_fragment_state(cf):
         _success(f"Fragment-аддон экспорта ВКЛЮЧЁН: packets={cf['packets']} "
                  f"length={cf['length']}б interval={cf['interval']}мс")
@@ -686,23 +757,51 @@ def do_export_fragment_toggle_menu() -> None:
 def do_fragment_config_menu() -> None:
     """
     Интерактивное меню генератора клиентских конфигов с фрагментацией.
-    Вызывается из _menu_diagnostics() в _core.py.
+    Вызывается из _menu_diagnostics() в _core.py (Меню 4 → F1).
+
+    v4.31 «Fragment & FP Customizer»:
+      • пресеты данных (агрессивная/сбалансированная/лёгкая/tlshello)
+        — единый источник _FRAGMENT_PRESETS, ничего не прибито гвоздями;
+      • пункт FP — выбор fingerprint для генерации (сессия меню) с опцией
+        «сохранить как дефолт ноды» (state.json → все будущие генерации);
+      • пункты 1–5 генерируют с эффективным FP сессии.
     """
+    from chimera.modules.fingerprint_manager import (
+        XRAY_FP_LIST, reality_fp_warning, save_default_fingerprint,
+    )
+
+    state: dict = {}
+    if _STATE_FILE.exists():
+        try:
+            state = json.loads(_STATE_FILE.read_text())
+        except Exception:
+            state = {}
+
+    # FP сессии меню: Enter по всем пунктам = дефолт ноды
+    session_fp: Optional[str] = None
+
     while True:
         os.system("clear")
         print()
+        eff_fp = _effective_fp(state, session_fp)
         _box_top("🔀  ГЕНЕРАТОР КОНФИГОВ С ФРАГМЕНТАЦИЕЙ")
         _box_desc(
             "Фрагментация разбивает TLS ClientHello на мелкие TCP-сегменты, "
             "обходя DPI провайдера. Применяется в клиентском конфиге Xray."
         )
         _box_sep()
+        _box_row(f"  FP генерации: {BOLD}{eff_fp}{NC}"
+                 f"  {DIM}(state={'дефолт ноды' if session_fp is None else 'выбран в сессии'}){NC}")
         _box_row()
-        _box_item("1", f"⚡ Агрессивная  {DIM}(1–3 байта, макс. обход DPI){NC}")
-        _box_item("2", f"✅ Сбалансированная  {DIM}(3–7 байт, рекомендуется){NC}")
-        _box_item("3", f"🔆 Лёгкая  {DIM}(5–15 байт, минимальный оверхед){NC}")
-        _box_item("4", f"⚙️  Пользовательская  {DIM}(ввести length / interval / packets){NC}")
-        _box_item("5", f"📦 Fragment в дефолтном экспорте  {DIM}(тумблер: доп. файлы "
+        _box_item("1", f"⚡ Агрессивная  {DIM}{_FRAGMENT_PRESETS['aggressive']['desc']}{NC}")
+        _box_item("2", f"✅ Сбалансированная  {DIM}{_FRAGMENT_PRESETS['balanced']['desc']}{NC}")
+        _box_item("3", f"🔆 Лёгкая  {DIM}{_FRAGMENT_PRESETS['light']['desc']}{NC}")
+        _box_item("4", f"🧩 tlshello-рецепт  {DIM}{_FRAGMENT_PRESETS['tlshello']['desc']}{NC}")
+        _box_item("5", f"⚙️  Пользовательская  {DIM}(ввести length / interval / packets){NC}")
+        _box_sep()
+        _box_item("F", f"🔑 Fingerprint для генерации  {DIM}(полный список: "
+                       f"{len(XRAY_FP_LIST)} FP, Enter = текущий){NC}")
+        _box_item("6", f"📦 Fragment в дефолтном экспорте  {DIM}(тумблер: доп. файлы "
                        f"v2rayNG/Hiddify/Happ){NC}")
         _box_sep()
         _box_item("L", f"📂 Показать сохранённые конфиги")
@@ -719,33 +818,70 @@ def do_fragment_config_menu() -> None:
         if ch == "q" or ch == "":
             break
 
-        # ── Выбор пресета ─────────────────────────────────────────────────
-        preset_map = {"1": "aggressive", "2": "balanced", "3": "light"}
+        # ── FP сессии: выбор + опция сохранения в state ────────────────
+        if ch == "f":
+            print()
+            _info(f"Текущий FP: {eff_fp}. Ввод: имя из списка или номер.")
+            print(f"  {DIM}Список (live 26.10.29): {', '.join(XRAY_FP_LIST)}{NC}")
+            try:
+                raw = input(f"  {CYAN}FP (Enter = {eff_fp}):{NC} ").strip().lower()
+            except KeyboardInterrupt:
+                continue
+            if not raw:
+                session_fp = None
+                _info("FP сессии сброшен — используется дефолт ноды")
+                continue
+            if raw in XRAY_FP_LIST:
+                w = reality_fp_warning(raw)
+                if w:
+                    _warn(w)
+                session_fp = raw
+                _success(f"FP сессии: {raw}")
+                try:
+                    keep = input(f"  {CYAN}Сохранить как дефолт ноды (state.json)? "
+                                 f"[y/N]:{NC} ").strip().lower()
+                except KeyboardInterrupt:
+                    continue
+                if keep in ("y", "yes", "д", "да"):
+                    if save_default_fingerprint(raw):
+                        state["fingerprint"] = raw
+                        session_fp = None  # теперь это дефолт ноды
+                        _success(f"Дефолт ноды: {raw} (все будущие генерации/экспорт)")
+            else:
+                _warn(f"Неизвестный FP: {raw!r} — ядро 26.10.29 отвергает "
+                      "неизвестные имена при парсинге конфига")
+                time.sleep(1)
+            continue
+
+        # ── Выбор пресета ─────────────────────────────────────────────
+        preset_map = {"1": "aggressive", "2": "balanced", "3": "light",
+                      "4": "tlshello"}
         if ch in preset_map:
             key = preset_map[ch]
             p = _FRAGMENT_PRESETS[key]
             _info(f"Пресет: {p['desc']}")
-            _info(f"  packets={p['packets']}  length={p['length']}  interval={p['interval']} мс")
+            _info(f"  packets={p['packets']}  length={p['length']}  interval={p['interval']} мс  fp={_effective_fp(state, session_fp)}")
             print()
             path = generate_fragment_client_config(
                 packets=p["packets"],
                 length=p["length"],
                 interval=p["interval"],
                 label=f"fragment_{key}",
+                fp_override=session_fp,
             )
             if path:
                 _success(f"Конфиг сохранён: {path}")
                 _info("Скопируйте на клиентское устройство и подключите в Xray/v2rayNG/Nekoray")
             input(f"\n{BLUE}Нажмите Enter...{NC}")
 
-        elif ch == "4":
+        elif ch == "5":
             # Пользовательский ввод
             print()
             _info("Введите параметры фрагментации (диапазон: N или N-M, например 3-7):")
             print()
 
             try:
-                raw_packets  = input(f"  {CYAN}packets {DIM}(сегменты, напр. 1-3){NC}: ").strip() or "1-3"
+                raw_packets  = input(f"  {CYAN}packets {DIM}(сегменты, напр. 1-3 или tlshello){NC}: ").strip() or "1-3"
                 raw_length   = input(f"  {CYAN}length  {DIM}(байты,    напр. 3-7){NC}: ").strip() or "3-7"
                 raw_interval = input(f"  {CYAN}interval{DIM}(мс,       напр. 10-20){NC}: ").strip() or "10-20"
             except KeyboardInterrupt:
@@ -766,12 +902,13 @@ def do_fragment_config_menu() -> None:
                 length=raw_length,
                 interval=raw_interval,
                 label="fragment_custom",
+                fp_override=session_fp,
             )
             if path:
                 _success(f"Конфиг сохранён: {path}")
             input(f"\n{BLUE}Нажмите Enter...{NC}")
 
-        elif ch == "5":
+        elif ch == "6":
             do_export_fragment_toggle_menu()
 
         elif ch == "l":
@@ -779,21 +916,28 @@ def do_fragment_config_menu() -> None:
             print()
             _box_top("📂  Сохранённые конфиги")
             if not _FRAGMENT_DIR.exists() or not list(_FRAGMENT_DIR.glob("*.json")):
-                _box_info("Конфигов пока нет — создайте через пункты 1–4")
+                _box_info("Конфигов пока нет — создайте через пункты 1–5")
             else:
                 for f in sorted(_FRAGMENT_DIR.glob("*.json")):
                     try:
                         data = json.loads(f.read_text())
                         # Извлекаем параметры fragment из freedom-outbound
                         frag = {}
+                        fp_used = ""
                         for _ob in data.get("outbounds", []):
                             _fr = (_ob.get("settings", {}) or {}).get("fragment")
                             if isinstance(_fr, dict):
                                 frag = _fr
                                 break
+                        for _ob in data.get("outbounds", []):
+                            _rs = (_ob.get("streamSettings", {}) or {}).get("realitySettings", {})
+                            if isinstance(_rs, dict) and _rs.get("fingerprint"):
+                                fp_used = _rs["fingerprint"]
+                                break
                         tag = (f"packets={frag.get('packets','-')} "
                                f"length={frag.get('length','-')} "
-                               f"interval={frag.get('interval','-')}")
+                               f"interval={frag.get('interval','-')}"
+                               + (f"  fp={fp_used}" if fp_used else ""))
                         _box_row(f"  {GREEN}•{NC} {f.name}  {DIM}{tag}{NC}")
                     except Exception:
                         _box_row(f"  {DIM}• {f.name}{NC}")

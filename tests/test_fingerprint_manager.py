@@ -5,9 +5,10 @@ tests/test_fingerprint_manager.py
 Unit-тесты для chimera/modules/fingerprint_manager.py.
 
 Покрывает:
-  1. XRAY_FP_LIST — список fingerprint'ов
+  1. XRAY_FP_LIST — список fingerprint'ов (LIVE-валидация 26.10.29)
   2. DEFAULT_FP — дефолт
   3. _FP_MENU — структура меню
+  4. resolve_client_fp / save_default_fingerprint (v4.31)
 """
 from __future__ import annotations
 
@@ -43,12 +44,20 @@ def _setup_core():
 
 class TestFingerprintManager(unittest.TestCase):
     def setUp(self): _setup_core()
-    def test_xray_fp_list_has_11_entries(self):
+    def test_xray_fp_list_live_validated(self):
         from chimera.modules.fingerprint_manager import XRAY_FP_LIST
-        self.assertGreaterEqual(len(XRAY_FP_LIST), 11)
-        self.assertIn("chrome", XRAY_FP_LIST)
-        self.assertIn("firefox", XRAY_FP_LIST)
-        self.assertIn("safari", XRAY_FP_LIST)
+        # LIVE-валидация 31.10.2026, xray run -test, ядро 26.10.29:
+        # 11 принятых имён; «none» отвергнут (латентный баг старого списка);
+        # randomizednoalpn — принят, добавлен.
+        self.assertEqual(len(XRAY_FP_LIST), 11)
+        for name in ("chrome", "firefox", "safari", "ios", "android",
+                     "edge", "360", "qq", "random", "randomized",
+                     "randomizednoalpn"):
+            self.assertIn(name, XRAY_FP_LIST)
+        self.assertNotIn("none", XRAY_FP_LIST)  # ядро: unknown "fingerprint": none
+        self.assertNotIn("golang", XRAY_FP_LIST)
+        for banned in ("chrome_120", "ios_17_0", "firefox_133"):
+            self.assertNotIn(banned, XRAY_FP_LIST)  # utls-версионные не принимаются
     def test_default_fp_is_chrome(self):
         from chimera.modules.fingerprint_manager import DEFAULT_FP
         self.assertEqual(DEFAULT_FP, "chrome")
@@ -70,6 +79,11 @@ class TestRealityFpGuard(unittest.TestCase):
         self.assertTrue(REALITY_INCOMPATIBLE_FP.issubset(set(XRAY_FP_LIST)))
         self.assertIn("random", REALITY_INCOMPATIBLE_FP)
         self.assertIn("randomized", REALITY_INCOMPATIBLE_FP)
+        self.assertIn("randomizednoalpn", REALITY_INCOMPATIBLE_FP)
+
+    def test_warning_nonempty_for_randomizednoalpn(self):
+        from chimera.modules.fingerprint_manager import reality_fp_warning
+        self.assertTrue(reality_fp_warning("randomizednoalpn"))
 
     def test_warning_nonempty_for_random(self):
         from chimera.modules.fingerprint_manager import reality_fp_warning
@@ -85,7 +99,7 @@ class TestRealityFpGuard(unittest.TestCase):
     def test_warning_empty_for_fixed_browser_fps(self):
         from chimera.modules.fingerprint_manager import reality_fp_warning
         for fp in ("chrome", "firefox", "safari", "ios", "android",
-                   "edge", "360", "qq", "none"):
+                   "edge", "360", "qq"):
             self.assertEqual(reality_fp_warning(fp), "", msg=fp)
 
     def test_prompt_confirm_declined_returns_fixed_fp(self):
@@ -103,6 +117,45 @@ class TestRealityFpGuard(unittest.TestCase):
         with patch("builtins.input", lambda *a, **k: next(inputs)):
             got = fm.prompt_fingerprint(current="firefox")
         self.assertEqual(got, "random")
+
+
+class TestResolveClientFp(unittest.TestCase):
+    """v4.31: эффективный FP для генераторов (override → state → chrome)."""
+
+    def setUp(self): _setup_core()
+
+    def test_state_fingerprint_used_by_default(self):
+        from chimera.modules.fingerprint_manager import resolve_client_fp
+        self.assertEqual(resolve_client_fp({"fingerprint": "firefox"}), "firefox")
+
+    def test_override_wins(self):
+        from chimera.modules.fingerprint_manager import resolve_client_fp
+        self.assertEqual(
+            resolve_client_fp({"fingerprint": "firefox"}, "safari"), "safari")
+
+    def test_garbage_falls_back_to_state(self):
+        from chimera.modules.fingerprint_manager import resolve_client_fp
+        self.assertEqual(
+            resolve_client_fp({"fingerprint": "firefox"}, "garbage"), "firefox")
+
+    def test_garbage_state_falls_back_to_chrome(self):
+        from chimera.modules.fingerprint_manager import resolve_client_fp
+        self.assertEqual(resolve_client_fp({"fingerprint": "none"}), "chrome")
+        self.assertEqual(resolve_client_fp({}), "chrome")
+
+    def test_case_insensitive(self):
+        from chimera.modules.fingerprint_manager import resolve_client_fp
+        self.assertEqual(resolve_client_fp({}, "  FIREFOX "), "firefox")
+
+    def test_save_default_fingerprint(self):
+        from chimera.modules import fingerprint_manager as fm
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(fm, "STATE_FILE", Path(td) / "state.json"):
+                self.assertTrue(fm.save_default_fingerprint("ios"))
+                saved = json.loads((Path(td) / "state.json").read_text())
+                self.assertEqual(saved["fingerprint"], "ios")
+                # мусор не сохраняется
+                self.assertFalse(fm.save_default_fingerprint("garbage"))
 
 # ── config_backup ──────────────────────────────────────────────────────────
 

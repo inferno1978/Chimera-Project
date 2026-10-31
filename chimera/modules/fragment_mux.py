@@ -168,8 +168,13 @@ def _resolve_sni(state: dict) -> str:
 
 def _build_xray_mux_json(state: dict, frag_packets: str, frag_length: str,
                           frag_interval: str, concurrency: int,
-                          xudp: int) -> dict:
-    """Xray JSON с fragment + mux."""
+                          xudp: int,
+                          fp_override: Optional[str] = None) -> dict:
+    """Xray JSON с fragment + mux.
+
+    v4.31: fp_override — FP этой генерации (None → дефолт ноды).
+    """
+    from chimera.modules.fingerprint_manager import resolve_client_fp
     proto      = state.get("protocol_mode", "reality")
     domain     = state.get("domain", "")
     port       = int(state.get("server_port", 443))
@@ -179,7 +184,7 @@ def _build_xray_mux_json(state: dict, frag_packets: str, frag_length: str,
     xtls_flow  = state.get("xtls_flow", "xtls-rprx-vision")
     xhttp_path = state.get("xhttp_path", "/")
     xhttp_mode = state.get("xhttp_mode", "stream-up")
-    fp         = state.get("fingerprint", "chrome") or "chrome"
+    fp         = resolve_client_fp(state, fp_override)  # v4.31
     sni        = _resolve_sni(state)
 
     # Валидная схема Xray-core: fragment — в settings freedom-outbound,
@@ -272,8 +277,17 @@ def _build_xray_mux_json(state: dict, frag_packets: str, frag_length: str,
 
 
 def _build_singbox_mux_json(state: dict, frag_packets: str, frag_length: str,
-                              frag_interval: str, sb_protocol: str) -> dict:
-    """Sing-box JSON с fragment + multiplex."""
+                              frag_interval: str, sb_protocol: str,
+                              sb_max_connections: int = 4,
+                              sb_min_streams: int = 4,
+                              fp_override: Optional[str] = None) -> dict:
+    """Sing-box JSON с fragment + multiplex.
+
+    v4.31: sb_max_connections/sb_min_streams — настраиваемые параметры
+    multiplex (раньше прибиты 4/4 в build_singbox_multiplex по умолчанию);
+    fp_override — FP этой генерации (None → дефолт ноды).
+    """
+    from chimera.modules.fingerprint_manager import resolve_client_fp
     proto      = state.get("protocol_mode", "reality")
     domain     = state.get("domain", "")
     port       = int(state.get("server_port", 443))
@@ -286,7 +300,7 @@ def _build_singbox_mux_json(state: dict, frag_packets: str, frag_length: str,
     # в xray-билдере — для sing-box добавлен здесь, по аналогии
     # с fragment_noise._build_singbox_noise_json).
     xhttp_mode = state.get("xhttp_mode", "stream-up")
-    fp         = state.get("fingerprint", "chrome") or "chrome"
+    fp         = resolve_client_fp(state, fp_override)  # v4.31
     sni        = _resolve_sni(state)
 
     # TFO — только по настройке tfo_settings (дефолт ВЫКЛ,
@@ -296,7 +310,9 @@ def _build_singbox_mux_json(state: dict, frag_packets: str, frag_length: str,
         **tfo_dial(),
         "fragment": {"enabled": True, "size": frag_length, "sleep": frag_interval},
     }
-    multiplex = build_singbox_multiplex(sb_protocol)
+    multiplex = build_singbox_multiplex(sb_protocol,
+                                        max_connections=sb_max_connections,
+                                        min_streams=sb_min_streams)
 
     if proto == "reality":
         outbound = {
@@ -364,7 +380,17 @@ def do_fragment_mux_menu() -> None:
     """
     Генерация конфигов с фрагментацией + Mux.
     Вызывается из _menu_diagnostics() (пункт F7).
+
+    v4.31 «Fragment & FP Customizer» — всё настраиваемо:
+      шаг 1 — fragment: 3 пресета + tlshello + СВОИ параметры;
+      шаг 2 — mux Xray: 3 пресета + СВОИ concurrency/xudp;
+      шаг 3 — sing-box: протокол + СВОИ max_connections/min_streams;
+      шаг 4 — Fingerprint: 11 live-валидированных имён (REALITY-guard).
     """
+    from chimera.modules.fingerprint_manager import (
+        XRAY_FP_LIST, reality_fp_warning, resolve_client_fp,
+    )
+    from chimera.modules.fragment_config import _validate_range_str
     os.system("clear")
     print()
     _box_top("🔀  ФРАГМЕНТАЦИЯ + MUX (МУЛЬТИПЛЕКСИРОВАНИЕ)")
@@ -384,69 +410,170 @@ def do_fragment_mux_menu() -> None:
         input(f"\n{BLUE}Нажмите Enter...{NC}")
         return
 
-    # Шаг 1: пресет фрагментации
+    # ── Шаг 1: фрагментация (v4.31: + tlshello + своя) ─────────────────
     print()
-    _box_top("Шаг 1 из 3: пресет фрагментации")
-    _box_item("1", f"⚡ Агрессивная  {DIM}length=1-3б{NC}")
-    _box_item("2", f"✅ Сбалансированная  {DIM}length=3-7б{NC}")
-    _box_item("3", f"🔆 Лёгкая  {DIM}length=5-15б{NC}")
+    _box_top("Шаг 1 из 4: фрагментация")
+    _box_item("1", f"⚡ Агрессивная  {DIM}packets=1-3 length=1-3б interval=5-10мс{NC}")
+    _box_item("2", f"✅ Сбалансированная  {DIM}packets=1-3 length=3-7б interval=10-20мс{NC}")
+    _box_item("3", f"🔆 Лёгкая  {DIM}packets=1-2 length=5-15б interval=20-50мс{NC}")
+    _box_item("4", f"🧩 tlshello-рецепт  {DIM}packets=tlshello length=10-20б "
+                   f"interval=10-20мс{NC}")
+    _box_item("5", f"⚙️  Своя  {DIM}ввести packets/length/interval вручную{NC}")
     _box_bottom()
     try:
-        ch = input(f"{CYAN}Выбор [1-3]:{NC} ").strip()
+        ch = input(f"{CYAN}Выбор [1-5]:{NC} ").strip()
     except KeyboardInterrupt:
         return
     frag_map = {"1": ("1-3","1-3","5-10"),
                 "2": ("1-3","3-7","10-20"),
-                "3": ("1-2","5-15","20-50")}
-    if ch not in frag_map:
+                "3": ("1-2","5-15","20-50"),
+                "4": ("tlshello","10-20","10-20")}
+    if ch == "5":
+        print()
+        _info("Свои параметры фрагментации:")
+        print()
+        try:
+            raw_p = input(f"  {CYAN}packets {DIM}(напр. 1-3 или tlshello){NC}: ").strip() or "1-3"
+            raw_l = input(f"  {CYAN}length  {DIM}(байты){NC}: ").strip() or "3-7"
+            raw_i = input(f"  {CYAN}interval{DIM}(мс){NC}: ").strip() or "10-20"
+        except KeyboardInterrupt:
+            return
+        if not (_validate_range_str(raw_p, "packets")
+                and _validate_range_str(raw_l, "length")
+                and _validate_range_str(raw_i, "interval")):
+            time.sleep(2)
+            return
+        fpackets, flength, finterval = raw_p, raw_l, raw_i
+    elif ch in frag_map:
+        fpackets, flength, finterval = frag_map[ch]
+    else:
         return
-    fp, fl, fi = frag_map[ch]
 
-    # Шаг 2: пресет mux
+    # ── Шаг 2: mux Xray (v4.31: + своя) ─────────────────────────────────
     print()
-    _box_top("Шаг 2 из 3: мультиплексирование (Xray)")
-    for k, (key, p) in enumerate(_MUX_PRESETS.items(), 1):
-        _box_item(str(k), p["desc"])
+    _box_top("Шаг 2 из 4: мультиплексирование (Xray)")
+    for k, (key, p_) in enumerate(_MUX_PRESETS.items(), 1):
+        _box_item(str(k), p_["desc"])
+    _box_item("4", "⚙️  Своя — ввести concurrency/xudp вручную")
     _box_bottom()
     try:
-        ch2 = input(f"{CYAN}Выбор [1-3]:{NC} ").strip()
+        ch2 = input(f"{CYAN}Выбор [1-4]:{NC} ").strip()
     except KeyboardInterrupt:
         return
     mux_list = list(_MUX_PRESETS.values())
-    if ch2 not in ("1","2","3"):
+    if ch2 == "4":
+        print()
+        _info("Свой mux (целые числа > 0):")
+        print()
+        try:
+            raw_c = input(f"  {CYAN}concurrency {DIM}(потоков, напр. 8){NC}: ").strip() or "8"
+            raw_x = input(f"  {CYAN}xudp {DIM}(UDP-потоков, напр. 16){NC}: ").strip() or "16"
+        except KeyboardInterrupt:
+            return
+        if not (raw_c.isdigit() and int(raw_c) > 0 and raw_x.isdigit() and int(raw_x) > 0):
+            _warn("concurrency/xudp: целые числа > 0")
+            time.sleep(2)
+            return
+        mux_concurrency, mux_xudp = int(raw_c), int(raw_x)
+    elif ch2 in ("1", "2", "3"):
+        mux_cfg = mux_list[int(ch2) - 1]
+        mux_concurrency = mux_cfg["concurrency"]
+        mux_xudp = mux_cfg["xudp"]
+    else:
         return
-    mux_cfg  = mux_list[int(ch2)-1]
 
-    # Шаг 3: протокол sing-box
+    # ── Шаг 3: sing-box протокол (v4.31: + свои параметры) ─────────────
     print()
-    _box_top("Шаг 3 из 3: протокол Sing-box")
-    for k, (proto, desc) in enumerate(_SINGBOX_PROTOCOLS.items(), 1):
+    _box_top("Шаг 3 из 4: протокол Sing-box")
+    for k, (proto_, desc) in enumerate(_SINGBOX_PROTOCOLS.items(), 1):
         _box_item(str(k), desc)
+    _box_item("4", "⚙️  Свой — протокол + max_connections/min_streams")
     _box_bottom()
     try:
-        ch3 = input(f"{CYAN}Выбор [1-3]:{NC} ").strip()
+        ch3 = input(f"{CYAN}Выбор [1-4]:{NC} ").strip()
     except KeyboardInterrupt:
         return
     sb_protos = list(_SINGBOX_PROTOCOLS.keys())
-    if ch3 not in ("1","2","3"):
+    sb_max_connections, sb_min_streams = 4, 4
+    if ch3 == "4":
+        print()
+        _info("Свой sing-box multiplex:")
+        print()
+        try:
+            raw_pr = input(f"  {CYAN}протокол {DIM}(h2mux/smux/yamux){NC}: ").strip().lower() or "h2mux"
+            raw_mc = input(f"  {CYAN}max_connections {DIM}(напр. 4){NC}: ").strip() or "4"
+            raw_ms = input(f"  {CYAN}min_streams {DIM}(напр. 4){NC}: ").strip() or "4"
+        except KeyboardInterrupt:
+            return
+        if raw_pr not in sb_protos:
+            _warn(f"Протокол должен быть одним из: {', '.join(sb_protos)}")
+            time.sleep(2)
+            return
+        if not (raw_mc.isdigit() and int(raw_mc) > 0 and raw_ms.isdigit() and int(raw_ms) > 0):
+            _warn("max_connections/min_streams: целые числа > 0")
+            time.sleep(2)
+            return
+        sb_proto = raw_pr
+        sb_max_connections, sb_min_streams = int(raw_mc), int(raw_ms)
+    elif ch3 in ("1", "2", "3"):
+        sb_proto = sb_protos[int(ch3) - 1]
+    else:
         return
-    sb_proto = sb_protos[int(ch3)-1]
 
-    # Генерация
+    # ── Шаг 4: Fingerprint (v4.31) ─────────────────────────────────────
+    eff_fp = resolve_client_fp(state)
+    print()
+    _box_top("Шаг 4 из 4: fingerprint (TLS/uTLS)")
+    _box_row(f"  Текущий (дефолт ноды): {BOLD}{eff_fp}{NC}")
+    _box_row()
+    for i, name in enumerate(XRAY_FP_LIST, 1):
+        mark = f" {GREEN}← текущий{NC}" if name == eff_fp else ""
+        dim = f" {YELLOW}(REALITY: несовместим){NC}" if name in ("random", "randomized", "randomizednoalpn") else ""
+        _box_item(str(i), f"{name}{mark}{dim}")
+    _box_row()
+    _box_back()
+    _box_bottom()
+    try:
+        raw_fp = input(f"{CYAN}FP (номер/имя, Enter = {eff_fp}):{NC} ").strip().lower()
+    except KeyboardInterrupt:
+        return
+    fp_override = None
+    if raw_fp:
+        chosen = ""
+        if raw_fp.isdigit() and 1 <= int(raw_fp) <= len(XRAY_FP_LIST):
+            chosen = XRAY_FP_LIST[int(raw_fp) - 1]
+        elif raw_fp in XRAY_FP_LIST:
+            chosen = raw_fp
+        if not chosen:
+            _warn(f"Неизвестный FP: {raw_fp!r} — ядро 26.10.29 отвергает "
+                  "неизвестные имена при парсинге.")
+            time.sleep(1)
+            return
+        w = reality_fp_warning(chosen)
+        if w:
+            _warn(w)
+        fp_override = chosen
+
+    # ── Генерация ──────────────────────────────────────────────────────
     print()
     _info("Генерирую конфиги с fragment + mux...")
     _OUT_DIR.mkdir(parents=True, exist_ok=True)
-    suffix    = f"frag_{fl.replace('-','_')}b_mux_{mux_cfg['concurrency']}x"
+    suffix    = f"frag_{flength.replace('-','_')}b_mux_{mux_concurrency}x"
     xray_path = _OUT_DIR / f"xray-{suffix}.json"
     sb_path   = _OUT_DIR / f"singbox-{suffix}.json"
 
     try:
         xray_cfg = _build_xray_mux_json(
-            state, fp, fl, fi, mux_cfg["concurrency"], mux_cfg["xudp"])
+            state, fpackets, flength, finterval, mux_concurrency, mux_xudp,
+            fp_override=fp_override)
         xray_path.write_text(json.dumps(xray_cfg, ensure_ascii=False, indent=2))
         xray_path.chmod(0o600)
 
-        sb_cfg = _build_singbox_mux_json(state, fp, fl, fi, sb_proto)
+        sb_cfg = _build_singbox_mux_json(
+            state, fpackets, flength, finterval, sb_proto,
+            sb_max_connections=sb_max_connections,
+            sb_min_streams=sb_min_streams,
+            fp_override=fp_override)
         sb_path.write_text(json.dumps(sb_cfg, ensure_ascii=False, indent=2))
         sb_path.chmod(0o600)
     except Exception as e:
@@ -456,7 +583,9 @@ def do_fragment_mux_menu() -> None:
 
     _ok(f"Xray:     {xray_path}")
     _ok(f"Sing-box: {sb_path}")
-    _log("INFO", f"Mux configs: {xray_path} {sb_path}")
+    _log("INFO", f"Mux configs: {xray_path} {sb_path} "
+                 f"mux={mux_concurrency}/{mux_xudp} sb={sb_proto}/{sb_max_connections}/{sb_min_streams} "
+                 f"fp={resolve_client_fp(state, fp_override)}")
 
     print()
     _box_top("📋  Как использовать")

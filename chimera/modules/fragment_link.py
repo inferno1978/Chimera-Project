@@ -99,6 +99,10 @@ from chimera.modules.fragment_config import (
     _FRAGMENT_PRESETS,
     _validate_range_str,
 )
+from chimera.modules.fingerprint_manager import (
+    XRAY_FP_LIST, REALITY_INCOMPATIBLE_FP, reality_fp_warning,
+    resolve_client_fp, save_default_fingerprint,
+)
 
 # ── Делегирование в _core.py (без circular import, без дублирования) ──────
 def _core_call(func_name: str, *args, **kwargs):
@@ -150,8 +154,13 @@ def _flag_prefix() -> str:
 def _base_uri_params(
     host: str, uuid_str: str, pbk: str, sid: str, sni: str,
     fp: str, proto: str, xhttp_path: str, xhttp_mode: str, port: int,
+    flow: str = "xtls-rprx-vision",
 ) -> str:
-    """Возвращает vless://uuid@host:port?<базовые параметры> без fragment и без #label."""
+    """Возвращает vless://uuid@host:port?<базовые параметры> без fragment и без #label.
+
+    v4.31: flow берётся из state (xtls_flow), а не прибит гвоздями —
+    все генераторы ссылок пробрасывают его сюда.
+    """
     import urllib.parse
     if proto == "xhttp":
         path_enc = urllib.parse.quote(xhttp_path, safe="/")
@@ -174,7 +183,7 @@ def _base_uri_params(
         return (
             f"vless://{uuid_str}@{host}:{port}"
             f"?type=tcp&security=reality&pbk={pbk}"
-            f"&fp={fp}&sni={sni}&sid={sid}&flow=xtls-rprx-vision"
+            f"&fp={fp}&sni={sni}&sid={sid}&flow={flow}"
         )
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -186,6 +195,7 @@ def _gen_happ_link(
     packets: str, length: str, interval: str,
     fp: str = "chrome", proto: str = "reality",
     xhttp_path: str = "/", xhttp_mode: str = "stream-up", port: int = 443,
+    flow: str = "xtls-rprx-vision",
 ) -> str:
     """
     Happ (iOS/Android/Desktop, Xray-core).
@@ -194,7 +204,8 @@ def _gen_happ_link(
     Пример: &fragment=3-7,10-20,1-3
     """
     import urllib.parse
-    base   = _base_uri_params(host, uuid_str, pbk, sid, sni, fp, proto, xhttp_path, xhttp_mode, port)
+    base   = _base_uri_params(host, uuid_str, pbk, sid, sni, fp, proto,
+                              xhttp_path, xhttp_mode, port, flow)
     frag   = urllib.parse.quote(f"{length},{interval},{packets}")
     label  = _flag_prefix() + urllib.parse.quote(sni) + "%20%F0%9F%94%B5Happ"
     return f"{base}&fragment={frag}#{label}"
@@ -205,6 +216,7 @@ def _gen_incy_link(
     packets: str, length: str, interval: str,
     fp: str = "chrome", proto: str = "reality",
     xhttp_path: str = "/", xhttp_mode: str = "stream-up", port: int = 443,
+    flow: str = "xtls-rprx-vision",
 ) -> str:
     """
     Incy (iOS/Android/Desktop/TV, Xray-core).
@@ -215,7 +227,8 @@ def _gen_incy_link(
     дефолтный пакет tlshello автоматически при tls/reality.
     """
     import urllib.parse
-    base  = _base_uri_params(host, uuid_str, pbk, sid, sni, fp, proto, xhttp_path, xhttp_mode, port)
+    base  = _base_uri_params(host, uuid_str, pbk, sid, sni, fp, proto,
+                             xhttp_path, xhttp_mode, port, flow)
     label = _flag_prefix() + urllib.parse.quote(sni) + "%20%F0%9F%94%B5Incy"
     return f"{base}&fragmentLength={length}&fragmentInterval={interval}#{label}"
 
@@ -225,6 +238,7 @@ def _gen_nekoray_link(
     packets: str, length: str, interval: str,
     fp: str = "chrome", proto: str = "reality",
     xhttp_path: str = "/", xhttp_mode: str = "stream-up", port: int = 443,
+    flow: str = "xtls-rprx-vision",
 ) -> str:
     """
     Nekoray / Nekobox (Desktop, sing-box core).
@@ -234,7 +248,8 @@ def _gen_nekoray_link(
     поддержка fragment в URI нестабильна, рекомендуется JSON-файл.
     """
     import urllib.parse
-    base   = _base_uri_params(host, uuid_str, pbk, sid, sni, fp, proto, xhttp_path, xhttp_mode, port)
+    base   = _base_uri_params(host, uuid_str, pbk, sid, sni, fp, proto,
+                              xhttp_path, xhttp_mode, port, flow)
     frag   = urllib.parse.quote(f"{packets},{length},{interval}")
     label  = _flag_prefix() + urllib.parse.quote(sni) + "%20%F0%9F%94%B5Neko"
     return f"{base}&fragment={frag}#{label}"
@@ -302,9 +317,13 @@ def build_fragment_link_variants(base_link: str, packets: str,
 def _build_xray_client_json(state: dict, packets: str, length: str,
                              interval: str,
                              noise_packet: Optional[str] = None,
-                             noise_delay: Optional[str] = None) -> dict:
+                             noise_delay: Optional[str] = None,
+                             fp_override: Optional[str] = None) -> dict:
     """Полный клиентский Xray config.json: fragment (+ опц. noise) в freedom-outbound,
-    основной outbound цепляется через sockopt.dialerProxy (валидная схема Xray-core)."""
+    основной outbound цепляется через sockopt.dialerProxy (валидная схема Xray-core).
+
+    v4.31: fp_override — FP этой генерации; None → дефолт ноды (state.fingerprint).
+    """
     proto      = state.get("protocol_mode", "reality")
     domain     = state.get("domain", "")
     port       = int(state.get("server_port", 443))
@@ -314,7 +333,7 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
     xtls_flow  = state.get("xtls_flow", "xtls-rprx-vision")
     xhttp_path = state.get("xhttp_path", "/")
     xhttp_mode = state.get("xhttp_mode", "stream-up")
-    fp         = state.get("fingerprint", "chrome") or "chrome"
+    fp         = resolve_client_fp(state, fp_override)  # v4.31: настраиваемый FP
     sni        = _resolve_sni(state)
 
     # Валидная схема Xray-core: fragment(+опц. noises) живут в settings
@@ -415,8 +434,12 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
 def _build_singbox_json(state: dict, packets: str, length: str,
                         interval: str,
                         noise_packet: Optional[str] = None,
-                        noise_delay: Optional[str] = None) -> dict:
-    """Sing-box outbound с нативным fragment (+ опц. noise)."""
+                        noise_delay: Optional[str] = None,
+                        fp_override: Optional[str] = None) -> dict:
+    """Sing-box outbound с нативным fragment (+ опц. noise).
+
+    v4.31: fp_override — FP этой генерации; None → дефолт ноды.
+    """
     proto      = state.get("protocol_mode", "reality")
     domain     = state.get("domain", "")
     port       = int(state.get("server_port", 443))
@@ -426,7 +449,7 @@ def _build_singbox_json(state: dict, packets: str, length: str,
     xtls_flow  = state.get("xtls_flow", "xtls-rprx-vision")
     xhttp_path = state.get("xhttp_path", "/")
     xhttp_mode = state.get("xhttp_mode", "stream-up")
-    fp         = state.get("fingerprint", "chrome") or "chrome"
+    fp         = resolve_client_fp(state, fp_override)  # v4.31: настраиваемый FP
     sni        = _resolve_sni(state)
 
     # TFO — только по настройке tfo_settings (дефолт ВЫКЛ).
@@ -577,15 +600,21 @@ def _pick_fragment_preset() -> Optional[tuple[str, str, str]]:
 # ══════════════════════════════════════════════════════════════════════════
 
 def _show_links_and_qr(state: dict, packets: str, length: str,
-                        interval: str) -> None:
-    """Выводит ссылки всех форматов и QR-коды."""
+                        interval: str,
+                        fp_override: Optional[str] = None) -> None:
+    """Выводит ссылки всех форматов и QR-коды.
+
+    v4.31: fp_override — FP этой генерации (None → дефолт ноды);
+    flow пробрасывается из state (xtls_flow), не прибит гвоздями.
+    """
     proto      = state.get("protocol_mode", "reality")
     domain     = state.get("domain", "")
     port       = int(state.get("server_port", 443))
     uuid_val   = state.get("uuid", "")
     pub_key    = state.get("public_key", "")
     short_id   = state.get("short_id", "")
-    fp         = state.get("fingerprint", "chrome") or "chrome"
+    fp         = resolve_client_fp(state, fp_override)  # v4.31
+    flow       = state.get("xtls_flow", "xtls-rprx-vision") or "xtls-rprx-vision"
     xhttp_path = state.get("xhttp_path", "/")
     xhttp_mode = state.get("xhttp_mode", "stream-up")
     sni        = _resolve_sni(state)
@@ -598,7 +627,7 @@ def _show_links_and_qr(state: dict, packets: str, length: str,
             # Happ
             happ = _gen_happ_link(
                 host, uuid_val, pub_key, short_id, sni,
-                packets, length, interval, fp, proto, xhttp_path, xhttp_mode, port,
+                packets, length, interval, fp, proto, xhttp_path, xhttp_mode, port, flow,
             )
             print()
             print(f"  {GREEN}🔵 Happ {DIM}({host_label}){NC}  {DIM}← QR достаточно{NC}")
@@ -609,7 +638,7 @@ def _show_links_and_qr(state: dict, packets: str, length: str,
             # Incy
             incy = _gen_incy_link(
                 host, uuid_val, pub_key, short_id, sni,
-                packets, length, interval, fp, proto, xhttp_path, xhttp_mode, port,
+                packets, length, interval, fp, proto, xhttp_path, xhttp_mode, port, flow,
             )
             print()
             print(f"  {CYAN}🔵 Incy {DIM}({host_label}){NC}  {DIM}← QR достаточно{NC}")
@@ -620,7 +649,7 @@ def _show_links_and_qr(state: dict, packets: str, length: str,
             # Nekoray / Nekobox
             neko = _gen_nekoray_link(
                 host, uuid_val, pub_key, short_id, sni,
-                packets, length, interval, fp, proto, xhttp_path, xhttp_mode, port,
+                packets, length, interval, fp, proto, xhttp_path, xhttp_mode, port, flow,
             )
             print()
             print(f"  {MAGENTA}🔵 Nekoray/Nekobox {DIM}({host_label}){NC}  {DIM}← QR достаточно{NC}")
@@ -751,6 +780,97 @@ def _print_client_guide(has_fragment: bool, domain: str,
     print()
 
 # ══════════════════════════════════════════════════════════════════════════
+# ВЫБОР FINGERPRINT (v4.31 — «Fragment & FP Customizer»)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _pick_fingerprint_step(state: dict) -> Optional[str]:
+    """
+    Шаг «Fingerprint» меню генерации ссылок/конфигов.
+
+    Возвращает:
+      None   — оставить дефолт ноды (state.fingerprint);
+      str    — выбранный FP (валидный, live 26.10.29) для ЭТОЙ генерации;
+               при согласии пользователя — сразу сохраняется как дефолт
+               ноды (state.json → все будущие генерации/экспорт);
+      ""     — Ctrl+C: отмена ВСЕЙ генерации (меню завершается).
+
+    Список — LIVE-валидированный (ядро 26.10.29 отвергает неизвестные
+    имена при парсинге конфига): 11 FP из XRAY_FP_LIST.
+    REALITY-guard: randomized-семейство (random/randomized/
+    randomizednoalpn) с REALITY несовместимо — предупреждаем.
+    """
+    eff = resolve_client_fp(state)
+    print()
+    _box_top("🔑  FINGERPRINT (TLS/uTLS)")
+    _box_desc(
+        "FP имитирует ClientHello браузера в REALITY-хендшейке. "
+        "Влияет на ссылки (&fp=) и JSON-конфиги этой генерации."
+    )
+    _box_sep()
+    _box_row(f"  Текущий (дефолт ноды): {BOLD}{eff}{NC}")
+    _box_row()
+    for i, name in enumerate(XRAY_FP_LIST, 1):
+        mark = f" {GREEN}← текущий{NC}" if name == eff else ""
+        dim = f" {YELLOW}(REALITY: несовместим){NC}" if name in REALITY_INCOMPATIBLE_FP else ""
+        _box_item(str(i), f"{name}{mark}{dim}")
+    _box_row()
+    _box_back()
+    _box_bottom()
+
+    try:
+        raw = input(f"{CYAN}FP (номер/имя, Enter = {eff}):{NC} ").strip().lower()
+    except KeyboardInterrupt:
+        return ""
+    if not raw:
+        return None
+
+    chosen = ""
+    if raw.isdigit() and 1 <= int(raw) <= len(XRAY_FP_LIST):
+        chosen = XRAY_FP_LIST[int(raw) - 1]
+    elif raw in XRAY_FP_LIST:
+        chosen = raw
+    if not chosen:
+        _warn(f"Неизвестный FP: {raw!r} — ядро 26.10.29 отвергает "
+              "неизвестные имена при парсинге (unknown fingerprint).")
+        time.sleep(1)
+        return None
+
+    w = reality_fp_warning(chosen)
+    if w:
+        _warn(w)
+    _info(f"FP этой генерации: {chosen}")
+
+    try:
+        keep = input(f"{CYAN}Сохранить как дефолт ноды (state.json)? "
+                     f"[y/N]:{NC} ").strip().lower()
+    except KeyboardInterrupt:
+        keep = ""
+    if keep in ("y", "yes", "д", "да"):
+        if save_default_fingerprint(chosen):
+            state["fingerprint"] = chosen
+            _ok(f"Сохранено — дефолт ноды теперь {chosen} "
+                "(все будущие генерации/экспорт)")
+    return chosen
+
+
+def _pick_noise_custom() -> Optional[tuple[str, str]]:
+    """Кастомный noise (v4.31): ручной ввод packet/delay. None = отмена."""
+    print()
+    _info("Свой noise: введите параметры (диапазон N или N-M).")
+    print()
+    try:
+        raw_packet = input(f"  {CYAN}packet {DIM}(байты, напр. 30-80){NC}: ").strip() or "30-80"
+        raw_delay  = input(f"  {CYAN}delay  {DIM}(мс,    напр. 10-40){NC}: ").strip() or "10-40"
+    except KeyboardInterrupt:
+        return None
+    if not (_validate_range_str(raw_packet, "packet")
+            and _validate_range_str(raw_delay, "delay")):
+        time.sleep(2)
+        return None
+    return (raw_packet, raw_delay)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # ЗАГРУЗКА STATE
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -797,6 +917,14 @@ def do_fragment_link_menu() -> None:
     """
     Генерация ссылок и конфигов с фрагментацией.
     Вызывается из _menu_users() в _core.py (пункт F).
+
+    v4.31 «Fragment & FP Customizer»:
+      шаг 0 — FP (11 live-валидированных имён, REALITY-guard, опция
+               «сохранить как дефолт ноды»);
+      шаг 1 — пресет фрагментации (агрессивная/сбалансированная/лёгкая/
+               tlshello/своя);
+      шаг 2 — опциональный noise (3 пресета + СВОИ параметры);
+      генерация — все JSON/ссылки несут выбранный FP и flow из state.
     """
     os.system("clear")
     print()
@@ -814,6 +942,12 @@ def do_fragment_link_menu() -> None:
         input(f"\n{BLUE}Нажмите Enter...{NC}")
         return
 
+    # ── Шаг 0: Fingerprint (v4.31) ─────────────────────────────────────
+    fp_pick = _pick_fingerprint_step(state)
+    if fp_pick == "":
+        return  # Ctrl+C — отмена всей генерации
+    fp_override: Optional[str] = fp_pick  # None = дефолт ноды
+
     result = _pick_fragment_preset()
     if result is None:
         return
@@ -824,6 +958,7 @@ def do_fragment_link_menu() -> None:
     # ── Опциональный noise (комбо fragment+noise одной генерацией) ────
     # Дефолт — N (Enter): прежнее поведение. Noise идёт ТОЛЬКО в
     # JSON-конфиги (URI-форматы Happ/Incy/Neko noise не несут).
+    # v4.31: + пункт «своя» — ручной ввод packet/delay.
     noise_packet: Optional[str] = None
     noise_delay:  Optional[str] = None
     if has_fragment:
@@ -838,9 +973,10 @@ def do_fragment_link_menu() -> None:
             _box_item("1", "🔅 Лёгкий      10–20 байт, 5–10 мс")
             _box_item("2", "🔆 Средний     20–50 байт, 10–20 мс")
             _box_item("3", "🔊 Агрессивный 50–100 байт, 15–30 мс")
+            _box_item("4", "⚙️  Своя        ввести packet/delay вручную")
             _box_bottom()
             try:
-                _nch = input(f"{CYAN}Выбор [1-3]:{NC} ").strip()
+                _nch = input(f"{CYAN}Выбор [1-4]:{NC} ").strip()
             except KeyboardInterrupt:
                 _nch = ""
             _nmap = {
@@ -850,6 +986,11 @@ def do_fragment_link_menu() -> None:
             }
             if _nch in _nmap:
                 noise_packet, noise_delay = _nmap[_nch]
+            elif _nch == "4":
+                custom = _pick_noise_custom()
+                if custom:
+                    noise_packet, noise_delay = custom
+            if noise_packet and noise_delay:
                 _info(f"Noise: packet={noise_packet}б delay={noise_delay}мс "
                       f"(только в JSON-конфигах)")
 
@@ -858,7 +999,7 @@ def do_fragment_link_menu() -> None:
     if noise_packet and noise_delay:
         frag_suffix += f"_noise_{safe(noise_packet)}b"
 
-    # Генерируем JSON-конфиги
+    # Генерируем JSON-конфиги (v4.31: с выбранным FP)
     print()
     _info("Генерирую JSON-конфиги...")
     _OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -869,13 +1010,15 @@ def do_fragment_link_menu() -> None:
     try:
         xray_path.write_text(
             json.dumps(_build_xray_client_json(state, packets, length, interval,
-                                                noise_packet, noise_delay),
+                                                noise_packet, noise_delay,
+                                                fp_override=fp_override),
                        ensure_ascii=False, indent=2)
         )
         xray_path.chmod(0o600)
         singbox_path.write_text(
             json.dumps(_build_singbox_json(state, packets, length, interval,
-                                           noise_packet, noise_delay),
+                                           noise_packet, noise_delay,
+                                           fp_override=fp_override),
                        ensure_ascii=False, indent=2)
         )
         singbox_path.chmod(0o600)
@@ -889,12 +1032,13 @@ def do_fragment_link_menu() -> None:
     _log("INFO", (
         f"Fragment configs generated: {xray_path}, {singbox_path} "
         f"[packets={packets} length={length} interval={interval}"
+        f" fp={resolve_client_fp(state, fp_override)}"
         + (f" noise_packet={noise_packet} noise_delay={noise_delay}]"
            if noise_packet and noise_delay else "]")
     ))
 
-    # Ссылки и QR
-    _show_links_and_qr(state, packets, length, interval)
+    # Ссылки и QR (v4.31: с выбранным FP)
+    _show_links_and_qr(state, packets, length, interval, fp_override=fp_override)
 
     # Мини-гайд
     _print_client_guide(

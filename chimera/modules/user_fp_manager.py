@@ -434,7 +434,7 @@ TG_FP_COMMANDS_BLOCK: str = r'''
 
 _FP_LIST_BOT = [
     "chrome", "firefox", "safari", "ios", "android", "edge",
-    "360", "qq", "random", "randomized", "none",
+    "360", "qq", "random", "randomized", "randomizednoalpn",
 ]
 
 def _fp_apply_via_xray(new_fp):

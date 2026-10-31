@@ -497,36 +497,41 @@ def do_generate_client_config() -> None:
         try:
             from chimera.modules import fragment_link as _fl
             _p, _l, _i = _cf["packets"], _cf["length"], _cf["interval"]
+            # v4.31: FP fragment-аддона (client_fragment.fp) — None → дефолт ноды
+            _fp_frag = _cf.get("fp")
             # Xray JSON — v2rayN / v2rayNG / Nekoray(Xray) / xray CLI
             _xray_frag_file = out_dir / "xray-client-fragment.json"
             _xray_frag_file.write_text(json.dumps(
-                _fl._build_xray_client_json(state, _p, _l, _i),
+                _fl._build_xray_client_json(state, _p, _l, _i,
+                                            fp_override=_fp_frag),
                 ensure_ascii=False, indent=2))
             _frag_files.append(_xray_frag_file)
             # Sing-box JSON — Hiddify / NekoBox (только reality-ветка)
             if proto == "reality":
                 _sb_frag_file = out_dir / "singbox-client-fragment.json"
                 _sb_frag_file.write_text(json.dumps(
-                    _fl._build_singbox_json(state, _p, _l, _i),
+                    _fl._build_singbox_json(state, _p, _l, _i,
+                                            fp_override=_fp_frag),
                     ensure_ascii=False, indent=2))
                 _frag_files.append(_sb_frag_file)
             # URI-ссылки Happ/Incy/Nekoray — fragment прямо в ссылке
             _sni_frag = _fl._resolve_sni(state)
+            _fp_links = _fp_frag or fp  # v4.31: FP аддона, иначе FP экспорта
             _links_frag = [
                 f"# Fragment-ссылки: packets={_p} length={_l}b interval={_i}ms",
                 "# Happ (iOS/Android/Desktop) — fragment=length,interval,packets:",
                 _fl._gen_happ_link(domain, vuuid, pub_key, short_id, _sni_frag,
-                                   _p, _l, _i, fp, proto, xhttp_path,
+                                   _p, _l, _i, _fp_links, proto, xhttp_path,
                                    xhttp_mode, port),
                 "",
                 "# Incy (iOS/Android/Desktop/TV) — fragmentLength/fragmentInterval:",
                 _fl._gen_incy_link(domain, vuuid, pub_key, short_id, _sni_frag,
-                                   _p, _l, _i, fp, proto, xhttp_path,
+                                   _p, _l, _i, _fp_links, proto, xhttp_path,
                                    xhttp_mode, port),
                 "",
                 "# Nekoray / Nekobox (Desktop) — fragment=packets,length,interval:",
                 _fl._gen_nekoray_link(domain, vuuid, pub_key, short_id, _sni_frag,
-                                      _p, _l, _i, fp, proto, xhttp_path,
+                                      _p, _l, _i, _fp_links, proto, xhttp_path,
                                       xhttp_mode, port),
             ]
             _links_frag_file = out_dir / "vless-links-fragment.txt"

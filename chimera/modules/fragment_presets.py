@@ -36,6 +36,7 @@ chimera/modules/fragment_presets.py
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -90,6 +91,9 @@ from chimera.modules.box_renderer import (
     _box_info, _box_warn, _box_desc, _box_ok, _get_box_width,
 )
 from chimera.modules.fragment_config import generate_fragment_client_config
+from chimera.modules.fingerprint_manager import (
+    XRAY_FP_LIST, reality_fp_warning, resolve_client_fp, save_default_fingerprint,
+)
 
 # ── Константы ─────────────────────────────────────────────────────────────
 _FRAGMENT_DIR = Path("/var/lib/xray-installer/fragment_configs")
@@ -227,8 +231,12 @@ _GROUP_LABELS = {
 
 # ── Генерация одного пресета ───────────────────────────────────────────────
 
-def _generate_one(preset: dict) -> Optional[Path]:
-    """Генерирует один конфиг по пресету. None = не генерировать sockopt fragment."""
+def _generate_one(preset: dict, fp_override: Optional[str] = None) -> Optional[Path]:
+    """Генерирует один конфиг по пресету. None = не генерировать sockopt fragment.
+
+    v4.31: fp_override — FP этой генерации (None → дефолт ноды state.fingerprint);
+    фикс хардкода хрома в reality-ветке.
+    """
     if preset["packets"] is None:
         # Конфиг без фрагментации — generate_fragment_client_config не подходит,
         # генерируем вручную через build_fragment_sockopt с пустым fragment
@@ -251,6 +259,7 @@ def _generate_one(preset: dict) -> Optional[Path]:
         short_id      = state.get("short_id", "")
         reality_dest  = state.get("reality_dest", "")
         xtls_flow     = state.get("xtls_flow", "xtls-rprx-vision")
+        fp_eff        = resolve_client_fp(state, fp_override)  # v4.31
 
         if not server_host or not uuid_val:
             return None
@@ -276,7 +285,8 @@ def _generate_one(preset: dict) -> Optional[Path]:
                     "users": [{"id": uuid_val, "encryption": "none"}]}]},
                 "streamSettings": {
                     "network": "xhttp", "security": "tls", "sockopt": sockopt,
-                    "tlsSettings": {"serverName": server_host, "allowInsecure": False},
+                    "tlsSettings": {"serverName": server_host, "allowInsecure": False,
+                                    "fingerprint": fp_eff},
                     "xhttpSettings": {"path": xhttp_path, "mode": xhttp_mode},
                 },
             }
@@ -322,7 +332,7 @@ def _generate_one(preset: dict) -> Optional[Path]:
                 "streamSettings": {
                     "network": "tcp", "security": "reality", "sockopt": sockopt,
                     "realitySettings": {
-                        "show": False, "fingerprint": "chrome",
+                        "show": False, "fingerprint": fp_eff,  # v4.31: настраиваемый (был hardcode chrome)
                         "serverName": sni, "publicKey": pub_key,
                         "shortId": short_id, "spiderX": "/",
                     },
@@ -368,20 +378,24 @@ def _generate_one(preset: dict) -> Optional[Path]:
             label=preset["label"],
             noise_packet=preset.get("noise_packet"),
             noise_delay=preset.get("noise_delay"),
+            fp_override=fp_override,
         )
 
 
 # ── Генерация всех пресетов ────────────────────────────────────────────────
 
-def generate_all_presets() -> list[dict]:
+def generate_all_presets(fp_override: Optional[str] = None) -> list[dict]:
     """
     Генерирует все конфиги из PRESET_MATRIX.
     Возвращает список результатов:
         [{"preset": {...}, "path": Path | None, "ok": bool}, ...]
+
+    v4.31: fp_override применяется ко ВСЕМ пресетам матрицы
+    (None → дефолт ноды state.fingerprint).
     """
     results = []
     for preset in PRESET_MATRIX:
-        path = _generate_one(preset)
+        path = _generate_one(preset, fp_override=fp_override)
         results.append({
             "preset": preset,
             "path":   path,
@@ -397,6 +411,10 @@ def do_fragment_presets_menu() -> None:
     Меню «Сгенерировать все конфиги с фрагментацией».
     Генерирует полный набор пресетов одной командой и выводит инструкцию
     как пользователю скачать и протестировать их на своём устройстве.
+
+    v4.31: шаг Fingerprint перед генерацией — FP применяется ко ВСЕМ
+    пресетам матрицы (11 live-валидированных имён, REALITY-guard,
+    опция «сохранить как дефолт ноды»).
 
     Вызывается из _menu_diagnostics() в _core.py.
     """
@@ -432,6 +450,56 @@ def do_fragment_presets_menu() -> None:
     _box_bottom()
     print()
 
+    # ── v4.31: шаг Fingerprint (до подтверждения) ─────────────────────
+    state: dict = {}
+    if _STATE_FILE.exists():
+        try:
+            state = json.loads(_STATE_FILE.read_text())
+        except Exception:
+            state = {}
+    eff_fp = resolve_client_fp(state)
+    print()
+    _box_top("🔑  FINGERPRINT ДЛЯ ВСЕЙ МАТРИЦЫ")
+    _box_row(f"  Текущий (дефолт ноды): {BOLD}{eff_fp}{NC}")
+    _box_row()
+    for i, name in enumerate(XRAY_FP_LIST, 1):
+        mark = f" {GREEN}← текущий{NC}" if name == eff_fp else ""
+        dim = f" {YELLOW}(REALITY: несовместим){NC}" if name in ("random", "randomized", "randomizednoalpn") else ""
+        _box_item(str(i), f"{name}{mark}{dim}")
+    _box_row()
+    _box_back()
+    _box_bottom()
+    try:
+        raw_fp = input(f"{CYAN}FP (номер/имя, Enter = {eff_fp}):{NC} ").strip().lower()
+    except KeyboardInterrupt:
+        return
+    fp_override: Optional[str] = None
+    if raw_fp:
+        chosen = ""
+        if raw_fp.isdigit() and 1 <= int(raw_fp) <= len(XRAY_FP_LIST):
+            chosen = XRAY_FP_LIST[int(raw_fp) - 1]
+        elif raw_fp in XRAY_FP_LIST:
+            chosen = raw_fp
+        if not chosen:
+            _warn(f"Неизвестный FP: {raw_fp!r} — ядро 26.10.29 отвергает "
+                  "неизвестные имена при парсинге.")
+            time.sleep(1)
+            return
+        w = reality_fp_warning(chosen)
+        if w:
+            _warn(w)
+        fp_override = chosen
+        _info(f"FP матрицы: {chosen}")
+        try:
+            keep = input(f"{CYAN}Сохранить как дефолт ноды (state.json)? [y/N]:{NC} "
+                         ).strip().lower()
+        except KeyboardInterrupt:
+            keep = ""
+        if keep in ("y", "yes", "д", "да") and save_default_fingerprint(chosen):
+            state["fingerprint"] = chosen
+            fp_override = None  # теперь это дефолт ноды
+            _success(f"Дефолт ноды: {chosen}")
+
     try:
         confirm = input(f"{CYAN}Сгенерировать все конфиги? [y/N]:{NC} ").strip().lower()
     except KeyboardInterrupt:
@@ -444,7 +512,7 @@ def do_fragment_presets_menu() -> None:
     _info("Генерирую конфиги...")
     print()
 
-    results = generate_all_presets()
+    results = generate_all_presets(fp_override=fp_override)
 
     ok_count  = sum(1 for r in results if r["ok"])
     err_count = len(results) - ok_count

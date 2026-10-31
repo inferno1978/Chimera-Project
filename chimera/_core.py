@@ -4916,7 +4916,9 @@ def _fp_patch_config(new_fp: str) -> bool:
 
 def _fp_install_cron(interval_hours: int) -> None:
     """Устанавливает cron-скрипт для ротации fingerprint."""
-    _FP_ROTATE_EXCLUDE = {"random", "randomized", "none"}
+    # v4.31: live-валидация 26.10.29 — randomized-семейство несовместимо
+    # с REALITY, "none" ядром не поддерживается вовсе (удалён из XRAY_FP_LIST).
+    _FP_ROTATE_EXCLUDE = {"random", "randomized", "randomizednoalpn"}
     fp_list_str = " ".join(fp for fp in _FP_LIST if fp not in _FP_ROTATE_EXCLUDE)  # только реальные браузеры
     script_content = textwrap.dedent(f"""\
         #!/bin/bash
@@ -5037,7 +5039,8 @@ def do_manage_fingerprint() -> None:
                 time.sleep(1)
                 continue
             if new_fp == "random":
-                _fp_real = [fp for fp in _FP_LIST if fp not in {"random", "randomized", "none"}]
+                _fp_real = [fp for fp in _FP_LIST
+                            if fp not in {"random", "randomized", "randomizednoalpn"}]
                 new_fp = random.choice(_fp_real)
                 info(f"Random → выбран: {new_fp}")
 

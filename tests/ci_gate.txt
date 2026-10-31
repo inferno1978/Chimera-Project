@@ -114,6 +114,7 @@ tests.test_fake_login_template
 tests.test_fingerprint_manager
 tests.test_fptn
 tests.test_fragment_config
+tests.test_fragment_customizer
 tests.test_fragment_fuzzer
 tests.test_fragment_guide
 tests.test_fragment_link
