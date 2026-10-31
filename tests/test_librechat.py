@@ -283,14 +283,41 @@ class TestEnvPatch(unittest.TestCase):
         env = lc._patch_env_text(
             self._EXAMPLE, port=3080, creds_key="k", creds_iv="i",
             meili_key="m", allow_registration=True, admin_port=3097,
-            zai_key="sk-secret")
+            zai_key="sk-secret", admin_secret="S" * 64)
         self.assertIn("ADMIN_PANEL_PORT=3097\n", env)
+        self.assertIn(f"ADMIN_PANEL_SESSION_SECRET={'S' * 64}\n", env)
         self.assertIn("ZAI_API_KEY=sk-secret\n", env)
         # без ключа ZAI_API_KEY не пишется вовсе
         env2 = lc._patch_env_text(
             self._EXAMPLE, port=3080, creds_key="k", creds_iv="i",
             meili_key="m", allow_registration=True)
         self.assertNotIn("ZAI_API_KEY", env2)
+
+    def test_write_env_file_live_formats(self):
+        """REGRESSION (живой инцидент 01.11 №3, vds13195): форматы секретов
+        LIVE-валидированы апстримом — api: «CREDS_IV must be exactly 32
+        hexadecimal characters (16 bytes)», admin-panel: «SESSION_SECRET
+        must be set to at least 32 characters». hex(N) = 2N символов."""
+        with tempfile.TemporaryDirectory() as td:
+            app = Path(td)
+            (app / ".env.example").write_text(
+                "PORT=3080\nCREDS_KEY=\nCREDS_IV=\n"
+                "ADMIN_PANEL_SESSION_SECRET=\n# UID=1000\n")
+            with patch.object(lc, "_APP_DIR", app):
+                self.assertTrue(lc._write_env_file(
+                    3456, True, zai_key="", admin_port=3095))
+            env = (app / ".env").read_text(encoding="utf-8")
+            key = re.search(r"^CREDS_KEY=([0-9a-f]+)$", env, re.M).group(1)
+            iv = re.search(r"^CREDS_IV=([0-9a-f]+)$", env, re.M).group(1)
+            sec = re.search(
+                r"^ADMIN_PANEL_SESSION_SECRET=([0-9a-f]+)$", env, re.M).group(1)
+            self.assertEqual(len(key), 64)            # 32 байта
+            self.assertEqual(len(iv), 32)             # 16 байт (!)
+            self.assertGreaterEqual(len(sec), 32)     # панель требует ≥32
+            self.assertIn("PORT=3456\n", env)
+            self.assertIn("UID=0\n", env)
+            # librechat.yaml (custom endpoint GLM) записан рядом
+            self.assertTrue((app / "librechat.yaml").exists())
 
     def test_patch_env_idempotent_shape(self):
         once = lc._patch_env_text(

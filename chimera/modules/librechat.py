@@ -613,13 +613,19 @@ def _vendor_app() -> bool:
 def _patch_env_text(text: str, *, port: int, creds_key: str, creds_iv: str,
                     meili_key: str, allow_registration: bool,
                     zai_key: str = "", admin_port: int = _DEFAULT_ADMIN_PORT,
+                    admin_secret: str = "",
                     ) -> str:
     """Генерирует .env из .env.example апстрима (idempotent replace).
 
-    Обязательные правки (без них стек апстрима не стартует/небезопасен):
+    Обязательные правки (без них стек апстрима не стартует/небезопасен;
+    форматы LIVE-валидированы на vds13195 01.11 — api отказывается
+    стартовать с «CREDS_IV must be exactly 32 hexadecimal characters
+    (16 bytes)», admin-panel — с «SESSION_SECRET must be set to at least
+    32 characters»):
       • PORT — loopback-порт api (маппинг в compose);
-      • CREDS_KEY/CREDS_IV — шифрование кред (hex 32/16, openssl rand);
-      • MEILI_MASTER_KEY — поиск (hex 32);
+      • CREDS_KEY — hex 64 (32 байта), CREDS_IV — hex 32 (16 байт);
+      • MEILI_MASTER_KEY — поиск (hex 32+);
+      • ADMIN_PANEL_SESSION_SECRET — hex 32+ (панель не стартует без него);
       • UID/GID — compose интерполирует user: "${UID}:${GID}";
       • ALLOW_REGISTRATION — тумблер регистрации (пункт меню 4);
       • ADMIN_PANEL_PORT — admin-panel на отдельном loopback-порту
@@ -640,6 +646,7 @@ def _patch_env_text(text: str, *, port: int, creds_key: str, creds_iv: str,
         "MEILI_MASTER_KEY": meili_key,
         "ALLOW_REGISTRATION": "true" if allow_registration else "false",
         "ADMIN_PANEL_PORT": str(admin_port),
+        "ADMIN_PANEL_SESSION_SECRET": admin_secret,
         "UID": "0",
         "GID": "0",
     }
@@ -712,15 +719,19 @@ def _write_env_file(port: int, allow_registration: bool, zai_key: str = "",
         _err(".env.example не найден в тарболле апстрима")
         return False
     text = example.read_text(encoding="utf-8", errors="replace")
+    # Форматы LIVE-валидированы (vds13195, 01.11): api требует CREDS_KEY
+    # = 64 hex (32 байта) и CREDS_IV = 32 hex (16 байт) — hex(N) даёт
+    # 2N символов; admin-panel требует SESSION_SECRET >= 32 символов.
     env = _patch_env_text(
         text,
         port=port,
-        creds_key=secrets.token_hex(32),
-        creds_iv=secrets.token_hex(8),
+        creds_key=secrets.token_hex(32),   # 64 hex-символов = 32 байта
+        creds_iv=secrets.token_hex(16),    # 32 hex-символов = 16 байт
         meili_key=secrets.token_hex(32),
         allow_registration=allow_registration,
         zai_key=zai_key,
         admin_port=admin_port,
+        admin_secret=secrets.token_hex(32),  # 64 символа ≥ 32 (панель)
     )
     (_APP_DIR / ".env").write_text(env, encoding="utf-8")
     # librechat.yaml (custom endpoint GLM)
