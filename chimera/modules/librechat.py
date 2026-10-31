@@ -623,6 +623,7 @@ def _patch_env_text(text: str, *, port: int, creds_key: str, creds_iv: str,
                     meili_key: str, allow_registration: bool,
                     zai_key: str = "", admin_port: int = _DEFAULT_ADMIN_PORT,
                     admin_secret: str = "", jwt_secret: str = "",
+                    jwt_refresh_secret: str = "",
                     ) -> str:
     """Генерирует .env из .env.example апстрима (idempotent replace).
 
@@ -640,7 +641,13 @@ def _patch_env_text(text: str, *, port: int, creds_key: str, creds_iv: str,
       • ALLOW_REGISTRATION — тумблер регистрации (пункт меню 4);
       • ADMIN_PANEL_PORT — admin-panel на отдельном loopback-порту
         (3000 занят AdGuard Home на RU-нодах);
-      • ZAI_API_KEY — для custom endpoint GLM (если задан).
+      • ZAI_API_KEY — для custom endpoint GLM (если задан);
+      • JWT_REFRESH_SECRET — постоянный refresh-секрет (без него api
+        стартует на временном из .env.temp — warn «No configured value
+        was found for JWT_REFRESH_SECRET», LIVE vds13195 01.11);
+      • SCHEDULES_SINGLE_PROCESS=true — единственная реплика api: без
+        флага scheduler не поднимается (write-маршруты schedules /
+        generations — 503 «scheduler NOT started»).
     """
     def _sub(pattern: str, repl: str, s: str, flags: int = 0) -> str:
         out, n = re.subn(pattern, repl, s, flags=flags)
@@ -660,6 +667,14 @@ def _patch_env_text(text: str, *, port: int, creds_key: str, creds_iv: str,
         # постоянный JWT (без него api стартует на временных секретах
         # с warn «Configure permanent values before production use»)
         "JWT_SECRET": jwt_secret,
+        # постоянный refresh-секрет (без него — временный из .env.temp,
+        # warn «No configured value was found for JWT_REFRESH_SECRET»;
+        # LIVE-инцидент vds13195 01.11)
+        "JWT_REFRESH_SECRET": jwt_refresh_secret,
+        # единственная реплика api: без флага scheduler не стартует
+        # (write-маршруты schedules/generations — 503; апстрим требует
+        # ЛИБО shared-store (USE_REDIS_STREAMS), ЛИБО этот флаг)
+        "SCHEDULES_SINGLE_PROCESS": "true",
         "UID": "0",
         "GID": "0",
     }
@@ -713,11 +728,18 @@ def _render_librechat_yaml() -> str:
     array, received undefined» → «Exiting due to invalid configuration»;
     LIVE-валидировано на vds13195 01.11) даже при fetch: true — fetch
     дополняет список моделей, но не заменяет дефолт.
+
+    version — обязана совпадать с Constants.CONFIG_VERSION пакета
+    librechat-data-provider вендореного образа (v0.8.9-rc1 → 1.3.18,
+    LIVE vds13195 01.11): несовпадение → info-warn «Outdated Config
+    version» на каждом старте api. Проверка на живой ноде:
+    docker compose exec -T api node -e \
+      "console.log(require('librechat-data-provider').Constants.CONFIG_VERSION)"
     """
     return """# Chimera — custom endpoints для LibreChat.
 # Сгенерировано chimera/modules/librechat.py. НЕ редактировать вручную.
 # Управление: TUI → раздел 1 → W → 9 (LibreChat) → пункт 9.
-version: 1.2.1
+version: 1.3.18
 endpoints:
   custom:
     - name: 'zai'
@@ -753,6 +775,7 @@ def _write_env_file(port: int, allow_registration: bool, zai_key: str = "",
         admin_port=admin_port,
         admin_secret=secrets.token_hex(32),  # 64 символа ≥ 32 (панель)
         jwt_secret=secrets.token_hex(32),    # постоянный JWT (не временный)
+        jwt_refresh_secret=secrets.token_hex(32),  # refresh, иначе .env.temp
     )
     (_APP_DIR / ".env").write_text(env, encoding="utf-8")
     # librechat.yaml (custom endpoint GLM)

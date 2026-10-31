@@ -276,8 +276,9 @@ class TestEnvPatch(unittest.TestCase):
             "HOST=localhost\n", port=3080, creds_key="k", creds_iv="i",
             meili_key="m", allow_registration=True, admin_port=3095)
         for key in ("PORT=", "CREDS_KEY=", "CREDS_IV=", "MEILI_MASTER_KEY=",
-                    "ALLOW_REGISTRATION=", "ADMIN_PANEL_PORT=", "UID=",
-                    "GID="):
+                    "ALLOW_REGISTRATION=", "ADMIN_PANEL_PORT=",
+                    "JWT_REFRESH_SECRET=", "SCHEDULES_SINGLE_PROCESS=",
+                    "UID=", "GID="):
             self.assertIsNotNone(
                 re.search(rf"^{re.escape(key)}", env, re.MULTILINE),
                 f"нет активной строки {key}")
@@ -295,6 +296,37 @@ class TestEnvPatch(unittest.TestCase):
             self._EXAMPLE, port=3080, creds_key="k", creds_iv="i",
             meili_key="m", allow_registration=True)
         self.assertNotIn("ZAI_API_KEY", env2)
+
+    def test_patch_env_live_warns_fixed(self):
+        """REGRESSION (живой инцидент 01.11, vds13195): без постоянного
+        JWT_REFRESH_SECRET api стартует на временных кредах .env.temp (warn
+        «No configured value was found for JWT_REFRESH_SECRET»), без
+        SCHEDULES_SINGLE_PROCESS=true scheduler не поднимается (write-маршруты
+        schedules/generations — 503 «scheduler NOT started»)."""
+        env = lc._patch_env_text(
+            self._EXAMPLE, port=3080, creds_key="k", creds_iv="i",
+            meili_key="m", allow_registration=True,
+            jwt_refresh_secret="R" * 64)
+        self.assertIn(f"JWT_REFRESH_SECRET={'R' * 64}\n", env)
+        self.assertIn("SCHEDULES_SINGLE_PROCESS=true\n", env)
+        # idempotent shape (повторный прогон не плодит дублей)
+        twice = lc._patch_env_text(
+            env, port=3080, creds_key="k", creds_iv="i",
+            meili_key="m", allow_registration=True,
+            jwt_refresh_secret="R" * 64)
+        self.assertEqual(env, twice)
+
+    def test_patch_env_activates_commented_schedules(self):
+        """Апстримный .env.example содержит '# SCHEDULES_SINGLE_PROCESS=true'
+        (закомментировано) — патч активирует строку на месте (как UID/GID),
+        не создавая дубля в хвосте файла."""
+        env = lc._patch_env_text(
+            "PORT=3080\n# SCHEDULES_SINGLE_PROCESS=true\n",
+            port=3080, creds_key="k", creds_iv="i",
+            meili_key="m", allow_registration=True)
+        self.assertIn("\nSCHEDULES_SINGLE_PROCESS=true\n", env)
+        self.assertNotIn("# SCHEDULES_SINGLE_PROCESS", env)
+        self.assertEqual(env.count("SCHEDULES_SINGLE_PROCESS="), 1)
 
     def test_write_env_file_live_formats(self):
         """REGRESSION (живой инцидент 01.11 №3, vds13195): форматы секретов
@@ -317,6 +349,10 @@ class TestEnvPatch(unittest.TestCase):
             self.assertEqual(len(key), 64)            # 32 байта
             self.assertEqual(len(iv), 32)             # 16 байт (!)
             self.assertGreaterEqual(len(sec), 32)     # панель требует ≥32
+            ref = re.search(
+                r"^JWT_REFRESH_SECRET=([0-9a-f]+)$", env, re.M).group(1)
+            self.assertEqual(len(ref), 64)            # 32 байта refresh
+            self.assertIn("SCHEDULES_SINGLE_PROCESS=true\n", env)
             self.assertIn("PORT=3456\n", env)
             self.assertIn("UID=0\n", env)
             # librechat.yaml (custom endpoint GLM) записан рядом
@@ -395,6 +431,14 @@ class TestLibrechatYaml(unittest.TestCase):
         self.assertRegex(y, r"models:\s*\n\s+default:\s*\[")
         # управление — из TUI (канон проектов: «НЕ редактировать вручную»)
         self.assertIn("НЕ редактировать вручную", y)
+
+    def test_yaml_version_matches_upstream(self):
+        """REGRESSION (живой инцидент 01.11, vds13195): version обязана
+        совпадать с Constants.CONFIG_VERSION librechat-data-provider
+        вендореного образа (v0.8.9-rc1 → 1.3.18; проверено на живой ноде:
+        node -e "require('librechat-data-provider').Constants.CONFIG_VERSION"),
+        иначе info-warn «Outdated Config version: 1.2.1» на каждом старте."""
+        self.assertIn("version: 1.3.18\n", lc._render_librechat_yaml())
 
 
 # ════════════════════════════════════════════════════════════════════════════
