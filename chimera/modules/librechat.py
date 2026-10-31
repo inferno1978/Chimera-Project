@@ -805,10 +805,12 @@ def _wait_service_http(port: int, attempts: int = 60, delay: float = 3.0,
 # ════════════════════════════════════════════════════════════════════════════
 #  ВЫБОР ПОРТА (port_registry: конфликт-чек) — канон triple_panel._ask_web_port
 # ════════════════════════════════════════════════════════════════════════════
-def _port_conflicts(port: int) -> list:
+def _port_conflicts(port: int, exclude_service: str = "") -> list:
     try:
         from chimera.modules.port_registry import port_get_conflicts
-        return port_get_conflicts(port, proto="tcp")
+        return port_get_conflicts(
+            port, proto="tcp",
+            exclude_service=exclude_service or None)
     except Exception:
         return []
 
@@ -820,16 +822,21 @@ def _port_busy_system(port: int) -> list:
         return []
 
 def _validate_web_port(port: int, exclude_tag: str = "") -> "tuple[bool, list]":
+    """(валиден, конфликты). exclude_tag — свой тег port_registry:
+    собственные регистрации/ufw-правила конфликтом не считаются
+    (переустановка после сбоя), системные слушатели — всегда конфликт."""
     if not isinstance(port, int) or port < 1024 or port > 65535:
         return False, ["порт должен быть 1024-65535"]
     try:
         from chimera.modules.port_registry import port_is_free
-        ok, conflicts = port_is_free(port, "tcp", exclude_service=exclude_tag)
+        ok, conflicts = port_is_free(port, "tcp",
+                                      exclude_service=exclude_tag or None)
         if not ok:
             return False, conflicts
     except Exception:
         pass
-    conflicts = _port_conflicts(port) + _port_busy_system(port)
+    conflicts = _port_conflicts(port, exclude_service=exclude_tag) \
+        + _port_busy_system(port)
     return (len(conflicts) == 0), conflicts
 
 def _pick_admin_port(web_port: int) -> int:
@@ -840,8 +847,14 @@ def _pick_admin_port(web_port: int) -> int:
             return cand
     return _DEFAULT_ADMIN_PORT
 
-def _ask_web_port(default: int = _DEFAULT_PORT) -> "Optional[int]":
-    """Полный мини-бокс выбора порта (канон triple_panel). None = отмена."""
+def _ask_web_port(default: int = _DEFAULT_PORT,
+                  exclude_tag: str = "") -> "Optional[int]":
+    """Полный мини-бокс выбора порта (канон triple_panel). None = отмена.
+
+    exclude_tag: тег port_registry, с которым НЕ конфликтуем (сам с собой
+    — переустановка после сбоя: прошлый запуск успел зарегистрировать
+    порт, но упал до записи state; живой инцидент 01.11 на vds13195).
+    """
     _box_top("🔌  ВЫБОР ПОРТА  •  LIBRECHAT")
     _box_row()
     _box_row(f"  {DIM}Порт веб-интерфейса (Enter = {default}):{NC}")
@@ -865,7 +878,7 @@ def _ask_web_port(default: int = _DEFAULT_PORT) -> "Optional[int]":
         except ValueError:
             _box_warn("Нужно число (или Q для отмены).")
             continue
-        ok, conflicts = _validate_web_port(port)
+        ok, conflicts = _validate_web_port(port, exclude_tag=exclude_tag)
         if ok:
             _box_row()
             _box_ok(f"Порт {port} свободен.")
@@ -896,8 +909,12 @@ def _install() -> bool:
     _box_bot()
     print()
 
-    # Бокс 2: выбор порта
-    port = _ask_web_port()
+    # Бокс 2: выбор порта. exclude_tag=SERVICE_LIBRECHAT_WEB — порт,
+    # зарегистрированный САМИМ librechat_web (хвосты незавершённой
+    # установки), конфликтом не считается; ниже регистрации тега
+    # снимаются целиком и перерегистрируются заново.
+    from chimera.modules.port_registry import SERVICE_LIBRECHAT_WEB
+    port = _ask_web_port(exclude_tag=SERVICE_LIBRECHAT_WEB)
     if port is None:
         return False
     admin_port = _pick_admin_port(port)
@@ -959,18 +976,25 @@ def _install() -> bool:
             f"{port}, admin={admin_port})")
     _box_ok("compose: порты → 127.0.0.1 (наружу — только nginx front)")
 
-    # 4. port_registry (+ ufw закрыт по умолчанию: loopback-биндинг
-    #    уже не публикует порт наружу; регистрация — для учёта/аудита)
+    # 4. port_registry: переустановка владеет своим тегом — сначала
+    # снимаем ВСЕ старые записи librechat_web (хвосты прошлых попыток:
+    # упавший до записи state запуск мог оставить регистрацию порта;
+    # живой инцидент 01.11), затем регистрируем актуальные порты.
+    # loopback-биндинг уже не публикует порты наружу; регистрация —
+    # для учёта/аудита конфликтов между модулями.
     try:
         from chimera.modules.port_registry import (
-            port_register, SERVICE_LIBRECHAT_WEB,
+            port_register, port_unregister, SERVICE_LIBRECHAT_WEB,
         )
+        port_unregister(SERVICE_LIBRECHAT_WEB)  # все записи тега
         ok, msg = port_register(SERVICE_LIBRECHAT_WEB, port, proto="tcp",
-                                comment="LibreChat web UI (loopback)")
+                                comment="LibreChat web UI (loopback)",
+                                force=True)
         if not ok:
             _box_warn(f"port_registry: {msg}")
         port_register(SERVICE_LIBRECHAT_WEB, admin_port, proto="tcp",
-                      comment="LibreChat admin panel (loopback)")
+                      comment="LibreChat admin panel (loopback)",
+                      force=True)
     except Exception as e:
         _box_warn(f"port_registry недоступен: {e}")
 

@@ -492,6 +492,30 @@ class TestPortRegistryTags(unittest.TestCase):
         self.assertIn("port_unregister", src2)
         self.assertIn("SERVICE_LIBRECHAT_WEB", src2)
 
+    def test_reinstall_owns_registry_tag(self):
+        """REGRESSION (живой инцидент 01.11, vds13195): повторная установка
+        после сбоя не должна конфликтовать с СОБСТВЕННОЙ регистрацией
+        порта (прошлый запуск упал после port_register, до state).
+        Контракт: _install снимает ВСЕ записи тега перед регистрацией и
+        спрашивает порт с exclude_tag=SERVICE_LIBRECHAT_WEB."""
+        import inspect
+        src = inspect.getsource(lc._install)
+        self.assertIn("port_unregister(SERVICE_LIBRECHAT_WEB)", src)
+        self.assertIn("_ask_web_port(exclude_tag=SERVICE_LIBRECHAT_WEB)", src)
+        # хелперы прокидывают exclude в port_registry API
+        sig_ask = inspect.signature(lc._ask_web_port)
+        self.assertIn("exclude_tag", sig_ask.parameters)
+        src_val = inspect.getsource(lc._validate_web_port)
+        self.assertIn("exclude_service=exclude_tag", src_val)
+        src_pc = inspect.getsource(lc._port_conflicts)
+        self.assertIn("exclude_service=exclude_service", src_pc)
+        # port_get_conflicts/port_is_free реально поддерживают exclude
+        from chimera.modules import port_registry as pr
+        self.assertIn("exclude_service",
+                      inspect.signature(pr.port_get_conflicts).parameters)
+        self.assertIn("exclude_service",
+                      inspect.signature(pr.port_is_free).parameters)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  12. rest_api: пункт 9 в хабе панелей
