@@ -613,7 +613,7 @@ def _vendor_app() -> bool:
 def _patch_env_text(text: str, *, port: int, creds_key: str, creds_iv: str,
                     meili_key: str, allow_registration: bool,
                     zai_key: str = "", admin_port: int = _DEFAULT_ADMIN_PORT,
-                    admin_secret: str = "",
+                    admin_secret: str = "", jwt_secret: str = "",
                     ) -> str:
     """Генерирует .env из .env.example апстрима (idempotent replace).
 
@@ -626,6 +626,7 @@ def _patch_env_text(text: str, *, port: int, creds_key: str, creds_iv: str,
       • CREDS_KEY — hex 64 (32 байта), CREDS_IV — hex 32 (16 байт);
       • MEILI_MASTER_KEY — поиск (hex 32+);
       • ADMIN_PANEL_SESSION_SECRET — hex 32+ (панель не стартует без него);
+      • JWT_SECRET — постоянный JWT (иначе api — временные секреты с warn);
       • UID/GID — compose интерполирует user: "${UID}:${GID}";
       • ALLOW_REGISTRATION — тумблер регистрации (пункт меню 4);
       • ADMIN_PANEL_PORT — admin-panel на отдельном loopback-порту
@@ -647,6 +648,9 @@ def _patch_env_text(text: str, *, port: int, creds_key: str, creds_iv: str,
         "ALLOW_REGISTRATION": "true" if allow_registration else "false",
         "ADMIN_PANEL_PORT": str(admin_port),
         "ADMIN_PANEL_SESSION_SECRET": admin_secret,
+        # постоянный JWT (без него api стартует на временных секретах
+        # с warn «Configure permanent values before production use»)
+        "JWT_SECRET": jwt_secret,
         "UID": "0",
         "GID": "0",
     }
@@ -694,7 +698,13 @@ def _patch_compose_text(text: str, *, mount_yaml: bool = True) -> str:
     return text
 
 def _render_librechat_yaml() -> str:
-    """librechat.yaml: custom endpoint GLM (Z.ai) — OpenAI-совместимый API."""
+    """librechat.yaml: custom endpoint GLM (Z.ai) — OpenAI-совместимый API.
+
+    models.default — ОБЯЗАТЕЛЬНЫЙ массив (Zod-валидатор апстрима: «expected
+    array, received undefined» → «Exiting due to invalid configuration»;
+    LIVE-валидировано на vds13195 01.11) даже при fetch: true — fetch
+    дополняет список моделей, но не заменяет дефолт.
+    """
     return """# Chimera — custom endpoints для LibreChat.
 # Сгенерировано chimera/modules/librechat.py. НЕ редактировать вручную.
 # Управление: TUI → раздел 1 → W → 9 (LibreChat) → пункт 9.
@@ -705,6 +715,7 @@ endpoints:
       apiKey: '${ZAI_API_KEY}'
       baseURL: 'https://api.z.ai/api/paas/v4'
       models:
+        default: ['glm-4.7']
         fetch: true
       titleConvo: true
       titleModel: 'glm-4.7'
@@ -732,6 +743,7 @@ def _write_env_file(port: int, allow_registration: bool, zai_key: str = "",
         zai_key=zai_key,
         admin_port=admin_port,
         admin_secret=secrets.token_hex(32),  # 64 символа ≥ 32 (панель)
+        jwt_secret=secrets.token_hex(32),    # постоянный JWT (не временный)
     )
     (_APP_DIR / ".env").write_text(env, encoding="utf-8")
     # librechat.yaml (custom endpoint GLM)

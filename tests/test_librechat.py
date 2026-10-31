@@ -387,6 +387,9 @@ class TestLibrechatYaml(unittest.TestCase):
         # OpenAI-совместимый базовый URL Z.ai
         self.assertIn("baseURL: 'https://api.z.ai/api/paas/v4'", y)
         self.assertIn("fetch: true", y)
+        # REGRESSION (живой инцидент 01.11 №4): models.default — ОБЯЗАТЕЛЬНЫЙ
+        # массив (Zod: «expected array, received undefined» → Exiting)
+        self.assertRegex(y, r"models:\s*\n\s+default:\s*\[")
         # управление — из TUI (канон проектов: «НЕ редактировать вручную»)
         self.assertIn("НЕ редактировать вручную", y)
 
