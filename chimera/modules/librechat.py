@@ -367,9 +367,9 @@ def _pause() -> None:
         print()
 
 def _run(cmd: list, capture: bool = False, check: bool = False,
-         timeout: "Optional[int]" = None):
+         timeout: "Optional[int]" = None, cwd: "Optional[str]" = None):
     return subprocess.run(cmd, capture_output=capture, check=check,
-                          timeout=timeout)
+                          timeout=timeout, cwd=cwd)
 
 # ════════════════════════════════════════════════════════════════════════════
 #  ВЕРСИИ (паттерн dpi_bypass.py: installed / latest / кэш / header row)

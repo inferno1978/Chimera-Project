@@ -549,6 +549,25 @@ class TestMenuAndCli(unittest.TestCase):
         self.assertIn('"--smoke" in sys.argv', tail)
         self.assertIn('"--version" in sys.argv', tail)
 
+    def test_run_signature_accepts_cwd(self):
+        """REGRESSION (живой инцидент 01.11, установка на vds13195):
+        _compose передаёт cwd=str(_APP_DIR) в _run — сигнатура _run
+        обязана принимать cwd и timeout, иначе pull падает TypeError."""
+        import inspect
+        sig = inspect.signature(lc._run)
+        self.assertIn("cwd", sig.parameters)
+        self.assertIn("timeout", sig.parameters)
+        # и действительно прокидывает
+        src = inspect.getsource(lc._compose)
+        self.assertIn("cwd=str(_APP_DIR)", src)
+        # живой вызов с cwd не падает (docker не нужен: несуществующая cwd
+        # → только FileNotFoundError от subprocess, не TypeError)
+        try:
+            lc._run(["/bin/true"], capture=True, check=False,
+                    timeout=10, cwd="/tmp")
+        except TypeError:
+            self.fail("_run не принимает cwd (живой инцидент)")
+
     def test_state_defaults(self):
         """Дефолты state: версия порта, порты, upstream-кэш (без файла)."""
         with tempfile.TemporaryDirectory() as td:
