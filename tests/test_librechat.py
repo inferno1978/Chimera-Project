@@ -22,6 +22,9 @@ port_registry / rest_api).
   9. Версии runtime: _runtime_version-регекс (из тела /api/version)
  10. nginx front: делегирование в panel_nginx_front с long_timeouts=True
      (фейк-модуль) + _generate_vhost long_timeouts (3600s vs 60s)
+     + ACME :80-vhost для поддомена (LE webroot на занятом основном :80):
+     контракт рендера, вызов в LE-ветке, пропуск в self-signed, снятие
+     при удалении
  11. port_registry: SERVICE_LIBRECHAT_WEB/NGINX теги существуют
  12. rest_api: пункт меню 9 → do_librechat_menu (интеграция хаба панелей)
  13. CLI: __main__ вызывает do_librechat_menu (регресс-паттерн triple_panel)
@@ -476,9 +479,11 @@ class TestNginxFront(unittest.TestCase):
         snap = _snapshot_module("chimera.modules.panel_nginx_front")
         _install_fake("chimera.modules.panel_nginx_front", fake_pnf)
         try:
-            # состояние + /opt не существуют — только контракт вызова
+            # состояние + /opt не существуют — только контракт вызова;
+            # acme-vhost подменён: его live-поведение — отдельный класс ниже
             with patch.object(lc, "_NGINX_STATE_FILE",
-                              Path(tempfile.gettempdir()) / "lc-test-nginx.json"):
+                              Path(tempfile.gettempdir()) / "lc-test-nginx.json"), \
+                 patch.object(lc, "_ensure_acme_vhost", return_value=True):
                 ok, msg = lc._nginx_install(False, "chat.example.com")
             self.assertTrue(ok)
             self.assertEqual(calls.get("service_tag"),
@@ -506,6 +511,112 @@ class TestNginxFront(unittest.TestCase):
         # дефолт не изменился (обратная совместимость панелей B4/Triple/WPP)
         self.assertIn("proxy_read_timeout 60s", short)
         self.assertIn("proxy_send_timeout 60s", short)
+
+
+class TestNginxAcmeVhost(unittest.TestCase):
+    """ACME :80-vhost для поддомена (LE webroot на занятом основном :80).
+
+    Живая предыстория (vds13195): на :80 единственный server-блок ОСНОВНОГО
+    домена ноды с acme-root, жёстко указывающим в /var/www/<основной>.
+    LE-валидация ПОДДОМЕНА (Host=chat.<зона>) матчится этим же блоком
+    (default) → токен ищется в ЧУЖОМ root → 404 → certbot падает.
+    Контракт: LE-ветка _nginx_install создаёт отдельный :80-блок с точным
+    server_name <поддомен> ДО запуска certbot внутри panel_nginx_front.
+    """
+
+    def test_render_acme_vhost_contract(self):
+        vhost = lc._render_acme_vhost("chat.example.com")
+        self.assertIn("listen 80;", vhost)
+        self.assertIn("server_name chat.example.com;", vhost)
+        self.assertIn("location /.well-known/acme-challenge/", vhost)
+        # root — webroot именно ПОДДОМЕНА (не основного домена)
+        self.assertIn("root /var/www/chat.example.com;", vhost)
+        self.assertNotIn("root /var/www/chimeraprodcdn", vhost)
+        # тихий 404: не палим порт nginx front (3443) в редиректе
+        self.assertIn("return 404;", vhost)
+        self.assertNotIn("3443", vhost)
+        self.assertNotIn("301", vhost)
+
+    def test_install_le_calls_ensure_acme(self):
+        """LE-ветка обязана создать acme-vhost ДО certbot (порядок)."""
+        order = []
+
+        def fake_install(**kwargs):
+            order.append("certbot")
+            return True, "ok"
+
+        fake_pnf = type(sys)("chimera.modules.panel_nginx_front")
+        fake_pnf.panel_nginx_front_install = fake_install
+        snap = _snapshot_module("chimera.modules.panel_nginx_front")
+        _install_fake("chimera.modules.panel_nginx_front", fake_pnf)
+        try:
+            with patch.object(lc, "_NGINX_STATE_FILE",
+                              Path(tempfile.gettempdir()) / "lc-test-nginx.json"), \
+                 patch.object(lc, "_ensure_acme_vhost",
+                              side_effect=lambda d: order.append(d) or True):
+                ok, _ = lc._nginx_install(False, "chat.example.com")
+            self.assertTrue(ok)
+            # acme-vhost создан ДО запуска certbot внутри install
+            self.assertEqual(order, ["chat.example.com", "certbot"])
+        finally:
+            _restore_module("chimera.modules.panel_nginx_front", snap)
+
+    def test_install_self_signed_skips_acme(self):
+        """Self-signed (по IP) — acme-vhost не нужен: LE-валидации нет."""
+        calls = []
+
+        def fake_install(**kwargs):
+            return True, "ok"
+
+        fake_pnf = type(sys)("chimera.modules.panel_nginx_front")
+        fake_pnf.panel_nginx_front_install = fake_install
+        snap = _snapshot_module("chimera.modules.panel_nginx_front")
+        _install_fake("chimera.modules.panel_nginx_front", fake_pnf)
+        try:
+            with patch.object(lc, "_NGINX_STATE_FILE",
+                              Path(tempfile.gettempdir()) / "lc-test-nginx.json"), \
+                 patch.object(lc, "_ensure_acme_vhost",
+                              side_effect=lambda d: calls.append(d) or True):
+                ok, _ = lc._nginx_install(True, None)
+            self.assertTrue(ok)
+            self.assertEqual(calls, [])
+        finally:
+            _restore_module("chimera.modules.panel_nginx_front", snap)
+
+    def test_remove_calls_remove_acme(self):
+        called = []
+        fake_pnf = type(sys)("chimera.modules.panel_nginx_front")
+        fake_pnf.panel_nginx_front_remove = lambda **kw: called.append("pnf") or (True, "ok")
+        snap = _snapshot_module("chimera.modules.panel_nginx_front")
+        _install_fake("chimera.modules.panel_nginx_front", fake_pnf)
+        try:
+            with patch.object(lc, "_nginx_status",
+                              return_value={"enabled": True}), \
+                 patch.object(lc, "_remove_acme_vhost",
+                              side_effect=lambda: called.append("acme")):
+                ok, _ = lc._nginx_remove()
+            self.assertTrue(ok)
+            self.assertIn("acme", called)
+            self.assertIn("pnf", called)
+        finally:
+            _restore_module("chimera.modules.panel_nginx_front", snap)
+
+    def test_remove_when_disabled_still_cleans_acme(self):
+        """Ветка «уже выключен» тоже чистит осиротевший acme-vhost
+        (мог остаться после сбоя установки)."""
+        called = []
+        with patch.object(lc, "_nginx_status",
+                          return_value={"enabled": False}), \
+             patch.object(lc, "_remove_acme_vhost",
+                          side_effect=lambda: called.append(1)):
+            ok, _ = lc._nginx_remove()
+        self.assertTrue(ok)
+        self.assertEqual(called, [1])
+
+    def test_ensure_acme_vhost_guard_no_nginx(self):
+        """Без nginx (CI/тесты) — тихий False, никаких файлов/исключений."""
+        with patch.object(lc.shutil, "which", return_value=None, create=True):
+            self.assertFalse(lc._ensure_acme_vhost("chat.example.com"))
 
 
 # ════════════════════════════════════════════════════════════════════════════

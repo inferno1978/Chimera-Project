@@ -92,6 +92,15 @@ _NGINX_STATE_FILE = STATE_DIR / "librechat_nginx.json"
 _NGINX_SITE_NAME  = "chimera-librechat"
 DEFAULT_NGINX_PORT = 3443
 
+# ACME :80-vhost для LE-выпуска ПОДДОМЕНА (chat.<зона>): LE-валидация
+# приходит на :80, где единственный server-блок — основной домен ноды
+# с жёстким root /var/www/<основной>; Host=<поддомен> матчится им же
+# (по умолчанию) и токен ищется в ЧУЖОМ root → 404 → выпуск падает.
+# Отдельный server_name <поддомен> выигрывает матчинг — см. _ensure_acme_vhost.
+_ACME_SITE_NAME   = "chimera-librechat-acme"
+_SITES_AVAILABLE  = Path("/etc/nginx/sites-available")
+_SITES_ENABLED    = Path("/etc/nginx/sites-enabled")
+
 # Апстрим (MIT). Лицензия сохраняется в вендореном коде.
 _UPSTREAM_REPO       = "LibreChat-AI/LibreChat"
 _UPSTREAM_API_LATEST = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases/latest"
@@ -1291,6 +1300,90 @@ def _nginx_status() -> dict:
     except Exception:
         return {"enabled": False}
 
+# ── ACME :80-vhost для поддомена (LE webroot-валидация) ─────────────────────
+def _render_acme_vhost(domain: str) -> str:
+    """Рендер :80-блока для домена: точный server_name + acme-root.
+
+    LE renewal/выпуск для поддомена идёт через webroot /var/www/<поддомен>
+    (obtain_ssl_cert: web_root = /var/www/{domain}). Без этого блока Host
+    <поддомен> на :80 матчится единственным server-блоком ОСНОВНОГО домена
+    (он же default), и nginx ищет токен в /var/www/<основной> → 404.
+
+    location / → 404 (не редирект): не палим порт nginx front (3443)
+    в Location-заголовке — маскировка, эталон b4 «тише ниже радаром».
+    """
+    return f"""# Chimera — ACME :80 для {domain} (LibreChat, LE webroot).
+# Сгенерировано chimera/modules/librechat.py. НЕ редактировать вручную.
+# Управление: TUI → раздел 1 → W → 9 (LibreChat) → пункт 8 (nginx front).
+server {{
+    listen 80;
+    listen [::]:80;
+    server_name {domain};
+
+    location /.well-known/acme-challenge/ {{
+        root /var/www/{domain};
+    }}
+
+    # Не палим порт nginx front в редиректе — тихий 404 (маскировка).
+    location / {{
+        return 404;
+    }}
+}}
+"""
+
+def _ensure_acme_vhost(domain: "Optional[str]") -> bool:
+    """Создаёт :80 ACME-vhost + webroot ДО запуска certbot (идемпотентно).
+
+    Вызывается из _nginx_install в LE-ветке ДО panel_nginx_front_install
+    (тот внутри зовёт obtain_ssl_cert → certbot --webroot). Тихо возвращает
+    False без nginx/без прав (CI/тесты) — сбой ACME-vhost не должен ронять
+    установку: certbot попробует и, возможно, серт уже существует.
+    """
+    if not domain or "." not in domain:
+        return False
+    if not shutil.which("nginx"):
+        return False
+    try:
+        webroot = Path(f"/var/www/{domain}")
+        webroot.mkdir(parents=True, exist_ok=True)
+        (webroot / "index.html").touch(exist_ok=True)
+        available = _SITES_AVAILABLE / _ACME_SITE_NAME
+        enabled   = _SITES_ENABLED / _ACME_SITE_NAME
+        available.write_text(_render_acme_vhost(domain), encoding="utf-8")
+        if enabled.exists() or enabled.is_symlink():
+            enabled.unlink()
+        enabled.symlink_to(available)
+        r = _run(["nginx", "-t"], capture=True, check=False, timeout=30)
+        if r is None or r.returncode != 0:
+            enabled.unlink(missing_ok=True)
+            available.unlink(missing_ok=True)
+            _warn("acme-vhost: nginx -t failed — пропускаю (серт, возможно, есть)")
+            return False
+        _run(["systemctl", "reload", "nginx"], capture=True, check=False,
+             timeout=30)
+        _log("INFO", f"acme-vhost: enabled for {domain}")
+        return True
+    except Exception as e:
+        _log("WARN", f"acme-vhost: {e}")
+        return False
+
+def _remove_acme_vhost() -> None:
+    """Снимает :80 ACME-vhost (nginx -t + reload; идемпотентно)."""
+    enabled   = _SITES_ENABLED / _ACME_SITE_NAME
+    available = _SITES_AVAILABLE / _ACME_SITE_NAME
+    if not (enabled.exists() or enabled.is_symlink() or available.exists()):
+        return
+    try:
+        enabled.unlink(missing_ok=True)
+        available.unlink(missing_ok=True)
+        r = _run(["nginx", "-t"], capture=True, check=False, timeout=30)
+        if r is not None and r.returncode == 0:
+            _run(["systemctl", "reload", "nginx"], capture=True, check=False,
+                 timeout=30)
+        _log("INFO", "acme-vhost: removed")
+    except Exception as e:
+        _log("WARN", f"acme-vhost remove: {e}")
+
 def _nginx_install(use_self_signed: bool, domain: "Optional[str]") -> "tuple[bool, str]":
     """nginx front с TLS по эталону B4 (dpi_bypass._b4_nginx_install).
 
@@ -1302,6 +1395,12 @@ def _nginx_install(use_self_signed: bool, domain: "Optional[str]") -> "tuple[boo
     from chimera.modules.panel_nginx_front import panel_nginx_front_install
     state = _load_state()
     backend_port = int(state.get("web_port", _DEFAULT_PORT))
+    # LE-ветка: поддомену нужен свой :80 ACME-блок ДО запуска certbot
+    # внутри panel_nginx_front_install (obtain_ssl_cert → --webroot):
+    # иначе Host=<поддомен> матчится :80-блоком основного домена,
+    # токен ищется в чужом root → 404 → выпуск падает.
+    if not use_self_signed and domain:
+        _ensure_acme_vhost(domain)
     ok, msg = panel_nginx_front_install(
         service_tag="chimera-librechat-nginx",
         port=DEFAULT_NGINX_PORT,
@@ -1340,6 +1439,7 @@ def _nginx_install(use_self_signed: bool, domain: "Optional[str]") -> "tuple[boo
 def _nginx_remove() -> "tuple[bool, str]":
     from chimera.modules.panel_nginx_front import panel_nginx_front_remove
     if not _nginx_status().get("enabled"):
+        _remove_acme_vhost()   # мог остаться после сбоя установки
         return True, "nginx front уже выключен"
     panel_nginx_front_remove(
         service_tag="chimera-librechat-nginx",
@@ -1347,6 +1447,7 @@ def _nginx_remove() -> "tuple[bool, str]":
         state_file=_NGINX_STATE_FILE,
         title="LibreChat",
     )
+    _remove_acme_vhost()
     return True, "nginx front удалён"
 
 def _nginx_url() -> "Optional[str]":
