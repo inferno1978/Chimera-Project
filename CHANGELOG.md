@@ -23,6 +23,23 @@
 
 ---
 
+# Changelog new entry — FEAT(librechat-monitor): ops-слой LibreChat — health-tick */1 мин (systemd timer) + TG-репорт по смене состояния, EMA TTFB, self-heal/ремедии, cert-порог — полный parity b4_monitor (02 Nov 2026)
+
+## Контекст: по итогам вывода LibreChat наружу (chat.chimeraprodcdn.online:3443, LE, живой прод) стек остался без наблюдения: падение api/контейнеров, смерть nginx front и протухание сертификата обнаружились бы только жалобой пользователя. Заказ: «Health-тик LibreChat в ТГ-бот (аналог b4_monitor: systemd-timer */1 мин, EMA, репорт по смене) — делаем».
+
+## Решение: новый chimera/modules/librechat_monitor.py (ленивая зависимость на librechat, как b4_monitor → youtube_b4):
+- health_tick */1 мин (librechat-health.timer, OnCalendar=*:0/1): systemd-проба + ПРОБА GET /api/config на loopback (юнит Type=oneshot/RemainAfterExit: «active» ≠ api жив — сдохшие контейнеры systemd не видит, проба ловит; --noproxy '*' — http_proxy не гоняет 127.0.0.1 через прокси); фронт-проба https://домен:порт/api/config с --resolve домен:порт:127.0.0.1 (юзер-путь без DNS/hairpin; self-signed — -k по IP); EMA ttfb api+front (α=0.35, протухлость 15 мин — константы каскада/b4); fail_streak ≥ 2 → degraded (1 промах при прошлом healthy — «скорельно жив»);
+- self-heal/ремедии с cooldown 600с и политикой (policy.restart/front_fix, меню P): рестарт стека при падении сервиса ИЛИ api-смерти (compose up пересоздаёт), nginx reload при смерти фронта (api жив — reload не рвёт соединения); журнал действий → по одному TG-алерту на действие;
+- TG-слой */5 мин (cron /etc/cron.d/librechat-monitor): читает state тика БЕЗ проб (сеть не дублируем), алерты ТОЛЬКО при смене (первое наблюдение молча); события librechat_down/up/degraded/recovered/stalled/restarted/front_down/front_up/front_fix/cert_expire — все в telegram.json events-фильтре (отсутствующий ключ = ВКЛ) и в меню tg_bot [3] (кейс окт.2026 №8 — неуправляемых событий нет, есть AST-тест); cert-порог 14 дней по СМЕНЕ (20→10 алерт, 10→20 снятие — без дневного спама);
+- меню M в do_librechat_menu (матрица: сервис/api EMA/фронт/cert/политика/журнал, T/C/P/I/I10/I30/U — паттерн do_b4_monitor_menu); _uninstall LibreChat сносит монитор (шаг 3.5 — иначе тик алертит об удалённом стеке);
+- баг, пойманный тестом ДО продакшена: strptime %Z="GMT" даёт aware-datetime → вычитание наивного utcnow() = TypeError → _cert_days всегда None; таймзона теперь отбрасывается (rsplit), путь LE — константа LE_CERT_DIR (патчится в tmp).
+
+## Live-валидация (vds13195, 02.11): timer/cron установлены, тик пишет state (api OK, фронт OK, cert 88 дн., EMA ttfb), TG-слой — первое наблюдение молча (анти-спам по построению), события в чат по смене.
+
+## Тесты: новый tests/test_librechat_monitor.py — 35 (EMA/streak/curl-парсер 2xx-строгость/cert-парсер; тик: self-heal, api-деградация streak≥2 + ремедия + cooldown, фронт-ремедия nginx-reload при живом api, политики; TG: первое-молча, down/up, degraded/recovered, front, cert-порог по смене, stalled, действия по одному, events-фильтр; install: OnCalendar/wrapper bash -n/PYTHONPATH-safe/cron; AST-гард всех EVENT_KEYS в tg_bot). Соседи зелёные: test_librechat 43, test_tg_bot 39, test_b4_monitor 51, test_tui 8, test_tgmon_v2, test_tests_index 5, const_default_scan 0; ci_gate v9 (317), TESTS_INDEX регенерирован.
+
+---
+
 # Changelog new entry — FIX(panel_nginx_front): nginx-front порты НЕ регистрировались в port_registry — port_register после reload ловил собственного слушателя (тихий False, возврат не проверялся); реестр врал по всем 5 панелям годами (01 Nov 2026)
 
 ## Контекст (инцидент 01.11, live vds13195): после включения nginx front LibreChat (3443) проверка реестра показала — НИ ОДНОГО nginx-front порта нет (b4 9743 / triple 9761 / wpp 9745 / subscription 6444 / librechat 3443), хотя все панели «установлены» и наружу работают. Реестр врал годами — требование «port_registry не вводит в заблуждение» (порт должен отражать ПЕРЕПРИМЕНЁННУЮ реальность) нарушалось по всем фронтам. Сопутствующий контекст пользователя: смена порта xray 8443→443 через TUI (25.10) в реестре отражена корректно (reconfigure.py:472-483: port_register(new)+port_unregister(old), запись vless/443 «VLESS (reconfigured to :443)», призрака 8443 нет) — механизм смены портов в реестре живой; дыра была именно в panel_nginx_front.

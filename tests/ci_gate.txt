@@ -1,7 +1,9 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
-# Обновлён 2026-11-01 (v8): 316 модулей = 315 + test_librechat (LibreChat
-# AI-чат модуль: docker compose стек, download_manager/port_registry/
-# panel_nginx_front long_timeouts, обновления по паттерну b4 с откатом).
+# Обновлён 2026-11-02 (v9): 317 модулей = 316 + test_librechat_monitor
+# (ops-слой LibreChat: health-tick 1/мин + TG по смене, EMA, self-heal,
+# ремедии nginx-reload/рестарт стека, cert-порог — parity b4_monitor).
+# Пред. v8: 316 = 315 + test_librechat (LibreChat AI-чат: docker compose
+# стек, download_manager/port_registry/panel_nginx_front long_timeouts).
 # Пред. v7: 315 = 314 + test_cdn_ranges (CDN-защита авто-бана, инцидент
 # 950 банов edge-IP Cloudflare: гард в скане/_fw_ban + авто-хил старых
 # банов, chimera/modules/cdn_ranges.py). Пред. v6: 314 =
@@ -174,6 +176,7 @@ tests.test_ipset_boot_sync
 tests.test_ipset_persist
 tests.test_leak_guard
 tests.test_librechat
+tests.test_librechat_monitor
 tests.test_linkqr_lib
 tests.test_logrotate
 tests.test_mieru

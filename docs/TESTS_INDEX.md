@@ -2,7 +2,7 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **317** (гейт-манифест: **317**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **318** (гейт-манифест: **318**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
 ## AmneziaWG (transport Mode B + standalone 2.0) (30)
@@ -471,8 +471,9 @@
 | [`test_xhttp_cdn_masking.py`](../tests/test_xhttp_cdn_masking.py) | Unit-тесты для chimera/modules/xhttp_cdn_masking.py — экспертный профиль XHTTP | ✓ |
 | [`test_xhttp_path_gen.py`](../tests/test_xhttp_path_gen.py) | Unit-тесты для chimera/modules/xhttp_path_gen.py — генератор случайного | ✓ |
 
-## Прочее (1)
+## Прочее (2)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
 |---|---|---|
 | [`test_librechat.py`](../tests/test_librechat.py) | Unit-тесты для chimera/modules/librechat.py (+ интеграция panel_nginx_front / | ✓ |
+| [`test_librechat_monitor.py`](../tests/test_librechat_monitor.py) | Unit-тесты ops-слоя LibreChat (chimera/modules/librechat_monitor.py). | ✓ |

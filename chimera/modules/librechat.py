@@ -1686,6 +1686,15 @@ def _uninstall() -> None:
         _nginx_remove()
     except Exception:
         pass
+    # 3.5 монитор (timer/cron/state — иначе тик будет алертить об
+    # удалённом стеке; паттерн b4)
+    try:
+        from chimera.modules.librechat_monitor import (
+            uninstall_librechat_monitor,
+        )
+        uninstall_librechat_monitor()
+    except Exception:
+        pass
     # 4. port_registry
     try:
         from chimera.modules.port_registry import (
@@ -1776,6 +1785,8 @@ def do_librechat_menu() -> None:
         _box_item("8", "🌐  nginx front (TLS)  "
                         f"{DIM}(домен/LE — эталон b4){NC}")
         _box_item("9", "🧠  GLM (Z.ai) custom endpoint")
+        _box_item("M", "🩺  Мониторинг (health-tick 1/мин + TG)  "
+                        f"{DIM}(эталон b4_monitor){NC}")
         _box_item("0", f"{RED}🗑️  Удалить (полное / с сохранением данных){NC}")
         _box_sep()
         _box_item("Q", "← Назад")
@@ -1867,6 +1878,19 @@ def do_librechat_menu() -> None:
         elif ch == "9":
             if installed:
                 _zai_endpoint_menu()
+            else:
+                _warn("LibreChat не установлен.")
+                _pause()
+        elif ch == "m":
+            if installed:
+                try:
+                    from chimera.modules.librechat_monitor import (
+                        do_librechat_monitor_menu,
+                    )
+                    do_librechat_monitor_menu()
+                except Exception as exc:   # диагносцируем, но не роняем меню
+                    _err(f"Меню мониторинга: {exc}")
+                    _pause()
             else:
                 _warn("LibreChat не установлен.")
                 _pause()
