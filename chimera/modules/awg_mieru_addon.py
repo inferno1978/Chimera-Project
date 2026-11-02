@@ -109,63 +109,168 @@ _CLIENT_MTU = 1100
 _RE_CLIENT_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  СТИЛЬ ВЫВОДА (копия алгоритмов box_renderer, как в hybrid_addon / mieru —
-#  самостоятельный CLI не тянет chimera-пакет на верхнем уровне импорта)
+#  СТИЛЬ ВЫВОДА — порт box_renderer (как в mieru.py / hybrid_addon.py)
 # ══════════════════════════════════════════════════════════════════════════════
+# Самостоятельный (без импорта) порт алгоритмов рисования рамок, переноса
+# строк и цветных строк-статусов из chimera/modules/box_renderer.py — ровно
+# так же, как modules/mieru.py и modules/hybrid_addon.py держат свои копии
+# рисунка рамок, а не импортируют общий модуль: awg_mieru_addon.py —
+# самостоятельный CLI («sudo python3 awg_mieru_addon.py --status», без pip).
+# Если в box_renderer.py поменяется алгоритм/символика — здесь нужно
+# поправить отдельно, копия не синхронизируется автоматически.
 
 def _detect_colors() -> dict:
+    _light = os.environ.get("VLESS_THEME", "").lower() == "light"
     if sys.stdout.isatty():
+        if _light:
+            return dict(
+                RED='\033[0;31m', GREEN='\033[0;32m', YELLOW='\033[0;33m',
+                CYAN='\033[0;34m', BLUE='\033[0;34m', BOLD='\033[1m',
+                DIM='\033[2m', WHITE='\033[0;30m', NC='\033[0m',
+            )
         return dict(
-            RED="\033[31m", GREEN="\033[32m", YELLOW="\033[33m",
-            CYAN="\033[36m", BOLD="\033[1m", DIM="\033[2m", NC="\033[0m",
+            RED='\033[0;31m', GREEN='\033[0;32m', YELLOW='\033[1;33m',
+            CYAN='\033[0;36m', BLUE='\033[0;35m', BOLD='\033[1m',
+            DIM='\033[2m', WHITE='\033[1;37m', NC='\033[0m',
         )
-    return {k: "" for k in ("RED", "GREEN", "YELLOW", "CYAN", "BOLD", "DIM", "NC")}
+    return {k: '' for k in ('RED', 'GREEN', 'YELLOW', 'CYAN', 'BLUE',
+                            'BOLD', 'DIM', 'WHITE', 'NC')}
+
 
 _C = _detect_colors()
-RED, GREEN, YELLOW, CYAN, BOLD, DIM, NC = (
-    _C["RED"], _C["GREEN"], _C["YELLOW"], _C["CYAN"], _C["BOLD"], _C["DIM"], _C["NC"],
+RED, GREEN, YELLOW, CYAN, BLUE, BOLD, DIM, WHITE, NC = (
+    _C['RED'], _C['GREEN'], _C['YELLOW'], _C['CYAN'], _C['BLUE'],
+    _C['BOLD'], _C['DIM'], _C['WHITE'], _C['NC'],
 )
 
 _BOX_W = 66
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
 
 
 def _plain(s: str) -> str:
-    """Убирает ANSI-коды для корректного расчёта ширины."""
-    return re.sub(r"\033\[[0-9;]*m", "", s)
+    """Строка без ANSI-кодов — для подсчёта реальной видимой ширины."""
+    return _ANSI_RE.sub('', s)
 
 
 def _wcslen(s: str) -> int:
-    n = 0
-    for ch in s:
-        if unicodedata.east_asian_width(ch) in ("W", "F"):
-            n += 2
-        elif unicodedata.combining(ch):
+    """Видимая ширина строки в терминале: ANSI-коды = 0, emoji/CJK = 2
+    колонки, вариационные селекторы/комбинирующие знаки = 0, остальное = 1.
+    Та же логика, что в box_renderer._wcslen — от неё зависит ровная
+    правая граница рамки при цветном тексте."""
+    plain = _plain(s)
+    width = 0
+    i = 0
+    while i < len(plain):
+        ch = plain[i]
+        cp = ord(ch)
+        if 0xFE00 <= cp <= 0xFE0F or cp in (0x200D, 0x200B, 0x200C):
+            i += 1
             continue
+        if unicodedata.category(ch) in ('Mn', 'Me', 'Cf'):
+            i += 1
+            continue
+        if 0x1F1E6 <= cp <= 0x1F1FF:  # Regional Indicator (флаги)
+            width += 2
+            i += 1
+            continue
+        eaw = unicodedata.east_asian_width(ch)
+        if eaw in ('W', 'F') or cp >= 0x1F000:
+            width += 2
+        elif i + 1 < len(plain) and ord(plain[i + 1]) == 0xFE0F:
+            width += 2  # базовый emoji + VS16
         else:
-            n += 1
-    return n
-
-
-def _pad(text: str, width: int) -> str:
-    return text + " " * max(0, width - _wcslen(text))
-
-
-def _box_top(title: str = "") -> None:
-    print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
-    if title:
-        _box_row(f"{BOLD}{title}{NC}")
+            width += 1
+        i += 1
+    return width
 
 
 def _box_row(text: str = "") -> None:
-    p = _plain(text)
-    overflow = _wcslen(p) - _BOX_W
-    if overflow > 0:
-        cut = len(p) - overflow
-        while cut > 0 and _wcslen(p[:cut]) > _BOX_W:
-            cut -= 1
-        text = text[:cut]
-        p = p[:cut]
-    print(f"{CYAN}║{_pad(text, _BOX_W)}║{NC}")
+    """Одна строка внутри рамки: ║ text ... ║ — с автопереносом по словам,
+    если строка не влезает в _BOX_W. Правая граница всегда ровная — это
+    единственное место, рисующее правый ║, все остальные функции зовут его."""
+    if not text:
+        print(f"{CYAN}║{NC}{' ' * _BOX_W}{CYAN}║{NC}")
+        return
+
+    vis_w = _wcslen(text)
+    if vis_w <= _BOX_W:
+        pad = _BOX_W - vis_w
+        print(f"{CYAN}║{NC}{text}{' ' * pad}{CYAN}║{NC}")
+        return
+
+    # Не влезает — переносим по словам, сохраняя ведущий отступ.
+    plain = _plain(text)
+    leading_spaces = len(plain) - len(plain.lstrip(' '))
+    indent = ' ' * leading_spaces
+
+    pos, skipped_vis = 0, 0
+    while pos < len(text) and skipped_vis < leading_spaces:
+        m = _ANSI_RE.match(text, pos)
+        if m:
+            pos = m.end()
+            continue
+        if text[pos] == ' ':
+            skipped_vis += 1
+            pos += 1
+        else:
+            break
+    text_stripped = text[pos:]
+    prefix = ' ' * leading_spaces
+
+    words = text_stripped.split(' ')
+    lines_out = []
+    current = prefix
+    current_vis = leading_spaces
+
+    for word in words:
+        if not word:
+            if current_vis + 1 <= _BOX_W:
+                current += ' '
+                current_vis += 1
+            continue
+        word_vis = _wcslen(word)
+        sep_vis = 1 if current.strip() else 0
+        if current_vis + sep_vis + word_vis <= _BOX_W:
+            current = current + (' ' if current.strip() else '') + word
+            current_vis = current_vis + sep_vis + word_vis
+        else:
+            if current.strip():
+                lines_out.append(current)
+            avail = max(_BOX_W - leading_spaces, 8)
+            while _wcslen(word) > avail:
+                piece, pw = '', 0
+                for ch in word:
+                    cw = _wcslen(ch)
+                    if pw + cw > avail:
+                        break
+                    piece += ch
+                    pw += cw
+                lines_out.append(indent + piece)
+                word = word[len(piece):]
+            current = indent + word
+            current_vis = leading_spaces + _wcslen(word)
+
+    if current.strip() or not lines_out:
+        lines_out.append(current)
+
+    for line in lines_out:
+        pad = max(0, _BOX_W - _wcslen(line))
+        print(f"{CYAN}║{NC}{line}{' ' * pad}{CYAN}║{NC}")
+
+
+def _box_top(title: str = "") -> None:
+    """Верхняя граница + заголовок по центру + разделитель."""
+    print(f"{CYAN}╔{'═' * _BOX_W}╗{NC}")
+    if title:
+        pad = _BOX_W - _wcslen(title)
+        lpad = pad // 2
+        rpad = pad - lpad
+        print(f"{CYAN}║{NC}{' ' * lpad}{BOLD}{WHITE}{title}{NC}{' ' * rpad}{CYAN}║{NC}")
+        print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
+
+
+def _box_sep() -> None:
+    print(f"{CYAN}╠{'═' * _BOX_W}║{NC}")
 
 
 def _box_bottom() -> None:
@@ -173,67 +278,132 @@ def _box_bottom() -> None:
 
 
 def _box_item(key: str, label: str) -> None:
-    _box_row(f"  [{key}] {label}")
+    """Пункт меню: ║  [KEY]  label ║ — ключ белый жирный, Q/0 — красный."""
+    col = RED + BOLD if key.strip().upper() in ("Q", "0") else WHITE + BOLD
+    _box_row(f"  {DIM}[{NC}{col}{key}{NC}{DIM}]{NC}  {label}")
 
 
-def _box_kv(key: str, val: str, kw: int = 24) -> None:
-    _box_row(f"  {_pad(key, kw)}{val}")
+def _box_desc(text: str) -> None:
+    """Строка описания под пунктом меню (отступ, приглушённый стиль) —
+    как box_renderer._box_desc; перенос длинных строк делает _box_row."""
+    _box_row(f"     {DIM}{text}{NC}")
+
+
+def _box_kv(key: str, val: str, kw: int = 22) -> None:
+    """Строка «ключ — значение»: ключ цианетом, выравнивание по колонкам
+    (канон mieru/hybrid_addon). Перенос длинных значений делает _box_row."""
+    key_colored = f"{CYAN}{key}{NC}"
+    key_pad = max(0, kw - _wcslen(key_colored))
+    _box_row(f"  {key_colored}{' ' * key_pad}  {val}")
+
+
+def _box_wrap_msg(prefix_colored: str, msg: str) -> None:
+    """Строка с цветным префиксом-иконкой и переносом сообщения —
+    продолжение выравнивается под текст (а не под иконку). Понимает ручные
+    '\\n' в msg — каждый сегмент переносится по словам отдельно."""
+    prefix_plain_len = _wcslen(_plain(prefix_colored))
+    max_msg = max(_BOX_W - prefix_plain_len, 10)
+    indent = ' ' * prefix_plain_len
+
+    all_lines = []
+    for segment in msg.split('\n'):
+        words = segment.split(' ')
+        current = ''
+        for word in words:
+            if not word:
+                continue
+            candidate = (current + ' ' + word).lstrip() if current else word
+            if _wcslen(candidate) <= max_msg:
+                current = candidate
+            else:
+                if current:
+                    all_lines.append(current)
+                while _wcslen(word) > max_msg:
+                    piece, pw = '', 0
+                    for ch in word:
+                        cw = _wcslen(ch)
+                        if pw + cw > max_msg:
+                            break
+                        piece += ch
+                        pw += cw
+                    all_lines.append(piece)
+                    word = word[len(piece):]
+                current = word
+        all_lines.append(current)  # пустой segment -> пустая строка
+
+    if not all_lines:
+        _box_row(prefix_colored)
+        return
+    _box_row(f"{prefix_colored}{all_lines[0]}")
+    for line in all_lines[1:]:
+        _box_row(f"{indent}{line}" if line else "")
+
+
+# Иконки семейства Mieru-модулей (как _box_ok/_box_warn/_box_info/_box_err
+# в mieru.py и c_* в hybrid_addon.py): ✓ ✗ ⚠ →
+def c_cyan(msg: str) -> None:
+    _box_wrap_msg(f"  {CYAN}→{NC}  ", msg)
+
+
+def c_green(msg: str) -> None:
+    _box_wrap_msg(f"  {GREEN}✓{NC}  ", msg)
+
+
+def c_red(msg: str) -> None:
+    _box_wrap_msg(f"  {RED}✗{NC}  ", msg)
+
+
+def c_yellow(msg: str) -> None:
+    _box_wrap_msg(f"  {YELLOW}⚠{NC}  ", msg)
 
 
 def box_header(title: str) -> None:
+    """Открывает новую рамку с заголовком (сверху пустая строка-отступ).
+    У каждой открытой через box_header() секции есть парный _box_bottom() —
+    ищи его в той же функции (через try/finally, чтобы рамка закрывалась
+    и при раннем return, и при ошибке)."""
     print()
     _box_top(title)
     _box_row()
 
 
-def c_cyan(msg: str) -> None:
-    print(f"{CYAN}{msg}{NC}")
-
-
-def c_green(msg: str) -> None:
-    print(f"{GREEN}{msg}{NC}")
-
-
-def c_red(msg: str) -> None:
-    print(f"{RED}{msg}{NC}")
-
-
-def c_yellow(msg: str) -> None:
-    print(f"{YELLOW}{msg}{NC}")
-
-
 def die(msg: str, code: int = 1) -> None:
-    _box_bottom()
     c_red(msg)
+    _log("ERROR", msg)
     sys.exit(code)
 
 
 def confirm(prompt: str) -> bool:
     try:
-        return input(f"{YELLOW}{prompt} [y/N]:{NC} ").strip().lower() in ("y", "yes", "д", "да")
+        ans = input(f"  {BOLD}{prompt} [y/N]: {NC}").strip().lower()
     except (EOFError, KeyboardInterrupt):
+        _box_row()
         return False
+    return ans in ("y", "yes", "д", "да")
 
 
 def _log(level: str, msg: str) -> None:
-    """Лог в /var/log/chimera.log (если каталог есть), тихо иначе."""
+    """Лог в общий /var/log/chimera.log (формат как у hybrid_addon), тихо иначе."""
+    line = (f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"[awg_mieru_addon] [{level}] {msg}\n")
     try:
-        d = Path("/var/log")
-        if d.is_dir():
-            with open(d / "chimera.log", "a", encoding="utf-8") as f:
-                f.write(f"{datetime.now().isoformat(timespec='seconds')} "
-                        f"[awg_mieru_addon] {level}: {msg}\n")
-    except Exception:
-        pass
+        with open("/var/log/chimera.log", "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass  # лог не критичен для работы скрипта
 
 
 def require_root() -> None:
     if os.geteuid() != 0:
-        print(f"{RED}Запусти от root (sudo).{NC}")
+        # Обычный print, не через c_red/рамку — этот код может сработать
+        # до открытия любой рамки (как в mieru.py / hybrid_addon.py).
+        print(f"{RED}Запусти от root (sudo python3 awg_mieru_addon.py){NC}")
+        _log("ERROR", "запуск не от root")
         sys.exit(1)
 
 
 def run(cmd: list, **kwargs) -> subprocess.CompletedProcess:
+    """Обёртка над subprocess с единым поведением."""
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
 
@@ -952,8 +1122,8 @@ def show_status() -> None:
     state = state_load()
     _box_kv("Клиентов выдано:", str(len(state["clients"])), kw=20)
     if pre["error"]:
-        _box_row()
-        _box_row(f"  {RED}⚠ {pre['error']}{NC}")
+        _box_sep()
+        c_red(pre["error"])
     _box_row()
     _box_row(f"  {DIM}Сервер не требует изменений: mita уже релеит UDP до awg0.{NC}")
     _box_row(f"  {DIM}Живая валидация UDP ASSOCIATE → awg0-порт: 02.11.2026, vds13195.{NC}")
@@ -964,14 +1134,29 @@ def show_clients() -> None:
     state = state_load()
     box_header("AWG × MIERU — КЛИЕНТЫ")
     if not state["clients"]:
-        _box_row(f"  {DIM}Пока никого (--issue NAME).{NC}")
-    for c in state["clients"]:
-        _box_row()
-        _box_kv(f"{c['name']}:", f"gw={c['gw_port']} socks={c['socks_port']}", kw=18)
-        _box_kv("", f"entry={c['entry_addr']} awg={c['awg_port']}", kw=18)
-        _box_kv("", f"mita={c['mita_username']} @ {c['created_at']}", kw=18)
-        _box_kv("", f"бандл: {_BUNDLE_DIR / c['name']}", kw=18)
+        _box_row(f"  {DIM}Пока никого — выдай первого (--issue NAME или пункт [1]).{NC}")
+    for i, c in enumerate(state["clients"]):
+        if i:
+            _box_sep()
+        _box_row(f"  {BOLD}{WHITE}{c['name']}{NC}")
+        _box_kv("мост → socks:", f"127.0.0.1:{c['gw_port']}/udp → :{c['socks_port']}", kw=16)
+        _box_kv("entry:", f"{c['entry_addr']}:{c['awg_port']}/udp", kw=16)
+        _box_kv("mita-юзер:", c["mita_username"], kw=16)
+        _box_kv("выдан:", c["created_at"], kw=16)
+        _box_kv("бандл:", str(_BUNDLE_DIR / c["name"]), kw=16)
     _box_bottom()
+
+
+def print_issue_result(rec: dict) -> None:
+    """Сводка выданного клиента — внутри ОТКРЫТОЙ рамки (CLI и TUI зовут
+    после успешного issue_client)."""
+    _box_kv("Клиент:", rec["name"], kw=20)
+    _box_kv("Мост (клиент):", f"127.0.0.1:{rec['gw_port']}/udp", kw=20)
+    _box_kv("mieru SOCKS5:", f"127.0.0.1:{rec['socks_port']}", kw=20)
+    _box_kv("Entry:", f"{rec['entry_addr']}:{rec['awg_port']}/udp", kw=20)
+    _box_kv("Бандл:", rec["bundle_dir"], kw=20)
+    _box_row()
+    c_cyan("Передай клиенту каталог целиком — порядок запуска в README.txt.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -979,18 +1164,22 @@ def show_clients() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def do_awg_mieru_menu() -> None:
+    """TUI-меню аддона (пункт [M] в управлении пирами AWG)."""
     while True:
         os.system("clear")
-        print()
         show_status()
         print()
         _box_top("AWG × MIERU — УПРАВЛЕНИЕ")
         _box_row()
-        _box_item("1", "Выдать клиента (пир + mita-юзер + бандл)")
-        _box_item("2", "Пересобрать бандл (смена IP/домена Entry)")
+        _box_item("1", "Выдать клиента")
+        _box_desc("пир AWG + mita-юзер + клиентский бандл")
+        _box_item("2", "Пересобрать бандл клиента")
+        _box_desc("смена IP/домена Entry в профиле mieru")
         _box_item("3", "Отозвать клиента")
         _box_item("4", "Список выданных")
-        _box_item("Q", "Назад")
+        _box_row()
+        _box_item("Q", f"{DIM}← Назад к меню AWG-пиров{NC}")
+        _box_row()
         _box_bottom()
         try:
             ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -999,36 +1188,47 @@ def do_awg_mieru_menu() -> None:
 
         if ch == "1":
             try:
-                name = input("Имя клиента ([A-Za-z][A-Za-z0-9_-]): ").strip()
+                name = input(f"{CYAN}Имя клиента ([A-Za-z][A-Za-z0-9_-]):{NC} ").strip()
             except (EOFError, KeyboardInterrupt):
                 continue
             if name:
-                rec = issue_client(name)
-                if rec:
-                    c_green(f"Готово. Бандл: {rec['bundle_dir']}")
-                    c_cyan("Передай клиенту КАТАЛОГ целиком (awg-client.conf + "
-                           "mieru-client.json + mieru-udp-gw.py + start-* + README.txt).")
-            input(f"{CYAN}Enter...{NC}")
+                box_header("AWG × MIERU — ВЫДАЧА КЛИЕНТА")
+                try:
+                    rec = issue_client(name)
+                    if rec:
+                        _box_sep()
+                        print_issue_result(rec)
+                finally:
+                    _box_bottom()
+            input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "2":
             try:
-                name = input("Имя клиента: ").strip()
-                entry = input("Новый адрес Entry (пусто = как было): ").strip()
+                name = input(f"{CYAN}Имя клиента:{NC} ").strip()
+                entry = input(f"{CYAN}Новый адрес Entry (пусто = как было):{NC} ").strip()
             except (EOFError, KeyboardInterrupt):
                 continue
             if name:
-                regen_client(name, entry_addr=entry or None)
-            input(f"{CYAN}Enter...{NC}")
+                box_header("AWG × MIERU — РЕГЕН БАНДЛА")
+                try:
+                    regen_client(name, entry_addr=entry or None)
+                finally:
+                    _box_bottom()
+            input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "3":
             try:
-                name = input("Имя клиента для отзыва: ").strip()
+                name = input(f"{CYAN}Имя клиента для отзыва:{NC} ").strip()
             except (EOFError, KeyboardInterrupt):
                 continue
             if name and confirm(f"Отозвать '{name}'?"):
-                revoke_client(name)
-            input(f"{CYAN}Enter...{NC}")
+                box_header("AWG × MIERU — ОТЗЫВ КЛИЕНТА")
+                try:
+                    revoke_client(name)
+                finally:
+                    _box_bottom()
+            input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "4":
             show_clients()
-            input(f"{CYAN}Enter...{NC}")
+            input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch in ("q", ""):
             break
 
@@ -1064,28 +1264,40 @@ def main() -> None:
         show_clients()
         return
     if args.rollback_all:
-        rollback_all()
+        box_header("AWG × MIERU — ROLLBACK ВСЕХ КЛИЕНТОВ")
+        try:
+            rollback_all()
+        finally:
+            _box_bottom()
         return
     if args.issue:
-        rec = issue_client(args.issue, gw_port=args.gw_port,
-                           entry_addr=args.entry, socks_port=args.socks_port)
-        if rec:
-            box_header("AWG × MIERU — КЛИЕНТ ВЫДАН")
-            _box_kv("Клиент:", rec["name"])
-            _box_kv("Мост (клиент):", f"127.0.0.1:{rec['gw_port']}/udp", kw=22)
-            _box_kv("mieru SOCKS5:", f"127.0.0.1:{rec['socks_port']}", kw=22)
-            _box_kv("Entry:", f"{rec['entry_addr']}:{rec['awg_port']}/udp", kw=22)
-            _box_kv("Бандл:", rec["bundle_dir"], kw=22)
-            _box_row()
-            _box_row(f"  {DIM}Передай клиенту каталог целиком; README внутри.{NC}")
+        box_header("AWG × MIERU — ВЫДАЧА КЛИЕНТА")
+        rec = None
+        try:
+            rec = issue_client(args.issue, gw_port=args.gw_port,
+                               entry_addr=args.entry, socks_port=args.socks_port)
+            if rec:
+                _box_sep()
+                print_issue_result(rec)
+        finally:
             _box_bottom()
-        else:
+        if not rec:
             sys.exit(1)
         return
     if args.regen:
-        sys.exit(0 if regen_client(args.regen, entry_addr=args.entry) else 1)
+        box_header("AWG × MIERU — РЕГЕН БАНДЛА")
+        try:
+            ok = regen_client(args.regen, entry_addr=args.entry)
+        finally:
+            _box_bottom()
+        sys.exit(0 if ok else 1)
     if args.revoke:
-        sys.exit(0 if revoke_client(args.revoke) else 1)
+        box_header("AWG × MIERU — ОТЗЫВ КЛИЕНТА")
+        try:
+            ok = revoke_client(args.revoke)
+        finally:
+            _box_bottom()
+        sys.exit(0 if ok else 1)
 
     parser.print_help()
 
