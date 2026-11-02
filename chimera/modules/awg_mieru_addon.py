@@ -764,6 +764,8 @@ def _build_readme(name: str, entry: str, mita_port: int, awg_port: int,
   start-linux.sh     — запуск всех трёх слоёв (Linux)
   start-windows.bat  — mieru + мост (Windows; AWG — импорт awg-client.conf
                        в Amnezia/любой AWG-клиент)
+  start-v2rayn.bat   — вариант для v2rayN: мост цепляется к SOCKS5 v2rayN
+                       (Windows; mieru-профиль живёт внутри v2rayN)
 
 LINUX
   # 1) mieru (один раз):   mieru replace config mieru-client.json
@@ -781,6 +783,15 @@ WINDOWS
               --socks 127.0.0.1:{socks_port} --target {entry}:{awg_port}
   3) AWG: импортировать awg-client.conf (Amnezia / awg-quick под WSL)
   Или просто start-windows.bat (шаги 1-2).
+
+WINDOWS + V2RAYN (mieru-нога внутри v2rayN)
+  1) v2rayN: Профили → Добавить → Mieru:
+     адрес {entry}, порт {mita_port}, протокол TCP,
+     логин/пароль — из mieru-client.json (user.name / user.password).
+     Подключить (v2rayN поднимет локальный SOCKS5, дефолт 10808).
+  2) Мост: запусти start-v2rayn.bat — он проверит v2rayN и поднимет мост
+     на SOCKS v2rayN (порт правится переменной V2SOCKS внутри bat-файла).
+  3) AWG: импортировать awg-client.conf в Amnezia и подключить.
 
 НОРМАЛЬНО ЛИ, ЧТО МОСТ МОЛЧИТ
   Да. При подключении AWG печатает "session ... -> relay ..." на каждую
@@ -845,6 +856,74 @@ tasklist /FI "IMAGENAME eq python.exe" | find /I "python.exe" >nul || (
 
 echo Мост запущен (127.0.0.1:{gw_port} -> {entry}:{awg_port} через mieru).
 echo Теперь подключи AWG: конфиг awg-client.conf (Endpoint уже указывает на мост).
+pause
+"""
+
+
+def _build_start_v2rayn(name: str, entry: str, mita_port: int, awg_port: int,
+                        gw_port: int) -> str:
+    """Вариант для Windows-клиентов, у которых mieru-нога живёт внутри
+    v2rayN (профиль типа Mieru). Мост цепляется к локальному SOCKS5
+    v2rayN (дефолт 10808, правится переменной V2SOCKS). AWG — по-прежнему
+    отдельным клиентом (Amnezia), см. README бандла."""
+    return f"""@echo off
+chcp 65001 >nul
+rem ═══════════════════════════════════════════════════════════════
+rem  AWG 3.1 через mieru — мост для v2rayN («{name}»).
+rem  mieru-ногу держит v2rayN (профиль Mieru), этот файл — только мост.
+rem  ПОРЯДОК: 1) подключить mieru-профиль в v2rayN  2) запустить ЭТОТ файл
+rem           3) подключить awg-client.conf в Amnezia
+rem ═══════════════════════════════════════════════════════════════
+
+rem Локальный SOCKS5-порт v2rayN (настройки v2rayN; дефолт 10808).
+rem Если у тебя другой — поправь эту строку:
+set V2SOCKS=10808
+
+cd /d "%~dp0"
+
+where python >nul 2>&1
+if errorlevel 1 (
+    echo [X] Python не найден. Установи с python.org
+    echo     ^(при установке отметь галку "Add Python to PATH"^).
+    pause
+    exit /b 1
+)
+
+rem v2rayN подключен? (ждём локальный SOCKS5)
+netstat -an | find "127.0.0.1:%V2SOCKS% " | find "LISTENING" >nul
+if errorlevel 1 (
+    echo [!] v2rayN не подключен: нет SOCKS5 на 127.0.0.1:%V2SOCKS%.
+    echo.
+    echo     Сделай в v2rayN: Профили -^> Добавить -^> Mieru:
+    echo        адрес:  {entry}
+    echo        порт:   {mita_port}  (TCP)
+    echo        логин/пароль: из mieru-client.json (user.name / user.password)
+    echo     Подключи профиль и запусти этот файл снова.
+    echo     ^(Если v2rayN использует другой SOCKS-порт — поправь V2SOCKS
+    echo       в начале этого файла.^)
+    pause
+    exit /b 1
+)
+
+rem Мост уже запущен? (UDP-порт занят)
+netstat -an | find "127.0.0.1:{gw_port} " | find "UDP" >nul
+if not errorlevel 1 (
+    echo [OK] Мост уже запущен (127.0.0.1:{gw_port}/udp занят).
+    echo     Подключи awg-client.conf в Amnezia, если ещё не подключен.
+    pause
+    exit /b 0
+)
+
+echo [*] Поднимаю мост: 127.0.0.1:{gw_port} -^> v2rayN^(%V2SOCKS%^) -^> {entry}:{awg_port} ...
+start "mieru-udp-gw-{name}" /MIN python mieru-udp-gw.py --listen 127.0.0.1:{gw_port} --socks 127.0.0.1:%V2SOCKS% --target {entry}:{awg_port}
+timeout /t 2 /nobreak >nul
+
+echo.
+echo ═══════════════════════════════════════════════════════
+echo  [OK] Мост работает (свёрнутое окно python в панели задач).
+echo  ОСТАЛОСЬ: Amnezia -^> подключить awg-client.conf
+echo  Проверка: https://api.ipify.org покажет IP exit-ноды.
+echo ═══════════════════════════════════════════════════════
 pause
 """
 
@@ -947,6 +1026,10 @@ def _emit_bundle(rec: dict, peer: dict, awg_server_state: dict,
     p = bdir / "start-windows.bat"
     p.write_text(_build_start_windows(name, rec["entry_addr"], rec["awg_port"],
                                       rec["gw_port"], rec["socks_port"]),
+                 encoding="utf-8")
+    p = bdir / "start-v2rayn.bat"
+    p.write_text(_build_start_v2rayn(name, rec["entry_addr"], rec["mita_port"],
+                                     rec["awg_port"], rec["gw_port"]),
                  encoding="utf-8")
     p = bdir / "README.txt"
     p.write_text(_build_readme(name, rec["entry_addr"], rec["mita_port"],
