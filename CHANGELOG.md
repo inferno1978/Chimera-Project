@@ -38,6 +38,8 @@
 
 **Не входит (намеренно, возможные следующие шаги):** интеграция с TG-ботом (/config-сегмент), rest_api-синк в WPP-портал, QR для mierus-части (мобильный стек mieru+AWG не собирается одним приложением — Karing/NekoBox не умеют AWG I1-I5).
 
+**Правка после смоука на vds13195 (02.11, та же ветка feat/awg-mieru-addon):** прямой CLI-запуск `sudo python3 awg_mieru_addon.py --status` из /opt/chimera падал на ленивых импортах — sys.path[0] = chimera/modules/, пакет chimera не находится («No module named 'chimera'»), --status фальшиво показывал «AWG standalone: НЕТ / Mieru (mita): НЕТ». Фикс: буутстрап sys.path в шапке модуля — при `not __package__` корень репо (parents[2]) кладётся в sys.path; при штатном импорте как chimera.modules.* (TUI через main.py) — no-op. Проверено: запуск файла из модульного каталога → prerequisites() даёт осмысленный «AWG standalone не установлен», не ImportError.
+
 # Changelog new entry — FIX(): чистые логи api — постоянный JWT_REFRESH_SECRET + SCHEDULES_SINGLE_PROCESS=true + version 1.3.18 в .yaml (live, vds13195) (01 Nov 2026)
 
 ## Контекст (хвосты GLM-подключения, vds13195 01.11): на каждом старте api три шумящие строки: (1) warn «[credentials] No configured value was found for JWT_REFRESH_SECRET» — модуль ставил постоянный JWT_SECRET, но не refresh: api генерил временный в /app/data/.env.temp; (2) error «[schedules] scheduler NOT started …» — write-маршруты schedules/generations отдавали 503: стек — ОДНА реплика api, shared-store (USE_REDIS_STREAMS) нет, апстрим требует явного SCHEDULES_SINGLE_PROCESS=true; (3) info «Outdated Config version: 1.2.1» — version в .yaml отставала от образа.

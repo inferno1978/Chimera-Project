@@ -77,6 +77,16 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
+# Прямой запуск файла (sudo python3 awg_mieru_addon.py --status): sys.path[0]
+# указывает на chimera/modules/, пакета chimera рядом нет → ленивые импорты
+# chimera.modules.* падали («No module named 'chimera'», фикс после смоука на
+# vds13195 02.11). Кладём корень репо в sys.path. При штатном импорте как
+# chimera.modules.awg_mieru_addon (TUI через main.py) __package__ задан — no-op.
+if not __package__:
+    _REPO_ROOT = str(Path(__file__).resolve().parents[2])
+    if _REPO_ROOT not in sys.path:
+        sys.path.insert(0, _REPO_ROOT)
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  КОНСТАНТЫ
 # ══════════════════════════════════════════════════════════════════════════════
