@@ -78,6 +78,7 @@ def _log(level: str, msg: str) -> None:
 
 def _success(msg: str) -> None: print(f"{GREEN}[OK]{NC}    {msg}"); _log("SUCCESS", msg)
 def _warn(msg: str)    -> None: print(f"{YELLOW}[WARN]{NC}  {msg}"); _log("WARN", msg)
+def _info(msg: str)    -> None: print(f"{CYAN}[..]{NC}    {msg}"); _log("INFO", msg)
 
 # ── Вспомогательные ───────────────────────────────────────────────────────────
 def _run(cmd: list, capture: bool = False, check: bool = False,
@@ -282,6 +283,90 @@ def _dns_validate_domain(text: str) -> "str | None":
     return None
 
 
+# ── RESTORE (после regenerate — канон restore_youtube_rule_if_needed) ────────
+#
+# ДЫРА (исправлена): state (/var/lib/xray-installer/dns_rules.json) ведётся
+# с первой версии модуля, но generate_* перезаписывает config.json целиком —
+# dns.hosts и dns_custom:* правила МОЛЧА терялись при каждой пересборке
+# (смена домена/порта, regenerate 5b, редактирование нод и т.д.). Юзер
+# добавлял host/routing → пересобрал конфиг → правила исчезли без предупреждения.
+
+def _dns_state_hosts_in_config(state_hosts: dict, live_hosts: dict) -> list:
+    """Какие hosts из state отсутствуют в живом dns.hosts конфига."""
+    return [d for d in state_hosts if d not in live_hosts]
+
+
+def _dns_state_routing_missing(state_routing: list, live_rt: list) -> list:
+    """Какие routing-правила из state отсутствуют в живом конфиге.
+
+    Правило считается применённым, если есть dns_custom:* с тем же доменом
+    И тем же outboundTag.
+    """
+    live_pairs = {(d, r.get("outboundTag"))
+                  for r in live_rt
+                  for d in r.get("domain", [])}
+    missing = []
+    for entry in state_routing:
+        d = entry.get("domain")
+        ob = entry.get("outbound")
+        if d and (d, ob) not in live_pairs:
+            missing.append(entry)
+    return missing
+
+
+def restore_dns_rules_if_needed(silent: bool = False) -> bool:
+    """Пере-применяет кастомные DNS-правила если state говорит что они
+    есть, но в config.json их нет (generate_* перезаписывает конфиг
+    целиком — dns.hosts и dns_custom:* правила терялись молча).
+
+    ВЫЗЫВАЕТСЯ ИЗ:
+      - _core._rebuild_and_restart_xray (после generate_*, ДО рестарта)
+      - Пункта меню «7» этого модуля (пере-применить из state)
+
+    Возвращает True если что-то было пере-применено.
+    Перезапуск Xray делает вызывающий код (rebuild) / пункт меню.
+    """
+    data     = _dns_rules_load()
+    hosts    = data.get("hosts") or {}
+    routing  = data.get("routing") or []
+    if not hosts and not routing:
+        return False
+
+    _, cfg            = _dns_get_xray_config()
+    if not cfg and not _CONFIG_DIR.joinpath("config.json").exists() \
+            and not _DIAG_ALT_CONFIG.exists():
+        if not silent:
+            _warn("Xray конфиг не найден — restore пропущен")
+        return False
+
+    live_hosts    = cfg.get("dns", {}).get("hosts", {}) if cfg else {}
+    live_rt_rules = [r for r in (cfg.get("routing", {}).get("rules", []) if cfg else [])
+                     if r.get("comment", "").startswith("dns_custom:")]
+
+    miss_hosts   = _dns_state_hosts_in_config(hosts, live_hosts)
+    miss_routing = _dns_state_routing_missing(routing, live_rt_rules)
+
+    if not miss_hosts and not miss_routing:
+        return False  # всё уже на месте
+
+    if not silent:
+        _info(f"Восстанавливаем кастомные DNS-правила после regenerate "
+              f"(hosts: {len(miss_hosts)}, routing: {len(miss_routing)})...")
+
+    applied = 0
+    if miss_hosts:
+        if _dns_apply_hosts({d: hosts[d] for d in miss_hosts}):
+            applied += len(miss_hosts)
+    for entry in miss_routing:
+        if _dns_apply_routing_rule(entry.get("domain", ""),
+                                   entry.get("outbound", "direct")):
+            applied += 1
+
+    if applied and not silent:
+        _success(f"Кастомные DNS-правила восстановлены из state ({applied} записей)")
+    return applied > 0
+
+
 def do_manage_dns_rules() -> None:
     """
     Меню управления кастомными DNS правилами.
@@ -298,11 +383,22 @@ def do_manage_dns_rules() -> None:
         live_rt_rules = [r for r in cfg.get("routing", {}).get("rules", [])
                          if r.get("comment", "").startswith("dns_custom:")]
 
+        # Рассинхрон state ↔ конфиг (regenerate стёр правила)
+        st_hosts_cnt = len(hosts)
+        st_rt_cnt    = len(rt_rules)
+        lost = (st_hosts_cnt - len(live_hosts)) + (st_rt_cnt - len(live_rt_rules))
+
         _box_top("🌐  КАСТОМНЫЕ DNS ПРАВИЛА")
         _box_row()
 
+        if lost > 0:
+            _box_row(f"  {YELLOW}⚠  Потеряно в конфиге: {lost} записей из state{NC}")
+            _box_row(f"  {DIM}(regenerate стёр — пункт 7 восстановит){NC}")
+            _box_row()
+
         # ── Hosts (domain → IP) ──
-        _box_row(f"  {BOLD}Hosts (domain → IP):  {DIM}{len(live_hosts)} записей{NC}")
+        _box_row(f"  {BOLD}Hosts (domain → IP):  {DIM}{len(live_hosts)} в конфиге"
+                f" / {st_hosts_cnt} в state{NC}")
         if live_hosts:
             _box_sep()
             for dom, ips in list(live_hosts.items())[:8]:
@@ -317,7 +413,7 @@ def do_manage_dns_rules() -> None:
         # ── Routing правила (domain → outbound) ──
         _box_row(
             f"  {BOLD}DNS routing (domain → outbound):  "
-            f"{DIM}{len(live_rt_rules)} правил{NC}"
+            f"{DIM}{len(live_rt_rules)} в конфиге / {st_rt_cnt} в state{NC}"
         )
         if live_rt_rules:
             _box_sep()
@@ -337,6 +433,7 @@ def do_manage_dns_rules() -> None:
         _box_item("4", f"Удалить routing-правило")
         _box_item("5", f"Показать все DNS-правила из конфига")
         _box_item("6", f"Перезапустить Xray (применить изменения)")
+        _box_item("7", f"Пере-применить из state  {DIM}(восстановить после regenerate){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -496,6 +593,15 @@ def do_manage_dns_rules() -> None:
         elif ch == "6":
             print()
             _dns_reload_xray()
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        # ── 7: Пере-применить из state (после regenerate) ──────────────
+        elif ch == "7":
+            print()
+            if restore_dns_rules_if_needed(silent=False):
+                _dns_reload_xray()
+            else:
+                _success("Рассинхрона нет — всё уже в конфиге")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch in ("q", ""):

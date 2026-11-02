@@ -97,6 +97,9 @@ import chimera.modules.box_renderer as _br
 _BOX_W = _br._BOX_W  # алиас для совместимости с кодом в _core.py
 from chimera.modules.logrotate  import do_manage_logrotate
 from chimera.modules.dns_rules         import do_manage_dns_rules
+from chimera.modules.routing_rules import (
+    do_manage_routing_rules, restore_routing_rules_if_needed,
+)
 from chimera.modules.fingerprint_manager import (
     XRAY_FP_LIST  as _FM_FP_LIST,
     prompt_fingerprint as _fm_prompt_fingerprint,
@@ -3076,6 +3079,35 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
         pass
     except Exception:
         pass  # не критично — это best-effort restore
+
+    # Кастомные DNS-правила (dns.hosts + dns_custom:* routing). ДЫРА,
+    # фиксы ниже: state (/var/lib/xray-installer/dns_rules.json) ведётся с
+    # первой версии dns_rules.py, но re-apply после generate_* не было —
+    # dns.hosts и dns_custom:* МОЛЧА терялись при каждой пересборке. Без
+    # этого хука пункт D меню бесполезен после любого rebuild.
+    try:
+        from chimera.modules.dns_rules import restore_dns_rules_if_needed
+        if restore_dns_rules_if_needed(silent=False):
+            info("Кастомные DNS-правила восстановлены из state")
+    except ImportError:
+        pass
+    except Exception:
+        pass  # best-effort restore
+
+    # Кастомные routing-правила (custom:*). Вызывается ПОСЛЕДНИМ из
+    # «в начало»-вставляющих restore: итоговый порядок в routing.rules —
+    # [custom:*] → [dns_custom:*] → [youtube] → [ru_subnets_ripe] → ... —
+    # т.е. явные правила пользователя всегда выше встроенных пресетов
+    # (запрос Vasily: РФ-подсети через chain-exit-N должны перебивать direct
+    # из Split Tunneling). generate_* перезаписывает routing целиком —
+    # без restore правила молча терялись при пересборке.
+    try:
+        if restore_routing_rules_if_needed(silent=False):
+            info("Кастомные routing-правила восстановлены из state")
+    except ImportError:
+        pass
+    except Exception:
+        pass  # best-effort restore
 
     # Восстанавливаем Telemt tproxy-интеграцию (если установлен).
     # generate_* перезаписывает config.json целиком — dokodemo inbound и
@@ -8246,6 +8278,7 @@ def _menu_network() -> None:
         _box_sep()
         _box_item("D", f"🌐 Кастомные DNS правила  {DIM}(hosts / routing override){NC}")
         _box_item("DR", f"🔒 Принудительный DNS REDIRECT  {DIM}(NAT на dnscrypt-proxy, anti-leak){NC}")
+        _box_item("RR", f"🧭 Кастомные routing-правила  {DIM}(домен/IP/CIDR/порт → любой outbound, приоритет){NC}")
         _box_item("M", f"📏 MTU/MSS автотюнинг  {DIM}(оптимизация для exit-нод){NC}")
         _box_item("T", f"⚡ TCP Fast Open (TFO)  {DIM}(вкл/выкл, по умолчанию ВЫКЛ — анти-DPI){NC}")
         _box_item("X", f"⚡ XTLS-flow режим  {DIM}(Vision / Splice / none — только REALITY){NC}")
@@ -8352,6 +8385,11 @@ def _menu_network() -> None:
             do_manage_dns_redirect()
         elif ch.lower() == "d":
             do_manage_dns_rules()
+        elif ch.lower() == "rr":
+            # Кастомные routing-правила: {имя, матч, outbound, вкл/выкл,
+            # приоритет, расположение}. Полноправный сосед dns_custom:*, но
+            # с любым outbound (chain-exit-N и т.д.) и любыми матчами.
+            do_manage_routing_rules()
         elif ch.lower() == "m":
             do_mtu_tuning()
         elif ch.lower() == "t":

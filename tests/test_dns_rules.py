@@ -308,5 +308,128 @@ class TestDnsRemoveRoutingRule(unittest.TestCase):
         self.assertEqual(rules[0]["domain"], ["y.com"])
 
 
+class TestRestoreDnsRulesIfNeeded(unittest.TestCase):
+    """restore_dns_rules_if_needed — re-apply после regenerate.
+
+    ДЫРА: dns_rules.json вёлся с первой версии, но generate_* перезаписывал
+    конфиг — dns.hosts и dns_custom:* молча терялись при пересборке.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg = self._tmpdir / "config.json"
+        self._rules = self._tmpdir / "dns_rules.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _p(self):
+        return patch("chimera.modules.dns_rules.DNS_RULES_FILE", self._rules)
+
+    def _p_cfg(self, cfg_dict):
+        self._cfg.write_text(json.dumps(cfg_dict))
+        return patch("chimera.modules.dns_rules._dns_get_xray_config",
+                     return_value=(self._cfg, cfg_dict))
+
+    def test_returns_false_when_state_empty(self):
+        """State пуст — ничего не делаем."""
+        from chimera.modules.dns_rules import restore_dns_rules_if_needed
+        cfg = {"dns": {"hosts": {}}, "routing": {"rules": []}}
+        with self._p(), self._p_cfg(cfg):
+            self.assertFalse(restore_dns_rules_if_needed())
+
+    def test_returns_false_when_no_state_file(self):
+        """Нет dns_rules.json → False (не падает)."""
+        from chimera.modules.dns_rules import restore_dns_rules_if_needed
+        cfg = {"dns": {"hosts": {}}, "routing": {"rules": []}}
+        with self._p(), self._p_cfg(cfg):
+            self.assertFalse(restore_dns_rules_if_needed())
+
+    def test_returns_false_when_all_present(self):
+        """Всё из state уже в конфиге → False."""
+        from chimera.modules.dns_rules import restore_dns_rules_if_needed
+        self._rules.write_text(json.dumps({
+            "hosts": {"x.com": ["1.2.3.4"]},
+            "routing": [{"domain": "y.com", "outbound": "block"}],
+        }))
+        cfg = {
+            "dns": {"hosts": {"x.com": ["1.2.3.4"]}},
+            "routing": {"rules": [
+                {"type": "field", "domain": ["y.com"], "outboundTag": "block",
+                 "comment": "dns_custom:y.com"},
+            ]},
+        }
+        with self._p(), self._p_cfg(cfg):
+            self.assertFalse(restore_dns_rules_if_needed())
+
+    def test_reapplies_hosts_after_regenerate(self):
+        """Regenerate стёр dns.hosts → hosts пере-применяются."""
+        from chimera.modules.dns_rules import restore_dns_rules_if_needed
+        self._rules.write_text(json.dumps({
+            "hosts": {"x.com": ["1.2.3.4"], "y.org": ["5.6.7.8"]},
+            "routing": [],
+        }))
+        cfg = {"dns": {}, "routing": {"rules": []}}
+        self._cfg.write_text(json.dumps(cfg))
+        # _dns_get_xray_config вызывается несколько раз (restore + apply):
+        # возвращаем живой файл — apply перечитывает его сам
+        with self._p(), patch(
+            "chimera.modules.dns_rules._dns_get_xray_config",
+            side_effect=lambda: (self._cfg, json.loads(self._cfg.read_text()))
+        ):
+            self.assertTrue(restore_dns_rules_if_needed())
+        restored = json.loads(self._cfg.read_text())
+        self.assertEqual(restored["dns"]["hosts"]["x.com"], ["1.2.3.4"])
+        self.assertEqual(restored["dns"]["hosts"]["y.org"], ["5.6.7.8"])
+
+    def test_reapplies_routing_after_regenerate(self):
+        """Regenerate стёр dns_custom:* → routing пере-применяются."""
+        from chimera.modules.dns_rules import restore_dns_rules_if_needed
+        self._rules.write_text(json.dumps({
+            "hosts": {},
+            "routing": [{"domain": "ads.com", "outbound": "block"}],
+        }))
+        cfg = {"dns": {}, "routing": {"rules": []}}
+        self._cfg.write_text(json.dumps(cfg))
+        with self._p(), patch(
+            "chimera.modules.dns_rules._dns_get_xray_config",
+            side_effect=lambda: (self._cfg, json.loads(self._cfg.read_text()))
+        ):
+            self.assertTrue(restore_dns_rules_if_needed())
+        restored = json.loads(self._cfg.read_text())
+        rules = restored["routing"]["rules"]
+        custom = [r for r in rules if r.get("comment") == "dns_custom:ads.com"]
+        self.assertEqual(len(custom), 1)
+        self.assertEqual(custom[0]["outboundTag"], "block")
+
+    def test_changed_outbound_counts_as_missing(self):
+        """Домен есть, но outboundTag другой → правило пере-применяется."""
+        from chimera.modules.dns_rules import restore_dns_rules_if_needed
+        self._rules.write_text(json.dumps({
+            "hosts": {},
+            "routing": [{"domain": "x.com", "outbound": "block"}],
+        }))
+        cfg = {
+            "dns": {},
+            "routing": {"rules": [
+                {"type": "field", "domain": ["x.com"], "outboundTag": "direct",
+                 "comment": "dns_custom:x.com"},
+            ]},
+        }
+        self._cfg.write_text(json.dumps(cfg))
+        with self._p(), patch(
+            "chimera.modules.dns_rules._dns_get_xray_config",
+            side_effect=lambda: (self._cfg, json.loads(self._cfg.read_text()))
+        ):
+            self.assertTrue(restore_dns_rules_if_needed())
+        restored = json.loads(self._cfg.read_text())
+        rules = restored["routing"]["rules"]
+        self.assertEqual(len(rules), 1)
+        # Старое (direct) удалено, новое (block) на месте
+        self.assertEqual(rules[0]["outboundTag"], "block")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

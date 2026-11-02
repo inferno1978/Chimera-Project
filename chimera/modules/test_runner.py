@@ -108,7 +108,7 @@ TEST_GROUPS: dict[str, dict] = {
         "label": "Сеть и Безопасность",
         "description": "DNS, баны, GeoIP, firewall, SSH, сертификаты",
         "tests": [
-            "dns_rules", "dnscrypt_selector", "dnscrypt_setup",
+            "dns_rules", "routing_rules", "dnscrypt_selector", "dnscrypt_setup",
             "ipban", "autoban", "fail2ban_manager",
             "geoip_block", "ingress_geoip", "ru_subnets",
             "port_hopping", "honeypot", "ssl_certbot",
