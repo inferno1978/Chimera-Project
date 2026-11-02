@@ -902,6 +902,7 @@ def do_manage_awg_peers() -> None:
         _box_item("4", f"Статистика трафика")
         _box_item("5", f"Изменить параметр (dns/expires)")
         _box_item("6", f"Показать QR-код клиента")
+        _box_item("M", f"Mieru-обёртка (клиент AWG через mieru)")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -964,6 +965,13 @@ def do_manage_awg_peers() -> None:
                     awgs_qr_export_peer(peer)
                 else:
                     warn(f"Пир '{name}' не найден")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "m":
+            try:
+                from chimera.modules.awg_mieru_addon import do_awg_mieru_menu
+                do_awg_mieru_menu()
+            except ImportError as _e:
+                warn(f"Модуль AWG×Mieru addon не найден: {_e}")
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch in ("q", ""):
             break
