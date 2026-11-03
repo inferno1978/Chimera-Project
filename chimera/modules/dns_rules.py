@@ -25,11 +25,25 @@ import time
 import textwrap
 from chimera.modules.tui import tui_form, tui_select, tui_confirm, TuiField
 
-# _set_config_owner — устанавливает владельца конфига; no-op если недоступна
 def _set_config_owner(path) -> None:
+    """
+    FIX (04.11.2026, репорт клиента): владелец конфига = канон _core —
+    640 root:xray. Раньше здесь жёстко ставили root:root: на серверах с
+    User=xray (весь флот) конфиг после патча терял group-read и xray
+    падал с permission denied (клиент чинил вручную chgrp xray).
+    Числовой GID — не зависит от chown в PATH (канон _core).
+    """
     try:
-        import shutil, pwd
-        shutil.chown(str(path), user="root", group="root")
+        import grp
+        xray_gid = grp.getgrnam("xray").gr_gid
+        os.chown(str(path), 0, xray_gid)
+        os.chmod(str(path), 0o640)
+    except KeyError:
+        # группы xray нет — 644, чтобы xray-сервис читал как other (канон _core)
+        try:
+            os.chmod(str(path), 0o644)
+        except Exception:
+            pass
     except Exception:
         pass
 
