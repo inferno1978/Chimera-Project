@@ -214,6 +214,17 @@ class TestPeerRebuildPropagatesVersion(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
+        # Анти-яд (глубокая защита): если какой-то тест выше по файлу или
+        # другой файл в общем процессе оставил в awg_peers утёкшие моки
+        # awgs_build_server_conf/awgs_write_server_conf — восстанавливаем
+        # реальные привязки из awg_standalone. До фикса install-тесты
+        # травили namespace: 3.1-rebuild FAIL-ал на '[Interface]\n', а
+        # 2.0-регрессия ЛОЖНО проходила (assertNotIn тривиально истинен
+        # на пустом конфиге). Идемпотентно: в здоровом процессе — no-op.
+        import chimera.modules.awg_peers as _ap
+        import chimera.modules.awg_standalone as _as
+        _ap.awgs_build_server_conf = _as.awgs_build_server_conf
+        _ap.awgs_write_server_conf = _as.awgs_write_server_conf
         self._tmpdir = Path(tempfile.mkdtemp())
         self._state_file = self._tmpdir / "state.json"
 
@@ -244,6 +255,8 @@ class TestPeerRebuildPropagatesVersion(unittest.TestCase):
             ok = awg_peers.awg_peer_rebuild_conf(apply=True)
             self.assertTrue(ok)
             written = mock_write.call_args.args[0]
+            # sanity: конфиг реальный, а не огрызок от утёкшего мока
+            self.assertIn("PrivateKey = PRIV", written)
             self.assertIn("HeaderProtectionKey = ", written)
             self.assertIn("RandomTrailers = on", written)
 
@@ -267,6 +280,11 @@ class TestPeerRebuildPropagatesVersion(unittest.TestCase):
             ok = awg_peers.awg_peer_rebuild_conf(apply=True)
             self.assertTrue(ok)
             written = mock_write.call_args.args[0]
+            # sanity: 2.0-регрессия раньше ЛОЖНО проходила на огрызке
+            # '[Interface]\n' (assertNotIn тривиально истинен) —
+            # требуем настоящий 2.0-конфиг
+            self.assertIn("PrivateKey = PRIV", written)
+            self.assertIn("ListenPort = 51820", written)
             self.assertNotIn("HeaderProtectionKey", written)
 
 
@@ -279,6 +297,17 @@ class TestInstallContract31(unittest.TestCase):
     def test_install_31_calls(self):
         from chimera.modules import awg_standalone
         mock_core = _mock_core()
+        # Изоляция секции bulk-provisioning (v4.25) в awgs_install: она
+        # делает function-local import rest_api -> _sync_dispatch лениво
+        # импортирует chimera.modules.awg_peers. При ИЗОЛИРОВАННОМ прогоне
+        # файла это ПЕРВЫЙ импорт awg_peers в процессе — и случается он
+        # ВНУТРИ этого with-блока: свежий awg_peers навсегда забирает моки
+        # awgs_build_server_conf/awgs_write_server_conf из awg_standalone
+        # (patch восстанавливает только awg_standalone). До фикса это
+        # травило test_rebuild_* ниже по файлу: rebuild получал
+        # '[Interface]\n' вместо конфига и «терял» HeaderProtectionKey.
+        # Плюс на боксе с установленным standalone AWG реальный sync
+        # провижинил бы всех VLESS-юзеров в живой awg-state.json.
         with patch.object(Path, "mkdir", lambda self, *a, **kw: None), \
              patch.object(Path, "touch", lambda self, *a, **kw: None), \
              patch.object(awg_standalone, "_core_module",
@@ -301,6 +330,10 @@ class TestInstallContract31(unittest.TestCase):
                           return_value=True), \
              patch.object(awg_standalone, "awgs_setup_nat_and_routing",
                           return_value=True), \
+             patch("chimera.modules.users_manager._unified_load_users",
+                   return_value=[]), \
+             patch("chimera.modules.rest_api._sync_all_from_vless",
+                   return_value={}) as mock_sync, \
              patch.object(awg_standalone, "awgs_state_init") as mock_init, \
              patch.object(awg_standalone, "awgs_setup_expires_cron",
                           return_value=True), \
@@ -317,11 +350,24 @@ class TestInstallContract31(unittest.TestCase):
             # State — с версией 3.1
             self.assertEqual(
                 mock_init.call_args.kwargs.get("protocol_version"), "3.1")
+            # Секция bulk-provisioning изолирована: sync не зовётся
+            mock_sync.assert_not_called()
 
     def test_install_20_default_contract(self):
         # РЕГРЕССИЯ: без версии — все вызовы с protocol_version="2.0"
         from chimera.modules import awg_standalone
         mock_core = _mock_core()
+        # Изоляция секции bulk-provisioning (v4.25) в awgs_install: она
+        # делает function-local import rest_api -> _sync_dispatch лениво
+        # импортирует chimera.modules.awg_peers. При ИЗОЛИРОВАННОМ прогоне
+        # файла это ПЕРВЫЙ импорт awg_peers в процессе — и случается он
+        # ВНУТРИ этого with-блока: свежий awg_peers навсегда забирает моки
+        # awgs_build_server_conf/awgs_write_server_conf из awg_standalone
+        # (patch восстанавливает только awg_standalone). До фикса это
+        # травило test_rebuild_* ниже по файлу: rebuild получал
+        # '[Interface]\n' вместо конфига и «терял» HeaderProtectionKey.
+        # Плюс на боксе с установленным standalone AWG реальный sync
+        # провижинил бы всех VLESS-юзеров в живой awg-state.json.
         with patch.object(Path, "mkdir", lambda self, *a, **kw: None), \
              patch.object(Path, "touch", lambda self, *a, **kw: None), \
              patch.object(awg_standalone, "_core_module",
@@ -344,6 +390,10 @@ class TestInstallContract31(unittest.TestCase):
                           return_value=True), \
              patch.object(awg_standalone, "awgs_setup_nat_and_routing",
                           return_value=True), \
+             patch("chimera.modules.users_manager._unified_load_users",
+                   return_value=[]), \
+             patch("chimera.modules.rest_api._sync_all_from_vless",
+                   return_value={}) as mock_sync, \
              patch.object(awg_standalone, "awgs_state_init") as mock_init, \
              patch.object(awg_standalone, "awgs_setup_expires_cron",
                           return_value=True), \
@@ -355,6 +405,7 @@ class TestInstallContract31(unittest.TestCase):
                 mock_build.call_args.kwargs.get("protocol_version"), "2.0")
             self.assertEqual(
                 mock_init.call_args.kwargs.get("protocol_version"), "2.0")
+            mock_sync.assert_not_called()
 
 
 if __name__ == "__main__":
