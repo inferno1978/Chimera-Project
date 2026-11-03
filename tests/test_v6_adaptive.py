@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""
+tests/test_v6_adaptive.py
+───────────────────────────────────────────────────────────────────────────────
+Unit-тесты v6-adaptive watcher (chimera/modules/v6_adaptive.py).
+
+Покрывает:
+  1. _probe_v6 — парсинг проб (адрес/маршрут/двойной ping-таргет)
+  2. run_once — контракт адаптива: skip-explicit / noop / switched
+     (в обе стороны: v6 ожил и v6 умер) / busy / no-state / no-config
+  3. Откаты: провал валидации (rollback-validate) и рестарта
+     (rollback-restart) — конфиг восстанавливается байт-в-байт
+  4. Интеграция с domain_strategy.apply_domain_strategy_to_config —
+     реальный патч конфига (dns.queryStrategy + freedom + v6-DNS-чистка)
+  5. Cron lifecycle: install/uninstall, клэмп интервала, контент
+  6. enable/disable: state['strategy']='' без потери соседних ключей
+  7. CLI main(): check/on/off/status
+
+Изоляция: все пути модуля патчатся на tmp; пробы/рестарты/TG — моки.
+Реальных записей в /etc, /var, systemctl — НЕТ.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
+
+from chimera.modules import v6_adaptive as v6a  # noqa: E402
+from chimera.modules.domain_strategy import (  # noqa: E402
+    apply_domain_strategy_to_config,
+)
+
+
+# ── Фикстуры ─────────────────────────────────────────────────────────────────
+
+class _R:
+    """Заглушка результата subprocess.run."""
+    def __init__(self, rc=0, out=""):
+        self.returncode = rc
+        self.stdout = out
+        self.stderr = ""
+
+
+def _fake_runner(responses):
+    """responses: список (префикс-кортеж, _R); первое совпадение выигрывает."""
+    def run(cmd, **kw):
+        for pre, r in responses:
+            if tuple(cmd[:len(pre)]) == tuple(pre):
+                return r
+        return _R(1, "")
+    return run
+
+
+def _cfg_xray(qs="UseIPv4", ds="UseIPv4", dns_servers=None):
+    """Минимальный xray-конфиг: freedom direct в каноничной ДУАЛ-форме
+    (settings.domainStrategy + streamSettings.sockopt.domainStrategy —
+    как пишут генераторы Химеры), иначе патчер видит «изменение» там,
+    где реальный конфиг уже соответствовал стратегии."""
+    return {
+        "log": {"loglevel": "warning"},
+        "dns": {"queryStrategy": qs,
+                "servers": dns_servers if dns_servers is not None
+                else ["1.1.1.1", "8.8.8.8"]},
+        "outbounds": [
+            {"protocol": "freedom", "tag": "direct",
+             "settings": {"domainStrategy": ds},
+             "streamSettings": {"sockopt": {"domainStrategy": ds}}},
+            {"protocol": "freedom", "tag": "xray-stats-api",
+             "settings": {}},
+        ],
+        "inbounds": [{"protocol": "vless", "tag": "vless-in"}],
+    }
+
+
+class _Isolated(unittest.TestCase):
+    """tmp-изоляция всех путей v6_adaptive + моки тяжёлых операций."""
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp())
+        self.state_f = self._tmp / "state.json"
+        self.cfg_f = self._tmp / "config.json"
+        self.marker_f = self._tmp / "marker.json"
+        self.lock_f = self._tmp / "v6a.lock"
+        self.cron_f = self._tmp / "cron.d" / "chimera-v6-adaptive"
+        self.script_f = self._tmp / "bin" / "chimera-v6-adaptive.sh"
+        self.log_f = self._tmp / "v6a.log"
+        self.tg_f = self._tmp / "telegram.json"
+
+        self._patchers = [
+            patch.object(v6a, "STATE_FILE", self.state_f),
+            patch.object(v6a, "XRAY_CONFIG", self.cfg_f),
+            patch.object(v6a, "MARKER_FILE", self.marker_f),
+            patch.object(v6a, "LOCK_FILE", self.lock_f),
+            patch.object(v6a, "CRON_FILE", self.cron_f),
+            patch.object(v6a, "CRON_SCRIPT", self.script_f),
+            patch.object(v6a, "LOG_FILE", self.log_f),
+            patch.object(v6a, "TG_CFG_FILE", self.tg_f),
+        ]
+        for p in self._patchers:
+            p.start()
+            self.addCleanup(p.stop)
+
+        self.mock_tg = MagicMock()
+        self._tg_patch = patch.object(v6a, "_tg_notify", self.mock_tg)
+        self._tg_patch.start()
+        self.addCleanup(self._tg_patch.stop)
+
+    def _set_state(self, state: dict):
+        self.state_f.write_text(json.dumps(state), encoding="utf-8")
+
+    def _set_cfg(self, cfg: dict):
+        self.cfg_f.write_text(json.dumps(cfg, indent=2),
+                              encoding="utf-8")
+
+    def _run(self, **kw):
+        """run_once с замоканными пробой/валидацией/рестартом."""
+        defaults = dict(probe=(False, "egress мёртв"),
+                        test_ok=True, restart=True)
+        defaults.update(kw)
+        with patch.object(v6a, "_probe_v6",
+                          return_value=defaults["probe"]), \
+             patch.object(v6a, "_xray_test_ok",
+                          return_value=defaults["test_ok"]), \
+             patch.object(v6a, "_safe_restart",
+                          return_value=defaults["restart"]) as m_restart:
+            rep = v6a.run_once(apply=True)
+            return rep, m_restart
+
+
+# ── 1. Пробы ─────────────────────────────────────────────────────────────────
+
+class TestProbeV6(unittest.TestCase):
+
+    def test_alive_first_target(self):
+        run = _fake_runner([
+            (("ip", "-6", "addr"), _R(0, "inet6 2a10:ab80:103:5::2/64 scope global")),
+            (("ip", "-6", "route"), _R(0, "default via 2a10:ab80:103:5::1")),
+            (("ping",), _R(0, "")),
+        ])
+        alive, detail = v6a._probe_v6(runner=run)
+        self.assertTrue(alive)
+
+    def test_alive_second_target(self):
+        # первый таргет loss, второй отвечает (ранний выход по успеху)
+        seq = {"n": 0}
+        def run(cmd, **kw):
+            t = tuple(cmd)
+            if t[0] == "ip":
+                return _R(0, "inet6 2a10::1/64\ndefault via 2a10::1")
+            seq["n"] += 1
+            return _R(0 if seq["n"] >= 2 else 1, "")
+        alive, _ = v6a._probe_v6(runner=run)
+        self.assertTrue(alive)
+
+    def test_dead_egress(self):
+        run = _fake_runner([
+            (("ip", "-6", "addr"), _R(0, "inet6 2a10:ab80:103:5::2/64 scope global")),
+            (("ip", "-6", "route"), _R(0, "default via 2a10:ab80:103:5::1")),
+            (("ping",), _R(1, "")),
+        ])
+        alive, detail = v6a._probe_v6(runner=run)
+        self.assertFalse(alive)
+        self.assertIn("egress мёртв", detail)
+
+    def test_no_global_address(self):
+        run = _fake_runner([(("ip", "-6", "addr"), _R(0, ""))])
+        alive, detail = v6a._probe_v6(runner=run)
+        self.assertFalse(alive)
+        self.assertIn("нет глобального", detail)
+
+    def test_no_default_route(self):
+        run = _fake_runner([
+            (("ip", "-6", "addr"), _R(0, "inet6 2a10::2/64 scope global")),
+            (("ip", "-6", "route"), _R(0, "2a10::/64 dev eth0")),
+        ])
+        alive, detail = v6a._probe_v6(runner=run)
+        self.assertFalse(alive)
+        self.assertIn("default-маршрут", detail)
+
+
+# ── 2-4. run_once: контракт и откаты ────────────────────────────────────────
+
+class TestRunOnce(_Isolated):
+
+    def test_no_state(self):
+        rep, _ = self._run()
+        self.assertEqual(rep["action"], "no-state")
+
+    def test_skip_explicit_choice(self):
+        # кейс 91.х: явный выбор юзера — watcher не трогает НИКОГДА
+        self._set_state({"strategy": "UseIPv4", "domain": "x.com"})
+        self._set_cfg(_cfg_xray(qs="UseIPv4"))
+        rep, m_restart = self._run(probe=(True, "жив"))
+        self.assertEqual(rep["action"], "skip-explicit")
+        m_restart.assert_not_called()
+        # конфиг не переписан
+        self.assertEqual(
+            json.loads(self.cfg_f.read_text())["dns"]["queryStrategy"],
+            "UseIPv4")
+
+    def test_noop_when_target_matches(self):
+        # адаптив + v6 мёртв + конфиг уже UseIPv4 → ничего не делает
+        self._set_state({"strategy": ""})
+        self._set_cfg(_cfg_xray(qs="UseIPv4", ds="UseIPv4"))
+        rep, m_restart = self._run(probe=(False, "egress мёртв"))
+        self.assertEqual(rep["action"], "noop")
+        m_restart.assert_not_called()
+        self.assertEqual(
+            json.loads(self.marker_f.read_text())["action"], "noop")
+
+    def test_switch_down_when_v6_died(self):
+        # v6 отвалился ПОСЛЕ установки: UseIPv6v4 → UseIPv4
+        self._set_state({"strategy": ""})
+        self._set_cfg(_cfg_xray(qs="UseIPv6v4", ds="UseIPv6v4"))
+        rep, m_restart = self._run(probe=(False, "egress мёртв"))
+        self.assertEqual(rep["action"], "switched")
+        self.assertEqual(rep["from"], "UseIPv6v4")
+        self.assertEqual(rep["to"], "UseIPv4")
+        m_restart.assert_called_once()
+        cfg = json.loads(self.cfg_f.read_text())
+        self.assertEqual(cfg["dns"]["queryStrategy"], "UseIPv4")
+        direct = [o for o in cfg["outbounds"]
+                  if o.get("tag") == "direct"][0]
+        self.assertEqual(direct["settings"]["domainStrategy"], "UseIPv4")
+        # дуал-запись: sockopt тоже переведён
+        self.assertEqual(
+            direct["streamSettings"]["sockopt"]["domainStrategy"],
+            "UseIPv4")
+        # бэкак создан и содержит прежний текст
+        baks = list(self._tmp.glob("config.json.v6adapt-*.bak"))
+        self.assertEqual(len(baks), 1)
+        self.assertIn("UseIPv6v4", baks[0].read_text())
+        # TG-уведомление о переключении
+        self.mock_tg.assert_called_once()
+        self.assertIn("UseIPv4", self.mock_tg.call_args.args[0])
+
+    def test_switch_up_when_v6_alive(self):
+        # КЕЙС Intezio: v6 ожил после починки хостера → UseIPv4 → UseIPv6v4
+        self._set_state({"strategy": ""})
+        self._set_cfg(_cfg_xray(qs="UseIPv4", ds="UseIPv4"))
+        rep, _ = self._run(probe=(True, "жив"))
+        self.assertEqual(rep["action"], "switched")
+        self.assertEqual(rep["to"], "UseIPv6v4")
+        cfg = json.loads(self.cfg_f.read_text())
+        self.assertEqual(cfg["dns"]["queryStrategy"], "UseIPv6v4")
+
+    def test_auto_value_accepted(self):
+        # "auto" в state — тоже адаптив (либеральный приём)
+        self._set_state({"strategy": "auto"})
+        self._set_cfg(_cfg_xray(qs="UseIPv4"))
+        rep, _ = self._run(probe=(False, "egress мёртв"))
+        self.assertEqual(rep["action"], "noop")
+
+    def test_no_config(self):
+        self._set_state({"strategy": ""})
+        rep, _ = self._run()
+        self.assertEqual(rep["action"], "no-config")
+
+    def test_busy_when_locked(self):
+        import fcntl
+        self._set_state({"strategy": ""})
+        self.lock_f.parent.mkdir(parents=True, exist_ok=True)
+        fd = open(self.lock_f, "a")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            rep = v6a.run_once(apply=True)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+        self.assertEqual(rep["action"], "busy")
+
+    def test_dns_v6_servers_purged_on_useipv4(self):
+        # интеграция с реальным apply_domain_strategy_to_config:
+        # при UseIPv4 мёртвые v6-DNS вычищаются из dns.servers
+        self._set_state({"strategy": ""})
+        self._set_cfg(_cfg_xray(qs="UseIPv6v4", ds="UseIPv6v4",
+                                dns_servers=["1.1.1.1",
+                                             "2606:4700:4700::1111"]))
+        rep, _ = self._run(probe=(False, "egress мёртв"))
+        self.assertEqual(rep["action"], "switched")
+        servers = json.loads(self.cfg_f.read_text())["dns"]["servers"]
+        self.assertEqual(servers, ["1.1.1.1"])
+
+    def test_stats_api_freedom_untouched(self):
+        # служебный freedom xray-stats-api не получает domainStrategy
+        self._set_state({"strategy": ""})
+        self._set_cfg(_cfg_xray(qs="UseIPv4", ds="UseIPv4"))
+        self._run(probe=(True, "жив"))
+        cfg = json.loads(self.cfg_f.read_text())
+        stats = [o for o in cfg["outbounds"]
+                 if o.get("tag") == "xray-stats-api"][0]
+        self.assertNotIn("domainStrategy", stats.get("settings", {}))
+
+    def test_rollback_on_validate_fail(self):
+        # xray -test провален → конфиг откачен байт-в-байт, НЕТ рестарта
+        self._set_state({"strategy": ""})
+        self._set_cfg(_cfg_xray(qs="UseIPv4", ds="UseIPv4"))
+        before = self.cfg_f.read_text()
+        rep, m_restart = self._run(probe=(True, "жив"), test_ok=False)
+        self.assertEqual(rep["action"], "rollback-validate")
+        self.assertEqual(self.cfg_f.read_text(), before)
+        m_restart.assert_not_called()
+        self.mock_tg.assert_called_once()
+
+    def test_rollback_on_restart_fail(self):
+        # рестарт не удался → текст возвращён + повторный рестарт на старом
+        self._set_state({"strategy": ""})
+        self._set_cfg(_cfg_xray(qs="UseIPv4", ds="UseIPv4"))
+        before = self.cfg_f.read_text()
+        rep, m_restart = self._run(probe=(True, "жив"), restart=False)
+        self.assertEqual(rep["action"], "rollback-restart")
+        self.assertEqual(self.cfg_f.read_text(), before)
+        # дважды: неудачный рестарт + рестарт отката
+        self.assertEqual(m_restart.call_count, 2)
+        self.mock_tg.assert_called_once()
+
+    def test_dry_run_does_not_touch_config(self):
+        self._set_state({"strategy": ""})
+        self._set_cfg(_cfg_xray(qs="UseIPv4", ds="UseIPv4"))
+        before = self.cfg_f.read_text()
+        with patch.object(v6a, "_probe_v6", return_value=(True, "жив")):
+            rep = v6a.run_once(apply=False)
+        self.assertEqual(rep["action"], "dry-run")
+        self.assertEqual(rep["target"], "UseIPv6v4")
+        self.assertEqual(self.cfg_f.read_text(), before)
+        self.mock_tg.assert_not_called()
+
+    def test_backups_pruned(self):
+        # старые бэкапы подрезаются до BACKUP_KEEP
+        self._set_state({"strategy": ""})
+        self._set_cfg(_cfg_xray(qs="UseIPv4", ds="UseIPv4"))
+        for i in range(v6a.BACKUP_KEEP + 3):
+            (self._tmp / f"config.json.v6adapt-20261103-10000{i}.bak") \
+                .write_text("{}", encoding="utf-8")
+        self._run(probe=(True, "жив"))
+        baks = list(self._tmp.glob("config.json.v6adapt-*.bak"))
+        self.assertEqual(len(baks), v6a.BACKUP_KEEP)
+
+
+# ── 5. Cron lifecycle ────────────────────────────────────────────────────────
+
+class TestCronLifecycle(_Isolated):
+
+    def test_install_content(self):
+        ok, msg = v6a.install_watcher(10)
+        self.assertTrue(ok)
+        self.assertIn("10", msg)
+        cron = self.cron_f.read_text()
+        self.assertIn("*/10 * * * * root", cron)
+        self.assertIn(str(self.script_f), cron)
+        script = self.script_f.read_text()
+        self.assertIn("from chimera.modules.v6_adaptive import run_once",
+                      script)
+        self.assertIn("PYTHONPATH", script)
+
+    def test_interval_clamp(self):
+        ok, msg = v6a.install_watcher(0)
+        self.assertTrue(ok)
+        self.assertIn("*/1", self.cron_f.read_text())
+        ok, _ = v6a.install_watcher(999)
+        self.assertTrue(ok)
+        self.assertIn("*/60", self.cron_f.read_text())
+
+    def test_uninstall(self):
+        v6a.install_watcher(10)
+        ok, _ = v6a.uninstall_watcher()
+        self.assertTrue(ok)
+        self.assertFalse(self.cron_f.exists())
+        self.assertFalse(self.script_f.exists())
+
+
+# ── 6. enable / disable ──────────────────────────────────────────────────────
+
+class TestEnableDisable(_Isolated):
+
+    def test_enable_sets_adaptive_and_keeps_keys(self):
+        self._set_state({"strategy": "UseIPv4", "domain": "x.com",
+                         "uuid": "U"})
+        with patch.object(v6a, "run_once",
+                          return_value={"action": "noop"}) as m_run:
+            ok, msg = v6a.enable()
+        self.assertTrue(ok)
+        st = json.loads(self.state_f.read_text())
+        self.assertEqual(st["strategy"], "")
+        self.assertEqual(st["domain"], "x.com")   # соседние ключи целы
+        self.assertEqual(st["uuid"], "U")
+        self.assertTrue(self.cron_f.exists())
+        m_run.assert_called_once()
+
+    def test_enable_without_state(self):
+        ok, msg = v6a.enable()
+        self.assertFalse(ok)
+        self.assertIn("state.json", msg)
+
+    def test_disable_keeps_state(self):
+        self._set_state({"strategy": ""})
+        v6a.install_watcher(10)
+        ok, msg = v6a.disable()
+        self.assertTrue(ok)
+        self.assertFalse(self.cron_f.exists())
+        self.assertEqual(
+            json.loads(self.state_f.read_text())["strategy"], "")
+
+
+# ── 7. CLI ───────────────────────────────────────────────────────────────────
+
+class TestCli(_Isolated):
+
+    def test_check_flag(self):
+        self._set_state({"strategy": ""})
+        with patch.object(v6a, "run_once",
+                          return_value={"action": "noop"}) as m_run:
+            rc = v6a.main(["--v6-adaptive-check"])
+        self.assertEqual(rc, 0)
+        m_run.assert_called_once()
+
+    def test_on_off_status(self):
+        self._set_state({"strategy": "UseIPv4"})
+        with patch.object(v6a, "run_once",
+                          return_value={"action": "noop"}):
+            rc = v6a.main(["--v6-adaptive", "on"])
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                json.loads(self.state_f.read_text())["strategy"], "")
+        rc = v6a.main(["--v6-adaptive", "off"])
+        self.assertEqual(rc, 0)
+        self.assertFalse(self.cron_f.exists())
+        with patch.object(v6a, "_probe_v6", return_value=(False, "мёртв")):
+            rc = v6a.main(["--v6-adaptive", "status"])
+        self.assertEqual(rc, 0)
+
+    def test_status_fields(self):
+        self._set_state({"strategy": "UseIPv4"})
+        self._set_cfg(_cfg_xray(qs="UseIPv4"))
+        with patch.object(v6a, "_probe_v6", return_value=(False, "мёртв")):
+            st = v6a.status()
+        self.assertFalse(st["adaptive"])          # явный выбор — не адаптив
+        self.assertEqual(st["strategy_state"], "UseIPv4")
+        self.assertEqual(st["target"], "UseIPv4")
+        self.assertEqual(st["current_query_strategy"], "UseIPv4")
+        self.assertEqual(st["last"], {})          # маркера ещё нет
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

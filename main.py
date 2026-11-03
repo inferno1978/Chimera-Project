@@ -236,6 +236,18 @@ if "--exit-watcher" in sys.argv:
     _ew_run_once(force=force)
     sys.exit(0)
 
+# --- v6-adaptive: авто-стратегия DNS/domain по живому IPv6 ---
+# Кейс 03.11.2026 (138.124.100.55): адрес+шлюз есть, маршрутизация /64
+# мертва -> preflight ставит UseIPv4; watcher сам вернёт UseIPv6v4,
+# когда хостер починит маршрут. Действует только при strategy="" (auto).
+# --v6-adaptive on|off|status — управление; --v6-adaptive-check — прогон.
+if "--v6-adaptive" in sys.argv or "--v6-adaptive-check" in sys.argv:
+    if os.geteuid() != 0:
+        print("ERROR: требуются права root", file=sys.stderr)
+        sys.exit(1)
+    from chimera.modules.v6_adaptive import main as _v6a_main
+    sys.exit(_v6a_main(sys.argv[1:]))
+
 # --- System Doctor: медосмотр ОС + безопасные авто-фиксы (кейс №13) ---
 # --system-doctor            — только проверка (безопасный дефолт)
 # --system-doctor --fix      — чинить по тумблерам конфига
