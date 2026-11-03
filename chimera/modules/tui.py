@@ -62,6 +62,61 @@ def _vis_len(s: str) -> int:
 
 # ── базовый однострочный getch ────────────────────────────────────────────────
 
+_KEY_PENDING = b""
+
+
+def _parse_key(buf: bytes, pos: int) -> "tuple[str, int]":
+    """
+    Разбирает ОДИН кейстрок из buf, начиная с позиции pos.
+    Возвращает (код_клавиши, позиция_следующего). Коды — как в _getch_raw;
+    нераспознанные ESC-последовательности возвращаются как есть (вызывающий
+    их игнорирует).
+    """
+    if pos >= len(buf):
+        return "", pos
+    lead = buf[pos]
+    # ESC-последовательности: CSI (ESC [ params финал) и SS3 (ESC O финал)
+    if lead == 0x1B and pos + 1 < len(buf) and buf[pos + 1] in (0x5B, 0x4F):
+        if buf[pos + 1] == 0x4F:                  # SS3: ESC O <финал> — 3 байта
+            end = min(pos + 3, len(buf))
+        else:                                     # CSI: читаем до финального
+            end = pos + 2                         # байта-буквы/~ (A-H, ~)
+            while end < len(buf):
+                c = buf[end:end + 1].decode("utf-8", "replace")
+                end += 1
+                if c.isalpha() or c == "~":
+                    break
+        seq = buf[pos:end].decode("utf-8", "replace")
+        _map = {
+            "\x1b[A": "KEY_UP",    "\x1bOA": "KEY_UP",
+            "\x1b[B": "KEY_DOWN",  "\x1bOB": "KEY_DOWN",
+            "\x1b[C": "KEY_RIGHT", "\x1bOC": "KEY_RIGHT",
+            "\x1b[D": "KEY_LEFT",  "\x1bOD": "KEY_LEFT",
+            "\x1b[H": "KEY_HOME",  "\x1b[F": "KEY_END",
+            "\x1b[1~": "KEY_HOME", "\x1b[4~": "KEY_END",
+            "\x1b[5~": "KEY_PGUP", "\x1b[6~": "KEY_PGDN",
+            "\x1b[3~": "KEY_DELETE",
+            "\x1b[Z":  "KEY_BTAB",
+        }
+        return _map.get(seq, seq), end
+    # одиночный символ: UTF-8-продолжения по lead-байту (кириллица в формах)
+    if   0xC0 <= lead <= 0xDF:
+        need = 2
+    elif 0xE0 <= lead <= 0xEF:
+        need = 3
+    elif 0xF0 <= lead <= 0xF7:
+        need = 4
+    else:
+        need = 1
+    end = min(pos + need, len(buf))
+    ch = buf[pos:end].decode("utf-8", "replace")
+    if ch in ("\x7f", "\x08"):
+        return "KEY_BACKSPACE", end
+    if ch == "\t":
+        return "KEY_TAB", end
+    return ch, end
+
+
 def _getch_raw() -> str:
     """
     Читает один (возможно многобайтный) кейстрок без echo.
@@ -69,45 +124,53 @@ def _getch_raw() -> str:
     или спецкод: 'KEY_UP', 'KEY_DOWN', 'KEY_LEFT', 'KEY_RIGHT',
     'KEY_BACKSPACE', 'KEY_DELETE', 'KEY_HOME', 'KEY_END',
     'KEY_PGUP', 'KEY_PGDN', 'KEY_TAB', 'KEY_BTAB', '\r', '\n', '\x03'.
+
+    FIX (04.11.2026, кейс «стрелки убивают меню», репорт владельца) —
+    два раунда:
+    Раунд-1: первый символ читался через sys.stdin.read(1) — TextIOWrapper
+    одним сисколом затягивал в буфер Python ВЕСЬ хвост ESC-последовательности
+    (\x1b[B приходит из SSH одним пакетом), где его не видит select(2) на
+    fd → «голый» ESC → tui_select/tui_form считали это Esc-отменой и
+    закрывали меню («Нажмите Enter…»), остаток [B эхом печатался мусором.
+    Раунд-2 (вскрыли pty-тесты): чтение os.read'ом по байту с возвратом в
+    cooked между нажатиями съедало байты, пришедшие ОДНИМ всплеском со
+    стрелкой (↓+Enter одним пакетом: '\r' повисал в kernel-очереди на
+    границе raw→cooked→raw, второй _getch_raw блокировался навсегда);
+    плюс SS3-стрелки (\x1bOB) не разбирались — ранний обрыв по isalpha
+    ловил модификатор 'O' как финал. Итоговая схема: читаем ВЕСЬ всплеск
+    одним raw-сеансом (до 50 мс тишины), первый кейстрок разбирает
+    _parse_key, остаток храним в _KEY_PENDING и отдаём следующим вызовам
+    БЕЗ обращения к терминалу — все байты живут в Python, границы
+    режимов их не трогают. UTF-8 — по lead-байту; одинокий Esc —
+    всплеск из одного байта → '\x1b'.
     """
-    import termios, tty
+    import select
+    global _KEY_PENDING
     fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
+    old = None
     try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == '\x1b':
-            # ESC-последовательность — читаем до конца
-            rest = ''
-            import select
-            while True:
-                r, _, _ = select.select([sys.stdin], [], [], 0.05)
+        if _KEY_PENDING:
+            buf = _KEY_PENDING            # остаток прошлого всплеска
+        else:
+            old = termios.tcgetattr(fd)
+            tty.setraw(fd)
+            buf = os.read(fd, 4096)       # первый кусок (блокирующе)
+            if not buf:
+                return ""                 # EOF — паритет со старым поведением
+            while True:                   # всплеск: пока данные идут
+                r, _, _ = select.select([fd], [], [], 0.05)
                 if not r:
                     break
-                c = sys.stdin.read(1)
-                rest += c
-                if c.isalpha() or c == '~':
+                more = os.read(fd, 4096)
+                if not more:
                     break
-            seq = ch + rest
-            _map = {
-                '\x1b[A': 'KEY_UP',   '\x1bOA': 'KEY_UP',
-                '\x1b[B': 'KEY_DOWN', '\x1bOB': 'KEY_DOWN',
-                '\x1b[C': 'KEY_RIGHT','\x1bOC': 'KEY_RIGHT',
-                '\x1b[D': 'KEY_LEFT', '\x1bOD': 'KEY_LEFT',
-                '\x1b[H': 'KEY_HOME', '\x1b[F': 'KEY_END',
-                '\x1b[1~': 'KEY_HOME','\x1b[4~': 'KEY_END',
-                '\x1b[5~': 'KEY_PGUP','\x1b[6~': 'KEY_PGDN',
-                '\x1b[3~': 'KEY_DELETE',
-                '\x1b[Z': 'KEY_BTAB',
-            }
-            return _map.get(seq, seq)
-        if ch in ('\x7f', '\x08'):
-            return 'KEY_BACKSPACE'
-        if ch == '\t':
-            return 'KEY_TAB'
-        return ch
+                buf += more
+        key, consumed = _parse_key(buf, 0)
+        _KEY_PENDING = buf[consumed:]
+        return key
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if old is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 # ── tui_input ─────────────────────────────────────────────────────────────────
