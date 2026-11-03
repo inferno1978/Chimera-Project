@@ -2190,7 +2190,10 @@ def awgs_install(
         _box_row(f"  {GREEN}VPN URI version:{NC}   {awg_vpn_uri_protocol_version(protocol_version)} "
                  f"(AmneziaVPN 5.0.1.5+)")
     _box_row(f"  {GREEN}Endpoint:{NC}          {endpoint or '(не определён)'}")
-    _box_row(f"  {GREEN}Server pubkey:{NC}     {server_pub[:32]}...")
+    # FIX 03.11 (репорт юзера «publickey режется до 35 симв. вместо
+    # 44»): полный ключ — юзер копирует Server pubkey из этого бокса
+    # (ручная настройка клиента/каскада); 21+44=65 < 80-кол рамки.
+    _box_row(f"  {GREEN}Server pubkey:{NC}     {server_pub}")
     _box_row(f"  {GREEN}Конфиг:{NC}            {AWGS_SERVER_CONF}")
     _box_row(f"  {GREEN}State:{NC}             /var/lib/xray-installer/awg_standalone_state.json")
     _box_row(f"  {GREEN}Лог:{NC}               {AWGS_LOG_FILE}")

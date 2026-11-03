@@ -14,6 +14,10 @@ tests/test_awg_install_fixes.py
      после старта сервиса адрес обязан сесть на awg0: oneshot-юнит с
      RemainAfterExit держит «active» даже у userspace-стаба, который
      не назначает адрес.
+  5. FIX 03.11 (репорт юзера «publickey режется до 35 симв. вместо
+     44»): AWG-ключи в терминальной выдаче — ПОЛНЫЕ (44 симв.),
+     без [:N]+«...»: финальный бокс awgs_install, verbose-список
+     пиров, B4-флоу генерации ключей.
 """
 from __future__ import annotations
 
@@ -359,6 +363,41 @@ class TestShadowingStubs(unittest.TestCase):
             # нет пакетного юнита → /etc-юнит не удаляем
             self.assertTrue(Path(P["etc_unit"]).exists())
 
+
+# ── 5. FIX 03.11: публичные ключи целиком — без обрезки [:N]+«...» ──────────
+class TestPubkeyFullOutput(unittest.TestCase):
+    """Репорт юзера после установки AWG 3.1 (03.11): «в выдаче publickey
+    режется до 35 символов вместо 44, в конце многоточия» — base64-ключ
+    (всегда 44 симв.) обрезался в трёх местах выдачи: [:32]+«...»
+    (32+3 = те самые «35 с точками»). Юзер копирует ключи из терминала
+    (ручная настройка клиента/каскад/диагностика) — обрезка ломала
+    копипасту. Регресс-замок (канон test_dns_redirect): строковые
+    ассерты против [:N]-обрезок в исходниках."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def _src(self, rel: str) -> str:
+        return (self.ROOT / rel).read_text(encoding="utf-8")
+
+    def test_standalone_final_box_full_server_pubkey(self):
+        """Финальный бокс «Готово»: Server pubkey — целиком, без [:32]."""
+        src = self._src("chimera/modules/awg_standalone.py")
+        self.assertNotIn("{server_pub[:32]}", src)
+        self.assertIn('{GREEN}Server pubkey:{NC}     {server_pub}")', src)
+
+    def test_peers_verbose_full_client_pubkey(self):
+        """Verbose-список пиров: client_pubkey — целиком, без [:32]+«...»."""
+        src = self._src("chimera/modules/awg_peers.py")
+        self.assertNotIn('")[:32] + "..."', src)
+        self.assertIn('pubkey = p.get("client_pubkey", "")', src)
+
+    def test_transport_full_pubkeys(self):
+        """B4-флоу awg_generate_keys: оба ключа — целиком, без [:20]."""
+        src = self._src("chimera/modules/awg_transport.py")
+        self.assertNotIn("AWG_SERVER_PUBKEY[:20]", src)
+        self.assertNotIn("AWG_CLIENT_PUBKEY[:20]", src)
+        self.assertIn('pubkey = {AWG_SERVER_PUBKEY}"', src)
+        self.assertIn('pubkey = {AWG_CLIENT_PUBKEY}"', src)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

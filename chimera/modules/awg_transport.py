@@ -199,8 +199,10 @@ def awg_generate_keys() -> bool:
             raise RuntimeError(f"{awg_bin} genpsk: {psk_r.stderr}")
         AWG_PRESHARED_KEY = psk_r.stdout.strip()
         setattr(core, "AWG_PRESHARED_KEY", AWG_PRESHARED_KEY)
-        success(f"AWG: server pubkey = {AWG_SERVER_PUBKEY[:20]}...")
-        success(f"AWG: client pubkey = {AWG_CLIENT_PUBKEY[:20]}...")
+        # FIX 03.11: полные ключи (44 симв.) — [:20]+«...» ломала
+        # копипасту (B4-флоу выдаёт ключи юзеру только здесь)
+        success(f"AWG: server pubkey = {AWG_SERVER_PUBKEY}")
+        success(f"AWG: client pubkey = {AWG_CLIENT_PUBKEY}")
         return True
     except Exception as exc:
         warn(f"AWG: ошибка генерации ключей: {exc}")

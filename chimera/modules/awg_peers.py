@@ -577,7 +577,9 @@ def awg_peer_list(verbose: bool = False, json_output: bool = False) -> None:
             psk_col = "✓" if p.get("preshared_key") else "—"
             _box_row(f"  {CYAN}{name:<20}{NC} {ip:<18} {expires_colored:<35} {psk_col}")
             if verbose:
-                pubkey = p.get("client_pubkey", "")[:32] + "..."
+                # FIX 03.11: полный client_pubkey (44 симв.) — юзер копирует
+                # ключ из verbose-списка (диагностика пира/каскад); без [:32]
+                pubkey = p.get("client_pubkey", "")
                 added = p.get("added_at", "")[:19].replace("T", " ")
                 _box_row(f"    {DIM}pubkey: {pubkey}{NC}")
                 _box_row(f"    {DIM}added:  {added}{NC}")
