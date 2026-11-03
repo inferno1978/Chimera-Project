@@ -1006,7 +1006,17 @@ def chk_crash_loops(ctx: DoctorCtx) -> None:
 
 
 def chk_apt_cache(ctx: DoctorCtx) -> None:
-    r = _run(["du", "-sm", "/var/cache/apt"], timeout=30)
+    # FIX (03.11.2026, кейс «триста раз одно и то же»): мерить ТОЛЬКО
+    # /var/cache/apt/archives — скачанные .deb (реальный мусор). Раньше du
+    # шёл по всему /var/cache/apt, где живут pkgcache.bin + srcpkgcache.bin
+    # (56+56M) — легитимные бинарные индексы, пересоздающиеся при КАЖДОМ
+    # apt update (apt-daily, certbot, любой apt-вызов): доктор ежедневно
+    # видел «112M», чистил индексы apt-get clean (кэш тут же пересозда-
+    # вался) и слал идентичную уведу doctor_fixed на 5 нодах подряд.
+    # Побочный OS-фикс флота: APT::Keep-Downloads=false
+    # (/etc/apt/apt.conf.d/99-chimera-keep-downloads-off) — archives
+    # больше не накапливается вовсе.
+    r = _run(["du", "-sm", "/var/cache/apt/archives"], timeout=30)
     m = re.match(r"(\d+)", r.stdout or "")
     if not m:
         ctx.record("apt_cache", "info", "кэш apt не измерить")
@@ -1014,9 +1024,9 @@ def chk_apt_cache(ctx: DoctorCtx) -> None:
     mb = int(m.group(1))
     if mb > 100:
         ctx.record("apt_cache", "warn",
-                   f"/var/cache/apt — {human_mb(mb)} (фикс: apt-get clean)")
+                   f"/var/cache/apt/archives — {human_mb(mb)} (фикс: apt-get clean)")
     else:
-        ctx.record("apt_cache", "ok", f"/var/cache/apt — {human_mb(mb)}")
+        ctx.record("apt_cache", "ok", f"/var/cache/apt/archives — {human_mb(mb)}")
 
 
 def _running_kernel() -> str:
@@ -1656,12 +1666,15 @@ def fix_crash_loops(ctx: DoctorCtx):
 
 
 def fix_apt_cache(ctx: DoctorCtx):
-    r = _run(["du", "-sm", "/var/cache/apt"], timeout=30)
+    # FIX (03.11.2026): порог по archives (.deb), а не по /var/cache/apt
+    # целиком — бинарные индексы apt (pkgcache/srcpkgcache) не чистим
+    # (см. chk_apt_cache).
+    r = _run(["du", "-sm", "/var/cache/apt/archives"], timeout=30)
     m = re.match(r"(\d+)", r.stdout or "")
     if not m or int(m.group(1)) <= 100:
         return None, ""
     ctx.cmd(["apt-get", "clean"], timeout=120)
-    return True, f"apt_cache: clean ({m.group(1)}M кэша снесено)"
+    return True, f"apt_cache: clean ({m.group(1)}M .deb-кэша снесено)"
 
 
 def fix_old_kernels(ctx: DoctorCtx):

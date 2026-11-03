@@ -1047,5 +1047,78 @@ class TestCliContract(unittest.TestCase):
         self.assertIn('"SD"', src)
 
 
+
+from chimera.modules import system_doctor as sd
+
+
+# ─── FIX (03.11.2026): apt_cache — только /var/cache/apt/archives ────────────
+
+class _RecCtx:
+    """Мини-ctx для chk_*/fix_*: record() + cmd()."""
+    def __init__(self):
+        self.records = []
+    def record(self, cid, lvl, msg):
+        self.records.append((cid, lvl, msg))
+    def cmd(self, cmd, timeout=30):
+        self.records.append(("CMD", cmd))
+
+
+class _Res:
+    def __init__(self, stdout):
+        self.stdout = stdout
+        self.stderr = ""
+
+
+class AptCacheArchivesOnlyTests(unittest.TestCase):
+    """FIX (03.11.2026, «триста раз одно и то же»): chk/fix apt_cache меряют
+    ТОЛЬКО /var/cache/apt/archives (скачанные .deb — реальный мусор). Раньше
+    du шёл по всему /var/cache/apt: pkgcache.bin + srcpkgcache.bin (56+56M) —
+    легитимные бинарные индексы, пересоздающиеся при каждом apt update
+    (apt-daily/certbot/любой apt-вызов) → ежедневный warn+clean+TG-спам
+    doctor_fixed «112M кэша снесено» на 5 нодах флота."""
+
+    def test_chk_measures_archives_not_root(self):
+        """du идёт по archives, а не по /var/cache/apt (корень с индексами)."""
+        ctx = _RecCtx()
+        calls = []
+        def fake_run(cmd, timeout=30):
+            calls.append(cmd)
+            return _Res("16\t/var/cache/apt/archives\n")
+        with patch.object(sd, "_run", side_effect=fake_run):
+            sd.chk_apt_cache(ctx)
+        self.assertEqual(calls, [["du", "-sm", "/var/cache/apt/archives"]])
+        self.assertEqual(ctx.records, [("apt_cache", "ok",
+                                        "/var/cache/apt/archives — 16M")])
+
+    def test_chk_ok_despite_big_binary_indexes(self):
+        """Бинарные индексы в /var/cache/apt/*.bin чеком не меряются — ok."""
+        ctx = _RecCtx()
+        with patch.object(sd, "_run", return_value=_Res("0\t/var/cache/apt/archives\n")):
+            sd.chk_apt_cache(ctx)
+        self.assertEqual(ctx.records[0][:2], ("apt_cache", "ok"))
+
+    def test_chk_warn_over_100m_debs(self):
+        ctx = _RecCtx()
+        with patch.object(sd, "_run", return_value=_Res("120\t/var/cache/apt/archives\n")):
+            sd.chk_apt_cache(ctx)
+        self.assertEqual(ctx.records[0][:2], ("apt_cache", "warn"))
+        self.assertIn("apt-get clean", ctx.records[0][2])
+
+    def test_fix_cleans_only_when_archives_big(self):
+        """fix: чистит при archives > 100M; ниже порога — идемпотентный None."""
+        ctx = _RecCtx()
+        with patch.object(sd, "_run", return_value=_Res("120\t/var/cache/apt/archives\n")):
+            ok, msg = sd.fix_apt_cache(ctx)
+        self.assertIs(ok, True)
+        self.assertIn(".deb", msg)
+        self.assertEqual(ctx.records, [("CMD", ["apt-get", "clean"])])
+        ctx2 = _RecCtx()
+        with patch.object(sd, "_run", return_value=_Res("16\t/var/cache/apt/archives\n")):
+            ok2, msg2 = sd.fix_apt_cache(ctx2)
+        self.assertIsNone(ok2)
+        self.assertEqual(msg2, "")
+        self.assertEqual(ctx2.records, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
