@@ -19,6 +19,8 @@ Unit-тесты v6-adaptive watcher (chimera/modules/v6_adaptive.py).
      _log_tail) + smoke do_v6_adaptive_menu с фейковым chimera._core
      (канон tests/test_awg_ui_smoke.py) + строковые ассерты на _core.py
      (канон test_dns_redirect: пункт меню залочен)
+  9. TG-обвязка v6_strategy_switch: иконка+подпись в tg_bot (канон
+     кейса №8/№9) + строка готовности TG-бота в _status_rows
 
 Изоляция: все пути модуля патчатся на tmp; пробы/рестарты/TG — моки.
 Реальных записей в /etc, /var, systemctl — НЕТ.
@@ -664,6 +666,71 @@ class TestTuiSmoke(_Isolated):
         fake = self._fake_core()
         m = self._menu(fake, ["1", EOFError(), EOFError()])
         m.enable.assert_called_once()
+
+
+class TestTgWiringV6Adaptive(unittest.TestCase):
+    """TG-обвязка события v6_strategy_switch (канон кейса №8/№9 у
+    users-watchdog): иконка в tg_notify_event, подпись в event_labels,
+    тумблер в ev_keys/ev_labels (паритет позиций) + строка готовности
+    TG-бота в _status_rows (вопрос владельца 03.11: «а уведы в ТГ
+    будут приходить?» — на ноде без telegram.json молчание неочевидно)."""
+
+    def test_icon_in_tg_notify_event(self):
+        from chimera.modules import tg_bot
+        import inspect
+        src = inspect.getsource(tg_bot.tg_notify_event)
+        self.assertIn('"v6_strategy_switch"', src,
+                      "нет иконки для v6_strategy_switch")
+
+    def test_label_in_manage_menu(self):
+        from chimera.modules import tg_bot
+        import inspect, re
+        src = inspect.getsource(tg_bot.do_manage_telegram)
+        body = re.search(r"event_labels = \{(.*?)\}", src, re.S)
+        self.assertIsNotNone(body, "event_labels не найден")
+        self.assertIn('"v6_strategy_switch"', body.group(1),
+                      "v6_strategy_switch отсутствует в event_labels")
+
+    def test_toggle_lists_contain_event(self):
+        from chimera.modules import tg_bot
+        import inspect, re
+        src = inspect.getsource(tg_bot.do_manage_telegram)
+        keys = re.findall(
+            r'"([a-z_0-9]+)"',
+            re.search(r"ev_keys = \[(.*?)\]", src, re.S).group(1))
+        labels = re.findall(
+            r'"([^"]+)"',
+            re.search(r"ev_labels = \[(.*?)\]\n\s+events", src, re.S).group(1))
+        self.assertEqual(len(keys), len(labels),
+                         "ev_keys и ev_labels разъехались")
+        self.assertIn("v6_strategy_switch", keys)
+        idx = keys.index("v6_strategy_switch")
+        self.assertIn("V6-adaptive", labels[idx],
+                      "подпись v6_strategy_switch не на своей позиции")
+
+    def test_status_rows_tg_ready(self):
+        st = {"strategy_state": "", "adaptive": True, "cron_installed": True,
+              "v6_alive": False, "v6_detail": "", "target": "UseIPv4",
+              "current_query_strategy": "UseIPv4", "last": {},
+              "tg_ready": True}
+        rows = {r[0]: r for r in v6a._status_rows(st)}
+        self.assertIn("настроены", rows["TG-уведы"][1])
+        self.assertEqual(rows["TG-уведы"][2], v6a.C_OK)
+
+    def test_status_rows_tg_not_ready(self):
+        # ключа нет (старая форма dict) или False — юзер видит подсказку,
+        # а не молчаливое «ничего не придёт»
+        for st in ({"adaptive": True, "tg_ready": False},
+                   {"adaptive": True}):
+            rows = {r[0]: r for r in v6a._status_rows(st)}
+            self.assertIn("не настроены", rows["TG-уведы"][1])
+            self.assertEqual(rows["TG-уведы"][2], v6a.C_WARN)
+
+    def test_cli_status_mentions_tg(self):
+        # CLI-статус показывает ту же строку (паритет с TUI)
+        import inspect
+        src = inspect.getsource(v6a.main)
+        self.assertIn("TG-уведы", src)
 
 
 class TestCoreIntegration(unittest.TestCase):

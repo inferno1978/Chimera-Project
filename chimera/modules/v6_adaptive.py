@@ -480,6 +480,9 @@ def status() -> dict:
         cfg = _read_json(XRAY_CONFIG, {}) or {}
         cur_qs = str((cfg.get("dns") or {}).get("queryStrategy", ""))
     strategy = str(state.get("strategy", "") or "")
+    tg_cfg = _read_json(TG_CFG_FILE, {}) or {}
+    tg_ready = bool(str(tg_cfg.get("token") or "")
+                    and str(tg_cfg.get("chat_id") or ""))
     return {
         "strategy_state": strategy,
         "adaptive": strategy in AUTO_VALUES,
@@ -489,6 +492,7 @@ def status() -> dict:
         "target": "UseIPv6v4" if alive else "UseIPv4",
         "current_query_strategy": cur_qs,
         "last": _read_json(MARKER_FILE, {}),
+        "tg_ready": tg_ready,
     }
 
 
@@ -522,6 +526,9 @@ def main(argv: Optional[list] = None) -> int:
           + f" ({st['v6_detail']})")
     print(f"цель           : {st['target']}")
     print(f"config dns.queryStrategy: {st['current_query_strategy'] or '(нет)'}")
+    print("TG-уведы      : "
+          + ("настроены" if st.get("tg_ready")
+             else "нет (Безопасность и автоматизация → S → 📬 Telegram)"))
     return 0
 
 
@@ -604,6 +611,16 @@ def _status_rows(st: dict) -> list[tuple[str, str, str]]:
         rows.append(("Последний прогон",
                      f"{last.get('ts', '?')} — {last.get('action')}",
                      C_DIM))
+    # TG-уведы о переключении (v6_strategy_switch): бот не настроен на
+    # свежей ноде — переключение прошло бы молча; показываем состояние
+    # прямо здесь (вопрос владельца 03.11: «а уведы в ТГ будут
+    # приходить?»)
+    if st.get("tg_ready"):
+        rows.append(("TG-уведы",
+                     "настроены — переключение придёт в чат", C_OK))
+    else:
+        rows.append(("TG-уведы",
+                     "не настроены (Безопасность и автоматизация → S)", C_WARN))
     return rows
 
 

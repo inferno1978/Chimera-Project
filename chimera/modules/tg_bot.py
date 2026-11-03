@@ -279,6 +279,11 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "doctor_alert":  "🚨",   # найдено критичное / фикс не удался
         "doctor_fixed":  "🩺",   # сводка применённых авто-фиксов
         "doctor_report": "📋",   # полный дайджест прохода (по желанию)
+        # v6-adaptive (наблюдатель DNS/domain-стратегии): событие шлёт
+        # модуль с релиза e04eba0, но шло без иконки — fallback ℹ️
+        # (класс бага кейса окт.2026 №8; выявлено 03.11 при вопросе
+        # владельца «а уведы в ТГ будут приходить?»)
+        "v6_strategy_switch": "📶",  # v6-adaptive: стратегия v6↔v4 переключена
     }
     icon = icons.get(event, "ℹ️")
     text = f"{icon} <b>{header}</b> {detail}\n<i>{ts}</i>"
@@ -2409,6 +2414,9 @@ def do_manage_telegram() -> None:
             "doctor_alert":  "Doctor: критичные проблемы ОС / фикс не удался",
             "doctor_fixed":  "Doctor: авто-фиксы применены",
             "doctor_report": "Doctor: дайджест медосмотра ОС",
+            # v6-adaptive (наблюдатель DNS/domain-стратегии; событие
+            # существовало с релиза e04eba0, но не было видно в меню)
+            "v6_strategy_switch": "V6-adaptive: переключение DNS-стратегии (v6↔v4)",
         }
 
         print()
@@ -2488,7 +2496,8 @@ def do_manage_telegram() -> None:
                        "ingress_geoip","install_complete",
                        "users_drift","users_restored","users_restore_failed",
                        "users_watchdog_budget",
-                       "doctor_alert","doctor_fixed","doctor_report"]
+                       "doctor_alert","doctor_fixed","doctor_report",
+                       "v6_strategy_switch"]
             ev_labels = [
                 "Xray упал","Xray восстановился","Сертификат истекает",
                 "Лимит трафика","Daily health-отчёт","Exit-нода недоступна",
@@ -2528,6 +2537,7 @@ def do_manage_telegram() -> None:
                 "Doctor: критичные проблемы ОС",
                 "Doctor: авто-фиксы применены",
                 "Doctor: дайджест медосмотра",
+                "V6-adaptive: переключение стратегии",
             ]
             events = cfg.get("events", {k: True for k in ev_keys})
             print()
