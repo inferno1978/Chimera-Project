@@ -42,6 +42,10 @@ CLI (человек):  python3 main.py --v6-adaptive on|off|status
 CLI (cron/скрипт): python3 main.py --v6-adaptive-check
   (cron-скрипт зовёт run_once() напрямую — модуль самодостаточен,
   БЕЗ exec монолита _core; паттерн exit_switch_watcher)
+TUI:  Настройки сети → V — do_v6_adaptive_menu(): живой статус (проба
+  при отрисовке), вкл/выкл наблюдателя, ручной прогон, подробности
+  (оформление — box_renderer _core, паттерн tfo_settings: «Настройки
+  сети → T»)
 
 Событие TG: v6_strategy_switch (фильтр events в telegram.json;
 неизвестные ключи по умолчанию ВКЛЮЧЕНЫ — events.get(event, True)).
@@ -519,6 +523,231 @@ def main(argv: Optional[list] = None) -> int:
     print(f"цель           : {st['target']}")
     print(f"config dns.queryStrategy: {st['current_query_strategy'] or '(нет)'}")
     return 0
+
+
+# ── TUI: пункт меню «Настройки сети → V» (паттерн tfo_settings) ──────────────
+#
+# Канон оформления: box_renderer монолита (_box_top/_box_row/_box_item/
+# _box_desc/_box_sep/_box_back/_box_bottom) + ленивый _core_module()
+# (tfo_settings/chain_nodes). Чистые рендеры (_status_rows/_report_text/
+# _log_tail) не зависят от _core и покрыты юнит-тестами; интерактивная
+# обёртка do_v6_adaptive_menu() — тонкая, тестится smoke-ом с фейковым
+# chimera._core (канон tests/test_awg_ui_smoke.py). Под пайпом (EOF на
+# input) меню не падает — канон entry_mirrors.
+
+NC_FALLBACK = "\033"   # сброс цвета, если _core недоступен (паттерн tfo)
+
+# Цветовые метки строк статуса (TUI-агностичны: в меню маппятся на ANSI
+# _core, в тестах — просто идентификаторы)
+C_OK, C_WARN, C_BAD, C_INFO, C_DIM = "ok", "warn", "bad", "info", "dim"
+
+
+def _core_module():
+    """Ленивая привязка к chimera._core (как в tfo_settings/chain_nodes)."""
+    import importlib
+    return importlib.import_module("chimera._core")
+
+
+def _tui_error(msg: str) -> None:
+    """[ERROR]-печать. В _core.py функции error НЕТ (только info/success/
+    warn) — свой хелпер по паттерну tfo_settings._error (инцидент 29.08:
+    AttributeError в меню T). Отказ _core (headless/тесты) → stderr,
+    без падения."""
+    try:
+        core = _core_module()
+        print(f"{core.RED}[ERROR]{NC_FALLBACK} {msg}")
+        try:
+            core.log_to_file("ERROR", msg)
+        except Exception:
+            pass
+    except Exception:
+        print(f"[v6-adaptive:ERROR] {msg}", file=sys.stderr)
+
+
+def _status_rows(st: dict) -> list[tuple[str, str, str]]:
+    """Статус → строки (label, value, метка цвета) для _box_row.
+
+    Чистая функция (без _core/ANSI/subprocess) — тестопригодное ядро
+    меню; на вход — словарь status().
+    """
+    rows: list[tuple[str, str, str]] = []
+    if st.get("adaptive"):
+        rows.append(("Режим",
+                     "АДАПТИВНЫЙ — нода сама держит стратегию по живому IPv6",
+                     C_OK))
+    else:
+        rows.append(("Режим",
+                     f"явный выбор: {st.get('strategy_state') or '?'} "
+                     f"(наблюдатель не трогает)",
+                     C_WARN))
+    rows.append(("Наблюдатель",
+                 "установлен (cron)" if st.get("cron_installed")
+                 else "не установлен",
+                 C_OK if st.get("cron_installed") else C_DIM))
+    if st.get("v6_alive"):
+        rows.append(("IPv6 сейчас",
+                     str(st.get("v6_detail") or "").strip() or "жив",
+                     C_OK))
+    else:
+        rows.append(("IPv6 сейчас",
+                     str(st.get("v6_detail") or "").strip() or "мёртв",
+                     C_BAD))
+    if st.get("adaptive"):
+        rows.append(("Цель стратегии", str(st.get("target", "?")), C_INFO))
+    qs = str(st.get("current_query_strategy") or "")
+    rows.append(("В конфиге Xray",
+                 f"dns.queryStrategy = {qs}" if qs
+                 else "dns.queryStrategy не задан",
+                 C_INFO))
+    last = st.get("last") or {}
+    if isinstance(last, dict) and last.get("action"):
+        rows.append(("Последний прогон",
+                     f"{last.get('ts', '?')} — {last.get('action')}",
+                     C_DIM))
+    return rows
+
+
+_REPORT_LABELS = {
+    "no-state":          "state.json не найден — сначала установка Xray",
+    "skip-explicit":     "явный выбор стратегии в state — наблюдатель не трогает",
+    "no-config":         "config.json не найден — наблюдатель ждёт установку",
+    "bad-config":        "config.json не парсится — конфиг не тронут",
+    "busy":              "прогон уже идёт (lock) — повторите позже",
+    "noop":              "конфиг уже соответствует цели — изменений нет",
+    "dry-run":           "dry-run: изменения показаны, не применялись",
+    "switched":          "переключил стратегию",
+    "fail-write":        "ошибка записи config.json — откат",
+    "rollback-validate": "xray -test провален — конфиг откачен, xray не трогали",
+    "rollback-restart":  "рестарт не удался — откат и подъём на прежней стратегии",
+}
+
+
+def _report_text(rep: dict) -> str:
+    """Резюме прогона run_once для меню (чистая функция)."""
+    act = str(rep.get("action", "?"))
+    label = _REPORT_LABELS.get(act, act)
+    if act == "switched":
+        label += (f": {rep.get('from') or '?'} → {rep.get('to')}"
+                  f" ({'v6 ожил' if rep.get('alive') else 'v6 мёртв'})")
+    return label
+
+
+def _log_tail(n: int = 6) -> list[str]:
+    """Последние n строк журнала (best-effort, для «Подробностей»)."""
+    try:
+        return LOG_FILE.read_text(encoding="utf-8").splitlines()[-n:]
+    except Exception:
+        return []
+
+
+def _pause(core) -> None:
+    """«Нажмите Enter» — EOF-безопасно (канон entry_mirrors: под пайпом
+    диалоги не падают)."""
+    try:
+        input(f"{core.BLUE}Нажмите Enter...{core.NC}")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def _show_last_details(core) -> None:
+    """Пункт «Подробности»: маркер последнего прогона + хвост журнала."""
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_bottom = core._box_bottom
+    DIM, NC = core.DIM, core.NC
+    last = _read_json(MARKER_FILE, {}) or {}
+    _box_top("V6-ADAPTIVE — ПОСЛЕДНИЙ ПРОГОН")
+    _box_row()
+    if not last:
+        _box_row(f"  {DIM}маркер не создан — наблюдатель ещё не прогонялся{NC}")
+    else:
+        for k in ("ts", "action", "from", "to", "alive", "target", "detail"):
+            if k in last:
+                _box_row(f"  {k + ':':<10} {last[k]}")
+        for c in (last.get("changes") or []):
+            _box_row(f"  change:   {c}")
+    _box_row()
+    tail = _log_tail(6)
+    if tail:
+        _box_row(f"  {DIM}— журнал (хвост):{NC}")
+        for line in tail:
+            _box_row(f"  {DIM}{line}{NC}")
+    _box_bottom()
+
+
+def do_v6_adaptive_menu() -> None:
+    """Меню «Настройки сети → V»: адаптивная стратегия по живому IPv6.
+
+    Статус в реальном времени (проба v6 при отрисовке) + вкл/выкл
+    наблюдателя + ручной прогон + подробности. Включение = enable()
+    (state["strategy"]="" + cron + первый прогон сразу), выключение =
+    disable() (снимает ТОЛЬКО cron; вернуть явный выбор — пункт 6).
+    """
+    core = _core_module()
+    _box_top    = core._box_top
+    _box_row    = core._box_row
+    _box_item   = core._box_item
+    _box_desc   = core._box_desc
+    _box_sep    = core._box_sep
+    _box_back   = core._box_back
+    _box_bottom = core._box_bottom
+    info    = core.info
+    success = core.success
+    warn    = core.warn
+    CYAN = core.CYAN
+    NC   = core.NC
+    _colors = {C_OK: core.GREEN, C_WARN: core.YELLOW, C_BAD: core.RED,
+               C_INFO: CYAN, C_DIM: core.DIM}
+
+    while True:
+        os.system("clear")
+        print()
+        st = status()
+        _box_top("🔄  V6-ADAPTIVE — АВТОМАТИКА СТРАТЕГИИ")
+        _box_row()
+        for label, value, c in _status_rows(st):
+            _box_row(f"  {label + ':':<18} {_colors.get(c, '')}{value}{NC}")
+        _box_sep()
+        _box_desc("Наблюдатель (cron, 10 мин) пробует живой IPv6 ноды и")
+        _box_desc("держит dns.queryStrategy + freedom-outbound'ы в соответствии:")
+        _box_desc("v6 жив → UseIPv6v4, мёртв → UseIPv4. Явный выбор (пункт 6)")
+        _box_desc("всегда приоритетнее — наблюдатель его не трогает.")
+        _box_row()
+        if st["adaptive"] and st["cron_installed"]:
+            _box_item("1", f"⏹  Выключить наблюдатель  {core.DIM}(снять cron; ничего не меняется){NC}")
+            _box_item("2", "↻  Проверить сейчас  (ручной прогон наблюдателя)")
+        else:
+            _box_item("1", f"🟢 Включить адаптивный режим  {core.DIM}(cron + первый прогон сразу){NC}")
+            _box_item("2", "↻  Проверить сейчас  (одиночный прогон, без cron)")
+        _box_item("3", "📋 Подробности последнего прогона")
+        _box_row()
+        _box_back()
+        _box_bottom()
+        try:
+            ch = input(f"{CYAN}Выбор:{NC} ").strip()
+        except (KeyboardInterrupt, EOFError):
+            break
+
+        try:
+            # Q — что рендерит _box_back(); b/B/0 — паритет с tfo_settings
+            if ch in ("q", "Q", "b", "B", "0", ""):
+                break
+            if ch == "1":
+                if st["adaptive"] and st["cron_installed"]:
+                    ok, msg = disable()
+                else:
+                    ok, msg = enable()
+                (success if ok else warn)(msg)
+            elif ch == "2":
+                rep = run_once(apply=True)
+                info(f"Прогон: {_report_text(rep)}")
+            elif ch == "3":
+                _show_last_details(core)
+            else:
+                warn("Неверный выбор.")
+        except Exception as e:   # меню не должно вылетать целиком (кейс T)
+            _tui_error(f"v6-adaptive: {e}")
+        _pause(core)
 
 
 if __name__ == "__main__":

@@ -2945,6 +2945,24 @@ def do_change_domain_strategy() -> None:
         except Exception as e:
             warn(f"Не удалось сохранить в state.json: {e}")
 
+    # v6-adaptive (Настройки сети → V): явный выбор — приоритет юзера,
+    # наблюдатель с этого момента молча пропускает (skip-explicit). Если
+    # cron наблюдателя стоит — предлагаем снять, чтобы не гонял зря.
+    try:
+        from chimera.modules import v6_adaptive as _v6a
+        if _v6a.CRON_FILE.exists():
+            _w = input(f"{YELLOW}Снять наблюдатель v6-adaptive? [Y/n]:{NC} ").strip().lower()
+            if _w in ("", "y", "yes", "д", "да"):
+                _okw, _msgw = _v6a.uninstall_watcher()
+                if _okw:
+                    success(f"v6-adaptive: {_msgw}")
+                else:
+                    warn(f"v6-adaptive: {_msgw}")
+    except ImportError:
+        pass
+    except Exception as e:
+        warn(f"v6-adaptive: не удалось снять наблюдатель: {e}")
+
     # Патчим живой config.json напрямую (чистый хелпер + лог изменений).
     # routing.domainStrategy осознанно НЕ трогаем: это AsIs/IPIfNonMatch/
     # IPOnDemand (семантика правил), а не IPv4/IPv6-приоритет. Прежний код
@@ -8270,7 +8288,8 @@ def _menu_network() -> None:
         _box_item("A", f"🛡️ AdGuard Home  {DIM}(DNS :53 + фильтры + DoH/DoT — поверх DNSCrypt){NC}")
         _box_item("4", f"☁️  Cloudflare WARP  {DIM}(управление туннелем){NC}")
         _box_item("5", f"🔄 Сменить домен / порт  {DIM}(без переустановки){NC}")
-        _box_item("6", f"🌍 Стратегия исходящих  {DIM}(domainStrategy){NC}")
+        _box_item("6", f"🌍 Стратегия исходящих  {DIM}(domainStrategy; авто — V){NC}")
+        _box_item("V", f"🔄 V6-adaptive: авто по живому IPv6  {DIM}(UseIPv4 ⇄ UseIPv6v4){NC}")
         _box_item("7", f"📡 Exit-ноды каскада  {DIM}(Режим B, до 10 нод){NC}")
         _box_item("8", f"🔗 Сводка каскадного прокси  {DIM}(Режим B){NC}")
         _box_item("9", "🌐 Внешняя проверка домена / порта")
@@ -8315,6 +8334,16 @@ def _menu_network() -> None:
         elif ch == "6":
             do_change_domain_strategy()
             input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch.lower() == "v":
+            # v6-adaptive (Настройки сети → V): авто domainStrategy по
+            # живому IPv6. Паттерн tfo_settings («Настройки сети → T»):
+            # UI живёт в модуле, монолит только диспетчеризует.
+            try:
+                from chimera.modules.v6_adaptive import do_v6_adaptive_menu
+                do_v6_adaptive_menu()
+            except ImportError as e:
+                warn(f"Модуль v6_adaptive не найден: {e}")
+                time.sleep(2)
         elif ch == "7":
             _load_state_into_globals()
             if AWG_EXIT_ENABLED and INSTALL_MODE == "B":

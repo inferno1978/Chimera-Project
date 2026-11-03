@@ -15,6 +15,10 @@ Unit-тесты v6-adaptive watcher (chimera/modules/v6_adaptive.py).
   5. Cron lifecycle: install/uninstall, клэмп интервала, контент
   6. enable/disable: state['strategy']='' без потери соседних ключей
   7. CLI main(): check/on/off/status
+  8. TUI «Настройки сети → V»: чистые рендеры (_status_rows/_report_text/
+     _log_tail) + smoke do_v6_adaptive_menu с фейковым chimera._core
+     (канон tests/test_awg_ui_smoke.py) + строковые ассерты на _core.py
+     (канон test_dns_redirect: пункт меню залочен)
 
 Изоляция: все пути модуля патчатся на tmp; пробы/рестарты/TG — моки.
 Реальных записей в /etc, /var, systemctl — НЕТ.
@@ -24,6 +28,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -445,6 +450,234 @@ class TestCli(_Isolated):
         self.assertEqual(st["target"], "UseIPv4")
         self.assertEqual(st["current_query_strategy"], "UseIPv4")
         self.assertEqual(st["last"], {})          # маркера ещё нет
+
+
+# ── 8. TUI «Настройки сети → V» ──────────────────────────────────────────────
+
+class TestStatusRows(unittest.TestCase):
+    """_status_rows: (label, value, цвет) для всех состояний."""
+
+    def _st(self, **kw):
+        base = {"strategy_state": "", "adaptive": True, "cron_installed": True,
+                "v6_alive": False, "v6_detail": "egress мёртв (обе пробы loss)",
+                "target": "UseIPv4", "current_query_strategy": "UseIPv4",
+                "last": {"action": "noop", "ts": "2026-11-03 20:00:00"}}
+        base.update(kw)
+        return base
+
+    def test_adaptive_on_dead_v6(self):
+        rows = {r[0]: r for r in v6a._status_rows(self._st())}
+        self.assertIn("АДАПТИВНЫЙ", rows["Режим"][1])
+        self.assertEqual(rows["Режим"][2], v6a.C_OK)
+        self.assertEqual(rows["Наблюдатель"][2], v6a.C_OK)
+        self.assertIn("мёртв", rows["IPv6 сейчас"][1])
+        self.assertEqual(rows["IPv6 сейчас"][2], v6a.C_BAD)
+        self.assertEqual(rows["Цель стратегии"][1], "UseIPv4")
+        self.assertIn("UseIPv4", rows["В конфиге Xray"][1])
+        self.assertIn("noop", rows["Последний прогон"][1])
+
+    def test_explicit_choice(self):
+        rows = {r[0]: r for r in v6a._status_rows(
+            self._st(adaptive=False, strategy_state="UseIPv4"))}
+        self.assertIn("UseIPv4", rows["Режим"][1])
+        self.assertEqual(rows["Режим"][2], v6a.C_WARN)
+        # цель показываем только в адаптиве — при явном выборе её нет
+        self.assertNotIn("Цель стратегии", rows)
+
+    def test_v6_alive(self):
+        rows = {r[0]: r for r in v6a._status_rows(
+            self._st(v6_alive=True,
+                     v6_detail="жив (ответ от 2001:4860:4860::8888)",
+                     target="UseIPv6v4",
+                     current_query_strategy="UseIPv6v4"))}
+        # вердикт приходит из details пробы — без дублирования «ЖИВ (жив…)»
+        self.assertEqual(rows["IPv6 сейчас"][1],
+                         "жив (ответ от 2001:4860:4860::8888)")
+        self.assertEqual(rows["IPv6 сейчас"][2], v6a.C_OK)
+        self.assertEqual(rows["Цель стратегии"][1], "UseIPv6v4")
+
+    def test_v6_alive_no_detail(self):
+        # пустой detail → короткий вердикт, не пустая строка
+        rows = {r[0]: r for r in v6a._status_rows(
+            self._st(v6_alive=True, v6_detail=""))}
+        self.assertEqual(rows["IPv6 сейчас"][1], "жив")
+
+    def test_empty_query_strategy_and_no_last(self):
+        rows = {r[0]: r for r in v6a._status_rows(
+            self._st(current_query_strategy="", last={}))}
+        self.assertIn("не задан", rows["В конфиге Xray"][1])
+        self.assertNotIn("Последний прогон", rows)
+
+    def test_cron_missing_dim(self):
+        rows = {r[0]: r for r in v6a._status_rows(
+            self._st(cron_installed=False))}
+        self.assertEqual(rows["Наблюдатель"][1], "не установлен")
+        self.assertEqual(rows["Наблюдатель"][2], v6a.C_DIM)
+
+
+class TestReportText(unittest.TestCase):
+
+    def test_switched(self):
+        txt = v6a._report_text({"action": "switched", "from": "UseIPv4",
+                                "to": "UseIPv6v4", "alive": True})
+        self.assertIn("UseIPv4 → UseIPv6v4", txt)
+        self.assertIn("v6 ожил", txt)
+
+    def test_all_actions_have_labels(self):
+        actions = {"no-state", "skip-explicit", "no-config", "bad-config",
+                   "busy", "noop", "dry-run", "switched", "fail-write",
+                   "rollback-validate", "rollback-restart"}
+        self.assertEqual(set(v6a._REPORT_LABELS), actions)
+        for a in actions:
+            self.assertTrue(v6a._report_text({"action": a}))
+        # неизвестный action → сам идентификатор (не пустота)
+        self.assertEqual(v6a._report_text({"action": "weird"}), "weird")
+
+
+class TestLogTail(_Isolated):
+
+    def test_tail_and_missing(self):
+        self.assertEqual(v6a._log_tail(), [])          # файла нет → []
+        self.log_f.write_text("l1\nl2\nl3\n", encoding="utf-8")
+        self.assertEqual(v6a._log_tail(2), ["l2", "l3"])
+
+
+class TestTuiSmoke(_Isolated):
+    """do_v6_adaptive_menu с фейковым chimera._core (канон
+    tests/test_awg_ui_smoke.py) + патченный input: меню рисуется
+    box-рендерером, действия диспетчеризуются, под пайпом (EOF) не падает."""
+
+    def _fake_core(self):
+        calls = []
+        def rec(name):
+            def f(*a, **kw):
+                calls.append((name,) + a)
+            return f
+        m = types.ModuleType("chimera._core")
+        for n in ("_box_top", "_box_row", "_box_item", "_box_desc",
+                  "_box_sep", "_box_back", "_box_bottom"):
+            setattr(m, n, rec(n))
+        for n in ("info", "success", "warn", "log_to_file"):
+            setattr(m, n, rec(n))
+        for c in ("RED", "GREEN", "YELLOW", "DIM", "CYAN", "BLUE", "NC"):
+            setattr(m, c, "")
+        m._calls = calls
+        return m
+
+    def _st(self, **kw):
+        base = {"strategy_state": "", "adaptive": False,
+                "cron_installed": False, "v6_alive": False,
+                "v6_detail": "egress мёртв", "target": "UseIPv4",
+                "current_query_strategy": "UseIPv4", "last": {}}
+        base.update(kw)
+        return base
+
+    def _menu(self, fake, answers, **st_kw):
+        """Прогон меню: фейковый _core + патчи status/enable/disable/
+        run_once + input(answers). Возвращает мок действий."""
+        sys.modules["chimera._core"] = fake
+        self.addCleanup(sys.modules.pop, "chimera._core", None)
+        m_act = MagicMock()
+        m_act.enable.return_value = (True, "вкл")
+        m_act.disable.return_value = (True, "выкл")
+        m_act.run_once.return_value = {"action": "switched",
+                                       "from": "UseIPv4",
+                                       "to": "UseIPv6v4", "alive": True}
+        patches = [
+            patch.object(v6a, "status", return_value=self._st(**st_kw)),
+            patch.object(v6a, "enable", m_act.enable),
+            patch.object(v6a, "disable", m_act.disable),
+            patch.object(v6a, "run_once", m_act.run_once),
+            patch("builtins.input", side_effect=answers),
+            patch("os.system", return_value=0),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        v6a.do_v6_adaptive_menu()
+        return m_act
+
+    def test_renders_and_back(self):
+        fake = self._fake_core()
+        self._menu(fake, ["q"])   # Q — что рендерит _box_back()
+        tops = [c for c in fake._calls if c[0] == "_box_top"]
+        self.assertTrue(tops)
+        self.assertIn("V6-ADAPTIVE", tops[0][1])
+        # статус отрисован строками (Режим/Наблюдатель/IPv6 сейчас)
+        rows = "\n".join(str(c) for c in fake._calls)
+        for label in ("Режим", "Наблюдатель", "IPv6 сейчас"):
+            self.assertIn(label, rows)
+
+    def test_enable_flow(self):
+        fake = self._fake_core()
+        m = self._menu(fake, ["1", "", "b"])        # адаптив выключен
+        m.enable.assert_called_once()
+        m.disable.assert_not_called()
+        self.assertIn(("success", "вкл"), fake._calls)
+
+    def test_disable_flow(self):
+        fake = self._fake_core()
+        m = self._menu(fake, ["1", "", "b"], adaptive=True,
+                       cron_installed=True)
+        m.disable.assert_called_once()
+        m.enable.assert_not_called()
+        self.assertIn(("success", "выкл"), fake._calls)
+
+    def test_manual_run_once(self):
+        fake = self._fake_core()
+        m = self._menu(fake, ["2", "", "b"])
+        m.run_once.assert_called_once_with(apply=True)
+        infos = [c[1] for c in fake._calls
+                 if c[0] == "info" and len(c) > 1 and isinstance(c[1], str)]
+        self.assertTrue(any("UseIPv4 → UseIPv6v4" in t for t in infos))
+
+    def test_details_flow(self):
+        marker = {"action": "switched", "ts": "2026-11-03 21:00:00",
+                  "from": "UseIPv4", "to": "UseIPv6v4", "alive": True}
+        self.marker_f.write_text(json.dumps(marker), encoding="utf-8")
+        self.log_f.write_text("2026-11-03 21:00:00 switched\n",
+                              encoding="utf-8")
+        fake = self._fake_core()
+        self._menu(fake, ["3", "", "b"])
+        tops = [c[1] for c in fake._calls if c[0] == "_box_top"]
+        self.assertTrue(any("ПОСЛЕДНИЙ ПРОГОН" in t for t in tops))
+        rows = "\n".join(str(c) for c in fake._calls)
+        self.assertIn("switched", rows)
+
+    def test_invalid_choice(self):
+        fake = self._fake_core()
+        m = self._menu(fake, ["9", "", "b"])
+        m.enable.assert_not_called()
+        m.disable.assert_not_called()
+        m.run_once.assert_not_called()
+        self.assertTrue(any(c[0] == "warn" for c in fake._calls))
+
+    def test_eof_no_crash(self):
+        # пайп: EOF на первом же «Выбор:» — выход без исключений
+        fake = self._fake_core()
+        m = self._menu(fake, [EOFError()])
+        m.enable.assert_not_called()
+
+    def test_eof_midflow_no_crash(self):
+        # EOF на «Нажмите Enter» после действия — проглочен (_pause),
+        # затем EOF на «Выбор:» — выход; действие успело отработать
+        fake = self._fake_core()
+        m = self._menu(fake, ["1", EOFError(), EOFError()])
+        m.enable.assert_called_once()
+
+
+class TestCoreIntegration(unittest.TestCase):
+    """Строковые ассерты на _core.py (канон test_dns_redirect: вход в
+    меню залочен, чтобы рефакторинг монолита не потерял пункт V)."""
+
+    def test_menu_network_has_v_item(self):
+        core_src = (_PROJECT_ROOT / "chimera" / "_core.py").read_text()
+        self.assertIn('_box_item("V"', core_src)
+        self.assertIn("do_v6_adaptive_menu", core_src)
+
+    def test_domain_strategy_mentions_watcher(self):
+        core_src = (_PROJECT_ROOT / "chimera" / "_core.py").read_text()
+        self.assertIn("Снять наблюдатель v6-adaptive", core_src)
 
 
 if __name__ == "__main__":
