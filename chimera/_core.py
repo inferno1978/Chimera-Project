@@ -3098,6 +3098,20 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
     except Exception:
         pass  # не критично — это best-effort restore
 
+    # Кастомные outbound'ы (свои теги в outbounds[]). ВЫЗЫВАЕТСЯ ПЕРВЫМ из
+    # restore-хуков: dns_custom:* и custom:* routing-правила могут ссылаться
+    # на кастомные теги — outbound должен существовать к моменту их re-apply.
+    # generate_* переписывает outbounds[] целиком — без restore кастомные
+    # ноды (друзья/свои серверы, запрос клиента 04.11) молча терялись.
+    try:
+        from chimera.modules.custom_outbounds import restore_custom_outbounds_if_needed
+        if restore_custom_outbounds_if_needed(silent=False):
+            info("Кастомные outbound'ы восстановлены из state")
+    except ImportError:
+        pass
+    except Exception:
+        pass  # best-effort restore
+
     # Кастомные DNS-правила (dns.hosts + dns_custom:* routing). ДЫРА,
     # фиксы ниже: state (/var/lib/xray-installer/dns_rules.json) ведётся с
     # первой версии dns_rules.py, но re-apply после generate_* не было —
@@ -8298,6 +8312,7 @@ def _menu_network() -> None:
         _box_item("D", f"🌐 Кастомные DNS правила  {DIM}(hosts / routing override){NC}")
         _box_item("DR", f"🔒 Принудительный DNS REDIRECT  {DIM}(NAT на dnscrypt-proxy, anti-leak){NC}")
         _box_item("RR", f"🧭 Кастомные routing-правила  {DIM}(домен/IP/CIDR/порт → любой outbound, приоритет){NC}")
+        _box_item("CO", f"🔗 Кастомные outbound'ы  {DIM}(свои ноды / друзья: ссылка vless://, мастер, JSON){NC}")
         _box_item("M", f"📏 MTU/MSS автотюнинг  {DIM}(оптимизация для exit-нод){NC}")
         _box_item("T", f"⚡ TCP Fast Open (TFO)  {DIM}(вкл/выкл, по умолчанию ВЫКЛ — анти-DPI){NC}")
         _box_item("X", f"⚡ XTLS-flow режим  {DIM}(Vision / Splice / none — только REALITY){NC}")
@@ -8419,6 +8434,15 @@ def _menu_network() -> None:
             # приоритет, расположение}. Полноправный сосед dns_custom:*, но
             # с любым outbound (chain-exit-N и т.д.) и любыми матчами.
             do_manage_routing_rules()
+        elif ch.lower() == "co":
+            # Кастомные outbound'ы (запрос клиента 04.11): свои ноды/друзья
+            # в живом конфиге — ссылка vless://, мастер или JSON.
+            try:
+                from chimera.modules.custom_outbounds import do_manage_custom_outbounds
+                do_manage_custom_outbounds()
+            except ImportError as e:
+                warn(f"Модуль custom_outbounds не найден: {e}")
+                time.sleep(2)
         elif ch.lower() == "m":
             do_mtu_tuning()
         elif ch.lower() == "t":

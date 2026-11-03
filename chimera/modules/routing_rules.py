@@ -315,6 +315,85 @@ def _rr_live_outbounds() -> "tuple[list, dict]":
     return tags, cfg
 
 
+# ── Пикер outbound (общий для импорта РФ-подсетей и правил) ──────────────────
+# Запрос клиента (04.11, скриншот меню «Куда направить трафик РФ-подсетей?»):
+# «в режиме А можно как-то добавить outbound?» — служебные теги скрываем,
+# кастомные помечаем 🔗, даём создать новый на ходу (custom_outbounds).
+
+_RR_SERVICE_TAGS = {"xray-stats-api", "api", "dns-out", "antiblock"}
+
+
+def _rr_picker_options(tags: list, cfg: dict) -> "tuple[list, list]":
+    """(labels, tags) для пикера: служебные (api/stats) скрыты, кастомные
+    (из custom_outbounds state) помечены 🔗."""
+    protos = {o.get("tag", ""): o.get("protocol", "")
+              for o in cfg.get("outbounds", [])}
+    custom = set()
+    try:
+        from chimera.modules.custom_outbounds import co_state_tags
+        custom = co_state_tags()
+    except Exception:
+        custom = set()
+    labels, pick = [], []
+    for t in tags:
+        if t in _RR_SERVICE_TAGS or protos.get(t) in ("api", "dns"):
+            continue                      # служебные — не для трафика
+        p = protos.get(t, "")
+        if t in custom:
+            d = f"🔗 custom · {p or 'outbound'}"
+        elif p == "freedom" or t in ("direct", "direct-local"):
+            d = "freedom (напрямую)"
+        elif p == "blackhole" or t in ("block", "BLOCK"):
+            d = "blackhole (блок)"
+        elif t.startswith("chain-exit"):
+            d = "внешняя нода (каскад)"
+        else:
+            d = p or "outbound"
+        labels.append(f"{t}  ({d})")
+        pick.append(t)
+    return labels, pick
+
+
+def _rr_pick_outbound(cur_out: "str | None" = None,
+                      title: str = "Outbound (куда направить трафик)"
+                      ) -> "str | None":
+    """Выбор outbound: живые теги + создать новый (custom_outbounds) +
+    тег вручную. Возвращает тег или None (отмена)."""
+    tags, cfg = _rr_live_outbounds()
+    if not tags:
+        manual = tui_form("Outbound (нет живого конфига)", [
+            TuiField(key="tag", label="Тег", default=cur_out or "",
+                     required=True),
+        ])
+        if manual is None:
+            return None
+        return manual["tag"].strip()
+    labels, pick = _rr_picker_options(tags, cfg)
+    options = labels + ["— Создать новый outbound —  🔗",
+                        "— Ввести тег вручную —"]
+    pre = pick.index(cur_out) if cur_out in pick else 0
+    idx = tui_select(title, options, default=pre)
+    if idx is None:
+        return None
+    if idx == len(options) - 2:
+        # Создать новый на ходу: мастер custom_outbounds вернёт тег
+        try:
+            from chimera.modules.custom_outbounds import co_create_outbound_inline
+        except ImportError as e:
+            _warn(f"Модуль custom_outbounds недоступен: {e}")
+            return None
+        return co_create_outbound_inline()   # None = отмена
+    if idx == len(options) - 1:
+        manual = tui_form("Outbound вручную", [
+            TuiField(key="tag", label="Тег", default=cur_out or "chain-exit-1",
+                     required=True, hint="Напр. chain-exit-4"),
+        ])
+        if manual is None:
+            return None
+        return manual["tag"].strip()
+    return pick[idx]
+
+
 def _rr_awg_exit_enabled() -> bool:
     try:
         import importlib
@@ -628,25 +707,9 @@ def _rr_import_ru_subnets() -> "dict | None":
     _info(f"Подсетей РФ: {len(cidrs)} (→ {(len(cidrs) + 499) // 500} правил Xray по 500)")
 
     # 2. Outbound
-    tags, _cfg = _rr_live_outbounds()
-    if not tags:
-        _warn("Нет живого конфига Xray — сначала установка.")
+    outbound = _rr_pick_outbound(title="Куда направить трафик РФ-подсетей?")
+    if not outbound:
         return None
-    options = [f"{t}  ({'freedom' if t in ('direct', 'direct-local') else 'внешняя нода' if t.startswith('chain-exit') else 'blackhole' if t in ('block', 'BLOCK') else 'outbound'})" for t in tags]
-    options.append("— Ввести тег вручную —")
-    idx = tui_select("Куда направить трафик РФ-подсетей?", options)
-    if idx is None:
-        return None
-    if idx == len(options) - 1:
-        res = tui_form("Outbound вручную", [
-            TuiField(key="tag", label="Тег outbound", required=True,
-                     hint="Напр. chain-exit-4 или my-outbound"),
-        ])
-        if not res:
-            return None
-        outbound = res["tag"].strip()
-    else:
-        outbound = tags[idx]
 
     # 3. Имя правила
     default_name = f"ru-subnets-via-{outbound}".lower()[:64]
@@ -831,6 +894,7 @@ def do_manage_routing_rules() -> None:
         _box_item("5", f"Импорт РФ-подсетей (RIPE)  {DIM}→ любой outbound вместо direct{NC}")
         _box_item("6", "Показать живые правила из конфига (custom:*)")
         _box_item("7", "Пере-применить все правила из state (после regenerate)")
+        _box_item("8", f"Кастомные outbound'ы 🔗  {DIM}свои ноды / друзья — vless:// ссылка, мастер, JSON{NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -859,6 +923,15 @@ def do_manage_routing_rules() -> None:
             if ok:
                 _success("Все правила из state пере-применены")
             input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "8":
+            # Кастомные outbound'ы (запрос клиента 04.11: «в режиме А можно
+            # как-то добавить outbound?») — свои ноды/друзья: vless:// и др.
+            try:
+                from chimera.modules.custom_outbounds import do_manage_custom_outbounds
+                do_manage_custom_outbounds()
+            except ImportError as e:
+                _warn(f"Модуль custom_outbounds не найден: {e}")
+                time.sleep(2)
         elif ch in ("q", ""):
             break
         else:
@@ -939,35 +1012,9 @@ def _rr_menu_add_or_edit(existing: "dict | None" = None) -> "dict | None":
         break
 
     # ── Шаг 2: outbound ──
-    tags, _cfg = _rr_live_outbounds()
-    cur_out = f_default("outbound", "direct")
-    outbound = None
-    if tags:
-        options = list(tags) + ["— Ввести тег вручную —"]
-        try:
-            pre = tags.index(cur_out)
-        except ValueError:
-            pre = 0
-        idx = tui_select("Outbound (куда направить трафик)", options, default=pre)
-        if idx is None:
-            return None
-        if idx == len(options) - 1:
-            manual = tui_form("Outbound вручную", [
-                TuiField(key="tag", label="Тег", default=cur_out, required=True,
-                         hint="Напр. chain-exit-4"),
-            ])
-            if manual is None:
-                return None
-            outbound = manual["tag"].strip()
-        else:
-            outbound = tags[idx]
-    else:
-        manual = tui_form("Outbound (нет живого конфига)", [
-            TuiField(key="tag", label="Тег", default=cur_out, required=True),
-        ])
-        if manual is None:
-            return None
-        outbound = manual["tag"].strip()
+    outbound = _rr_pick_outbound(cur_out=f_default("outbound", "direct"))
+    if not outbound:
+        return None
 
     # ── Шаг 3: расположение ──
     cur_plac = f_default("placement", "top") or "top"
