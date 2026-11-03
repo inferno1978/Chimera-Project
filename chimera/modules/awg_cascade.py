@@ -38,6 +38,7 @@ from .awg_constants import (
     AWGS_CRON_RU_UPDATE, AWGS_CRON_RU_UPDATE_SCRIPT, AWGS_SYSTEMD_CASCADE,
     AWGS_RU_ZONE_URL, AWGS_RU_ZONE_FALLBACK_GH,
     AWGS_CASCADE_ENTRY_PEER, AWGS_DEFAULT_SUBNET,
+    AWGS_CASCADE_EXIT_SUBNET, AWGS_CASCADE_ENTRY_FALLBACK_SUBNET,
     AWGS_CASCADE_EXITS_KEY, AWGS_CASCADE_ACTIVE_KEY,
     AWGS_FAILOVER_SCRIPT, AWGS_SYSTEMD_FAILOVER_SVC,
     AWGS_SYSTEMD_FAILOVER_TIMER, AWGS_FAILOVER_STALE_SEC,
@@ -1118,8 +1119,11 @@ def awgs_cascade_register_exit(
         warn(f"exit '{name}' указывает на этот же сервер (self-loop)")
         return False
 
-    # Подсеть exit не должна совпадать с подсетью awg0 entry
-    subnet = (subnet or "").strip() or AWGS_DEFAULT_SUBNET
+    # Подсеть exit не должна совпадать с подсетью awg0 entry.
+    # FIX 03.11: дефолт для пустой подсети — каскадный 172.16.61.0/24, а не
+    # клиентский AWGS_DEFAULT_SUBNET (10.66.66.0/24 — мгновенная коллизия
+    # с awg0 на entry при Enter по умолчанию).
+    subnet = (subnet or "").strip() or AWGS_CASCADE_EXIT_SUBNET
     _own_subnet = state.get("subnet", "")
     if _own_subnet and _own_subnet == subnet:
         warn(f"Подсеть exit ({subnet}) совпадает с подсетью awg0 ({_own_subnet})")
@@ -1621,7 +1625,13 @@ def awgs_cascade_setup_awg1(protocol_version: str = "2.0") -> bool:
     if not awgs_state_is_installed():
         info(f"Установка standalone {awg_protocol_label(protocol_version)} "
              f"на этом сервере (AWG1, выход)...")
-        if not awgs_install(protocol_version=protocol_version):
+        # FIX 03.11 (репорт пользователя): подсеть exit при fresh-установке
+        # из меню каскада — AWGS_CASCADE_EXIT_SUBNET (172.16.61.0/24), а не
+        # дефолтный 10.66.66.0/24 (клиентская подсеть awg0 на AWG0). Раньше
+        # exit наследовал 10.66.66.0/24, entry — ту же → совпадение подсетей
+        # = «маршрутная каша», валидация setup_awg0 отказывала ПОСЛЕ установки.
+        if not awgs_install(protocol_version=protocol_version,
+                            subnet=AWGS_CASCADE_EXIT_SUBNET):
             warn("Установка standalone AWG не удалась")
             return False
     else:
@@ -1812,9 +1822,23 @@ def _awgs_cascade_prompt_exit_version() -> str:
         core.warn("Введите 1 или 2")
 
 
+def _awgs_cascade_entry_subnet(exit_subnet: str) -> str:
+    """Клиентская подсеть awg0 на entry под линком каскада.
+
+    Дефолт — AWGS_DEFAULT_SUBNET (10.66.66.0/24). Если она совпадает
+    с подсетью exit (линк каскада), берём соседний кандидат
+    AWGS_CASCADE_ENTRY_FALLBACK_SUBNET — анти-коллизия (E2E 03.11:
+    обе стороны на 10.66.66.0/24 → маршрутная каша).
+    """
+    _exit_net = (exit_subnet or "").strip()
+    if _exit_net and _exit_net == AWGS_DEFAULT_SUBNET:
+        return AWGS_CASCADE_ENTRY_FALLBACK_SUBNET
+    return AWGS_DEFAULT_SUBNET
+
+
 def _awgs_cascade_menu_awg0() -> None:
     """Подменю настройки AWG0 (вход каскада)."""
-    from .awg_protocol import awg_normalize_version
+    from .awg_protocol import awg_normalize_version, awg_protocol_label
     core = _core_module()
     _box_top = core._box_top
     _box_row = core._box_row
@@ -1844,11 +1868,12 @@ def _awgs_cascade_menu_awg0() -> None:
     _box_kv("Версия протокола", "1=2.0, 2=3.1 (как на AWG1)")
     _box_bottom()
 
-    # Если standalone AWG не установлен — нужно сначала установить
-    if not awgs_state_is_installed():
-        info("Standalone AWG не установлен. Сначала установим...")
-        if not awgs_install():
-            return
+    # FIX 03.11 (репорт пользователя): СНАЧАЛА опрашиваем весь бокс AWG1 —
+    # версия протокола и подсеть линка определяют параметры standalone на
+    # ЭТОМ сервере. Раньше standalone ставился ДО вопросов о версии
+    # (awgs_install() без аргументов → всегда 2.0 + 10.66.66.0/24) — при
+    # exit на 3.1 валидация awgs_cascade_setup_awg0 отказывала уже ПОСЛЕ
+    # установки: «ставлю awg0 — автоматом ставится 2.0 и та же подсеть».
 
     # Запрашиваем данные от AWG1
     exit_host = core._box_ask("Endpoint host AWG1 (зарубежный IP/домен)")
@@ -1904,6 +1929,55 @@ def _awgs_cascade_menu_awg0() -> None:
     confirm = core._box_ask(f"Настроить каскад с {exit_host}:{exit_port}? [y/N]").lower()
     if confirm not in ("y", "yes", "д", "да"):
         return
+
+    # ── standalone на ЭТОМ сервере: установить / сверить ДО setup_awg0 ─────
+    if not awgs_state_is_installed():
+        _entry_subnet = _awgs_cascade_entry_subnet(exit_subnet)
+        if _entry_subnet != AWGS_DEFAULT_SUBNET:
+            info(f"Подсеть {AWGS_DEFAULT_SUBNET} занята линком каскада — "
+                 f"клиентская подсеть awg0: {_entry_subnet}")
+        info(f"Standalone AWG не установлен. Устанавливаем "
+             f"{awg_protocol_label(exit_protocol_version)} "
+             f"(подсеть {_entry_subnet})...")
+        if not awgs_install(protocol_version=exit_protocol_version,
+                            subnet=_entry_subnet):
+            warn("Установка standalone AWG не удалась — каскад не настроен")
+            return
+    else:
+        _own = awgs_state_load()
+        _own_pv = awg_normalize_version(_own.get("protocol_version", "2.0"))
+        _own_subnet = (_own.get("subnet") or "").strip()
+        _mismatch = []
+        if _own_pv != awg_normalize_version(exit_protocol_version):
+            _mismatch.append(
+                f"версия — установлен {awg_protocol_label(_own_pv)}, "
+                f"AWG1 {awg_protocol_label(exit_protocol_version)}")
+        if _own_subnet and _own_subnet == exit_subnet:
+            _mismatch.append(
+                f"подсеть {_own_subnet} совпадает с линком каскада")
+        if _mismatch:
+            warn("Standalone AWG на этом сервере не совместим с AWG1: "
+                 + "; ".join(_mismatch) + ".")
+            warn("Каскад требует одинаковой версии протокола на обоих "
+                 "концах и непересекающиеся подсети.")
+            _re = core._box_ask(
+                "Переустановить standalone AWG под AWG1? "
+                "(пиры будут пересозданы) [y/N]").lower()
+            if _re not in ("y", "yes", "д", "да"):
+                warn("Без переустановки каскад не настроить — выход")
+                return
+            _entry_subnet = (
+                _own_subnet
+                if _own_subnet and _own_subnet != exit_subnet
+                else _awgs_cascade_entry_subnet(exit_subnet))
+            info(f"Переустановка standalone "
+                 f"{awg_protocol_label(exit_protocol_version)} "
+                 f"(подсеть {_entry_subnet})...")
+            if not awgs_install(protocol_version=exit_protocol_version,
+                                subnet=_entry_subnet, force=True):
+                warn("Переустановка standalone AWG не удалась — "
+                     "каскад не настроен")
+                return
 
     awgs_cascade_setup_awg0(
         exit_host=exit_host,

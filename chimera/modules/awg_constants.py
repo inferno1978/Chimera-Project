@@ -27,6 +27,17 @@ AWGS_DEFAULT_SUBNET:   str  = "10.66.66.0/24"  # /24 для клиентов (к
 AWGS_DEFAULT_SUBNET_V6: str = "fd66:66:66::/64"
 AWGS_DEFAULT_MTU:      int  = 1280             # безопасный MTU для мобильных
 
+# ── Каскад: подсети по умолчанию для связки entry↔exit ──────────────────────
+# E2E 03.11.2026 (репорт пользователя): при fresh-установке обе стороны
+# каскада получали AWGS_DEFAULT_SUBNET — клиентская подсеть awg0 на entry
+# совпадала с подсетью линка на exit, валидация awgs_cascade_setup_awg0
+# отказывала уже ПОСЛЕ установки standalone («маршрутная каша»).
+# Решение: exit при fresh-установке из меню каскада получает каскадный
+# дефолт 172.16.61.0/24; entry при коллизии с exit берёт соседний
+# кандидат 10.66.67.0/24 (см. _awgs_cascade_entry_subnet, awg_cascade.py).
+AWGS_CASCADE_EXIT_SUBNET:         str = "172.16.61.0/24"
+AWGS_CASCADE_ENTRY_FALLBACK_SUBNET: str = "10.66.67.0/24"
+
 # ── Пути ─────────────────────────────────────────────────────────────────────
 AWGS_CONF_DIR:        Path = Path("/etc/amnezia/amneziawg")
 AWGS_SERVER_CONF:     Path = AWGS_CONF_DIR / "awg0.conf"
