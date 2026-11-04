@@ -44,6 +44,7 @@ import os
 import re
 import socket
 import textwrap
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -75,6 +76,28 @@ def _core_module():
 # ============================================================================
 #  NGINX RATE LIMIT
 # ============================================================================
+# ─────────────────────────────────────────────────────────────────────
+#  ПРОБА ЖИВОСТИ UNIX-СОКЕТА (реинсталл-безопасность, репорт 04.11)
+# ─────────────────────────────────────────────────────────────────────
+def _unix_socket_serving(sock_path: Path) -> bool:
+    """True — путь сокета кто-то держит открытым (слушающий nginx).
+
+    Дискриминатор действующего сокета от мёртвого плейсхолдера:
+    bind()+close() оставляет ФАЙЛ на диске, но в /proc/net/unix его
+    нет (fd закрыт). Слушающий сокет присутствует в /proc/net/unix
+    со своим путём. Проба беззвучная: ни connect, ни логов nginx.
+    """
+    try:
+        needle = str(sock_path)
+        for line in Path("/proc/net/unix").read_text().splitlines():
+            parts = line.split()
+            if parts and parts[-1] == needle:
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def setup_nginx_rate_limit() -> None:
     core = _core_module()
     info = core.info
@@ -1018,11 +1041,17 @@ def setup_nginx_final(domain: Optional[str] = None,
         }}
     """))
 
-    # Создаём временный unix-сокет если нет
+    # Создаём временный unix-сокет если нет.
+    # РЕИНСТАЛЛ-БЕЗОПАСНОСТЬ (репорт 04.11): сначала проба живости —
+    # /proc/net/unix. Действующий сокет (слушающий nginx) НЕ трогаем.
     sock_path = Path(PARAM_SOCKET_PATH)
     sock_parent = sock_path.parent
     sock_parent.mkdir(parents=True, exist_ok=True)
-    if not sock_path.exists():
+    _sock_live_before = _unix_socket_serving(sock_path)
+    if not _sock_live_before:
+        # Путь никто не держит: stale-файл прошлого плейсхолдера
+        # мешает bind (EADDRINUSE) — сносим и пересоздаём временный.
+        sock_path.unlink(missing_ok=True)
         try:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.bind(str(sock_path))
@@ -1030,6 +1059,8 @@ def setup_nginx_final(domain: Optional[str] = None,
             info("Создан временный unix-сокет для nginx -t")
         except Exception:
             pass
+    else:
+        info("Действующий unix-сокет обнаружен (реинсталл): сокет не трогаем")
 
     link = NGINX_ENABLED_DIR / PARAM_DOMAIN
     link.unlink(missing_ok=True)
@@ -1038,9 +1069,11 @@ def setup_nginx_final(domain: Optional[str] = None,
     r = _run([_nginx_bin, "-t"], capture=True, check=False)
     log_to_file("INFO", r.stderr)
 
+    r_active = _run(["systemctl", "is-active", "nginx"], capture=True, check=False)
+    _nginx_active = (r_active.stdout.strip() == "active")
+
     if r.returncode == 0:
-        r_active = _run(["systemctl", "is-active", "nginx"], capture=True, check=False)
-        if r_active.stdout.strip() == "active":
+        if _nginx_active:
             _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
         success(f"Nginx финально настроен (Nginx {nginx_ver})")
     else:
@@ -1061,9 +1094,42 @@ def setup_nginx_final(domain: Optional[str] = None,
             warn(f"  {line}")
         info("Nginx будет запущен до Xray (финальный шаг установки)")
 
-    # Удаляем временный сокет; финальный старт nginx — до xray
-    sock_path.unlink(missing_ok=True)
-    _run(["systemctl", "stop", "nginx"], check=False, quiet=True)
+    # ── РЕИНСТАЛЛ-БЕЗОПАСНОСТЬ (репорт 04.11, нода друга): прежний
+    #    безусловный unlink + stop nginx рвали REALITY fallback
+    #    работающего сервера: xray получал ENOENT на dial dest ещё
+    #    ДО остановки nginx (unlink файла ≠ закрытие сокета), полная
+    #    недоступность ~20 сек до старта nginx на финальном шаге.
+    if _sock_live_before:
+        # Реинсталл поверх живого сервера: действующий сокет НЕ
+        # удаляем, nginx НЕ останавливаем — reload выше уже применил
+        # конфиг, listen-fd master переиспользует без переbind (путь
+        # не менялся). Финальный start/restart nginx установки — no-op.
+        if _nginx_active and r.returncode == 0 and not _unix_socket_serving(sock_path):
+            # Пост-чек (репорт 04.11): после reload сокет обязан
+            # оставаться живым. Если пропал — heal по образцу
+            # xray_install._nginx_restart_if_reality.
+            warn(f"REALITY fallback: сокет {PARAM_SOCKET_PATH} пропал после "
+                 f"reload — восстанавливаю (restart nginx)...")
+            _run(["systemctl", "restart", "nginx"], check=False, quiet=True)
+            _healed = False
+            for _ in range(20):
+                if _unix_socket_serving(sock_path):
+                    _healed = True
+                    break
+                time.sleep(1)
+            if _healed:
+                success("REALITY fallback восстановлен: сокет снова слушается")
+            else:
+                warn(f"Сокет {PARAM_SOCKET_PATH} не появился за 20 сек после "
+                     f"restart nginx — проверьте: journalctl -u nginx -n 20")
+        elif _nginx_active and r.returncode == 0:
+            success("REALITY fallback не прерывался: действующий сокет сохранён")
+    else:
+        # Fresh/dead-флоу (канон свежей установки, поведение сохранено):
+        # сносим временный сокет, nginx останавливаем — финальный старт
+        # nginx выполнит шаг установки ДО запуска xray.
+        sock_path.unlink(missing_ok=True)
+        _run(["systemctl", "stop", "nginx"], check=False, quiet=True)
 
 # =============================================================================
 #  ШАГ 12.1: NGINX SYSTEMD OVERRIDE

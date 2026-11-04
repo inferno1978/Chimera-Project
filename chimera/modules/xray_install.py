@@ -845,8 +845,13 @@ def generate_xray_config() -> None:
     # ПАТЧ: гарантируем создание группы/пользователя xray ДО chown.
     # Если установка Xray прервалась раньше — chown root:xray упадёт с "invalid group".
     _run(["groupadd", "-f", "xray"], check=False, quiet=True)
-    _run(["useradd", "-r", "-g", "xray", "-s", "/sbin/nologin", "xray"],
-         check=False, quiet=True)
+    # Реинсталл-идемпотентность (репорт 04.11): на живом сервере юзер
+    # xray уже существует — useradd без гарда падает exit 9
+    # («failed adding user 'xray', exit code: 9» в syslog).
+    _r_id = _run(["id", "xray"], check=False, quiet=True)
+    if _r_id.returncode != 0:
+        _run(["useradd", "-r", "-g", "xray", "-s", "/sbin/nologin", "xray"],
+             check=False, quiet=True)
     # ПАТЧ: директория должна быть доступна для записи root.
     # Если она принадлежит xray:xray с правами 750 — скрипт не может записать config.json.
     try:
@@ -1608,8 +1613,13 @@ def generate_xray_config_xhttp_reality() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # ПАТЧ (синхрон с generate_xray_config): группа/пользователь xray ДО chown.
     _run(["groupadd", "-f", "xray"], check=False, quiet=True)
-    _run(["useradd", "-r", "-g", "xray", "-s", "/sbin/nologin", "xray"],
-         check=False, quiet=True)
+    # Реинсталл-идемпотентность (репорт 04.11): на живом сервере юзер
+    # xray уже существует — useradd без гарда падает exit 9
+    # («failed adding user 'xray', exit code: 9» в syslog).
+    _r_id = _run(["id", "xray"], check=False, quiet=True)
+    if _r_id.returncode != 0:
+        _run(["useradd", "-r", "-g", "xray", "-s", "/sbin/nologin", "xray"],
+             check=False, quiet=True)
     try:
         os.chmod(str(CONFIG_DIR), 0o755)
         _run(["chown", "root:xray", str(CONFIG_DIR)], check=False, quiet=True)
