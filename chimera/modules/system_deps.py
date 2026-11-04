@@ -19,7 +19,7 @@ chimera/modules/system_deps.py
   • _CMD_TO_PKG  — карта «команда → (apt_pkg, dnf_pkg)»
   • _PKG_TO_CMDS — обратная карта «пакет → [команды]» (для сообщений)
 
-PKG_MGR — это глобал _core.py (см. _core.PKG_MGR: str = "").
+PKG_MGR — это глобал _core.py (см. _core.PKG_MGR: str = "apt").
 _init_pkg_mgr() мутирует его через setattr(core, "PKG_MGR", ...).
 Остальные функции читают через getattr(core, "PKG_MGR", "apt").
 
