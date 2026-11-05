@@ -194,6 +194,27 @@ class TestInstallWebServiceUfw(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
+        # ГЕРМЕТИЧНОСТЬ (env-класс, инцидент на live-ноде): port_registry
+        # .ufw_open_port/.ufw_close_port ходят в НАСТОЯЩИЙ ufw через
+        # subprocess — МИМО мока core._run. На живой chimera-ноде с
+        # активным ufw тест реально ОТКРЫВАЛ порт 9000 в прод-фаерволе
+        # (сайд-эффект) и падал: ufw_open_port → True → fallback-путь
+        # не выполнялся → allow_calls=0. Мокаем port_registry-слой:
+        # детерминизм на любом хосте + ровно задуманный контракт
+        # (fallback через core._run). Паттерн — шапка scripts/ci_suite.sh.
+        self._pr_patches = [
+            patch("chimera.modules.port_registry.ufw_open_port",
+                  return_value=(False, "мок: ufw недоступен (герметичный тест)")),
+            patch("chimera.modules.port_registry.ufw_close_port",
+                  return_value=(True, "мок: нет нашего правила")),
+            patch("chimera.modules.port_registry.port_register",
+                  return_value=(True, "мок")),
+            patch("chimera.modules.port_registry.port_unregister",
+                  return_value=(True, "мок")),
+        ]
+        for _p in self._pr_patches:
+            _p.start()
+            self.addCleanup(_p.stop)
 
     def _patch_web_config(self, host="127.0.0.1", port=8443):
         """Патчит WEB_CONFIG_FILE для чтения/записи во temp dir."""
@@ -280,6 +301,27 @@ class TestUninstallWebServiceUfw(unittest.TestCase):
 
     def setUp(self):
         _setup_core_in_sysmodules()
+        # ГЕРМЕТИЧНОСТЬ (env-класс, инцидент на live-ноде): port_registry
+        # .ufw_open_port/.ufw_close_port ходят в НАСТОЯЩИЙ ufw через
+        # subprocess — МИМО мока core._run. На живой chimera-ноде с
+        # активным ufw тест реально ОТКРЫВАЛ порт 9000 в прод-фаерволе
+        # (сайд-эффект) и падал: ufw_open_port → True → fallback-путь
+        # не выполнялся → allow_calls=0. Мокаем port_registry-слой:
+        # детерминизм на любом хосте + ровно задуманный контракт
+        # (fallback через core._run). Паттерн — шапка scripts/ci_suite.sh.
+        self._pr_patches = [
+            patch("chimera.modules.port_registry.ufw_open_port",
+                  return_value=(False, "мок: ufw недоступен (герметичный тест)")),
+            patch("chimera.modules.port_registry.ufw_close_port",
+                  return_value=(True, "мок: нет нашего правила")),
+            patch("chimera.modules.port_registry.port_register",
+                  return_value=(True, "мок")),
+            patch("chimera.modules.port_registry.port_unregister",
+                  return_value=(True, "мок")),
+        ]
+        for _p in self._pr_patches:
+            _p.start()
+            self.addCleanup(_p.stop)
 
     def test_uninstall_after_expose_true_closes_port(self):
         """uninstall после install с expose=True — ufw delete вызван."""

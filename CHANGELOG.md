@@ -23,6 +23,16 @@
 
 ---
 
+# Changelog new entry — fix(tests): Фаза-2 ремонты поверх feat(librechat) 804ccaa — герметизация 2 env-класс тестов (backup_registry + ufw-фаервол) и leak-домены апстрима (05 Nov 2026)
+
+## Контекст: два теста красные на HEAD→804ccaa в живых окружениях раннера (env-класс, см. шапку scripts/ci_suite.sh), один — с РЕАЛЬНЫМ сайд-эффектом на прод-фаерволе: (1) test_backup_registry.test_awg_standalone_empty_when_uninstalled — на live-ноде с реальным AWG /etc/amnezia/amneziawg/awg0.conf существует → get_backup_paths() ≠ [] → красный (одна из причин красного CI run 150; /etc/amnezia вне изолируемых префиксов _env_isolation); (2) test_rest_api_web_panel_firewall.test_port_change_closes_old_and_opens_new — port_registry.ufw_open_port/ufw_close_port ходят в НАСТОЯЩИЙ ufw через subprocess МИМО мока core._run: на живой ноде с активным ufw тест РЕАЛЬНО открывал порт 9000/tcp в прод-фаерволе (сайд-эффект подтверждён, правила chimera-web_panel 9000 v4/v6 немедленно удалены вручную) и падал (ufw_open_port → True → fallback не выполнялся → allow_calls=0); (3) новый код librechat.py ссылается на публичные домены апстрима librechat.ai / docker.io — вне DOMAIN_KNOWN → WARN в leak-диффе каждого коммита.
+
+## Решение: (1) герметизация awg-теста — «не установлен» моделируется патчем всех AWGS_* путей в tmp без создания файлов (паттерн соседних тестов файла); (2) герметизация ufw-тестов — мок port_registry-слой (ufw_open_port/ufw_close_port/port_register/port_unregister) в setUp TestInstallWebServiceUfw и TestUninstallWebServiceUfw: детерминизм на любом хосте (ufw есть/нет, root/не-root), проверяется ровно задуманный контракт (fallback через core._run), ноль касаний прод-фаервола; (3) librechat.ai + docker.io в DOMAIN_KNOWN leak_guard (публичные апстрим-домены, класс b4core.app) — дифф-аудит LEAK 0 / WARN 0. Плюс гигиена раннер-хоста: вычищены /tmp/test-certmon и /tmp/test-tgmon (root-owned leftovers ломали test_certmon_v2/test_tgmon_v2 у юзера ci-runner — PermissionError в run 150).
+
+## Тесты: test_backup_registry 33/33 (было 32/33) и test_rest_api_web_panel_firewall 11/11 (было 10/11) на живой ноде с реальным ufw/AWG, контроль прод-фаервола до/после: ufw 9000 before=0 after=0; test_tests_index 5/5; leak_guard полный аудит LEAK 0, дифф LEAK 0/WARN 0; py_compile затронутых файлов OK; смежные сьюты (test_rest_api, test_rest_api_auth, test_leak_guard, test_port_registry-контракт на чистых раннерах) — без регрессий. (05 Nov 2026)
+
+---
+
 # Changelog new entry — feat(librechat): LibreChat AI-чат панель — полный жизненный цикл в Chimera по образцу B4: docker-стек, download_manager, port_registry, TLS-фронт, версии/обновления, профили (05 Nov 2026)
 
 ## Контекст: модуль LibreChat был утрачен из дерева (удалён вместе с retired-набором) — переписан полностью заново по образцу модуля B4 (youtube_b4.py) и панели Triple/WPP: «зашёл в TUI Химеры — тыкнул кнопку — поставилось; тыкнул — удалилось», доступ и из локальной сети (SSH-туннель), и напрямую по домену с сертификатами, всё через download manager / port registry / panel_nginx_front, максимальная кастомизация (обновление/удаление/порты/профили).

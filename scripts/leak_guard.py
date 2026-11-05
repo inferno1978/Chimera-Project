@@ -280,6 +280,9 @@ DOMAIN_KNOWN = {
     "yandex.net", "vk.com", "whatsapp.com", "facebook.com",
     "instagram.com", "meduza.io", "2gis.com", "ip-api.com",
     "youtube.com", "b4core.app", "ghproxy.net", "quad9.net",
+    "youtube.com", "b4core.app", "librechat.ai", "docker.io",
+    "ghproxy.net",
+    "quad9.net",
     "adguard.com", "nginx.org", "adguard.net", "serverfault.com",
     "stackoverflow.com", "superuser.com", "wikipedia.org",
 }

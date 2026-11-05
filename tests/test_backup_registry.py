@@ -521,6 +521,22 @@ class TestProtocolGetBackupPaths(unittest.TestCase):
     # ── awg_standalone ───────────────────────────────────────────────────────
     def test_awg_standalone_empty_when_uninstalled(self):
         from chimera.modules import awg_standalone
+        from chimera.modules import awg_constants
+        # «Не установлен» = патч всех путей в tmp БЕЗ создания файлов.
+        # Без патча тест зависит от хоста: на live-ноде с реальным AWG
+        # /etc/amnezia/amneziawg/awg0.conf существует → env-класс падений
+        # (класс инцидента 2026-10-27; см. шапку scripts/ci_suite.sh и
+        # tests/_env_isolation.py — /etc/amnezia в изолируемых префиксах
+        # отсутствует). Герметичность = тот же эффект на любом раннере.
+        base = self._tmpdir / "awg-uninstalled"
+        self._patch_path_attr(awg_constants, "AWGS_SERVER_CONF",
+                              base / "awg0.conf")
+        self._patch_path_attr(awg_constants, "AWGS_INIT_FILE",
+                              base / "awgsetup_cfg.init")
+        self._patch_path_attr(awg_constants, "AWGS_STATE_FILE",
+                              base / "awg_standalone_state.json")
+        self._patch_path_attr(awg_constants, "AWGS_SYSTEMD_CASCADE",
+                              base / "awg-cascade-routing.service")
         self.assertEqual(awg_standalone.get_backup_paths(), [])
 
     def test_awg_standalone_nonempty_when_installed(self):
