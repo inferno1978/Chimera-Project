@@ -118,6 +118,14 @@ case "$MODE" in
     echo
     echo "ГЕЙТ: ok=$mods_ok fail=$mods_bad timeout=$mods_to"
     _summary
+    # Инцидент 05.11: трейсбеки падений уходили ТОЛЬКО в $GITHUB_STEP_SUMMARY,
+    # а этот Forgejo job summaries не поддерживает («will be discarded») —
+    # гейт красный 4 сьюта, причин в логе нет, диагностика вслепую.
+    # Теперь детали падений всегда видны в самом логе рана.
+    if [ -s "$FAILDETAIL" ]; then
+      header "ДЕТАЛИ ПАДЕНИЙ (tail-25 каждого упавшего модуля)"
+      cat "$FAILDETAIL"
+    fi
     ;;
   full)
     echo "FULL REPORT: python = $($PY --version 2>&1) (не блокирующий)"
@@ -127,6 +135,10 @@ case "$MODE" in
     echo "FULL: ok=$mods_ok fail=$mods_bad timeout=$mods_to"
     echo "FULL-режим отчётный: красные модули выше — кандидаты в триаж (tests/ci_gate.txt их не содержит)."
     _summary
+    if [ -s "$FAILDETAIL" ]; then
+      header "ДЕТАЛИ ПАДЕНИЙ (tail-25 каждого упавшего модуля)"
+      cat "$FAILDETAIL"
+    fi
     ;;
   *)
     echo "usage: $0 {static <py312> | gate <py> | full <py>}" >&2

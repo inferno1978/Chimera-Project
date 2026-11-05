@@ -141,6 +141,20 @@ def _run_script_as_cron(script_path: Path, log_path: Path | None = None) -> subp
         ):
             content = content.replace(real_log, str(log_path))
 
+    # Фаза-3 герметизация: cascade-wrapper РЕАЛЬНО звал
+    # awgs_cascade_update_ru_zone() → fetch_package(ru.zone): 5 зеркал ×
+    # 15s таймаут + проверка /root/ru.zone + запись в /etc/amneziawg — без
+    # env-изоляции (свежий python-процесс). На живой ноде с медленным/
+    # виснущим egress wrapper не укладывался в 30s subprocess-таймаут
+    # (TimeoutExpired, CI runs 152/154 attempt-1 + детерминированно на
+    # раннер-хосте). Регрессия v5.1, которую ловит тест, — это IMPORT
+    # (export PYTHONPATH + sys.path.insert), а не сетевой вызов: строка
+    # импорта не трогается, подменяется только вызов функции.
+    content = content.replace(
+        "awgs_cascade_update_ru_zone()",
+        "print('cron-wrapper-import-ok')",
+    )
+
     # Пишем подмененный скрипт во tmp (рядом с оригиналом, чтобы path был валиден)
     test_script = script_path.parent / (script_path.name + ".test_run.sh")
     test_script.write_text(content)

@@ -77,6 +77,25 @@ def _mk_node(host="ee.example.com", via=""):
     }
 
 
+def _relaycheck_mkstemp(testcase) -> tuple:
+    """Герметичный return-value для мока tempfile.mkstemp в full-path тестах.
+
+    Раньше все классы мокали mkstemp фиксированным /tmp/relaycheck_test.json,
+    но _TempXrayClient.__enter__ РЕАЛЬНО открывает <cfg_path>.err
+    (open «w+b» — не замокан) в этом же пути. На живой ноде root-owned
+    остаток от ручного прогона тестов под root ломал open() под
+    ci-runner (PermissionError → «живые» ассерты check_via_node_full_path
+    падали; env-класс Фазы-3, CI runs 152/154). Путь во временном
+    каталоге теста даёт детерминизм на любом хосте и любом юзере.
+    """
+    td = getattr(testcase, "_relaycheck_tmpdir", None)
+    if td is None:
+        td = tempfile.TemporaryDirectory(prefix="relaycheck_test_")
+        testcase._relaycheck_tmpdir = td
+        testcase.addCleanup(td.cleanup)
+    return (99, str(Path(td.name) / "relaycheck_test.json"))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  validate_hops
 # ══════════════════════════════════════════════════════════════════════════════
@@ -632,7 +651,7 @@ class TestFullPathSpeed(unittest.TestCase):
              patch.object(cr.subprocess, "run", side_effect=fake_run), \
              patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
              patch.object(cr.tempfile, "mkstemp",
-                          return_value=(99, "/tmp/relaycheck_test.json")), \
+                          return_value=_relaycheck_mkstemp(self)), \
              patch("os.write", lambda *a, **kw: None), \
              patch("os.close", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, **kw: None):
@@ -680,7 +699,7 @@ class TestFullPathSpeed(unittest.TestCase):
              patch.object(cr.subprocess, "run", side_effect=fake_run), \
              patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
              patch.object(cr.tempfile, "mkstemp",
-                          return_value=(99, "/tmp/relaycheck_test.json")), \
+                          return_value=_relaycheck_mkstemp(self)), \
              patch("os.write", lambda *a, **kw: None), \
              patch("os.close", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, **kw: None):
@@ -925,7 +944,7 @@ class TestFullPathV2(unittest.TestCase):
              patch.object(cr.subprocess, "run", side_effect=fake_run), \
              patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
              patch.object(cr.tempfile, "mkstemp",
-                          return_value=(99, "/tmp/relaycheck_test.json")), \
+                          return_value=_relaycheck_mkstemp(self)), \
              patch("os.write", lambda *a, **kw: None), \
              patch("os.close", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, **kw: None):
@@ -1121,7 +1140,7 @@ class TestNodeFullPathDirect(unittest.TestCase):
              patch.object(cr.subprocess, "run", side_effect=fake_run), \
              patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
              patch.object(cr.tempfile, "mkstemp",
-                          return_value=(99, "/tmp/relaycheck_test.json")), \
+                          return_value=_relaycheck_mkstemp(self)), \
              patch("os.write", lambda *a, **kw: None), \
              patch("os.close", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, **kw: None):
@@ -1168,7 +1187,7 @@ class TestNodeFullPathDirect(unittest.TestCase):
              patch.object(cr.subprocess, "run", side_effect=fake_run), \
              patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
              patch.object(cr.tempfile, "mkstemp",
-                          return_value=(99, "/tmp/relaycheck_test.json")), \
+                          return_value=_relaycheck_mkstemp(self)), \
              patch("os.write", lambda *a, **kw: None), \
              patch("os.close", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, **kw: None):
@@ -1193,7 +1212,7 @@ class TestNodeFullPathDirect(unittest.TestCase):
                           side_effect=fake_run_no_ipify), \
              patch.object(cr, "_resolve_probe_host_ipv4", lambda: None), \
              patch.object(cr.tempfile, "mkstemp",
-                          return_value=(99, "/tmp/relaycheck_test.json")), \
+                          return_value=_relaycheck_mkstemp(self)), \
              patch("os.write", lambda *a, **kw: None), \
              patch("os.close", lambda *a, **kw: None), \
              patch.object(Path, "unlink", lambda self, **kw: None):

@@ -47,6 +47,24 @@ class TestPostInstallLayout(unittest.TestCase):
         _setup_core()
         self._tmpdir = Path(tempfile.mkdtemp())
         self._cargo_cwds = []
+        # Фаза-3 герметизация: модуль распаковывает tarball в ФИКСИРОВАННЫЙ
+        # /tmp/csqtt_build (shutil.rmtree(ignore_errors) + mkdir(exist_ok)).
+        # На живой ноде root-owned остаток от ручного прогона под root не
+        # удалялся в sticky /tmp, mkdir молча проходил, а extractall падал
+        # с PermissionError у ci-runner (CI runs 152/154). Редиректим путь
+        # модуля в tmpdir теста: детерминизм на любом хосте и любом юзере.
+        from chimera.modules import csqtt_packages as _cp
+        self._cp = _cp
+        _real_path = _cp.Path
+
+        def _path_shim(p, *a, **kw):
+            if str(p) == "/tmp/csqtt_build":
+                return self._tmpdir / "csqtt_build"
+            return _real_path(p, *a, **kw)
+
+        self._path_patch = patch.object(_cp, "Path", _path_shim)
+        self._path_patch.start()
+        self.addCleanup(self._path_patch.stop)
 
     def tearDown(self):
         import shutil

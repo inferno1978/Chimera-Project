@@ -35,6 +35,47 @@ from chimera.modules.download_manager import (
 )
 
 
+def _hermetic_download_tmp(testcase) -> None:
+    """Фаза-3 герметизация: fetch_package качает во ФИКСИРОВАННЫЙ
+    /tmp/_download_mgr_<filename> (download_manager.py: tmp_path =
+    Path("/tmp") / f"_download_mgr_{filename}"). На живой ноде
+    root-owned остаток от ручного прогона тестов под root ломал
+    open('wb') под ci-runner (PermissionError → «зеркало недоступно»,
+    CI runs 152/154). Редиректим Path("/tmp") модуля в tmpdir теста —
+    tmp-файлы загрузок больше не шарятся между юзерами/ранами;
+    ссылки на tmp-файл в тестах строятся от Path(self.tmpdir).
+
+    Реализация — подкласс pathlib.Path (не функция-обёртка): наследует
+    stat/exists/unlink/«/» и isinstance-совместим, поэтому моки вида
+    patch('...download_manager.Path.unlink') продолжают работать.
+    Редирект «/tmp» делаем и в __new__, и в __init__: парсинг аргументов
+    pathlib переезжал между версиями (3.10 — в __new__, 3.12+ — в __init__)."""
+    from chimera.modules import download_manager as _dm
+    from pathlib import Path as _RealPath
+
+    @staticmethod
+    def _redirect(args):
+        if args and str(args[0]) == "/tmp":
+            return (testcase.tmpdir,) + args[1:]
+        return args
+
+    class _TmpRedirectPath(type(_RealPath())):
+        def __new__(cls, *args, **kw):
+            return super().__new__(cls, *_redirect(args), **kw)
+
+        def __init__(self, *args, **kw):
+            try:
+                super().__init__(*_redirect(args), **kw)
+            except TypeError:
+                # py3.10: PurePath.__init__ не принимает аргументы
+                # (путь уже установлен в __new__).
+                super().__init__()
+
+    _p = patch.object(_dm, "Path", _TmpRedirectPath)
+    _p.start()
+    testcase.addCleanup(_p.stop)
+
+
 # ============================================================================
 #  ТЕСТЫ PackageSpec — КРИТИЧЕСКИЙ ИНВАРИАНТ
 # ============================================================================
@@ -123,6 +164,7 @@ class TestFetchPackageManualUpload(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        _hermetic_download_tmp(self)
         self.manual_dir = Path(self.tmpdir) / "manual"
         self.manual_dir.mkdir()
         self.install_dir = Path(self.tmpdir) / "install"
@@ -176,7 +218,10 @@ class TestFetchPackageManualUpload(unittest.TestCase):
         mock_resp.__exit__ = lambda self, *a: None
 
         # tmp_path будет создан через open(tmp_path, 'wb')
-        tmp_path = Path("/tmp") / "_download_mgr_test.dat"
+        # Фаза-3 герметизация: фиксированный /tmp/_download_mgr_test.dat ломался
+        # о root-owned остаток от ручного прогона под root на живой ноде
+        # (PermissionError у ci-runner, CI runs 152/154) — путь в tmpdir теста.
+        tmp_path = Path(self.tmpdir) / "_download_mgr_test.dat"
         with patch("chimera.modules.download_manager.urllib.request.urlopen",
                    return_value=mock_resp), \
              patch("chimera.modules.download_manager._default_copy_to_dests") as mock_copy, \
@@ -202,6 +247,7 @@ class TestFetchPackageNetworkDownload(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        _hermetic_download_tmp(self)
         self.manual_dir = Path(self.tmpdir) / "manual"
         self.manual_dir.mkdir()
         self.install_dir = Path(self.tmpdir) / "install"
@@ -240,7 +286,10 @@ class TestFetchPackageNetworkDownload(unittest.TestCase):
                 raise URLError("connection refused")
             return mock_resp_ok
 
-        tmp_path = Path("/tmp") / "_download_mgr_test.dat"
+        # Фаза-3 герметизация: фиксированный /tmp/_download_mgr_test.dat ломался
+        # о root-owned остаток от ручного прогона под root на живой ноде
+        # (PermissionError у ci-runner, CI runs 152/154) — путь в tmpdir теста.
+        tmp_path = Path(self.tmpdir) / "_download_mgr_test.dat"
 
         # Записываем файл в tmp_path чтобы stat() прошёл
         def fake_open(path, *a, **kw):
@@ -324,6 +373,7 @@ class TestFetchPackageRegression21d7baf(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        _hermetic_download_tmp(self)
         self.manual_dir = Path(self.tmpdir) / "manual"
         self.manual_dir.mkdir()
         self.install_dir = Path(self.tmpdir) / "install"
@@ -365,7 +415,10 @@ class TestFetchPackageRegression21d7baf(unittest.TestCase):
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = lambda self, *a: None
 
-        tmp_path = Path("/tmp") / "_download_mgr_test.dat"
+        # Фаза-3 герметизация: фиксированный /tmp/_download_mgr_test.dat ломался
+        # о root-owned остаток от ручного прогона под root на живой ноде
+        # (PermissionError у ci-runner, CI runs 152/154) — путь в tmpdir теста.
+        tmp_path = Path(self.tmpdir) / "_download_mgr_test.dat"
 
         def fake_open(path, *a, **kw):
             if "wb" in str(a) or "wb" in str(kw.get("mode", "")):
@@ -420,6 +473,7 @@ class TestPostInstallCallback(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        _hermetic_download_tmp(self)
         self.manual_dir = Path(self.tmpdir) / "manual"
         self.manual_dir.mkdir()
         self.install_dir = Path(self.tmpdir) / "install"
@@ -472,7 +526,10 @@ class TestPostInstallCallback(unittest.TestCase):
         mock_resp.__enter__ = lambda self: self
         mock_resp.__exit__ = lambda self, *a: None
 
-        tmp_path = Path("/tmp") / "_download_mgr_test.dat"
+        # Фаза-3 герметизация: фиксированный /tmp/_download_mgr_test.dat ломался
+        # о root-owned остаток от ручного прогона под root на живой ноде
+        # (PermissionError у ci-runner, CI runs 152/154) — путь в tmpdir теста.
+        tmp_path = Path(self.tmpdir) / "_download_mgr_test.dat"
 
         def fake_open(path, *a, **kw):
             if "wb" in str(a) or "wb" in str(kw.get("mode", "")):
@@ -537,7 +594,10 @@ class TestPostInstallCallback(unittest.TestCase):
             resp.__exit__ = lambda self, *a: None
             return resp
 
-        tmp_path = Path("/tmp") / "_download_mgr_test.dat"
+        # Фаза-3 герметизация: фиксированный /tmp/_download_mgr_test.dat ломался
+        # о root-owned остаток от ручного прогона под root на живой ноде
+        # (PermissionError у ci-runner, CI runs 152/154) — путь в tmpdir теста.
+        tmp_path = Path(self.tmpdir) / "_download_mgr_test.dat"
 
         def fake_open(path, *a, **kw):
             if "wb" in str(a) or "wb" in str(kw.get("mode", "")):
@@ -570,11 +630,13 @@ class TestFetchPackageMinSizeRejection(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        _hermetic_download_tmp(self)
         self.manual_dir = Path(self.tmpdir) / "manual"
         self.manual_dir.mkdir()
         self.install_dir = Path(self.tmpdir) / "install"
         self.install_dir.mkdir()
-        self.tmp_path = Path("/tmp") / "_download_mgr_test_minsize.dat"
+        # Фаза-3 герметизация: путь в tmpdir теста (см. _download_mgr_test.dat)
+        self.tmp_path = Path(self.tmpdir) / "_download_mgr_test_minsize.dat"
         self.tmp_path.unlink(missing_ok=True)
 
     def tearDown(self):
@@ -913,13 +975,15 @@ class TestFetchPackageChecksumVerification(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        _hermetic_download_tmp(self)
         self.manual_dir = Path(self.tmpdir) / "manual"
         self.manual_dir.mkdir()
         self.install_dir = Path(self.tmpdir) / "install"
         self.install_dir.mkdir()
         # Уникальное имя tmp-файла для каждого теста, чтобы не было конфликтов
         self.tmp_filename = f"_test_checksum_{id(self)}.dat"
-        self.tmp_path = Path("/tmp") / f"_download_mgr_{self.tmp_filename}"
+        # Фаза-3 герметизация: путь в tmpdir теста (см. _hermetic_download_tmp)
+        self.tmp_path = Path(self.tmpdir) / f"_download_mgr_{self.tmp_filename}"
         self.tmp_path.unlink(missing_ok=True)
 
     def tearDown(self):
@@ -1378,6 +1442,7 @@ class TestCanonicalFileNameInInstallDests(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        _hermetic_download_tmp(self)
         self.manual_dir = Path(self.tmpdir) / "manual"
         self.manual_dir.mkdir()
         self.install_dir = Path(self.tmpdir) / "install"
