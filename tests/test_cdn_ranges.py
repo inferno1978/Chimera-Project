@@ -138,7 +138,7 @@ class TestCloudflareDnsResolvers(unittest.TestCase):
     провайдер cloudflare_dns.
 
     НЕ входят в cloudflare.com/ips (только proxy/edge-сети) — но это та же
-    инфраструктура AS13335. Живой кейс vds13195: 1.1.1.1 банился ДВАЖДЫ
+    инфраструктура AS13335. Живой кейс entry-ноды: 1.1.1.1 банился ДВАЖДЫ
     (2026-10-22 и 2026-10-27, 10–11 TLS-ошибок — health-пробы CF, не атака).
     Бан 1.1.1.1 ничего не защищает, а при использовании его как DNS-апстрима
     ноды режет DNS-ответы (ufw deny from 1.1.1.1) — резолв отваливается.
@@ -185,7 +185,7 @@ class TestCloudflareDnsResolvers(unittest.TestCase):
         self.assertIn("Cloudflare DNS", label)
 
     def test_fw_ban_refuses_resolver(self):
-        """Живой кейс vds13195: _fw_ban(1.1.1.1) обязан отказать ДО фаервола
+        """Живой кейс entry-ноды: _fw_ban(1.1.1.1) обязан отказать ДО фаервола
         (раньше бан ставился — 2026-10-22/27)."""
         _setup_core()
         from chimera.modules import autoban

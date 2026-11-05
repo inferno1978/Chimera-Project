@@ -6,7 +6,7 @@ chimera/modules/v6_adaptive.py
 v6-adaptive watcher: авто-переключение dns.queryStrategy / freedom
 domainStrategy по ЖИВОЙ IPv6-связности ноды (unattended, из cron).
 
-КЕЙС (03.11.2026, 138.124.100.55 / Intezio): хостер выдаёт глобальный
+КЕЙС (03.11.2026, 203.0.113.55 / хостер): хостер выдаёт глобальный
 IPv6-адрес + шлюз + default-маршрут (rDNS на оба семейства), но сам /64
 не доводится до сегмента — egress-пакеты уходят с eth0 и молча погибают
 за шлюзом, ingress 100% loss. Preflight установки честно ставит

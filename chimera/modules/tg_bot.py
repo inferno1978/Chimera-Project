@@ -1045,7 +1045,7 @@ def _format_status_line(d, is_first=False):
     ip = d.get("ip", "")
     ip_part = f" — <code>{{ip}}</code>" if ip else ""
     # Дедуп hostname: имя пира из конфига часто уже содержит его в
-    # скобках («Server 2 (vds13195)») — не дублируем «(vds13195)».
+    # скобках («Server 2 (entry-нода)») — не дублируем «(entry-нода)».
     host_part = "" if f"({{host}})" in name else f" ({{host}})"
     xray = d.get("xray", "?")
     xray_emoji = "🟢" if xray == "active" else "🔴" if xray in ("inactive", "failed") else "❓"

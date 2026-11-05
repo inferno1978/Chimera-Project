@@ -41,17 +41,17 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from chimera.modules import users_watchdog as uw
 
-UUID1 = "cd166266-f329-430e-9714-7c69b35de8d9"
+UUID1 = "6071d0fe-9dbe-4115-9d49-d10ab0c913ae"
 UUID2 = "1fa9bc73-030c-440a-9d6b-014ba0861f07"
 UUID3 = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 USERS = [
-    {"uuid": UUID1, "email": "user@chimeraprodcdn.online", "name": "user"},
+    {"uuid": UUID1, "email": "user@example.net", "name": "user"},
     {"uuid": UUID2, "email": "second@example.com", "name": "second"},
 ]
 
 GOOD_CLIENTS = [
-    {"id": UUID1, "email": "user@chimeraprodcdn.online", "flow": "xtls-rprx-vision"},
+    {"id": UUID1, "email": "user@example.net", "flow": "xtls-rprx-vision"},
     {"id": UUID2, "email": "second@example.com", "flow": "xtls-rprx-vision"},
 ]
 
@@ -88,7 +88,7 @@ class TestSanity(unittest.TestCase):
         self.assertFalse(uw._uuid_valid("a@x"))
         self.assertFalse(uw._uuid_valid(""))
         self.assertFalse(uw._uuid_valid(None))
-        self.assertFalse(uw._uuid_valid("cd166266f329430e97147c69b35de8d9"))  # без дефисов
+        self.assertFalse(uw._uuid_valid("6071d0fe9dbe41159d49d10ab0c913ae"))  # без дефисов
         self.assertFalse(uw._uuid_valid("zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"))
 
     def test_clients_sane(self):
@@ -176,7 +176,7 @@ class TestClassification(unittest.TestCase):
                                      "flow": "xtls-rprx-vision"}])
         exp = uw._expected_from_users(USERS, inb, inb["settings"]["clients"])
         self.assertEqual([c["id"] for c in exp], [UUID1, UUID2])
-        self.assertEqual(exp[0]["email"], "user@chimeraprodcdn.online")
+        self.assertEqual(exp[0]["email"], "user@example.net")
         self.assertTrue(all(c.get("flow") == "xtls-rprx-vision" for c in exp))
 
     def test_expected_from_users_xhttp_no_flow(self):
@@ -199,7 +199,7 @@ class TestClassification(unittest.TestCase):
         exp = uw._expected_from_users(USERS, inb, cur)
         by_id = {c["id"]: c for c in exp}
         self.assertEqual(by_id[UUID1].get("level"), 8)
-        self.assertEqual(by_id[UUID1]["email"], "user@chimeraprodcdn.online")
+        self.assertEqual(by_id[UUID1]["email"], "user@example.net")
 
     def test_flow_computed_when_no_live_client(self):
         inb = _cfg_inbound(clients=[])

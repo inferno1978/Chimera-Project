@@ -127,7 +127,7 @@ class TestSubprocessInputAudit(unittest.TestCase):
 
 
 class TestNginxFrontRegistryFix(unittest.TestCase):
-    """Инцидент 01.11 (vds13195, live): в port_registry НЕ БЫЛО НИ ОДНОГО
+    """Инцидент 01.11 (entry-нода, live): в port_registry НЕ БЫЛО НИ ОДНОГО
     nginx-front порта (b4 9743 / triple 9761 / wpp 9745 / subscription 6444
     собственного слушателя («system»-конфликт), тихо возвращал False, и
     возврат никто не проверял: реестр врал годами, «не вводит в заблуждение»

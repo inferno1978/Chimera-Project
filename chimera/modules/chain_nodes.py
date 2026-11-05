@@ -133,7 +133,7 @@ def _build_chain_routing_rules(outbound_target: str,
       balancer         — True если outbound_target это balancerTag, не outboundTag.
       v4_pin           — v4-режим закрепления (state['chain_pinned_v4only']):
                         нода закреплена за exit'ом со сломанным v6-egress
-                        (живой кейс окт.2026 №10: NL/qwins — маршрут v6-сегмента
+                        (живой кейс окт.2026 №10: exit-нода — маршрут v6-сегмента
                         потерян хостером, v4-egress жив). Добавляет два правила
                         ПЕРЕД catch-all:
                           (а) известные DoH/DoT-резолверы → direct: DNS-канал
@@ -144,7 +144,7 @@ def _build_chain_routing_rules(outbound_target: str,
                               сайтах при живом v4);
                           (б) ip ::/0 → BLOCK: v6-назначения отклоняются
                               мгновенно (RST за мс вместо 15-120 с чёрной дыры
-                              qwins) — клиенты с happy-eyeballs откатываются
+                              хостера) — клиенты с happy-eyeballs откатываются
                               на v4, IP-трафик полностью жив.
                         Честное ограничение: подключения, приходящие ДОМЕНОМ
                         (TUN-клиенты сниффят SNI и шлют домены — ~78% TLS

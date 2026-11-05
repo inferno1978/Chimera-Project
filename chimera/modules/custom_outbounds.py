@@ -634,13 +634,13 @@ def _parse_ss(link: str) -> dict:
         body, qs = body.split("?", 1)
         q = {k: (v[0] if v else "") for k, v in parse_qs(qs).items()}
 
-    method = password = ""
+    method = pw = ""
     if "@" in body:
         userinfo, hostport = body.rsplit("@", 1)
         # SIP002: plain-userinfo ВСЕГДА содержит ":" (method:password),
         # base64url-userinfo НИКОГДА (алфавит b64) — различаем по нему.
         if ":" in userinfo:
-            method, password = userinfo.split(":", 1)
+            method, pw = userinfo.split(":", 1)
         else:
             try:
                 dec = _b64_decode(userinfo).decode("utf-8", "replace")
@@ -648,7 +648,7 @@ def _parse_ss(link: str) -> dict:
                 raise ValueError(f"ss:// — {ex}")
             if ":" not in dec:
                 raise ValueError("ss:// — нет метода:пароль")
-            method, password = dec.split(":", 1)
+            method, pw = dec.split(":", 1)
     else:
         # legacy: всё тело — base64(method:password@host:port)
         try:
@@ -659,13 +659,13 @@ def _parse_ss(link: str) -> dict:
             raise ValueError("ss:// — legacy-base64 без @host:port")
         userinfo, hostport = dec.rsplit("@", 1)
         if ":" in userinfo:
-            method, password = userinfo.split(":", 1)
+            method, pw = userinfo.split(":", 1)
 
     host, port = _split_hostport(hostport)
     if not method:
         raise ValueError("ss:// — не удалось разобрать метод шифрования")
     settings = {"servers": [{"address": host, "port": port,
-                             "method": method, "password": password}]}
+                             "method": method, "password": pw}]}
     w = []
     if q.get("plugin"):
         w.append(f"SIP003-плагин '{q['plugin']}' не поддерживается Xray — "

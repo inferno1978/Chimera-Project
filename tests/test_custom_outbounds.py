@@ -238,9 +238,9 @@ class TestParseVless(unittest.TestCase):
 
     def test_ipv6_brackets(self):
         parts = co._parse_vless(
-            "vless://3b7c1f44-8f66-4b45-9d5a-1e2f3a4b5c6d@[2a10:ab80::5]:443?type=tcp")
+            "vless://3b7c1f44-8f66-4b45-9d5a-1e2f3a4b5c6d@[2001:db8:ab80::5]:443?type=tcp")
         self.assertEqual(parts["settings"]["vnext"][0]["address"],
-                         "2a10:ab80::5")
+                         "2001:db8:ab80::5")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -356,9 +356,9 @@ class TestParseSs(unittest.TestCase):
 
     def test_ipv6_host(self):
         parts = co._parse_ss(
-            "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw==@[2a10::5]:8388")
+            "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw==@[2001:db8::5]:8388")
         srv = parts["settings"]["servers"][0]
-        self.assertEqual(srv["address"], "2a10::5")
+        self.assertEqual(srv["address"], "2001:db8::5")
 
     def test_no_method_raises(self):
         with self.assertRaises(ValueError):
@@ -414,7 +414,7 @@ class TestDispatchAndValidators(unittest.TestCase):
     def test_validators(self):
         self.assertIsNone(co._co_v_host("example.com"))
         self.assertIsNone(co._co_v_host("1.2.3.4"))
-        self.assertIsNone(co._co_v_host("[2a10::5]".strip("[").strip("]")))
+        self.assertIsNone(co._co_v_host("[2001:db8::5]".strip("[").strip("]")))
         self.assertIsNotNone(co._co_v_host("bad host!"))
         self.assertIsNone(co._co_v_port("443"))
         self.assertIsNotNone(co._co_v_port("0"))

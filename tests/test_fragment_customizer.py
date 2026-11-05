@@ -46,11 +46,11 @@ def _setup_core_in_sysmodules():
 
 _STATE = {
     "protocol_mode": "reality",
-    "domain": "chimeraprodcdn.online",
+    "domain": "example.com",
     "server_port": 443,
-    "uuid": "cd166266-f329-430e-9714-7c69b35de8d9",
-    "public_key": "ppbbZGg9A0SvIpP8kM9Ctdv87w81YaBgjpCBxW_vnAg",
-    "short_id": "a2ea5d2b57c10ae8",
+    "uuid": "6071d0fe-9dbe-4115-9d49-d10ab0c913ae",
+    "public_key": "ChldKPMa2TSIZCDsGBbmPUKjMVAtDySTEEbd1DU3HRw",
+    "short_id": "ad477cbc87ee8fde",
     "fingerprint": "firefox",
     "xtls_flow": "xtls-rprx-vision",
 }

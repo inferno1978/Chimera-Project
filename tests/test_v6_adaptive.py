@@ -146,8 +146,8 @@ class TestProbeV6(unittest.TestCase):
 
     def test_alive_first_target(self):
         run = _fake_runner([
-            (("ip", "-6", "addr"), _R(0, "inet6 2a10:ab80:103:5::2/64 scope global")),
-            (("ip", "-6", "route"), _R(0, "default via 2a10:ab80:103:5::1")),
+            (("ip", "-6", "addr"), _R(0, "inet6 2001:db8:ab80:103:5::2/64 scope global")),
+            (("ip", "-6", "route"), _R(0, "default via 2001:db8:ab80:103:5::1")),
             (("ping",), _R(0, "")),
         ])
         alive, detail = v6a._probe_v6(runner=run)
@@ -159,7 +159,7 @@ class TestProbeV6(unittest.TestCase):
         def run(cmd, **kw):
             t = tuple(cmd)
             if t[0] == "ip":
-                return _R(0, "inet6 2a10::1/64\ndefault via 2a10::1")
+                return _R(0, "inet6 2001:db8::1/64\ndefault via 2001:db8::1")
             seq["n"] += 1
             return _R(0 if seq["n"] >= 2 else 1, "")
         alive, _ = v6a._probe_v6(runner=run)
@@ -167,8 +167,8 @@ class TestProbeV6(unittest.TestCase):
 
     def test_dead_egress(self):
         run = _fake_runner([
-            (("ip", "-6", "addr"), _R(0, "inet6 2a10:ab80:103:5::2/64 scope global")),
-            (("ip", "-6", "route"), _R(0, "default via 2a10:ab80:103:5::1")),
+            (("ip", "-6", "addr"), _R(0, "inet6 2001:db8:ab80:103:5::2/64 scope global")),
+            (("ip", "-6", "route"), _R(0, "default via 2001:db8:ab80:103:5::1")),
             (("ping",), _R(1, "")),
         ])
         alive, detail = v6a._probe_v6(runner=run)
@@ -183,8 +183,8 @@ class TestProbeV6(unittest.TestCase):
 
     def test_no_default_route(self):
         run = _fake_runner([
-            (("ip", "-6", "addr"), _R(0, "inet6 2a10::2/64 scope global")),
-            (("ip", "-6", "route"), _R(0, "2a10::/64 dev eth0")),
+            (("ip", "-6", "addr"), _R(0, "inet6 2001:db8::2/64 scope global")),
+            (("ip", "-6", "route"), _R(0, "2001:db8::/64 dev eth0")),
         ])
         alive, detail = v6a._probe_v6(runner=run)
         self.assertFalse(alive)
@@ -248,7 +248,7 @@ class TestRunOnce(_Isolated):
         self.assertIn("UseIPv4", self.mock_tg.call_args.args[0])
 
     def test_switch_up_when_v6_alive(self):
-        # КЕЙС Intezio: v6 ожил после починки хостера → UseIPv4 → UseIPv6v4
+        # КЕЙС хостера: v6 ожил после починки хостера → UseIPv4 → UseIPv6v4
         self._set_state({"strategy": ""})
         self._set_cfg(_cfg_xray(qs="UseIPv4", ds="UseIPv4"))
         rep, _ = self._run(probe=(True, "жив"))

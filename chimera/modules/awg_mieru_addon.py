@@ -31,7 +31,7 @@ UDP-сокет на время ассоциации → awg0 видит «пир
 работает. NAT-маппинг живёт, пока жива mieru-сессия; PersistentKeepalive=25
 в клиентском конфиге держит её тонкой.
 
-Живая валидация (02.11.2026, vds13195): mita 3.38.0 принимает UDP ASSOCIATE
+Живая валидация (02.11.2026, entry-нода): mita 3.38.0 принимает UDP ASSOCIATE
 и релеит датаграммы вплоть до 127.0.0.1 и до собственного публичного IP
 (порт awg0) — TCP CONNECT и UDP echo подтверждены end-to-end. Схема
 клиентского mieru-профиля (profileName / user{name,password} /
@@ -80,7 +80,7 @@ from pathlib import Path
 # Прямой запуск файла (sudo python3 awg_mieru_addon.py --status): sys.path[0]
 # указывает на chimera/modules/, пакета chimera рядом нет → ленивые импорты
 # chimera.modules.* падали («No module named 'chimera'», фикс после смоука на
-# vds13195 02.11). Кладём корень репо в sys.path. При штатном импорте как
+# entry-нода 02.11). Кладём корень репо в sys.path. При штатном импорте как
 # chimera.modules.awg_mieru_addon (TUI через main.py) __package__ задан — no-op.
 if not __package__:
     _REPO_ROOT = str(Path(__file__).resolve().parents[2])
@@ -486,13 +486,13 @@ def mita_user_add(username: str) -> str | None:
     for u in users:
         if u.get("username") == username:
             return u.get("password", "")
-    password = m.proto_gen_password()
-    users.append({"username": username, "password": password})
+    pw = m.proto_gen_password()
+    users.append({"username": username, "password": pw})
     state["users"] = users
     m.proto_save_state(m._MODULE_STATE, state)
     if not _mita_regenerate(m, state):
         return None
-    return password
+    return pw
 
 
 def mita_user_remove(username: str) -> bool:
@@ -529,7 +529,7 @@ def _build_mieru_profile(profile_name: str, username: str, password: str,
                          entry_addr: str, mita_port: int,
                          socks_port: int) -> dict:
     """Клиентский конфиг mieru. Схема сверена живым оракулом `mieru replace
-    config` (vds13195, mieru 3.38.0, 02.11.2026) и end-to-end PoC TCP+UDP."""
+    config` (entry-нода, mieru 3.38.0, 02.11.2026) и end-to-end PoC TCP+UDP."""
     return {
         "activeProfile": profile_name,
         "profiles": [{
@@ -1209,7 +1209,7 @@ def show_status() -> None:
         c_red(pre["error"])
     _box_row()
     _box_row(f"  {DIM}Сервер не требует изменений: mita уже релеит UDP до awg0.{NC}")
-    _box_row(f"  {DIM}Живая валидация UDP ASSOCIATE → awg0-порт: 02.11.2026, vds13195.{NC}")
+    _box_row(f"  {DIM}Живая валидация UDP ASSOCIATE → awg0-порт: 02.11.2026, entry-нода.{NC}")
     _box_bottom()
 
 

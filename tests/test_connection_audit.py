@@ -491,14 +491,14 @@ class TestClientIpOnlyFromPrefix(unittest.TestCase):
 
     REAL_V4 = ("2026/10/27 03:53:45.890235 from 192.0.2.20:52359 accepted "
                "tcp:cloudflare-dns.com:443 [inbound-vless -> chain-exit-3] "
-               "email: user@chimeraprodcdn.online")
+               "email: user@example.net")
     REAL_V6 = ("2026/10/27 14:07:32.429924 from "
                "[2001:db8:5a7:6214:2d82:41b3:6872:4bb9]:63698 accepted "
                "tcp:149.154.167.41:80 [inbound-vless -> chain-exit-2] "
-               "email: user@chimeraprodcdn.online")
+               "email: user@example.net")
     STRAY_DEST = ("2026/10/27 14:07:33.000000 from [2001:db8:5a7::1]:63699 "
                   "accepted tcp:192.0.2.29:443 [inbound-vless -> chain-exit-2] "
-                  "email: user@chimeraprodcdn.online")
+                  "email: user@example.net")
     FROM_DNS = ("2026/10/27 03:53:46.138124 from DNS accepted udp:127.0.0.1:53 "
                 "[xray.system.d471e110-f003-47de-a27e-9e66dd2160f7 -> direct]")
     OBSERVATORY = ("2026/10/27 10:00:00.111111 [Info] [42] app/observatory: "
@@ -509,7 +509,7 @@ class TestClientIpOnlyFromPrefix(unittest.TestCase):
                  "tcp:127.0.0.1:10085 [xray-stats-api -> xray-stats-api]")
     MAPPED_V4 = ("2026/10/27 04:00:00.000000 from [::ffff:192.0.2.20]:40123 "
                  "accepted tcp:example.org:443 [inbound-vless -> direct] "
-                 "email: user@chimeraprodcdn.online")
+                 "email: user@example.net")
     LEGACY_NO_FROM = ("2026/10/25 09:12:33 accepted tcp:198.51.100.7:49775 "
                       "dst:1.2.3.4:443 email:olduser@example.com")
 
@@ -535,7 +535,7 @@ class TestClientIpOnlyFromPrefix(unittest.TestCase):
         e = entries[0]
         self.assertEqual(e["src_ip"], "192.0.2.20")
         self.assertEqual(e["action"], "accepted")
-        self.assertEqual(e["email"], "user@chimeraprodcdn.online")
+        self.assertEqual(e["email"], "user@example.net")
         self.assertEqual(e["dt_str"], "2026/10/27 03:53:45")
         self.assertEqual(e["dst"], "cloudflare-dns.com")
 
@@ -566,7 +566,7 @@ class TestClientIpOnlyFromPrefix(unittest.TestCase):
                        if e["src_ip"] and e["email"]}
         self.assertNotIn("192.0.2.29", ip_to_email)
         self.assertEqual(ip_to_email.get("2001:db8:5a7::1"),
-                         "user@chimeraprodcdn.online")
+                         "user@example.net")
 
     def test_dns_dispatch_line_skipped(self):
         """«from DNS … udp:127.0.0.1:53» — внутренний диспетчер, не клиент.
