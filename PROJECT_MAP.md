@@ -1,6 +1,6 @@
 # Chimera Project — Карта проекта
 
-Полная карта всех модулей `chimera/modules/` (143 файла) + `_core.py`.
+Полная карта всех модулей `chimera/modules/` (144 файла) + `_core.py`.
 
 `_core.py` (8 093 строк) — ядро установщика: глобальное состояние, главный orchestrator `main_menu()`, `_load_state_into_globals()`, функции которые мутируют много globals (AWG, chain multi-node, install orchestration). Все модули ниже обращаются к ядру через `_core_module()` lazy binding.
 
@@ -322,6 +322,7 @@
 | `user_portal.py` | HTML/CSS/JS User Portal — анимированный интерфейс для юзеров. ↴
 | `triple_panel.py` | **Triple Panel (порт Panel-Naive-Mieru-by-RIXXX) — TUI-модуль жизненного цикла.** Отдельный сервис `triple-web.service` (loopback, порт выбирает юзер, port_registry + ufw), фронт апстрима вендорится через download_manager (tarball → atomic swap в /var/lib/xray-installer/triple_panel_www, LICENSE-кредит MIT), версии/обновления по паттерну dpi_bypass (GitHub API releases/latest + TTL-кэш 5 мин + header row + смоук с откатом), доступ по эталону b4 через panel_nginx_front (SSH-туннель / self-signed IP / Let's Encrypt домен + ufw deny прямого порта). ↴
 | `triple_panel_web.py` | **Triple Panel — веб-бэкенд (API-контракт панели поверх примитивов Chimera).** stdlib ThreadingHTTPServer (как rest_api), сессии cookie tp_session 24ч, SHA-256(соль+пароль) hmac.compare_digest. ↴
+| `librechat.py` | **LibreChat — AI-чат панель (docker compose стек LibreChat-AI/LibreChat) — TUI-модуль жизненного цикла по образцу B4.** Compose-файл апстрима@иммутабельный тег качается через download_manager (лестница зеркал raw/jsDelivr/gh-прокси + ручное размещение) и патчится: пин релизного образа `librechat/librechat:<tag>` (Docker Hub), loopback-привязка портов (SSH-туннель по умолчанию), profiles rag/admin (тяжёлые опциональные сервисы), depends_on без rag; `.env` с секретами (JWT/CREDS/MEILI — создаются один раз, переживают обновления), systemd `librechat.service` (compose up/down, профили вшиты), Docker Engine авто-установка (apt → get.docker.com), версии/обновления release+pre-release (GitHub API + TTL-кэш 6ч/30мин, смоук GET /api/status с откатом compose), смена порта (port_registry перерегистрация + пере-установка nginx front vhost), доступ по эталону b4 через panel_nginx_front (SSH-туннель / self-signed IP / Let's Encrypt домен, long_timeouts для LLM-SSE; при toggle патчит DOMAIN_CLIENT/SERVER в .env). Точка входа: раздел 1 → W → 9. |
 
 ---
 
@@ -390,11 +391,11 @@ chimera/
 ├── _core.py              (8 093 строки — ядро, главный orchestrator)
 ├── __init__.py           (version = "5.0.0")
 ├── __all_exports.py      (реэкспорт API для программного доступа)
-└── modules/              (143 модуля)
+└── modules/              (144 модуля)
     ├── __init__.py
     ├── _vendor/          (вендорные модули)
     │   └── dpi_detector/
-    └── *.py              (143 файла, см. группы выше)
+    └── *.py              (144 файла, см. группы выше)
 
 vendor/                   (вендор внешних проектов — вне python-пакета)
 └── b4/                   (исходники b4 v1.81.0, апстрим DanielLavrushin/b4)

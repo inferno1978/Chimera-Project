@@ -1,6 +1,13 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
-# ремедии nginx-reload/рестарт стека, cert-порог — parity b4_monitor).
-# стек, download_manager/port_registry/panel_nginx_front long_timeouts).
+# v10: 321 = 316 + test_librechat (модуль LibreChat: AI-чат панель docker
+# compose — compose-патчер/зеркала, .env секреты-инварианты,
+# health/версии/порты, systemd-юнит с профилями, интеграция меню 1→W→9)
+# + 4 пре-существующих долга манифеста, забытых в коммитах 04-05.11:
+# test_custom_outbounds / test_routing_rules / test_v6_adaptive /
+# test_nginx_reality_reinstall (каждый test_*.py обязан быть здесь —
+# автосверка tests/test_tests_index.py ловила, но коммиты ушли мимо).
+# (ремедии nginx-reload/рестарт стека, cert-порог — parity b4_monitor).
+# (стек, download_manager/port_registry/panel_nginx_front long_timeouts).
 # Пред. v7: 315 = 314 + test_cdn_ranges (CDN-защита авто-бана, инцидент
 # 950 банов edge-IP Cloudflare: гард в скане/_fw_ban + авто-хил старых
 # банов, chimera/modules/cdn_ranges.py). Пред. v6: 314 =
@@ -86,6 +93,7 @@ tests.test_cron_subprocess_integration
 tests.test_csqtt_manual_binary
 tests.test_csqtt_packages
 tests.test_csqtt_uninstall_state
+tests.test_custom_outbounds
 tests.test_diagnostics
 tests.test_diagnostics_errorlog
 tests.test_dns_ipv6
@@ -172,6 +180,7 @@ tests.test_ipban
 tests.test_ipset_boot_sync
 tests.test_ipset_persist
 tests.test_leak_guard
+tests.test_librechat
 tests.test_linkqr_lib
 tests.test_logrotate
 tests.test_mieru
@@ -199,6 +208,7 @@ tests.test_network_bench
 tests.test_network_setup
 tests.test_nginx_cdn_masking_config
 tests.test_nginx_cleanup_stale_vhosts
+tests.test_nginx_reality_reinstall
 tests.test_nginx_watchdog
 tests.test_no_streamup_typo
 tests.test_node_health_monitor
@@ -219,6 +229,7 @@ tests.test_rest_api
 tests.test_rest_api_auth
 tests.test_rest_api_web_panel_firewall
 tests.test_ripe_file_age
+tests.test_routing_rules
 tests.test_ru_subnets
 tests.test_satellite_bindings
 tests.test_scheduler
@@ -304,6 +315,7 @@ tests.test_user_portal
 tests.test_user_sync_v425
 tests.test_users_manager
 tests.test_users_watchdog
+tests.test_v6_adaptive
 tests.test_warp
 tests.test_warp_curated_lists
 tests.test_warp_install

@@ -68,6 +68,7 @@ FAMILY_BY_PREFIX: list[tuple[str, str]] = [
     ("rest", "WPP: веб-панели и REST API"),
     ("triple", "WPP: веб-панели и REST API"),
     ("panel", "WPP: веб-панели и REST API"),
+    ("librechat", "WPP: веб-панели и REST API"),
     ("naiveproxy", "Альтернативные протоколы"),
     ("fptn", "Альтернативные протоколы"),
     ("wdtt", "Альтернативные протоколы"),

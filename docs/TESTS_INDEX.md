@@ -2,7 +2,7 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **318** (гейт-манифест: **318**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **321** (гейт-манифест: **321**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
 ## AmneziaWG (transport Mode B + standalone 2.0) (30)
@@ -187,6 +187,23 @@
 | [`test_fragment_watchdog.py`](../tests/test_fragment_watchdog.py) | Unit-тесты для chimera/modules/fragment_watchdog.py. | ✓ |
 | [`test_server_fragment.py`](../tests/test_server_fragment.py) | Unit-тесты для chimera/modules/server_fragment.py (v4.28+, Task 24 / 24-5b). | ✓ |
 
+## Установка/bootstrap (12)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_bootstrap_mirrors.py`](../tests/test_bootstrap_mirrors.py) | Unit-тесты мульти-источникового bootstrap.sh (CHIMERA_MIRROR / CHIMERA_BRANCH). | ✓ |
+| [`test_emergency_repair_socket_wait.py`](../tests/test_emergency_repair_socket_wait.py) | Юнит-тест на логику ожидания Unix-сокета в аварийном восстановлении. | ✓ |
+| [`test_install_prompts.py`](../tests/test_install_prompts.py) | Unit-тесты для chimera/modules/install_prompts.py — _prompt_h1_h4_unique(). | ✓ |
+| [`test_nginx_cdn_masking_config.py`](../tests/test_nginx_cdn_masking_config.py) | Регрессионные тесты на баги в CDN masking профиле nginx-конфига: | ✓ |
+| [`test_nginx_cleanup_stale_vhosts.py`](../tests/test_nginx_cleanup_stale_vhosts.py) | Тесты для chimera.modules.nginx_setup._cleanup_stale_chimera_vhosts. | ✓ |
+| [`test_nginx_reality_reinstall.py`](../tests/test_nginx_reality_reinstall.py) | — | ✓ |
+| [`test_nginx_watchdog.py`](../tests/test_nginx_watchdog.py) | Unit-тесты для chimera/modules/nginx_watchdog.py. | ✓ |
+| [`test_secure_bootstrap.py`](../tests/test_secure_bootstrap.py) | Тесты безопасной мульти-зеркальной установки (CHIMERA SECURE INSTALL). | ✓ |
+| [`test_ssl_cert_guard.py`](../tests/test_ssl_cert_guard.py) | : защита LE-сертификата + устойчивая DNS-проверка (инцидент 203.0.113.102). | ✓ |
+| [`test_ssl_certbot.py`](../tests/test_ssl_certbot.py) | Unit-тесты для chimera/modules/ssl_certbot.py. | ✓ |
+| [`test_uninstall_dns_alive.py`](../tests/test_uninstall_dns_alive.py) | Regression-тесты инцидента (server-ru): ПОЛНОЕ удаление Chimera | ✓ |
+| [`test_uninstall_nginx_safety.py`](../tests/test_uninstall_nginx_safety.py) | Regression-тесты для критического бага в uninstall.py. | ✓ |
+
 ## Клиентские ссылки/конфиги (12)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -237,6 +254,22 @@
 | [`test_users_manager.py`](../tests/test_users_manager.py) | Unit-тесты для chimera/modules/users_manager.py — управление | ✓ |
 | [`test_users_watchdog.py`](../tests/test_users_watchdog.py) | Unit-тесты для chimera/modules/users_watchdog.py. | ✓ |
 
+## WPP: веб-панели и REST API (11)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_admin_panel.py`](../tests/test_admin_panel.py) | Smoke-тест для chimera/modules/admin_panel.py. | ✓ |
+| [`test_admin_whitelist_geo_dns.py`](../tests/test_admin_whitelist_geo_dns.py) | : регрессионные тесты двух инцидентов. | ✓ |
+| [`test_librechat.py`](../tests/test_librechat.py) | Unit-тесты для chimera/modules/librechat.py (LibreChat — AI-чат панель). | ✓ |
+| [`test_panel_nginx_front_input.py`](../tests/test_panel_nginx_front_input.py) | Регрессионные тесты инцидента 29.08.2026 (прод, vds-old): | ✓ |
+| [`test_rest_api.py`](../tests/test_rest_api.py) | Unit-тесты для chimera/modules/rest_api.py — функции генерации | ✓ |
+| [`test_rest_api_auth.py`](../tests/test_rest_api_auth.py) | Unit-тесты для auth-функций из chimera/modules/rest_api.py | ✓ |
+| [`test_rest_api_web_panel_firewall.py`](../tests/test_rest_api_web_panel_firewall.py) | Тесты для ufw-управления веб-панелью (admin + user portal) в rest_api.py. | ✓ |
+| [`test_triple_panel.py`](../tests/test_triple_panel.py) | Unit-тесты для chimera/modules/triple_panel.py + triple_panel_web.py. | ✓ |
+| [`test_wpp_awg_adapters.py`](../tests/test_wpp_awg_adapters.py) | tests/test_wpp_awg_adapters.py — адаптеры rest_api-стиля для WPP-хендлера. | ✓ |
+| [`test_wpp_portal_mieru.py`](../tests/test_wpp_portal_mieru.py) | tests/test_wpp_portal_mieru.py — вкладка Mieru + «Подключение: все протоколы». | ✓ |
+| [`test_wpp_upstream_sync.py`](../tests/test_wpp_upstream_sync.py) | Регрессия синхронизации WPP с апстримом POLESNIESOVETI12/web-panel-proxy | ✓ |
+
 ## Гигиена репо и CI (11)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -253,22 +286,6 @@
 | [`test_wave6_mirrors.py`](../tests/test_wave6_mirrors.py) | Unit-тесты для mirror-реестров и specs Волны 6 (awg_transport + olcrtc): | ✓ |
 | [`test_wave6_smoke.py`](../tests/test_wave6_smoke.py) | Smoke-тесты для оставшихся модулей Волны 6: | ✓ |
 
-## Установка/bootstrap (11)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_bootstrap_mirrors.py`](../tests/test_bootstrap_mirrors.py) | Unit-тесты мульти-источникового bootstrap.sh (CHIMERA_MIRROR / CHIMERA_BRANCH). | ✓ |
-| [`test_emergency_repair_socket_wait.py`](../tests/test_emergency_repair_socket_wait.py) | Юнит-тест на логику ожидания Unix-сокета в аварийном восстановлении. | ✓ |
-| [`test_install_prompts.py`](../tests/test_install_prompts.py) | Unit-тесты для chimera/modules/install_prompts.py — _prompt_h1_h4_unique(). | ✓ |
-| [`test_nginx_cdn_masking_config.py`](../tests/test_nginx_cdn_masking_config.py) | Регрессионные тесты на баги в CDN masking профиле nginx-конфига: | ✓ |
-| [`test_nginx_cleanup_stale_vhosts.py`](../tests/test_nginx_cleanup_stale_vhosts.py) | Тесты для chimera.modules.nginx_setup._cleanup_stale_chimera_vhosts. | ✓ |
-| [`test_nginx_watchdog.py`](../tests/test_nginx_watchdog.py) | Unit-тесты для chimera/modules/nginx_watchdog.py. | ✓ |
-| [`test_secure_bootstrap.py`](../tests/test_secure_bootstrap.py) | Тесты безопасной мульти-зеркальной установки (CHIMERA SECURE INSTALL). | ✓ |
-| [`test_ssl_cert_guard.py`](../tests/test_ssl_cert_guard.py) | : защита LE-сертификата + устойчивая DNS-проверка (инцидент 203.0.113.102). | ✓ |
-| [`test_ssl_certbot.py`](../tests/test_ssl_certbot.py) | Unit-тесты для chimera/modules/ssl_certbot.py. | ✓ |
-| [`test_uninstall_dns_alive.py`](../tests/test_uninstall_dns_alive.py) | Regression-тесты инцидента (server-ru): ПОЛНОЕ удаление Chimera | ✓ |
-| [`test_uninstall_nginx_safety.py`](../tests/test_uninstall_nginx_safety.py) | Regression-тесты для критического бага в uninstall.py. | ✓ |
-
 ## Telemt (телеметрия) (11)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -284,21 +301,6 @@
 | [`test_telemt_nginx_fallback.py`](../tests/test_telemt_nginx_fallback.py) | Регресс-тесты для Telemt nginx-fallback (свой домен + свой сайт вместо | ✓ |
 | [`test_telemt_panel.py`](../tests/test_telemt_panel.py) | Unit-тесты для chimera/modules/telemt_panel.py. | ✓ |
 | [`test_telemt_syn_limiter.py`](../tests/test_telemt_syn_limiter.py) | Unit-тесты для chimera/modules/telemt_syn_limiter.py. | ✓ |
-
-## WPP: веб-панели и REST API (10)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_admin_panel.py`](../tests/test_admin_panel.py) | Smoke-тест для chimera/modules/admin_panel.py. | ✓ |
-| [`test_admin_whitelist_geo_dns.py`](../tests/test_admin_whitelist_geo_dns.py) | : регрессионные тесты двух инцидентов. | ✓ |
-| [`test_panel_nginx_front_input.py`](../tests/test_panel_nginx_front_input.py) | Регрессионные тесты инцидента 29.08.2026 (прод, vds-old): | ✓ |
-| [`test_rest_api.py`](../tests/test_rest_api.py) | Unit-тесты для chimera/modules/rest_api.py — функции генерации | ✓ |
-| [`test_rest_api_auth.py`](../tests/test_rest_api_auth.py) | Unit-тесты для auth-функций из chimera/modules/rest_api.py | ✓ |
-| [`test_rest_api_web_panel_firewall.py`](../tests/test_rest_api_web_panel_firewall.py) | Тесты для ufw-управления веб-панелью (admin + user portal) в rest_api.py. | ✓ |
-| [`test_triple_panel.py`](../tests/test_triple_panel.py) | Unit-тесты для chimera/modules/triple_panel.py + triple_panel_web.py. | ✓ |
-| [`test_wpp_awg_adapters.py`](../tests/test_wpp_awg_adapters.py) | tests/test_wpp_awg_adapters.py — адаптеры rest_api-стиля для WPP-хендлера. | ✓ |
-| [`test_wpp_portal_mieru.py`](../tests/test_wpp_portal_mieru.py) | tests/test_wpp_portal_mieru.py — вкладка Mieru + «Подключение: все протоколы». | ✓ |
-| [`test_wpp_upstream_sync.py`](../tests/test_wpp_upstream_sync.py) | Регрессия синхронизации WPP с апстримом POLESNIESOVETI12/web-panel-proxy | ✓ |
 
 ## Сеть и системный слой (10)
 
@@ -463,6 +465,14 @@
 | [`test_config_backup.py`](../tests/test_config_backup.py) | Unit-тесты для chimera/modules/config_backup.py. | ✓ |
 | [`test_migration.py`](../tests/test_migration.py) | Unit-тесты для chimera/modules/migration.py. | ✓ |
 
+## Прочее (3)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_custom_outbounds.py`](../tests/test_custom_outbounds.py) | Unit-тесты для chimera/modules/custom_outbounds.py. | ✓ |
+| [`test_routing_rules.py`](../tests/test_routing_rules.py) | Unit-тесты для chimera/modules/routing_rules.py. | ✓ |
+| [`test_v6_adaptive.py`](../tests/test_v6_adaptive.py) | Unit-тесты v6-adaptive watcher (chimera/modules/v6_adaptive.py). | ✓ |
+
 ## xHTTP + REALITY (3)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -470,8 +480,3 @@
 | [`test_no_streamup_typo.py`](../tests/test_no_streamup_typo.py) | Регрессионный тест на опечатку "streamup" (без дефиса). | ✓ |
 | [`test_xhttp_cdn_masking.py`](../tests/test_xhttp_cdn_masking.py) | Unit-тесты для chimera/modules/xhttp_cdn_masking.py — экспертный профиль XHTTP | ✓ |
 | [`test_xhttp_path_gen.py`](../tests/test_xhttp_path_gen.py) | Unit-тесты для chimera/modules/xhttp_path_gen.py — генератор случайного | ✓ |
-
-## Прочее (2)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|

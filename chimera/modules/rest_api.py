@@ -2972,6 +2972,41 @@ def do_manage_web_panel() -> None:
                 if ipv4:
                     _box_row(f"  SSH-туннель:  {CYAN}ssh -L {_triple_port}:127.0.0.1:{_triple_port} root@{ipv4}{NC}")
 
+        # ── БЛОК 3b: LibreChat (если установлен) ───────────────────────────
+        _lc_installed = False
+        _lc_running = False
+        _lc_port = 0
+        _lc_version = ""
+        _lc_nginx_enabled = False
+        _lc_nginx_port = 0
+        _lc_nginx_url = ""
+        try:
+            from chimera.modules import librechat as _lc_mod
+            _lc_status = _lc_mod.status()
+            _lc_installed = bool(_lc_status.get("installed"))
+            if _lc_installed:
+                _lc_running = bool(_lc_status.get("service_active"))
+                _lc_port = int(_lc_status.get("port", 0) or 0)
+                _lc_version = str(_lc_status.get("version", "") or "")
+                _lc_nginx_enabled = bool(_lc_status.get("nginx_front_enabled"))
+                _lc_nginx_url = str(_lc_status.get("nginx_front_url", "") or "")
+                _lc_nginx_port = int(_lc_status.get("nginx_front_port", 0) or 0)
+        except Exception:
+            pass
+
+        if _lc_installed:
+            _box_sep()
+            _box_row(f"  {BOLD}🤖 LibreChat (AI-чат панель, docker compose){NC}")
+            _box_row(f"  Сервис:       {GREEN+'активен'+NC if _lc_running else YELLOW+'остановлен'+NC}"
+                     f"  {DIM}{_lc_version}{NC}")
+            _box_row(f"  Backend:      {CYAN}127.0.0.1:{_lc_port}{NC} (loopback)")
+            if _lc_nginx_enabled and _lc_nginx_url:
+                _box_row(f"  Nginx Front:  {GREEN}включён{NC} — {CYAN}{_lc_nginx_url}{NC}")
+            else:
+                _box_row(f"  Nginx Front:  {DIM}выключен (доступ через SSH-туннель){NC}")
+                if ipv4 and _lc_port:
+                    _box_row(f"  SSH-туннель:  {CYAN}ssh -L {_lc_port}:127.0.0.1:{_lc_port} root@{ipv4}{NC}")
+
         # ── БЛОК 4: nginx front статус (общий — для Chimera default) ─────────
         _box_sep()
         if _nginx_front_enabled:
@@ -2991,6 +3026,7 @@ def do_manage_web_panel() -> None:
         _box_item("6", f"🌐 nginx front (TLS) — {'выключен' if not _nginx_front_enabled else 'настройки'}")
         _box_item("7", f"🧩 Triple Panel (Naive+Mieru+H2)  {DIM}(порт RIXXX-панели: установка/обновления/доступ){NC}")
         _box_item("8", f"🌐 WPP Web Panel  {DIM}(порт POLESNIESOVETI12/web-panel-proxy: VLESS/H2/AWG/MTProto/OpenFlux){NC}")
+        _box_item("9", f"🤖 LibreChat  {DIM}(AI-чат: docker-стек, версии/обновления/профили/TLS-доступ){NC}")
         _box_item("0", f"{RED}🗑️  Удалить полностью{NC}")
         _box_item("Q", "Назад")
         _box_bottom()
@@ -3121,6 +3157,18 @@ def do_manage_web_panel() -> None:
                 do_wpp_panel_menu()
             except Exception as e:
                 warn(f"Не удалось открыть меню WPP Web Panel: {e}")
+                _input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "9":
+            #  LibreChat — AI-чат панель (docker compose стек апстрима
+            #  LibreChat-AI/LibreChat). По образцу B4/Triple: автономный
+            #  модуль с lazy-доступом к ядру, свой порт (loopback) +
+            #  nginx front с TLS, версии/обновления через GitHub API.
+            try:
+                from chimera.modules.librechat import do_librechat_menu
+                do_librechat_menu()
+            except Exception as e:
+                warn(f"Не удалось открыть меню LibreChat: {e}")
                 _input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "0":

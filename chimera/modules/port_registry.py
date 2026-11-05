@@ -185,6 +185,11 @@ SERVICE_MIERU_CASCADE  = "mieru_cascade"     # каскад standalone-Mieru (lo
 # Nginx Front с LE/self-signed TLS (по образцу B4 и Triple Panel).
 SERVICE_WPP_WEB         = "wpp_web"           # WPP backend (loopback, по умолч. 9701)
 SERVICE_WPP_NGINX       = "chimera-wpp-nginx" # nginx front для WPP (TLS)
+# LibreChat (AI-чат панель, docker compose стек) — веб-UI на loopback
+# (SSH-тunnel default, docker proxy слушает 127.0.0.1), наружу — Nginx
+# Front с LE/self-signed TLS (по образцу B4 / Triple Panel / WPP).
+SERVICE_LIBRECHAT_WEB   = "librechat_web"          # LibreChat web UI (loopback, по умолч. 3080)
+SERVICE_LIBRECHAT_NGINX = "chimera-librechat-nginx"  # nginx front для LibreChat (TLS)
 
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────
@@ -679,6 +684,9 @@ _EXPECTED_PROC_HINTS = {
     SERVICE_FPTN: ("fptn",),
     SERVICE_WDTT: ("wdtt",),
     SERVICE_MIERU_CASCADE: ("redsocks", "mieru",),
+    # LibreChat: порт слушает docker-proxy/dockerd (port publishing
+    # 127.0.0.1:PORT:PORT в compose-стеке librechat.service).
+    SERVICE_LIBRECHAT_WEB: ("docker",),
 }
 # awg_standalone / awg_exit — kernel-интерфейс (awg0), процесса-слушателя в
 # ss нет; в _EXPECTED_PROC_HINTS не включаем — mismatch для них не проверяем.
