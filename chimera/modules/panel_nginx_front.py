@@ -290,7 +290,6 @@ def _generate_vhost(port: int,
         (нужно для b4 >= 1.80, MCP-сервер панели).
       long_timeouts: если True — proxy_read/send_timeout 3600s вместо 60s
         (LLM-стримы/SSE: ответ модели может идти минутами без чанков;
-        нужно ; дефолт False — существующие панели не меняются).
     """
     # WebSocket origin rewrite block
     if websocket_origin_rewrite:
@@ -321,7 +320,6 @@ def _generate_vhost(port: int,
         proxy_set_header Connection "upgrade";
         proxy_connect_timeout 30s;
         # long_timeouts: LLM-стримы/SSE идут минутами без единого чанка —
-        # 60s обрывали бы ответ на середине (). По умолчанию —
         # прежние 60s (существующие панели не меняются).
         proxy_send_timeout {3600 if long_timeouts else 60}s;
         proxy_read_timeout {3600 if long_timeouts else 60}s;
@@ -449,7 +447,6 @@ def panel_nginx_front_install(
       mcp_proxy: True → добавить location /api/mcp (loopback-Host для
         MCP go-sdk, SSE без буферизации; b4 >= 1.80).
       long_timeouts: True → proxy_read/send_timeout 3600s вместо 60s
-        (LLM-стримы/SSE — ; дефолт False — панели не меняются).
 
     Returns:
       (success, message)
@@ -595,7 +592,6 @@ def panel_nginx_front_install(
     # внутри port_register ловит нашего же слушателя («system»-конфликт)
     # и тихо возвращает False, а возврат никто не проверял: в реестре
     # не было НИ ОДНОГО nginx-front порта (b4 9743 / triple 9761 /
-    # wpp 9745 / subscription 6444 /  3443), реестр врал —
     # «не вводит в заблуждение» нарушался годами. Конфликт-проверка
     # ДО поднятия слушателя уже сделана в шаге 1 — здесь фиксация.
     try:

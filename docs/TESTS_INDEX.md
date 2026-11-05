@@ -475,5 +475,3 @@
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
 |---|---|---|
-| [`test_.py`](../tests/test_.py) | Unit-тесты для chimera/modules/.py (+ интеграция panel_nginx_front / | ✓ |
-| [`test__monitor.py`](../tests/test__monitor.py) | Unit-тесты ops-слоя  (chimera/modules/_monitor.py). | ✓ |

@@ -185,8 +185,6 @@ SERVICE_MIERU_CASCADE  = "mieru_cascade"     # каскад standalone-Mieru (lo
 # Nginx Front с LE/self-signed TLS (по образцу B4 и Triple Panel).
 SERVICE_WPP_WEB         = "wpp_web"           # WPP backend (loopback, по умолч. 9701)
 SERVICE_WPP_NGINX       = "chimera-wpp-nginx" # nginx front для WPP (TLS)
-SERVICE__WEB   = "_web"     #  web + admin-panel (loopback, 3080/3095)
-SERVICE__NGINX = "chimera--nginx"  # nginx front для  (TLS, 3443)
 
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────

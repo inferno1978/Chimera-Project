@@ -129,7 +129,6 @@ class TestSubprocessInputAudit(unittest.TestCase):
 class TestNginxFrontRegistryFix(unittest.TestCase):
     """Инцидент 01.11 (vds13195, live): в port_registry НЕ БЫЛО НИ ОДНОГО
     nginx-front порта (b4 9743 / triple 9761 / wpp 9745 / subscription 6444
-    /  3443) — port_register вызывался ПОСЛЕ reload nginx, ловил
     собственного слушателя («system»-конфликт), тихо возвращал False, и
     возврат никто не проверял: реестр врал годами, «не вводит в заблуждение»
     нарушалось. Второе следствие: повторная установка падала на шаге 1
@@ -193,7 +192,7 @@ class TestNginxFrontRegistryFix(unittest.TestCase):
             self.assertIs(real_mod, fake)
             # nginx-слушатель пропущен, чужой registry-конфликт блокирует
             ok, conf = pnf.check_port_via_registry(
-                3443, "chimera--nginx", ignore_system_nginx=True)
+                8443, "front-x", ignore_system_nginx=True)
             self.assertFalse(ok)
             self.assertEqual(conf, ["Зарегистрирован за сервисом 'чужой'"])
             # только nginx-слушатель → свободен (пере-установка)
@@ -202,7 +201,7 @@ class TestNginxFrontRegistryFix(unittest.TestCase):
                                              "service": "nginx (pid=4242)",
                                              "detail": "..."}]):
                 ok2, _ = pnf.check_port_via_registry(
-                    3443, "chimera--nginx", ignore_system_nginx=True)
+                    8443, "front-x", ignore_system_nginx=True)
                 self.assertTrue(ok2)
             # не-nginx слушатель — честный конфликт (чужой захват)
             with patch.object(fake, "port_get_conflicts",
@@ -210,7 +209,7 @@ class TestNginxFrontRegistryFix(unittest.TestCase):
                                              "service": "xray (pid=1)",
                                              "detail": "..."}]):
                 ok3, _ = pnf.check_port_via_registry(
-                    3443, "chimera--nginx", ignore_system_nginx=True)
+                    8443, "front-x", ignore_system_nginx=True)
                 self.assertFalse(ok3)
             # дефолт (без флага) — прежняя семантика port_is_free
             ok4, _ = pnf.check_port_via_registry(3443, "x")
