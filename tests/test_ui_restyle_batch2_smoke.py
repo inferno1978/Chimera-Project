@@ -288,6 +288,61 @@ class TestTtlUsersUi(unittest.TestCase):
         self.assertIn("ПРОВЕРКА ИСТЁКШИХ", text)
         self.assertIn("Заблокировано 2", text)
 
+    # ── [8] Удалить пользователя ────────────────────────────────────────
+
+    def test_delete_item_in_menu(self):
+        text = self._menu([])
+        self.assertIn("[8]", text)
+        self.assertIn("Удалить пользователя", text)
+
+    def test_delete_user_flow_framed(self):
+        """[8] → пикер → y: каноничный user_lifecycle.remove_user(all)."""
+        with patch("chimera.modules.user_lifecycle.remove_user",
+                   return_value={"success": True, "applied": ["vless"],
+                                 "failed": [], "errors": []}) as rm:
+            text = self._menu(["8", "1", "y"])
+        self.assertIn("УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ", text)
+        self.assertIn("удалён", text)
+        rm.assert_called_once_with("u@x.io", protocols="all")
+
+    def test_delete_user_confirm_cancel(self):
+        """[8] → пикер → n: отмена, координатор не вызывается."""
+        with patch("chimera.modules.user_lifecycle.remove_user") as rm:
+            text = self._menu(["8", "1", "n"])
+        rm.assert_not_called()
+        self.assertIn("Отмена", text)
+
+    def test_delete_user_failure_shows_rollback(self):
+        """Координатор вернул failure — карточка с rollback, без успеха."""
+        with patch("chimera.modules.user_lifecycle.remove_user",
+                   return_value={"success": False, "applied": [],
+                                 "failed": ["vless"],
+                                 "errors": ["xray config apply failed"]}):
+            text = self._menu(["8", "1", "y"])
+        self.assertIn("Не удалось удалить", text)
+        self.assertIn("rollback", text)
+
+    def test_delete_orphan_ttl_flow_framed(self):
+        """TTL-сирота (юзера нет в users.json) — чистка записи + blocked."""
+        self._ttl.write_text(json.dumps(
+            {"ghost@xray": {"email": "ghost@xray",
+                            "expires_at": "2026-08-29T07:27:00+00:00",
+                            "days": 7, "notified_24h": True, "blocked": True}}))
+        blocked = self._tmpdir / "blocked_users.json"
+        blocked.write_text(json.dumps(
+            {"ghost@xray": {"email": "ghost@xray", "reason": "ttl_expired"}}))
+        with patch.object(self._m, "BLOCKED_FILE", blocked):
+            text = self._menu(["8", "2", "y"])   # 1 = живой юзер, 2 = сирота
+        self.assertIn("TTL-запись удалена", text)
+        self.assertEqual(self._state(), {})
+        self.assertEqual(json.loads(blocked.read_text()), {})
+
+    def test_delete_empty_lists_warns(self):
+        """Ни юзеров, ни TTL-записей — карточка-предупреждение."""
+        with patch.object(self._fake_core, "_users_load", return_value=[]):
+            text = self._menu(["8"])
+        self.assertIn("Нет ни пользователей, ни TTL-записей", text)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  chain_relay

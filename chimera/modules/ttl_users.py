@@ -28,6 +28,16 @@ chimera/modules/ttl_users.py
         _ttl_remove_cron, _ttl_cron_active, do_manage_ttl_users,
     )
 
+[8] Удаление пользователя — делегирует каноничному транзакционному
+координатору chimera/modules/user_lifecycle.remove_user(email,
+protocols="all"): удаление из users.json + xray config + РЕСТАРТ + все
+активные спутниковые протоколы (AWG/sing-box/Mieru/NaiveProxy/FPTN/
+TelemT/TrustTunnel) + чистка TTL/traffic_limits/blocked (rollback при
+сбое — StateSnapshot). Поверх — файлы ссылок /root/vless_link_*.
+txt|png (канон unified-меню). TTL-сироты (запись в ttl_users.json без
+пользователя в users.json — кейс «ИСТЁК / нет в базе» на скриншоте
+владельца) удаляются локально: _ttl_remove + чистка blocked-базы.
+
 Доступ к helpers ядра (info/warn/success/log_to_file/_users_load/...)
 — через importlib (см. _core_module()), как и в других извлечённых модулях
 (standalone_screens.py, asn_cache.py, warp.py, smart_balancer.py и т.д.).
@@ -567,6 +577,7 @@ def do_manage_ttl_users() -> None:
         )
         _box_item("6", f"🔒 Заблокировать пользователя вручную")
         _box_item("7", f"🔓 Разблокировать пользователя")
+        _box_item("8", f"🗑  Удалить пользователя  {DIM}(все протоколы + TTL + ссылки){NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -863,6 +874,136 @@ def do_manage_ttl_users() -> None:
             else:
                 info("Отмена")
             _pause()
+
+        # ── 8: Удалить пользователя ──────────────────────────────────────
+        elif ch == "8":
+            # Объединённый список: живые пользователи (с TTL/блок-метками)
+            # + TTL-сироты (запись есть, пользователя в users.json нет).
+            items = []
+            seen_emails = set()
+            for u in users:
+                _e = u.get("email", "")
+                if not _e or _e in seen_emails:
+                    continue
+                seen_emails.add(_e)
+                _marks = []
+                if _e in data:
+                    _marks.append(
+                        f"TTL: {_ttl_expires_str(data[_e].get('expires_at', ''))}")
+                if u.get("blocked"):
+                    _marks.append(f"{RED}заблокирован{NC}")
+                _mark_s = f"  {YELLOW}{'; '.join(_marks)}{NC}" if _marks else ""
+                items.append((
+                    f"{u.get('name', _e):<20}  {DIM}{_e}{NC}{_mark_s}",
+                    ("user", _e, u),
+                ))
+            for _e in data:
+                if _e in seen_emails:
+                    continue
+                seen_emails.add(_e)
+                items.append((
+                    f"{_e:<30}  {RED}TTL-запись без пользователя{NC}",
+                    ("orphan", _e, None),
+                ))
+
+            if not items:
+                _box_top("УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ")
+                _box_row()
+                _box_warn("Нет ни пользователей, ни TTL-записей")
+                _box_bottom()
+                _pause()
+                continue
+
+            picked = _ttl_pick(items, "УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ: ВЫБОР")
+            if not picked:
+                continue
+            kind, email, u_rec = picked
+
+            if kind == "user":
+                _box_top("УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ")
+                _box_row()
+                _box_kv("Пользователь", email)
+                _box_row()
+                _box_row(f"  {RED}Удалит из Xray, всех активных протоколов и баз:{NC}")
+                _box_row(f"  {RED}users.json, TTL, блокировки, лимиты трафика.{NC}")
+                _box_row(f"  {YELLOW}Ссылки и QR умрут. Отменить будет нельзя.{NC}")
+                _box_bottom()
+                ans = _box_ask(f"Удалить '{email}'? [y/N]").lower()
+                if ans not in ("y", "yes", "д", "да"):
+                    info("Отмена")
+                    _pause()
+                    continue
+
+                _name = (u_rec or {}).get("name", "")
+                try:
+                    from chimera.modules.user_lifecycle import (
+                        remove_user as _ul_remove_user,
+                    )
+                    res = _ul_remove_user(email, protocols="all")
+                except Exception as e:
+                    res = {"success": False, "applied": [], "failed": [],
+                           "errors": [str(e)]}
+
+                _box_top("УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ")
+                _box_row()
+                if res.get("success"):
+                    # Чистим файлы ссылок (канон unified-меню). missing_ok
+                    # не ловит PermissionError — файлы косметические,
+                    # осечка не должна ронять результат удаления.
+                    for _p in (f"/root/vless_link_{_name}.txt",
+                               f"/root/vless_qr_{_name}.png"):
+                        try:
+                            Path(_p).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    try:
+                        core._log_change(
+                            "user_del",
+                            f"Удалён через TTL-меню: {_name} ({email})")
+                    except Exception:
+                        pass
+                    _applied = res.get("applied") or []
+                    _box_ok(f"Пользователь {email} удалён")
+                    _box_row()
+                    if _applied:
+                        _box_row(f"  {DIM}Протоколы: {', '.join(_applied)}{NC}")
+                    _box_row(f"  {DIM}TTL / блокировка / лимиты вычищены, "
+                             f"Xray перезапущен{NC}")
+                else:
+                    _errs = ", ".join(res.get("errors") or
+                                      ["неизвестная ошибка"])
+                    _box_warn(f"Не удалось удалить {email}: {_errs}")
+                    _box_row()
+                    _box_row(f"  {DIM}Состояние откачено (rollback), "
+                             f"подробности: {core.LOG_FILE if hasattr(core, 'LOG_FILE') else 'журнал операций'}{NC}")
+                _box_bottom()
+                _pause()
+
+            else:  # orphan — TTL-запись без пользователя
+                _box_top("УДАЛЕНИЕ TTL-ЗАПИСИ")
+                _box_row()
+                _box_kv("Запись", email)
+                _box_row()
+                _box_row(f"  {DIM}Пользователя нет в users.json — удаляем только "
+                         f"мусорную TTL-запись{NC}")
+                _box_row(f"  {DIM}и блокировку в blocked_users.json (если есть).{NC}")
+                _box_bottom()
+                ans = _box_ask(f"Удалить запись '{email}'? [y/N]").lower()
+                if ans not in ("y", "yes", "д", "да"):
+                    info("Отмена")
+                    _pause()
+                    continue
+
+                _ttl_remove(email)
+                _blocked = _blocked_load()
+                if email in _blocked:
+                    del _blocked[email]
+                    _blocked_save(_blocked)
+                _box_top("УДАЛЕНИЕ TTL-ЗАПИСИ")
+                _box_row()
+                _box_ok(f"TTL-запись удалена: {email}")
+                _box_bottom()
+                _pause()
 
         elif ch in ("q", "Q", ""):
             break

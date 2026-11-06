@@ -420,6 +420,47 @@ class TestCoordinatorSuccess(unittest.TestCase):
         call_kwargs = vless_add.call_args
         self.assertIn("email", str(call_kwargs))
 
+    def test_remove_user_cleans_blocked_db(self):
+        """remove_user не оставляет сироту в blocked_users.json."""
+        from chimera.modules import user_lifecycle
+
+        blocked = self._tmpdir / "blocked.json"
+        blocked.write_text(json.dumps({
+            "alice@xray": {"email": "alice@xray", "uuid": "u1",
+                           "reason": "manual"}
+        }))
+
+        fake_core = MagicMock()
+        fake_core._users_load = MagicMock(return_value=[])
+        fake_core._users_save = MagicMock()
+        fake_core._users_apply_to_config = MagicMock(return_value=True)
+
+        with patch("chimera.modules.user_lifecycle._core_module",
+                   return_value=fake_core), \
+             patch.object(user_lifecycle.VlessAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.AwgAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.SingboxAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.MieruAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.NaiveProxyAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.MtprotoAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.FptnAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.Hysteria2Adapter, "remove", return_value=True):
+
+            r = user_lifecycle.remove_user("alice@xray", protocols="all")
+
+        self.assertTrue(r["success"], f"remove failed: {r['errors']}")
+        blocked_db = json.loads(blocked.read_text())
+        self.assertNotIn("alice@xray", blocked_db)
+
+    def test_remove_blocked_record_idempotent_no_file(self):
+        """_remove_blocked_record без файла/записи — noop, не создаёт файл."""
+        from chimera.modules import user_lifecycle
+
+        blocked = self._tmpdir / "blocked_missing.json"
+        with patch("chimera.modules.user_lifecycle._BLOCKED_FILE", blocked):
+            user_lifecycle._remove_blocked_record("alice@xray")
+        self.assertFalse(blocked.exists())
+
 
 class TestCoordinatorPartialFailure(unittest.TestCase):
     """Один adapter кидает исключение → rollback state files."""

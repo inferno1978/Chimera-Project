@@ -1523,10 +1523,11 @@ def remove_user(email: str,
                 result["errors"].append(err)
                 raise RuntimeError(err)
 
-        # Удаляем TTL и traffic_limit (если VLESS удалён)
+        # Удаляем TTL, traffic_limit и запись blocked (если VLESS удалён)
         if "vless" in protocols_list:
             _remove_ttl(email)
             _remove_traffic_limit(email)
+            _remove_blocked_record(email)
 
         snap.commit()
         _flush_if_not_batched()
@@ -1718,6 +1719,33 @@ def _remove_ttl(email: str) -> None:
         _ttl_remove(email)
     except Exception as e:
         _log("ERROR", f"_remove_ttl: {e}")
+        raise
+
+
+def _remove_blocked_record(email: str) -> None:
+    """Удаляет запись из blocked_users.json (совместимость с TTL-механизмом).
+
+    Раньше remove_user чистил TTL и traffic_limits, но запись в
+    blocked_users.json оставалась висеть сиротой (кейс скриншота
+    TTL-меню: пользователь удалён, срок ИСТЁК, «нет в базе» — а
+    blocked-запись и статистика блокировки остаются навсегда).
+    Идемпотентно: отсутствующая запись — noop (файл не трогаем).
+    """
+    try:
+        blocked_db = _read_json(_BLOCKED_FILE)
+        if isinstance(blocked_db, dict) and email in blocked_db:
+            del blocked_db[email]
+            _BLOCKED_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _BLOCKED_FILE.write_text(
+                json.dumps(blocked_db, indent=2, ensure_ascii=False))
+            try:
+                _BLOCKED_FILE.chmod(0o600)
+            except Exception:
+                pass
+            _log("INFO", f"_remove_blocked_record: {email} removed "
+                         f"from blocked_users.json")
+    except Exception as e:
+        _log("ERROR", f"_remove_blocked_record: {e}")
         raise
 
 
@@ -1948,6 +1976,10 @@ __all__ = [
     "ALL_PROTOCOLS",
     # Snapshot/restore
     "StateSnapshot",
+    # Record-cleanup helpers (для тестов)
+    "_remove_ttl",
+    "_remove_traffic_limit",
+    "_remove_blocked_record",
     # Constants
     "_USERS_FILE",
     "_TTL_FILE",
