@@ -4,16 +4,22 @@ chimera/modules/diagnostics.py
 Диагностический движок: split-tunneling diagnostics + live traffic dashboard +
 мастер полной диагностики.
 
-Содержит 30 функций + 3 константы, вынесенных из _core.py:
+Содержит 31 функцию + 6 констант, вынесенных из _core.py:
 
-Block A — split tunneling diagnostics (28 функций + 3 константы):
+Block A — split tunneling diagnostics (29 функций + 6 констант):
   • _DIAG_BLOCKED_DOMAINS / _DIAG_RUSSIAN_DOMAINS / _DIAG_STATS_API_ADDR —
     константы для тестов маршрутизации и Stats API.
+  • _XRAY_SERVICE_DROPIN_DIR / _KNOWN_XRAY_DROPINS / _DROPIN_DANGER_KEYS —
+    systemd drop-in'ы xray.service: директория, штатные файлы Химеры
+    (cold-boot-restore / override / chimera-server-frag) и директивы,
+    реально трогающие запуск/конфиг (семейство Exec*, EnvironmentFile).
   • _diag_ok / _diag_err / _diag_head / _diag_warn — адаптеры логирования
     (ok/err/head/warn) вокруг _box_wrap_msg / _box_top / _box_row.
   • _diag_make_counters / _diag_chk — счётчики [total, passed, warn, err]
     и единый валидатор chk(condition, ok_msg, fail_msg).
   • _diag_run — обёртка над subprocess.run с timeout-обработкой.
+  • _diag_dropin_danger_keys — разбор drop-in'а xray.service: какие
+    директивы трогают запуск/конфиг (безобидный Environment= → пусто).
   • _diag_fmt_bytes — форматирование байтов в КБ/МБ/ГБ.
   • _diag_sni_port — порт TLS-проверки SNI-цели: свой домен →
     server_port (REALITY-эндпоинт Xray), чужой SNI → 443.
@@ -104,6 +110,25 @@ _DIAG_RUSSIAN_DOMAINS = [
 
 # Порт Stats API xray (gRPC)
 _DIAG_STATS_API_ADDR = "127.0.0.1:10085"
+
+# Drop-in директория xray.service и файлы, которые создаёт сама Химера
+# (диагностика не считает их вмешательством): cold-boot-restore.conf —
+# tproxy-рестор после ребута (cold_boot_restore), override.conf — легаси,
+# chimera-server-frag.conf — MSS-сегментация (server_fragment:
+# Environment=GODEBUG=multipathtcp=0 и/или ExecStartPost-рестор).
+_XRAY_SERVICE_DROPIN_DIR = Path("/etc/systemd/system/xray.service.d")
+_KNOWN_XRAY_DROPINS = {"cold-boot-restore.conf", "override.conf",
+                       "chimera-server-frag.conf"}
+
+# Директивы drop-in'а, реально влияющие на запуск/конфиг Xray: семейство
+# Exec* (подмена бинарника/аргументов -config, инъекция хуков) и
+# EnvironmentFile (точка инъекции окружения). Безобидные — Environment=
+# (напр. GODEBUG=multipathtcp=0), Restart=, лимиты — конфиг не меняют.
+_DROPIN_DANGER_KEYS = {
+    "execstart", "execstartpre", "execstartpost", "execcondition",
+    "execreload", "execstop", "execstoppost", "execsearchpath",
+    "environmentfile",
+}
 
 # Адаптеры логирования: в диагностике используются ok/err/head —
 # которых нет в установщике. Определяем их как module-level функции
@@ -514,6 +539,28 @@ def _diag_print_traffic_volume(bytes_by_tag: dict) -> None:
 #  Проверочные функции
 # --------------------------------------------------------------------------- #
 
+def _diag_dropin_danger_keys(content: str) -> set:
+    """Опасные директивы drop-in'а xray.service (трогают запуск/конфиг).
+
+    Построчный разбор: пустые строки и комментарии (#, ;) пропускаем,
+    ключ — до первого '=' (ключи systemd регистронезависимы; модификаторы
+    @ - + ! относятся к значению и на ключ не влияют). Возвращает множество
+    найденных опасных ключей (lowercase); пустое множество — drop-in
+    безобиден (например, только Environment=GODEBUG=...).
+    """
+    keys = set()
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if "=" not in line:
+            continue
+        key = line.split("=", 1)[0].strip().lower()
+        if key in _DROPIN_DANGER_KEYS:
+            keys.add(key)
+    return keys
+
+
 def _diag_check_xray_service(counters: list) -> None:
     _diag_head("1. Состояние Xray")
     r = _diag_run(["systemctl", "is-active", "xray"])
@@ -524,17 +571,35 @@ def _diag_check_xray_service(counters: list) -> None:
     _diag_chk(counters, r.stdout.strip() == "enabled",
               "Xray включён в автозапуск",
               "Xray не добавлен в автозапуск", is_warn=True)
-    dropin = Path("/etc/systemd/system/xray.service.d")
-    # Файлы, которые создаёт сам установщик и которые не являются ошибкой
-    KNOWN_DROPINS = {"cold-boot-restore.conf", "override.conf"}
+    dropin = _XRAY_SERVICE_DROPIN_DIR
     if dropin.exists() and any(dropin.iterdir()):
-        files = [f.name for f in dropin.iterdir()]
-        unknown = [f for f in files if f not in KNOWN_DROPINS]
-        if unknown:
-            _diag_err(f"Drop-in файлы systemd: {unknown} — переопределяют конфиг, удалите директорию")
-            counters[3] += 1
-        else:
+        files = sorted(f.name for f in dropin.iterdir())
+        unknown = [f for f in files if f not in _KNOWN_XRAY_DROPINS]
+        if not unknown:
             _diag_ok(f"Drop-in файлы systemd: {files} — установлены установщиком (OK)")
+        else:
+            # Неизвестные файлы разбираем по содержимому: ERR — только на
+            # реально переопределяющие запуск/конфиг (Exec*, EnvironmentFile),
+            # безобидные (Environment=, Restart=, лимиты) — WARN, не ERR.
+            dangerous, harmless = {}, []
+            for name in unknown:
+                try:
+                    content = (dropin / name).read_text(encoding="utf-8",
+                                                        errors="replace")
+                except OSError:
+                    content = ""
+                keys = _diag_dropin_danger_keys(content)
+                if keys:
+                    dangerous[name] = sorted(keys)
+                else:
+                    harmless.append(name)
+            if dangerous:
+                detail = ", ".join(n + " [" + "+".join(k) + "]"
+                                   for n, k in sorted(dangerous.items()))
+                _diag_err(f"Drop-in файлы systemd: {detail} — переопределяют запуск/конфиг Xray (Exec*/EnvironmentFile), удалите или проверьте")
+                counters[3] += 1
+            if harmless:
+                _diag_warn(counters, f"Drop-in файлы systemd: {harmless} — посторонние, но безобидные (не трогают Exec*/конфиг)")
     else:
         _diag_ok("Drop-in директория xray.service.d отсутствует (нет конфликтов)")
 

@@ -10,6 +10,8 @@ Unit-тесты для chimera/modules/diagnostics.py.
   3. _diag_make_counters — создание счётчиков
   4. _diag_chk — валидатор с счётчиками
   5. _diag_resolve_config — поиск и чтение config.json
+  6. _diag_dropin_danger_keys — разбор опасных директив drop-in'а
+  7. _diag_check_xray_service — ветка drop-in'ов (штатный/безобидный/опасный)
 """
 from __future__ import annotations
 
@@ -852,6 +854,121 @@ class TestDiagRoutingDesyncHint(unittest.TestCase):
         self.assertIn("REALITY-зонд", out.getvalue())   # OK-ветка сработала
         self.assertNotIn("state.json", out.getvalue())  # подсказки нет на OK
         self.assertEqual(counters, [1, 1, 0, 0])
+
+
+class TestDiagDropinDangerKeys(unittest.TestCase):
+    """_diag_dropin_danger_keys — разбор опасных директив drop-in'а."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _keys(self, content: str) -> set:
+        from chimera.modules.diagnostics import _diag_dropin_danger_keys
+        return _diag_dropin_danger_keys(content)
+
+    def test_harmless_environment_only(self):
+        """Прод-контент chimera-server-frag.conf: только Environment= — безобиден."""
+        content = "[Service]\nEnvironment=GODEBUG=multipathtcp=0\n"
+        self.assertEqual(self._keys(content), set())
+
+    def test_execstart_override_detected(self):
+        content = "[Service]\nExecStart=/usr/local/bin/xray run -config /tmp/other.json\n"
+        self.assertEqual(self._keys(content), {"execstart"})
+
+    def test_execstartpost_with_plus_modifier(self):
+        """Модификатор '+' стоит в значении — ключ всё равно ExecStartPost."""
+        content = "[Service]\nExecStartPost=+/usr/local/bin/chimera-server-frag-restore\n"
+        self.assertEqual(self._keys(content), {"execstartpost"})
+
+    def test_comments_and_blank_lines_ignored(self):
+        content = "# ExecStart=/bin/false\n; ExecStop=/bin/false\n\n[Service]\nEnvironment=A=b\n"
+        self.assertEqual(self._keys(content), set())
+
+    def test_case_insensitive_keys(self):
+        content = "[Service]\nEXECSTART=/bin/false\n"
+        self.assertEqual(self._keys(content), {"execstart"})
+
+    def test_environmentfile_injection_point(self):
+        content = "[Service]\nEnvironmentFile=/etc/xray.env\n"
+        self.assertEqual(self._keys(content), {"environmentfile"})
+
+    def test_empty_reset_value_still_counts(self):
+        """Пустой 'ExecStart=' сбрасывает штатную команду — тоже опасно."""
+        content = "[Service]\nExecStart=\n"
+        self.assertEqual(self._keys(content), {"execstart"})
+
+    def test_mixed_returns_only_dangerous(self):
+        content = "[Service]\nEnvironment=GODEBUG=x\nRestart=on-failure\nExecStop=/bin/true\n"
+        self.assertEqual(self._keys(content), {"execstop"})
+
+    def test_bare_line_without_equals_ignored(self):
+        content = "[Service]\nBareLine\nExecReload=/bin/true\n"
+        self.assertEqual(self._keys(content), {"execreload"})
+
+
+class TestDiagCheckXrayServiceDropins(unittest.TestCase):
+    """_diag_check_xray_service — ветка drop-in'ов: штатный chimera-server-frag
+    не флагуется (FP-регрессия), посторонний безобидный — WARN, с Exec* — ERR."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._dropin_dir = self._tmpdir / "xray.service.d"
+        self._dropin_dir.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _mock_core(self):
+        core = MagicMock()
+        for attr in ("_box_wrap_msg", "_box_top", "_box_row", "_box_warn"):
+            setattr(core, attr, MagicMock())
+        for attr in ("GREEN", "RED", "YELLOW", "CYAN", "DIM", "BOLD", "NC"):
+            setattr(core, attr, "")
+        return core
+
+    def _run_check(self, dropin_files: dict) -> list:
+        from chimera.modules import diagnostics
+        for name, content in dropin_files.items():
+            (self._dropin_dir / name).write_text(content)
+        counters = diagnostics._diag_make_counters()
+        active = MagicMock(stdout="active\n", returncode=0)
+        enabled = MagicMock(stdout="enabled\n", returncode=0)
+        with patch.object(diagnostics, "_core_module", return_value=self._mock_core()), \
+             patch.object(diagnostics, "_diag_run", side_effect=[active, enabled]), \
+             patch.object(diagnostics, "_XRAY_SERVICE_DROPIN_DIR", self._dropin_dir), \
+             redirect_stdout(io.StringIO()):
+            diagnostics._diag_check_xray_service(counters)
+        return counters
+
+    def test_known_frag_dropin_is_ok(self):
+        """FP-регрессия: штатный chimera-server-frag.conf — ни ERR, ни WARN."""
+        counters = self._run_check(
+            {"chimera-server-frag.conf": "[Service]\nEnvironment=GODEBUG=multipathtcp=0\n"})
+        self.assertEqual(counters, [2, 2, 0, 0])
+
+    def test_unknown_harmless_dropin_warns_not_errors(self):
+        counters = self._run_check(
+            {"stranger-env.conf": "[Service]\nEnvironment=FOO=bar\n"})
+        self.assertEqual(counters, [2, 2, 1, 0])
+
+    def test_unknown_execstart_dropin_errors(self):
+        counters = self._run_check(
+            {"stranger.conf": "[Service]\nExecStart=/bin/false\n"})
+        self.assertEqual(counters, [2, 2, 0, 1])
+
+    def test_mixed_known_harmless_and_dangerous(self):
+        counters = self._run_check({
+            "chimera-server-frag.conf": "[Service]\nEnvironment=GODEBUG=multipathtcp=0\n",
+            "env-tweak.conf": "[Service]\nEnvironment=NO_PROXY=*\n",
+            "evil.conf": "[Service]\nExecStartPost=/usr/bin/reporter\n",
+        })
+        self.assertEqual(counters, [2, 2, 1, 1])
+
+    def test_empty_dropin_dir_no_conflicts(self):
+        counters = self._run_check({})
+        self.assertEqual(counters, [2, 2, 0, 0])
 
 
 if __name__ == "__main__":
