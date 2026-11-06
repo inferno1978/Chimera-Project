@@ -3184,6 +3184,27 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
     except Exception as _pq_e:
         warn(f"PQ VLESS восстановление: {_pq_e}")
 
+    # Восстанавливаем дополнительный xHTTP+TLS инбаунд (модуль
+    # xhttp_extra.py). Та же причина, что у PQ VLESS выше: generate_*
+    # пишет config.json с нуля и стирает любые дополнительные инбаунды.
+    # Параметры (порт/path/host/TLS-сертификаты/ВЫДЕЛЕННЫЙ клиент с
+    # постоянным UUID) хранятся в state.json (ключи xhttp_extra_*) —
+    # пере-применяются сохранёнными, новые UUID не генерируются
+    # (выданные клиентам ссылки не ломаются). Клиенты этого инбаунда
+    # НЕ синхронизируются с users.json: users_manager пропускает
+    # managed-тег (_protected_inbound_tags).
+    try:
+        from chimera.modules.xhttp_extra import restore_xhttp_extra_if_enabled
+        _xhe_result = restore_xhttp_extra_if_enabled()
+        if _xhe_result is not None:
+            _xhe_ok, _xhe_msg = _xhe_result
+            (info if _xhe_ok else warn)(f"xHTTP-extra: {_xhe_msg}")
+        # None = фича не включена — молчим
+    except ImportError:
+        pass
+    except Exception as _xhe_e:
+        warn(f"xHTTP-extra восстановление: {_xhe_e}")
+
     # Восстанавливаем server-side TLS fragment (v4.21 — anti-DPI symmetry).
     # generate_* полностью переписывает config.json, поэтому sockopt.fragment
     # на REALITY inbound теряется. Если в state включён — пере-применяем.

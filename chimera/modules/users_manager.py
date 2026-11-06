@@ -3,7 +3,7 @@ chimera/modules/users_manager.py
 ───────────────────────────────────────────────────────────────────────────────
 Управление пользователями Xray (добавление / удаление / ссылки / статистика).
 
-Содержит 16 функций, вынесенных из _core.py тремя блоками:
+Содержит 17 функций, вынесенных из _core.py тремя блоками:
 
 Region A — базовый CRUD пользователей (clients в xray config.json):
   • ``_users_get_config()``                          — найти config.json Xray.
@@ -32,6 +32,9 @@ Region B — единый менеджер (users.json + xray config.json одн
     БЕЗ рестарта Xray.
   • ``_users_apply_to_config(users)``                — патч clients + restart
     Xray (с валидацией через ``xray run -test``).
+  • ``_protected_inbound_tags()``                    — теги инбаундов с
+    выделенными клиентами (xhttp_extra): пропуск при синхронизации
+    users → clients, чтобы не затирать выделенный UUID.
   • ``_unified_load_users()``                        — объединённый список из
     users.json и config.json.
   • ``_unified_save_users(users)``                   — сохранение в оба формата.
@@ -1249,6 +1252,23 @@ def _users_save(users: list[dict]) -> None:
     USERS_FILE.chmod(0o640)
 
 
+def _protected_inbound_tags() -> set:
+    """Теги инбаундов с ВЫДЕЛЕННЫМ (не панельным) списком клиентов.
+
+    Сейчас это xHTTP-extra инбаунд (VLESS+xHTTP+TLS на отдельном порту,
+    модуль xhttp_extra.py): его clients задаются состоянием модуля
+    (state.json, ключи xhttp_extra_*) и НЕ должны затираться синхронизацией
+    панельных пользователей — иначе после добавления/удаления юзера
+    выделенный UUID «резервного входа» молча ломается. Отложенный импорт —
+    без циклических зависимостей; любое исключение (модуля нет, state
+    нечитаем) = пустое множество = обычное поведение синхронизации."""
+    try:
+        from chimera.modules.xhttp_extra import xhttp_extra_managed_tags
+        return xhttp_extra_managed_tags()
+    except Exception:
+        return set()
+
+
 def _users_patch_config_no_restart(users: list[dict]) -> bool:
     """
     Вписывает пользователей в inbound config.json БЕЗ перезапуска Xray.
@@ -1256,6 +1276,7 @@ def _users_patch_config_no_restart(users: list[dict]) -> bool:
     функций, где рестарт выполняется явно после всех патчей конфига.
     """
     core = _core_module()
+    _protected_tags = _protected_inbound_tags()
     CONFIG_DIR         = core.CONFIG_DIR
     XTLS_FLOW          = core.XTLS_FLOW
     _set_config_owner  = core._set_config_owner
@@ -1278,6 +1299,10 @@ def _users_patch_config_no_restart(users: list[dict]) -> bool:
             for inb in cfg.get("inbounds", []):
                 settings = inb.get("settings", {})
                 if "clients" not in settings:
+                    continue
+                if inb.get("tag") in _protected_tags:
+                    # Инбаунд с выделенными клиентами (xhttp_extra) —
+                    # НЕ затирать панельными пользователями
                     continue
                 proto = inb.get("protocol", "")
                 st    = inb.get("streamSettings", {})
@@ -1315,6 +1340,7 @@ def _users_apply_to_config(users: list[dict]) -> bool:
     Если валидация падает — оригинальный конфиг не трогается.
     """
     core = _core_module()
+    _protected_tags = _protected_inbound_tags()
     CONFIG_DIR         = core.CONFIG_DIR
     XTLS_FLOW          = core.XTLS_FLOW
     XRAY_BIN           = core.XRAY_BIN
@@ -1377,6 +1403,10 @@ def _users_apply_to_config(users: list[dict]) -> bool:
             for inb in cfg.get("inbounds", []):
                 settings = inb.get("settings", {})
                 if "clients" not in settings:
+                    continue
+                if inb.get("tag") in _protected_tags:
+                    # Инбаунд с выделенными клиентами (xhttp_extra) —
+                    # НЕ затирать панельными пользователями
                     continue
                 proto = inb.get("protocol", "")
                 st    = inb.get("streamSettings", {})
@@ -1621,6 +1651,7 @@ def _unified_save_users(users: list[dict]) -> None:
     Симлинки пропускаются — записываем только в реальные файлы.
     """
     core = _core_module()
+    _protected_tags = _protected_inbound_tags()
     CONFIG_DIR         = core.CONFIG_DIR
     XTLS_FLOW          = core.XTLS_FLOW
     _set_config_owner  = core._set_config_owner
@@ -1665,6 +1696,10 @@ def _unified_save_users(users: list[dict]) -> None:
             for inb in cfg.get("inbounds", []):
                 settings = inb.get("settings", {})
                 if "clients" not in settings:
+                    continue
+                if inb.get("tag") in _protected_tags:
+                    # Инбаунд с выделенными клиентами (xhttp_extra) —
+                    # НЕ затирать панельными пользователями
                     continue
                 proto    = inb.get("protocol", "")
                 st       = inb.get("streamSettings", {})

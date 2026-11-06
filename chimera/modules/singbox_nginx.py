@@ -1246,10 +1246,12 @@ def sni_dispatch_reapply_after_rebuild() -> None:
       3. _ru_subnets_restore_if_needed — RIPE-правила
       4. telemt_tproxy_emergency_restore — Telemt
       5. restore_pq_vless_if_enabled — PQ VLESS
-      6. server_fragment_reapply_after_rebuild — server-side fragment
-      7. sni_dispatch_reapply_after_rebuild (эта функция) — SNI-dispatch патч
-      8. systemctl restart xray — финальный рестарт
-      9. systemctl restart nginx (если REALITY + Unix-сокет) — nginx restart
+      6. restore_xhttp_extra_if_enabled — xHTTP+TLS extra-инбаунд
+         (выделенный клиент, не синхронизируется с users.json)
+      7. server_fragment_reapply_after_rebuild — server-side fragment
+      8. sni_dispatch_reapply_after_rebuild (эта функция) — SNI-dispatch патч
+      9. systemctl restart xray — финальный рестарт
+      10. systemctl restart nginx (если REALITY + Unix-сокет) — nginx restart
 
     nginx НЕ трогаем здесь — он уже настроен отдельным потоком
     auto_enable_sni_dispatch() и не зависит от regenerate config.json.

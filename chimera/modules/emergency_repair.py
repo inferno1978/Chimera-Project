@@ -765,6 +765,27 @@ def do_emergency_repair() -> None:
     except Exception as _tp_e:
         _box_warn(f"Telemt tproxy: {_tp_e}")
 
+    # ── Восстановление xHTTP-extra инбаунда (модуль xhttp_extra.py) ──────
+    # После пересборки config.json дополнительный инбаунд теряется —
+    # переинжектируем ДО запуска Xray (None = фича выключена — молчим).
+    # Рестарт делает код ниже (общий для всего восстановления).
+    try:
+        from chimera.modules.xhttp_extra import restore_xhttp_extra_if_enabled
+        import io as _io_xhe, contextlib as _cl_xhe
+        _xhe_sink = _io_xhe.StringIO()
+        with _cl_xhe.redirect_stdout(_xhe_sink):
+            _xhe_result = restore_xhttp_extra_if_enabled()
+        if _xhe_result is not None:
+            _xhe_ok, _xhe_msg = _xhe_result
+            if _xhe_ok:
+                _box_ok(f"xHTTP-extra: {_xhe_msg}")
+            else:
+                _box_warn(f"xHTTP-extra: {_xhe_msg}")
+    except ImportError:
+        pass
+    except Exception as _xhe_e:
+        _box_warn(f"xHTTP-extra: {_xhe_e}")
+
     # Запуск Xray
     # (start-limit-fix): reset-failed обязателен перед каждым start
     # если восстановление запущено вскоре после неудачной пересборки
