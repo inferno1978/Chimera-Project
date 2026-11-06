@@ -461,6 +461,73 @@ class TestCoordinatorSuccess(unittest.TestCase):
             user_lifecycle._remove_blocked_record("alice@xray")
         self.assertFalse(blocked.exists())
 
+    def test_remove_user_cleans_satellite_bindings(self):
+        """remove_user снимает привязки сателлитов по UUID владельца.
+
+        До v5 satellite_bindings.json чистили только rest_api/users_manager
+        вручную — TTL-меню, WPP и TUI-меню оставляли висящие записи.
+        """
+        from chimera.modules import user_lifecycle
+
+        self._users.write_text(json.dumps([
+            {"uuid": "u1", "email": "alice@xray", "name": "alice"}
+        ]))
+
+        fake_core = MagicMock()
+        fake_core._users_load = MagicMock(return_value=[])
+        fake_core._users_save = MagicMock()
+        fake_core._users_apply_to_config = MagicMock(return_value=True)
+
+        with patch("chimera.modules.user_lifecycle._core_module",
+                   return_value=fake_core), \
+             patch.object(user_lifecycle.VlessAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.AwgAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.SingboxAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.MieruAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.NaiveProxyAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.MtprotoAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.FptnAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.Hysteria2Adapter, "remove", return_value=True), \
+             patch("chimera.modules.satellite_bindings.remove_user") as sb_rm:
+
+            r = user_lifecycle.remove_user("alice@xray", protocols="all")
+
+        self.assertTrue(r["success"], f"remove failed: {r['errors']}")
+        sb_rm.assert_called_once_with("u1")
+
+    def test_remove_user_satellite_failure_not_fatal(self):
+        """Осечка чистки сателлитов — WARN, удаление всё равно успешно
+        (side-table косметическая, parity с rest_api)."""
+        from chimera.modules import user_lifecycle
+
+        self._users.write_text(json.dumps([
+            {"uuid": "u1", "email": "alice@xray", "name": "alice"}
+        ]))
+
+        fake_core = MagicMock()
+        fake_core._users_load = MagicMock(return_value=[])
+        fake_core._users_save = MagicMock()
+        fake_core._users_apply_to_config = MagicMock(return_value=True)
+
+        with patch("chimera.modules.user_lifecycle._core_module",
+                   return_value=fake_core), \
+             patch.object(user_lifecycle.VlessAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.AwgAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.SingboxAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.MieruAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.NaiveProxyAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.MtprotoAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.FptnAdapter, "remove", return_value=True), \
+             patch.object(user_lifecycle.Hysteria2Adapter, "remove", return_value=True), \
+             patch("chimera.modules.satellite_bindings.remove_user",
+                   side_effect=Exception("boom")):
+
+            r = user_lifecycle.remove_user("alice@xray", protocols="all")
+
+        self.assertTrue(r["success"], f"remove failed: {r['errors']}")
+        self.assertEqual(r["errors"], [])          # осечка сателлитов не попала в ошибки
+        self.assertIn("vless", r["applied"])       # транзакция завершена полностью
+
 
 class TestCoordinatorPartialFailure(unittest.TestCase):
     """Один adapter кидает исключение → rollback state files."""

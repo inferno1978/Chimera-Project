@@ -523,5 +523,124 @@ class TestH2ExitUi(unittest.TestCase):
         self._m.h2_exit_remove.assert_not_called()
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  _core: каноничное удаление в легаси/unified менеджерах пользователей
+#  (v5: все TUI-точки удаления сходятся на user_lifecycle.remove_user)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestCanonicalDeleteMenusUi(unittest.TestCase):
+    """do_manage_users [2] и do_unified_user_manager [2] → общий хелпер
+    _users_canonical_delete → user_lifecycle.remove_user(all).
+
+    ВАЖНО: функции _core скомпилированы в exec-неймспейс g (их __globals__
+    — это g, а НЕ копия в fake_core.__dict__), поэтому патчим сам g через
+    patch.dict — patch.object(fake_core, ...) здесь не работает.
+    """
+
+    USER = {"uuid": _UUID, "email": "u@x.io", "name": "User One",
+            "created": "2026-01-01T00:00:00+00:00", "source": "A"}
+
+    def setUp(self):
+        self._fake_core, self._g = _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._m_users_load = MagicMock(return_value=[dict(self.USER)])
+        self._m_unified_load = MagicMock(return_value=[dict(self.USER)])
+        self._m_unified_save = MagicMock()
+        self._m_sync = MagicMock()
+        self._m_log_change = MagicMock()
+        _p = patch.dict(self._g, {
+            "_users_load": self._m_users_load,
+            "_unified_load_users": self._m_unified_load,
+            "_unified_save_users": self._m_unified_save,
+            "_sync_user_to_protocols": self._m_sync,
+            "_log_change": self._m_log_change,
+            "STATE_FILE": self._tmpdir / "state.json",
+        })
+        _p.start()
+        self.addCleanup(_p.stop)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    # ── легаси do_manage_users [2] ─────────────────────────────────────
+
+    def test_legacy_delete_canonical_flow(self):
+        """[2] → номер → y: remove_user(all), без ручного [5]."""
+        with patch("chimera.modules.user_lifecycle.remove_user",
+                   return_value={"success": True, "applied": ["vless"],
+                                 "failed": [], "errors": []}) as rm:
+            text = _feed(self._fake_core.do_manage_users,
+                         ["2", "1", "y", "", "q"])[0]
+        rm.assert_called_once_with("u@x.io", protocols="all")
+        self.assertIn("удалён", text)
+        self.assertIn("Протоколы: vless", text)
+        self.assertNotIn("Не забудьте применить", text)   # [5] больше не нужен
+
+    def test_legacy_delete_confirm_cancel(self):
+        """[2] → номер → n: отмена, координатор не вызывается."""
+        with patch("chimera.modules.user_lifecycle.remove_user") as rm:
+            text = _feed(self._fake_core.do_manage_users,
+                         ["2", "1", "n", "", "q"])[0]
+        rm.assert_not_called()
+        self.assertIn("Отмена", text)
+
+    def test_legacy_delete_failure_shows_rollback(self):
+        """Координатор вернул failure — карточка с rollback."""
+        with patch("chimera.modules.user_lifecycle.remove_user",
+                   return_value={"success": False, "applied": [],
+                                 "failed": ["vless"],
+                                 "errors": ["xray apply failed"]}):
+            text = _feed(self._fake_core.do_manage_users,
+                         ["2", "1", "y", "", "q"])[0]
+        self.assertIn("Не удалось удалить", text)
+        self.assertIn("rollback", text)
+
+    # ── unified do_unified_user_manager [2] ─────────────────────────────
+
+    def test_unified_delete_canonical_flow(self):
+        """[2] → номер → y: remove_user(all) + материализация merged-вида."""
+        with patch("chimera.modules.user_lifecycle.remove_user",
+                   return_value={"success": True, "applied": ["vless", "awg"],
+                                 "failed": [], "errors": []}) as rm:
+            text = _feed(self._fake_core.do_unified_user_manager,
+                         ["2", "1", "y", "", "q"])[0]
+        rm.assert_called_once_with("u@x.io", protocols="all")
+        # Режим-A безопасность: merged-вид материализован ДО координатора,
+        # чтобы remove_user видел юзера в users.json и не зацепил соседей.
+        self._m_unified_save.assert_called_once()
+        self.assertIn("удалён", text)
+        self.assertIn("Протоколы: vless, awg", text)
+        self.assertNotIn("Не забудьте применить", text)   # [5] больше не нужен
+
+    def test_unified_delete_no_direct_sync_dispatcher(self):
+        """Протокольная синхронизация — внутри координатора; ручной вызов
+        _sync_user_to_protocols из [2] удалён (не двойной путь)."""
+        with patch("chimera.modules.user_lifecycle.remove_user",
+                   return_value={"success": True, "applied": ["vless"],
+                                 "failed": [], "errors": []}):
+            _feed(self._fake_core.do_unified_user_manager,
+                  ["2", "1", "y", "", "q"])
+        self._m_sync.assert_not_called()
+
+    def test_unified_delete_failure_shows_rollback(self):
+        with patch("chimera.modules.user_lifecycle.remove_user",
+                   return_value={"success": False, "applied": [],
+                                 "failed": ["vless"],
+                                 "errors": ["xray apply failed"]}):
+            text = _feed(self._fake_core.do_unified_user_manager,
+                         ["2", "1", "y", "", "q"])[0]
+        self.assertIn("Не удалось удалить", text)
+        self.assertIn("rollback", text)
+
+    def test_unified_delete_confirm_cancel(self):
+        with patch("chimera.modules.user_lifecycle.remove_user") as rm:
+            text = _feed(self._fake_core.do_unified_user_manager,
+                         ["2", "1", "n", "", "q"])[0]
+        rm.assert_not_called()
+        self._m_unified_save.assert_not_called()  # материализация только после y
+        self.assertIn("Отмена", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

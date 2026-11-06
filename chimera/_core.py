@@ -5309,6 +5309,54 @@ def _users_get_connections_by_email(email: str) -> int:
         return 0
 
 
+def _users_canonical_delete(u: dict, *, menu: str = "TUI") -> bool:
+    """Каноничное удаление пользователя — единая точка правды для всех
+    TUI-меню Химеры (легаси do_manage_users [2], unified [2]; TTL-меню [8]
+    в ttl_users.py использует координатора напрямую).
+
+    user_lifecycle.remove_user(email, protocols="all") — транзакционный
+    координатор: users.json + xray config + рестарт + все активные
+    протоколы + TTL/traffic_limits/blocked + привязки сателлитов,
+    StateSnapshot-rollback при осечке. Поверх координатора чистим файлы
+    ссылок (косметика: unlink обёрнут — missing_ok не ловит
+    PermissionError) и пишем _log_change. Возвращает True при успехе.
+    """
+    email = (u.get("email") or "").strip()
+    name  = u.get("name") or (email.split("@")[0] if email else "?")
+
+    try:
+        from chimera.modules.user_lifecycle import (
+            remove_user as _ul_remove_user,
+        )
+        res = _ul_remove_user(email, protocols="all")
+    except Exception as e:
+        res = {"success": False, "applied": [], "failed": [], "errors": [str(e)]}
+
+    if not res.get("success"):
+        _errs = ", ".join(res.get("errors") or ["неизвестная ошибка"])
+        warn(f"Не удалось удалить '{name}' ({email or 'без email'}): {_errs}")
+        warn("Состояние откачено (rollback), подробности в журнале операций")
+        return False
+
+    # Файлы ссылок (канон TTL-меню): осечка не должна ронять результат.
+    for _p in (f"/root/vless_link_{name}.txt", f"/root/vless_qr_{name}.png"):
+        try:
+            Path(_p).unlink(missing_ok=True)
+        except Exception:
+            pass
+    try:
+        _log_change("user_del", f"Удалён через {menu}: {name} ({email})")
+    except Exception:
+        pass
+
+    _applied = res.get("applied") or []
+    success(f"Пользователь '{name}' ({email}) удалён")
+    if _applied:
+        info(f"Протоколы: {', '.join(_applied)}")
+    info("TTL / блокировки / лимиты / привязки сателлитов вычищены, Xray перезапущен")
+    return True
+
+
 def do_manage_users() -> None:
     """Меню управления множественными пользователями Xray."""
     while True:
@@ -5358,13 +5406,23 @@ def do_manage_users() -> None:
                 time.sleep(1)
                 continue
             raw = input(f"  Номер пользователя для удаления: ").strip()
-            if raw.isdigit() and 1 <= int(raw) <= len(users):
-                removed = users.pop(int(raw) - 1)
-                _users_save(users)
-                success(f"Удалён: {removed.get('name')} ({removed['uuid'][:16]}...)")
-                warn("Не забудьте применить список [5]")
-            else:
+            if not (raw.isdigit() and 1 <= int(raw) <= len(users)):
                 warn("Неверный номер")
+                input(f"{BLUE}Нажмите Enter...{NC}")
+                continue
+            u = users[int(raw) - 1]
+            # v5: каноничный транзакционный путь (как в unified [2] и
+            # TTL-меню [8]) вместо голого users.pop+save, который не
+            # применял список к Xray и не чистил протоколы/TTL/blocked.
+            print()
+            warn(f"Будет полностью удалён: {u.get('name', '—')} <{u.get('email', '—')}>")
+            warn("Xray, все активные протоколы, TTL/блокировки/лимиты; ссылки и QR умрут.")
+            ans = input(f"  Удалить? [y/N]: ").strip().lower()
+            if ans not in ("y", "yes", "д", "да"):
+                info("Отмена")
+                input(f"{BLUE}Нажмите Enter...{NC}")
+                continue
+            _users_canonical_delete(u, menu="легаси-меню")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "3":
@@ -5882,23 +5940,35 @@ def do_unified_user_manager() -> None:
                     time.sleep(1)
                     continue
                 raw = input("  Номер пользователя для удаления: ").strip()
-                if raw.isdigit() and 1 <= int(raw) <= len(users):
-                    removed = users.pop(int(raw) - 1)
-                    _unified_save_users(users)
-                    _log_change("user_del", f"Удалён: {removed.get('name','?')} ({removed.get('email','')})")
-                    success(f"Удалён: {removed.get('name')} ({removed['uuid'][:16]}...)")
-                    # v4.25: удаляем юзера из всех спутниковых протоколов.
-                    _sync_result = _sync_user_to_protocols("remove", removed)
-                    _active_protos = [k for k, v in _sync_result.items() if v is not None]
-                    if _active_protos:
-                        info(f"Удалён из спутниковых протоколов: {', '.join(_active_protos)}")
-                    # Чистим файлы ссылок
-                    for p in (f"/root/vless_link_{removed.get('name','')}.txt",
-                               f"/root/vless_qr_{removed.get('name','')}.png"):
-                        Path(p).unlink(missing_ok=True)
-                    warn("Не забудьте применить список [5]")
-                else:
+                if not (raw.isdigit() and 1 <= int(raw) <= len(users)):
                     warn("Неверный номер")
+                    input(f"{BLUE}Нажмите Enter...{NC}")
+                    continue
+                u = users[int(raw) - 1]
+                # v5: каноничный транзакционный путь user_lifecycle.remove_user
+                # (как в TTL-меню [8]). Заменяет pop+save+_sync_user_to_protocols,
+                # который не применял список к Xray (ручной [5]) и не чистил
+                # TTL/blocked/traffic_limits — отсюда раньше росли сироты
+                # «ИСТЁК / нет в базе».
+                print()
+                warn(f"Будет полностью удалён: {u.get('name', '—')} <{u.get('email', '—')}>")
+                warn("Xray, все активные протоколы, TTL/блокировки/лимиты; ссылки и QR умрут.")
+                ans = input(f"  Удалить? [y/N]: ").strip().lower()
+                if ans not in ("y", "yes", "д", "да"):
+                    info("Отмена")
+                    input(f"{BLUE}Нажмите Enter...{NC}")
+                    continue
+                # Материализуем merged-вид в users.json ДО координатора: в
+                # режиме A юзер может существовать только в config.json —
+                # иначе remove_user не найдёт его в users.json (noop) и не
+                # выкинет из Xray, а _users_apply_to_config перепишет config
+                # из устаревшего users.json, зацепив живых режим-A клиентов.
+                # Пишем тот же список — содержимое конфига не меняется.
+                try:
+                    _unified_save_users(users)
+                except Exception:
+                    pass
+                _users_canonical_delete(u, menu="unified-меню")
                 input(f"{BLUE}Нажмите Enter...{NC}")
 
             elif ch == "3":

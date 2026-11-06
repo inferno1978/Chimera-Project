@@ -1528,6 +1528,22 @@ def remove_user(email: str,
             _remove_ttl(email)
             _remove_traffic_limit(email)
             _remove_blocked_record(email)
+            # v5: снимаем привязки сателлитов (side-table
+            # satellite_bindings.json) по UUID владельца — иначе в Admin
+            # Panel остаются висящие записи с несуществующим UUID (до
+            # этого чистили только rest_api/users_manager вручную, TTL-меню
+            # и WPP вообще не чистили). Side-table косметическая: осечка
+            # не роняет удаление (parity с rest_api, который исторически
+            # прощал этот шаг).
+            if uuid_str:
+                try:
+                    from chimera.modules.satellite_bindings import (
+                        remove_user as _sb_remove_user,
+                    )
+                    _sb_remove_user(uuid_str)
+                except Exception as _e:
+                    _log("WARN",
+                         f"satellite_bindings cleanup failed for {email!r}: {_e}")
 
         snap.commit()
         _flush_if_not_batched()
