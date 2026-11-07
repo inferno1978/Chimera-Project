@@ -2544,6 +2544,18 @@ def _xray_do_upgrade(tag: str, is_prerelease: bool = False) -> bool:
     except Exception:
         pass
 
+    # ── Шаг 6: цель доктора следует за установленной версией ─────────────
+    # xray_target_version в system-doctor.json обязан совпадать с тем, что
+    # владелец поставил (апгрейд/даунгрейд) — иначе доктор шумит «дрифт
+    # версий» на каждом проходе (кейс 07.11.2026: флот 26.10.31, цель
+    # 26.10.17). Синк мягкий: нет конфига/пустая цель = не трогаем.
+    try:
+        from chimera.modules.system_doctor import sync_xray_target
+        if sync_xray_target(tag):
+            info(f"system-doctor: цель версии Xray → {str(tag).lstrip('v')}")
+    except Exception:
+        pass  # конфиг доктора — не повод падать апгрейду
+
     return True
 
 

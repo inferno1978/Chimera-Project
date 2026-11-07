@@ -281,6 +281,42 @@ def save_cfg(cfg: dict) -> None:
     CONFIG_FILE.chmod(0o600)
 
 
+def sync_xray_target(ver: str) -> bool:
+    """Синхронизировать xray_target_version с установленной версией Xray.
+
+    Вызывается из xray_install._xray_do_upgrade ПОСЛЕ успешной установки
+    ядра (апгрейд и даунгрейд — один путь): цель доктора обязана следовать
+    за версией, которую владелец поставил сознательно, иначе каждый проход
+    доктора шумит «дрифт версий» до ручной правки конфига (кейс 07.11.2026:
+    флот на 26.10.31, цель 26.10.17 — warn на каждой ноде).
+
+    Семантика: поле обновляется ТОЛЬКО если конфиг существует и цель уже
+    задана. Пустая цель = владелец сознательно не сверяет дрифт — не
+    навязываем. Файл правится хирургически (raw read-modify-write),
+    без материализации дефолтов.
+    """
+    ver = str(ver or "").strip().lstrip("vV")
+    if not re.match(r"^\d+\.\d+\.\d+$", ver):
+        return False
+    try:
+        if not CONFIG_FILE.exists():
+            return False
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+        cur = str(data.get("xray_target_version") or "").strip()
+        if not cur or cur == ver:
+            return False
+        data["xray_target_version"] = ver
+        CONFIG_FILE.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        CONFIG_FILE.chmod(0o600)
+        return True
+    except Exception:
+        return False
+
+
 # ── Контекст прохода (бэкапы/dry-run/действия) ───────────────────────────────
 
 LEVEL_ICON = {"ok": "✅", "info": "ℹ️", "warn": "⚠️", "crit": "🚨"}
