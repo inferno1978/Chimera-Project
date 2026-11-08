@@ -393,6 +393,88 @@ class TestDiagNatRouting(unittest.TestCase):
             self.assertEqual(masq["status"], "OK")
             self.assertIn("172.16.82.0/24", masq["msg"])
 
+    def test_first_masq_rule_not_covering_does_not_stop_search(self):
+        """Live-баг с RU1 (валидация деплоя): docker-правило 172.17.0.0/16
+        стоит в POSTROUTING ПЕРВЫМ и подсеть ноды не покрывает — поиск
+        обязан дойти до строки с 172.16.82.0/24 (ранний return на первой
+        непокрывающей строке давал ложное «не найден» при живом NAT)."""
+        from chimera.modules import awg_diagnose
+        head = (
+            "Chain POSTROUTING (policy ACCEPT 10M packets, 768M bytes)\n"
+            " pkts bytes target     prot opt in     out     source               destination         \n"
+            "    0     0 MASQUERADE  0    --  *      !docker0  172.17.0.0/16        0.0.0.0/0           \n"
+            "    0     0 MASQUERADE  0    --  *      ens3    10.202.54.22         0.0.0.0/0            /* olcrtc-manager-netns */\n"
+            "   17   884 MASQUERADE  0    --  *      ens3    172.16.82.0/24       0.0.0.0/0           \n"
+        )
+        self.assertTrue(
+            awg_diagnose._diag_masq_covers(head, "172.16.82.0/24"))
+        # без catch-all: чужая подсеть никем не покрыта
+        self.assertFalse(
+            awg_diagnose._diag_masq_covers(head, "10.99.0.0/24"))
+
+    def test_tunnel_masq_covers_everything(self):
+        """MASQ -o awg1 с источником 0.0.0.0/0 (SNAT в каскадный туннель)
+        покрывает любую клиентскую подсеть — «есть» честно."""
+        from chimera.modules import awg_diagnose
+        stdout = ("20160 1692K MASQUERADE  0    --  *      awg1    "
+                  "0.0.0.0/0            0.0.0.0/0\n")
+        self.assertTrue(
+            awg_diagnose._diag_masq_covers(stdout, "172.16.82.0/24"))
+
+    def test_cascade_entry_only_catchall_is_warn(self):
+        """Entry, покрытая ТОЛЬКО catch-all SNAT в туннель (awgN): зарубежный
+        интернет жив, но РФ-direct без локального MASQ отваливается — WARN,
+        не молчаливое OK и не FAIL."""
+        from chimera.modules import awg_diagnose
+        self._state_file.write_text(json.dumps({
+            "installed": True, "subnet": "172.16.82.0/24",
+            "cascade_role": "entry",
+        }))
+        with patch("chimera.modules.awg_state.AWGS_STATE_FILE",
+                   self._state_file), \
+             patch("chimera._core._run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="1\n", stderr=""),
+                MagicMock(returncode=0, stdout=(
+                    "20160 1692K MASQUERADE  0    --  *      awg1    "
+                    "0.0.0.0/0            0.0.0.0/0\n"), stderr=""),
+                MagicMock(returncode=0, stdout="ACCEPT awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="172.16.82.0/24 dev awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="0\n", stderr=""),
+            ]
+            r = awg_diagnose._diag_nat_routing()
+            masq = self._masq_check(r)
+            self.assertTrue(masq["ok"])            # интернет жив
+            self.assertEqual(masq["status"], "WARN")
+            self.assertIn("catch-all", masq["msg"])
+            self.assertIn("РФ", masq["msg"])
+
+    def test_standalone_catchall_is_ok(self):
+        """Standalone с catch-all MASQ: покрытие есть — OK (клиенты с
+        интернетом), без каскадных нюансов."""
+        from chimera.modules import awg_diagnose
+        self._state_file.write_text(json.dumps({
+            "installed": True, "subnet": "10.66.66.0/24",
+        }))
+        with patch("chimera.modules.awg_state.AWGS_STATE_FILE",
+                   self._state_file), \
+             patch("chimera._core._run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="1\n", stderr=""),
+                MagicMock(returncode=0, stdout=(
+                    "500 10K MASQUERADE  all -- * ens3 0.0.0.0/0 0.0.0.0/0\n"),
+                    stderr=""),
+                MagicMock(returncode=3, stdout="inactive\n", stderr=""),  # роль
+                MagicMock(returncode=0, stdout="ACCEPT awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="10.66.66.0/24 dev awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="0\n", stderr=""),
+            ]
+            r = awg_diagnose._diag_nat_routing()
+            masq = self._masq_check(r)
+            self.assertTrue(masq["ok"])
+            self.assertEqual(masq["status"], "OK")
+            self.assertIn("catch-all", masq["msg"])
+
     def test_stale_state_subnet_falls_back_to_live(self):
         """State-подсеть не покрыта (stale), а живая awg0 — покрыта: проверка
         должна увидеть покрытие по ЖИВОЙ подсети, а не FAIL по устаревшей."""

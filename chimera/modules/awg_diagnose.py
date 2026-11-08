@@ -180,36 +180,67 @@ def _diag_live_port() -> int:
     return 0
 
 
-def _diag_masq_covers(stdout: str, subnet: str) -> bool:
-    """Покрывает ли какое-нибудь MASQUERADE-правило подсеть.
+def _diag_masq_covering_src(stdout: str, subnet: str):
+    """Источник первого MASQUERADE-правила, покрывающего подсеть.
 
     Инцидент 09.11.2026 (каскад-entry, follow-up): awg-nat helper
     ставит ШИРОКОЕ 172.16.0.0/12 → WAN, а подсеть ноды —
     172.16.82.0/24; легаси-строковый grep '172.16.82' не матчит
     '172.16.0.0/12' → ложный FAIL при живом NAT. Честно: в каждой
-    MASQUERADE-строке берём первый CIDR-токен (в выводе -L … -n
-    источник идёт раньше адресата; в -S первым идёт -s) и проверяем
-    ip_network(subnet).subnet_of(сеть_правила).
+    MASQUERADE-строке первый IP-подобный токен = ИСТОЧНИК правила
+    (в выводе -L … -n источник идёт раньше адресата; в -S первым
+    идёт -s), покрытие = ip_network(subnet).subnet_of(источник).
+
+    Возвращает CIDR-строку источника покрывающего правила или None;
+    '0.0.0.0/0' — catch-all (на наших деплоях это SNAT в каскадный
+    туннель awgN: покрывает всё, но РФ-direct-плечу не помогает).
+    Конкретное/широкое правило ПРЕДПОЧТИТЕЛЬНЕЕ catch-all (на RU1
+    awg1-catch-all стоит в POSTROUTING РАНЬШЕ широкого 172.16.0.0/12 —
+    первый-покрывший обманывал бы «только туннелем»): catch-all
+    возвращается лишь когда конкретного покрытия нет.
+
+    Тонкости формата -L -v (live-баги с RU1, iptables 1.8.10 nft):
+      • /32-источник печатается БЕЗ суффикса («10.202.54.22») — голый
+        IP трактуем как /32, иначе первым «слэшевым» токеном окажется
+        адресат 0.0.0.0/0 и правило «покроет» всё;
+      • непокрывающее правило (docker 172.17.0.0/16 первым в
+        POSTROUTING) НЕ обрывает поиск — смотрим все строки;
+      • MASQUERADE без адресов (голое -o awg1 в -S) — не покрывает.
     """
     import ipaddress
     try:
         want = ipaddress.ip_network(subnet, strict=False)
     except ValueError:
-        return False
+        return None
+    catch_all_hit = None
     for line in stdout.splitlines():
         if "MASQUERADE" not in line:
             continue
+        src = None
         for tok in line.split():
-            if "/" not in tok:
-                continue
             try:
-                net = ipaddress.ip_network(tok, strict=False)
+                if "/" in tok:
+                    src = ipaddress.ip_network(tok, strict=False)
+                else:
+                    src = ipaddress.ip_network(tok + "/32", strict=False)
             except ValueError:
-                continue
-            # 0.0.0.0/0 (правило без -s, «на всё») покрывает любую подсеть
-            return want.subnet_of(net)
-        # MASQUERADE без CIDR-токенов (голое -o awg1 в -S) — не покрывает
-    return False
+                continue  # не адрес (pkts/bytes/ifaces/«/*»…) — дальше
+            break  # первый адрес строки = источник правила
+        if src is None or src.version != want.version \
+                or not want.subnet_of(src):
+            continue
+        if str(src) == "0.0.0.0/0":
+            if catch_all_hit is None:
+                catch_all_hit = "0.0.0.0/0"
+            continue  # ищем конкретное/широкое правило дальше
+        return str(src)
+    return catch_all_hit
+
+
+def _diag_masq_covers(stdout: str, subnet: str) -> bool:
+    """Покрывает ли какое-нибудь MASQUERADE-правило подсеть (bool-обёртка
+    над _diag_masq_covering_src)."""
+    return _diag_masq_covering_src(stdout, subnet) is not None
 
 
 def _diag_is_cascade_entry(state: dict) -> bool:
@@ -280,18 +311,43 @@ def _diag_nat_routing() -> dict:
     # Покрытие честным матчингом сетей: широкое 172.16.0.0/12 → WAN
     # покрывает подсеть ноды; если state-подсеть не покрыта — вторая
     # попытка живой подсетью awg0 (stale state).
-    covered = _diag_masq_covers(r.stdout, subnet)
-    if not covered:
+    covered_src = _diag_masq_covering_src(r.stdout, subnet)
+    if covered_src is None:
         live = live_subnet or _diag_live_subnet()
-        if live and live != subnet and _diag_masq_covers(r.stdout, live):
-            covered = True
+        if live and live != subnet \
+                and _diag_masq_covering_src(r.stdout, live) is not None:
+            covered_src = _diag_masq_covering_src(r.stdout, live)
             subnet = live  # в сообщениях — реально покрытая подсеть
-    if covered:
+    if covered_src is not None and covered_src != "0.0.0.0/0":
+        # конкретное/широкое правило (наш кейс: -s <subnet>|172.16.0.0/12
+        # -o WAN) — покрывает и туннельное, и РФ-direct-плечо
         checks.append({
             "name":    "MASQUERADE",
             "ok":      True,
             "status":  "OK",
             "msg":     f"MASQUERADE для {subnet}: есть",
+        })
+    elif covered_src is not None and _diag_is_cascade_entry(state):
+        # только catch-all SNAT в каскадный туннель (awgN): зарубежный
+        # интернет клиентов жив, но РФ-направления (direct через
+        # провайдера entry) без локального MASQ работать не будут
+        checks.append({
+            "name":    "MASQUERADE",
+            "ok":      True,
+            "status":  "WARN",
+            "msg":     (f"MASQUERADE для {subnet}: только catch-all SNAT "
+                        f"в каскадный туннель — зарубежный интернет "
+                        f"клиентов жив, но РФ-направления (direct через "
+                        f"провайдера entry) отваливаются — systemctl "
+                        f"restart awg-nat"),
+        })
+    elif covered_src is not None:
+        # standalone/exit с catch-all — покрывает всё, честно «есть»
+        checks.append({
+            "name":    "MASQUERADE",
+            "ok":      True,
+            "status":  "OK",
+            "msg":     f"MASQUERADE для {subnet}: есть (catch-all)",
         })
     elif _diag_is_cascade_entry(state):
         checks.append({
