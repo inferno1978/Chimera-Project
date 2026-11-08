@@ -81,18 +81,26 @@ class TestConfigManagement(unittest.TestCase):
         self.assertEqual(cfg["thresholds"]["degraded_mbps"], 50.0)
 
 
+def _probe_result(speed_bps, source="cloudflare", peak_bps=None, streams=6,
+                  probe_mb=60.0):
+    """Фикстура результата _run_download_probe для тестов."""
+    return {"speed_bps": speed_bps, "peak_bps": peak_bps, "source": source,
+            "streams": streams, "probe_mb": probe_mb, "ookla": None}
+
+
 class TestMeasureOnce(unittest.TestCase):
-    """measure_once — классификация по порогам."""
+    """measure_once — классификация по порогам (без базлайна → absolute)."""
     def setUp(self):
         _setup_core_in_sysmodules()
         from chimera.modules import bandwidth_monitor
         self._m = bandwidth_monitor
 
     def test_classifies_normal(self):
-        """Скорость ≥ normal_mbps → level=normal."""
+        """Скорость ≥ normal_mbps → level=normal (базлайна нет → absolute)."""
         with patch.object(self._m, "_ping_latency", return_value=2.5), \
-             patch.object(self._m, "_try_download",
-                          return_value=(15_000_000, "cachefly")), \
+             patch.object(self._m, "_run_download_probe",
+                          return_value=_probe_result(15_000_000)), \
+             patch.object(self._m, "_baseline_mbps", return_value=None), \
              patch.object(self._m, "_node_hostname", return_value="test-host"), \
              patch.object(self._m, "_node_public_ip", return_value="1.2.3.4"), \
              patch.object(self._m, "load_config",
@@ -105,12 +113,16 @@ class TestMeasureOnce(unittest.TestCase):
         self.assertAlmostEqual(s["download_mbps"], 120.0, places=1)
         self.assertEqual(s["label"], "TEST")
         self.assertFalse(s["big"])
+        # новые поля методики
+        self.assertEqual(s["streams"], 6)
+        self.assertEqual(s["download_source"], "cloudflare")
 
     def test_classifies_degraded(self):
         """Скорость 50-100 Mbps → level=degraded."""
         with patch.object(self._m, "_ping_latency", return_value=5.0), \
-             patch.object(self._m, "_try_download",
-                          return_value=(7_500_000, "cachefly")), \
+             patch.object(self._m, "_run_download_probe",
+                          return_value=_probe_result(7_500_000)), \
+             patch.object(self._m, "_baseline_mbps", return_value=None), \
              patch.object(self._m, "_node_hostname", return_value="h"), \
              patch.object(self._m, "_node_public_ip", return_value="1.2.3.4"), \
              patch.object(self._m, "load_config",
@@ -123,8 +135,9 @@ class TestMeasureOnce(unittest.TestCase):
     def test_classifies_critical(self):
         """Скорость < 50 Mbps → level=critical."""
         with patch.object(self._m, "_ping_latency", return_value=10.0), \
-             patch.object(self._m, "_try_download",
-                          return_value=(2_000_000, "cachefly")), \
+             patch.object(self._m, "_run_download_probe",
+                          return_value=_probe_result(2_000_000)), \
+             patch.object(self._m, "_baseline_mbps", return_value=None), \
              patch.object(self._m, "_node_hostname", return_value="h"), \
              patch.object(self._m, "_node_public_ip", return_value="1.2.3.4"), \
              patch.object(self._m, "load_config",
@@ -137,14 +150,300 @@ class TestMeasureOnce(unittest.TestCase):
     def test_big_flag(self):
         """big=True → big=True в сэмпле."""
         with patch.object(self._m, "_ping_latency", return_value=2.0), \
-             patch.object(self._m, "_try_download",
-                          return_value=(20_000_000, "cachefly")), \
+             patch.object(self._m, "_run_download_probe",
+                          return_value=_probe_result(20_000_000, streams=8,
+                                                     probe_mb=760.0)), \
+             patch.object(self._m, "_baseline_mbps", return_value=None), \
              patch.object(self._m, "_node_hostname", return_value="h"), \
              patch.object(self._m, "_node_public_ip", return_value="1.2.3.4"), \
              patch.object(self._m, "load_config",
                           return_value=self._m.DEFAULT_CONFIG):
             s = self._m.measure_once(big=True)
         self.assertTrue(s["big"])
+        self.assertEqual(s["streams"], 8)
+
+    def test_ookla_fields_propagate(self):
+        """Ookla-результат протаскивается в сэмпл (ul/server)."""
+        probe = _probe_result(2_065_000_000, source="ookla", streams=1,
+                              probe_mb=0.0)
+        probe["ookla"] = {"dl_mbps": 16520.0, "ul_mbps": 19672.0,
+                          "latency_ms": 3.68, "server": "fdcservers — Amsterdam"}
+        with patch.object(self._m, "_ping_latency", return_value=3.68), \
+             patch.object(self._m, "_run_download_probe", return_value=probe), \
+             patch.object(self._m, "_baseline_mbps", return_value=None), \
+             patch.object(self._m, "_node_hostname", return_value="h"), \
+             patch.object(self._m, "_node_public_ip", return_value="1.2.3.4"), \
+             patch.object(self._m, "load_config",
+                          return_value=self._m.DEFAULT_CONFIG):
+            s = self._m.measure_once(big=True)
+        self.assertEqual(s["download_source"], "ookla")
+        self.assertAlmostEqual(s["download_mbps"], 16520.0, places=1)
+        self.assertEqual(s["ookla_ul_mbps"], 19672.0)
+        self.assertIn("Amsterdam", s["ookla_server"])
+
+
+class TestSteadyAndPeak(unittest.TestCase):
+    """_steady_and_peak — отброс разгона + пик в скользящем окне 1 с."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+
+    def test_steady_discards_ramp(self):
+        # t0=100.0; разгон (первые 0.4 c) даёт 50 MB, дальше 0.9 c — 150 MB
+        events = [(100.2, 25_000_000), (100.4, 50_000_000),
+                  (100.9, 100_000_000), (101.4, 200_000_000)]
+        steady, peak = self._m._steady_and_peak(events, t0=100.0, duration=1.4)
+        # ramp_t=100.5 → cum_at_ramp=50MB; (200-50)MB за (101.4-100.5)=0.9 c
+        self.assertAlmostEqual(steady, 150_000_000 / 0.9, places=1)
+        # пик: окно [100.4, 101.4] → (200-25)MB / 1.0 c
+        self.assertAlmostEqual(peak, 175_000_000.0, places=1)
+
+    def test_short_transfer_plain_avg(self):
+        """Замер короче отбрасываемого разгона → простое среднее."""
+        events = [(100.1, 60_000_000)]
+        steady, peak = self._m._steady_and_peak(events, t0=100.0, duration=0.1)
+        self.assertAlmostEqual(steady, 600_000_000.0, places=1)
+        self.assertAlmostEqual(peak, 60_000_000.0, places=1)
+
+
+class TestParallelDownloadOne(unittest.TestCase):
+    """_parallel_download_one — потоки, бюджет, события (без сети)."""
+
+    _conns = []
+
+    class _FakeResp:
+        def __init__(self, chunk_count):
+            self._n = chunk_count
+        def read(self, n):
+            if self._n > 0:
+                self._n -= 1
+                return b"x" * 65536
+            return b""
+
+    class _FakeConn:
+        CHUNKS = 1000
+        def __init__(self, host, timeout=None):
+            TestParallelDownloadOne._conns.append(self)
+            self.resp = TestParallelDownloadOne._FakeResp(self.CHUNKS)
+        def request(self, *a, **kw):
+            pass
+        def getresponse(self):
+            return self.resp
+        def close(self):
+            pass
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+        TestParallelDownloadOne._conns = []
+        TestParallelDownloadOne._FakeConn.CHUNKS = 1000
+        self._patch_conn = patch.object(self._m, "HTTPSConnection",
+                                        TestParallelDownloadOne._FakeConn)
+        self._patch_conn.start()
+
+    def tearDown(self):
+        self._patch_conn.stop()
+
+    def test_budget_split_across_streams(self):
+        """2 потока, бюджет 2 MB → каждый читает ~1 MB и останавливается."""
+        res = self._m._parallel_download_one(
+            "https://speed.cloudflare.com/__down?bytes=1000000",
+            streams=2, budget_bytes=2_000_000, active_cap=10)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["streams"], 2)
+        # per_stream = 1MB → по 16 блоков × 65536 на поток
+        self.assertEqual(res["total_bytes"], 2 * 16 * 65536)
+        self.assertGreater(res["speed_bps"], 0)
+        self.assertEqual(len(self._conns), 2)
+
+    def test_all_streams_empty_returns_none(self):
+        """Ни один поток не получил байта → None."""
+        TestParallelDownloadOne._FakeConn.CHUNKS = 0
+        res = self._m._parallel_download_one(
+            "https://speed.cloudflare.com/__down?bytes=1000000",
+            streams=3, budget_bytes=3_000_000, active_cap=10)
+        self.assertIsNone(res)
+
+
+class TestOoklaParser(unittest.TestCase):
+    """_ookla_test — парсинг JSON Ookla CLI."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+
+    def _fake_run(self, rc=0, stdout=""):
+        obj = SimpleNamespace(returncode=rc, stdout=stdout, stderr="")
+        return patch.object(self._m, "_run", return_value=obj)
+
+    def test_parses_ookla_json(self):
+        payload = json.dumps({
+            "download": {"bandwidth": 2_065_000_000},   # B/s → 16520 Mbps
+            "upload": {"bandwidth": 2_459_000_000},     # B/s → 19672 Mbps
+            "ping": {"latency": 3.68},
+            "server": {"name": "fdcservers", "location": "Amsterdam"},
+        })
+        with patch.object(self._m.shutil, "which",
+                          return_value="/usr/bin/speedtest"), \
+             self._fake_run(0, payload):
+            res = self._m._ookla_test()
+        self.assertAlmostEqual(res["dl_mbps"], 16520.0, places=0)
+        self.assertAlmostEqual(res["ul_mbps"], 19672.0, places=0)
+        self.assertEqual(res["latency_ms"], 3.68)
+        self.assertIn("fdcservers", res["server"])
+
+    def test_missing_binary(self):
+        with patch.object(self._m.shutil, "which", return_value=None):
+            self.assertIsNone(self._m._ookla_test())
+
+    def test_nonzero_exit(self):
+        with patch.object(self._m.shutil, "which",
+                          return_value="/usr/bin/speedtest"), \
+             self._fake_run(1, ""):
+            self.assertIsNone(self._m._ookla_test())
+
+
+class TestRunDownloadProbe(unittest.TestCase):
+    """Диспетчер методики: ookla → параллельные потоки → легаси-однопоток."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+
+    def test_ookla_wins_when_enabled_big(self):
+        cfg = {**self._m.DEFAULT_CONFIG, "use_ookla": True}
+        ook = {"dl_mbps": 16520.0, "ul_mbps": 19672.0,
+               "latency_ms": 3.68, "server": "fdcservers — Amsterdam"}
+        with patch.object(self._m, "_ookla_test", return_value=ook) as pook:
+            res = self._m._run_download_probe(cfg, big=True)
+        pook.assert_called_once()
+        self.assertEqual(res["source"], "ookla")
+        self.assertAlmostEqual(res["speed_bps"] * 8 / 1e6, 16520.0, places=1)
+        self.assertEqual(res["ookla"], ook)
+
+    def test_ookla_not_used_for_light(self):
+        cfg = {**self._m.DEFAULT_CONFIG, "use_ookla": True}
+        par = {"speed_bps": 500_000_000, "peak_bps": 700_000_000,
+               "source": "cloudflare", "total_bytes": 60_000_000,
+               "duration": 1.0, "streams": 6}
+        with patch.object(self._m, "_ookla_test") as pook, \
+             patch.object(self._m, "_parallel_download", return_value=par) as ppar:
+            res = self._m._run_download_probe(cfg, big=False)
+        pook.assert_not_called()
+        ppar.assert_called_once()
+        self.assertEqual(res["streams"], 6)
+        self.assertEqual(res["source"], "cloudflare")
+
+    def test_single_stream_legacy(self):
+        cfg = {**self._m.DEFAULT_CONFIG, "parallel_streams": 1}
+        with patch.object(self._m, "_parallel_download") as ppar, \
+             patch.object(self._m, "_try_download",
+                          return_value=(15_000_000, "cachefly")) as pcur:
+            res = self._m._run_download_probe(cfg, big=False)
+        ppar.assert_not_called()
+        pcur.assert_called_once()
+        self.assertEqual(res["streams"], 1)
+        self.assertEqual(res["source"], "cachefly")
+
+    def test_parallel_failure_falls_back_to_curl(self):
+        """Все параллельные источники упали → откат на однопотоковый curl."""
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "_parallel_download", return_value=None), \
+             patch.object(self._m, "_try_download",
+                          return_value=(10_000_000, "testdebit")):
+            res = self._m._run_download_probe(cfg, big=True)
+        self.assertEqual(res["source"], "testdebit")
+        self.assertEqual(res["streams"], 1)
+
+
+class TestBaselineClassification(unittest.TestCase):
+    """_classify_level auto-режим: базлайн-медиана 24ч вместо абсолютных порогов."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+
+    def test_auto_fast_port_cut_is_critical(self):
+        """Кейс №16: обрез 16.5G → ~1G. Абсолютные пороги дали бы normal."""
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "_baseline_mbps", return_value=9000.0):
+            self.assertEqual(self._m._classify_level(950.0, cfg), "critical")
+
+    def test_auto_half_baseline_is_normal(self):
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "_baseline_mbps", return_value=9000.0):
+            self.assertEqual(self._m._classify_level(5000.0, cfg), "normal")
+
+    def test_auto_quarter_baseline_is_degraded(self):
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "_baseline_mbps", return_value=9000.0):
+            self.assertEqual(self._m._classify_level(2000.0, cfg), "degraded")
+
+    def test_auto_falls_back_to_absolute_without_baseline(self):
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "_baseline_mbps", return_value=None):
+            self.assertEqual(self._m._classify_level(120.0, cfg), "normal")
+            self.assertEqual(self._m._classify_level(60.0, cfg), "degraded")
+            self.assertEqual(self._m._classify_level(16.0, cfg), "critical")
+
+    def test_absolute_mode_ignores_baseline(self):
+        cfg = {**self._m.DEFAULT_CONFIG, "level_mode": "absolute"}
+        with patch.object(self._m, "_baseline_mbps", return_value=9000.0) as pbl:
+            self.assertEqual(self._m._classify_level(120.0, cfg), "normal")
+        pbl.assert_not_called()
+
+    def test_baseline_median_from_samples(self):
+        """_baseline_mbps: медиана по файлам сэмплов + окно + min_samples."""
+        import shutil as _sh
+        import tempfile
+        import time as _t
+        tmp = Path(tempfile.mkdtemp())
+        patcher = patch.object(self._m, "SAMPLES_DIR", tmp)
+        patcher.start()
+        try:
+            self.assertIsNone(self._m._baseline_mbps())  # сэмплов нет
+            now = int(_t.time())
+            rows = []
+            # 5 свежих (медиана 8600) + 2 вне окна (не считаются)
+            for v in (9000, 8800, 8600, 500, 8400):
+                rows.append({"epoch": now - 60, "download_mbps": v})
+            for v in (99999, 88888):
+                rows.append({"epoch": now - 30 * 86400, "download_mbps": v})
+            f = tmp / (_t.strftime("%Y-%m-%d") + ".jsonl")
+            f.write_text("\n".join(json.dumps(r) for r in rows),
+                         encoding="utf-8")
+            self.assertAlmostEqual(self._m._baseline_mbps(), 8600.0)
+        finally:
+            patcher.stop()
+            _sh.rmtree(tmp, ignore_errors=True)
+
+
+class TestAlertFastPortCut(unittest.TestCase):
+    """Кейс №16: обрез 16.5G → ~1G должен давать critical-алерт,
+    хотя абсолютный порог 50 Mbps пройден с запасом."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+
+    def test_cut_triggers_critical_alert(self):
+        cfg = {**self._m.DEFAULT_CONFIG, "alerts_enabled": True}
+        with patch.object(self._m, "_baseline_mbps", return_value=9000.0):
+            level = self._m._classify_level(950.0, cfg)
+        self.assertEqual(level, "critical")
+        sample = {"level": level, "download_mbps": 950, "label": "test",
+                  "ip": "1.2.3.4", "ts": "2026-11-08T10:00:00",
+                  "latency_ms": 4.0, "latency_target": "1.1.1.1"}
+        recent = [{"download_mbps": 1100, "level": "critical"},
+                  {"download_mbps": 990, "level": "critical"}]
+        with patch.object(self._m, "read_samples", return_value=recent), \
+             patch.object(self._m, "_load_tg_state", return_value={}), \
+             patch.object(self._m, "_save_tg_state"):
+            result = self._m._check_alert(sample, cfg)
+        self.assertIsNotNone(result)
+        self.assertIn("КРИТИЧНО", result)
 
 
 class TestAlertLogic(unittest.TestCase):

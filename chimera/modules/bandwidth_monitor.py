@@ -11,18 +11,31 @@ Bandwidth монитор — периодический замер пропус�
 клиенты начинают жаловаться. Монитор ловит обрез за 30 минут.
 
 Гибридный подход (не тыркать каждые N часов):
-  1. Лёгкая проба (раз в 30 мин): small curl 10 MB + ping → быстрый замер
-     single-flow download. Если скорость < порога → мгновенный alarm в TG.
-  2. Полный замер (раз в 6 часов): big curl 100 MB + опционально iperf3
-     (если сервер свободен) → точный замер + отчёт в TG.
+  1. Лёгкая проба (раз в 30 мин): 6 параллельных потоков суммарно ~60 MB
+     + ping. Если скорость < порога → мгновенный alarm в TG.
+  2. Полный замер (раз в 6 часов): 8 параллельных потоков суммарно
+     ~760 MB (нижняя оценка порта) + опционально iperf3 / Ookla CLI →
+     точный замер + отчёт в TG.
   3. Дневной отчёт (раз в день): сводка avg/min/max/latency + классификация.
   4. Алерт при деградации: если скорость упала > 50% от среднего за час
      → мгновенный alarm + полный замер.
 
-Пороги (настраиваются):
+Почему параллельные потоки (кейс №16, 08.11.2026): NL-выход с портом
+16.5 Gbps (Ookla CLI: DL 16526 / UL 19675 Mbps) при ОДНОПОТОКОВОЙ пробе
+95 MB стабильно показывал 578-681 Mbps — это потолок одиночного TCP-потока
+и фазы slow start, а не порта: 100 MB на 16 Gbps = 0.05 c «по проводу»,
+весь замер внутри разгона. Параллельные потоки дают честную нижнюю оценку
+(≥ X Mbps); настоящее число — только Ookla (~16 соединений, десятки GB
+трафика за прогон, поэтому opt-in через use_ookla).
+
+Пороги (level_mode=absolute, или fallback пока < 5 сэмплов за 24ч):
   normal:    > 100 Mbps
   degraded:  50-100 Mbps
   critical:  < 50 Mbps  (хостер обрезал)
+Пороги (level_mode=auto, по умолчанию): относительно МЕДИАНЫ сэмплов
+за 24ч — normal ≥ 50% базлайна, degraded ≥ 20%, ниже — critical.
+Абсолютные пороги слепы на портах > 1 Gbps: обрез 16.5G → 1G выглядел
+бы «🟢 normal» при 950 Mbps.
 
 Файлы:
   /var/lib/xray-installer/bandwidth-monitor.json     — конфиг
@@ -51,10 +64,13 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from datetime import datetime
+from http.client import HTTPSConnection
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  КОНСТАНТЫ
@@ -116,6 +132,30 @@ DOWNLOAD_SOURCES = [
 # Цели для ping-теста
 PING_TARGETS = ["1.1.1.1", "ya.ru", "8.8.8.8"]
 
+# Параллельные потоки (кейс №16: однопотоковая проба мерила потолок
+# одиночного TCP-потока, а не порт — см. докстринг модуля)
+DEFAULT_PARALLEL_STREAMS_LIGHT = 6     # лёгкая проба: 6 × 10 MB
+DEFAULT_PARALLEL_STREAMS_BIG   = 8     # полный замер: 8 × 95 MB
+PROBE_MB_LIGHT = 60                    # суммарный бюджет лёгкой пробы
+PROBE_MB_BIG   = 760                   # суммарный бюджет полного замера
+STREAM_ACTIVE_CAP_LIGHT = 15           # сек на поток (лёгкая)
+STREAM_ACTIVE_CAP_BIG   = 30           # сек на поток (полный)
+RAMP_DISCARD_SEC = 0.5                 # разгон TCP не входит в среднюю
+PEAK_WINDOW_SEC  = 1.0                 # окно расчёта пика
+READ_BLOCK_BYTES = 65536
+
+# Базлайн для level_mode=auto
+BASELINE_WINDOW_HOURS = 24
+BASELINE_MIN_SAMPLES  = 5
+
+# Порядок источников для параллельного замера (отличается от легаси:
+# cloudflare первым — точный {size} без привязки к фиксированным файлам)
+PARALLEL_DOWNLOAD_SOURCES = [
+    ("https://speed.cloudflare.com/__down?bytes={size}", "cloudflare"),
+    ("https://cachefly.cachefly.net/100mb.test", "cachefly"),
+    ("https://dl.testdebit.info/{size_mb}M", "testdebit"),
+]
+
 DEFAULT_CONFIG: dict = {
     "enabled": True,
     "sample_interval_min": DEFAULT_SAMPLE_INTERVAL_MIN,
@@ -133,6 +173,13 @@ DEFAULT_CONFIG: dict = {
     "use_iperf3": False,             # iperf3 для полного замера (если доступен)
     "iperf3_server": "ping.online.net",
     "iperf3_port": 5200,
+    "parallel_streams": 0,           # 0 = авто (лёгкая 6 / полный 8); 1 = легаси-однопоток
+    "probe_mb_light": PROBE_MB_LIGHT,
+    "probe_mb_big": PROBE_MB_BIG,
+    "use_ookla": False,              # полный замер через Ookla CLI (десятки GB трафика за прогон!)
+    "level_mode": "auto",            # auto = базлайн-медиана 24ч; absolute = пороги normal/degraded
+    "baseline_normal_ratio": 0.5,    # auto: normal ≥ 50% базлайна
+    "baseline_degraded_ratio": 0.2,  # auto: degraded ≥ 20% базлайна
 }
 
 
@@ -300,20 +347,257 @@ def _iperf3_test(server: str, port: int = 5200, duration: int = 10) -> Optional[
         return None
 
 
+def _steady_and_peak(events: list, t0: float, duration: float,
+                     ramp_discard_sec: float = RAMP_DISCARD_SEC,
+                     peak_window_sec: float = PEAK_WINDOW_SEC) -> tuple:
+    """Средняя скорость (после отброса разгона TCP) и пик в скользящем окне.
+
+    events — отсортированный [(t, bytes_cum)]; t0 — старт замера; duration —
+    полная длительность в сек. Возвращает (steady_bps, peak_bps).
+    """
+    total_bytes = events[-1][1]
+    end_t = events[-1][0]
+    ramp_t = t0 + ramp_discard_sec
+    if end_t - ramp_t > 0.2:
+        cum_at_ramp = 0
+        for ts, cum in events:
+            if ts <= ramp_t:
+                cum_at_ramp = cum
+            else:
+                break
+        steady_bps = (total_bytes - cum_at_ramp) / (end_t - ramp_t)
+    else:
+        steady_bps = (total_bytes / duration) if duration > 0 else 0.0
+
+    peak_bps = 0.0
+    j = 0
+    for i in range(len(events)):
+        while events[j][0] < events[i][0] - peak_window_sec:
+            j += 1
+        base = events[j - 1][1] if j > 0 else 0
+        window_bps = (events[i][1] - base) / peak_window_sec
+        if window_bps > peak_bps:
+            peak_bps = window_bps
+    return steady_bps, peak_bps
+
+
+def _parallel_download_one(url: str, streams: int, budget_bytes: int,
+                           active_cap: int) -> Optional[dict]:
+    """Параллельная загрузка N потоками с одного URL.
+
+    Каждый поток качает не больше budget_bytes//streams (читаем до бюджета
+    или таймкапа и закрываем соединение — хвостовое добивание не качаем).
+    Возвращает {speed_bps, peak_bps, total_bytes, duration, streams} или
+    None, если ни один поток не получил ни байта.
+    """
+    per_stream = max(1_000_000, budget_bytes // max(1, streams))
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    path = parsed.path + (("?" + parsed.query) if parsed.query else "")
+    if not host:
+        return None
+
+    events = []          # [(t, bytes_cum_total)]
+    lock = threading.Lock()
+    total = [0]
+
+    def _worker():
+        conn = None
+        got = 0
+        t_start = time.time()
+        try:
+            conn = HTTPSConnection(host, timeout=active_cap + 10)
+            conn.request("GET", path, headers={"Connection": "close"})
+            resp = conn.getresponse()
+            while got < per_stream and time.time() - t_start < active_cap:
+                buf = resp.read(READ_BLOCK_BYTES)
+                if not buf:
+                    break
+                got += len(buf)
+                with lock:
+                    total[0] += len(buf)
+                    events.append((time.time(), total[0]))
+        except Exception:
+            pass
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    threads = [threading.Thread(target=_worker) for _ in range(streams)]
+    t0 = time.time()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(active_cap + 20)
+    duration = time.time() - t0
+    if not events:
+        return None
+    events.sort()
+    steady_bps, peak_bps = _steady_and_peak(events, t0, duration)
+    return {"speed_bps": steady_bps, "peak_bps": peak_bps,
+            "total_bytes": events[-1][1], "duration": round(duration, 2),
+            "streams": streams}
+
+
+def _parallel_download(sources: list, streams: int, budget_bytes: int,
+                       active_cap: int) -> Optional[dict]:
+    """Перебираем sources (PARALLEL_DOWNLOAD_SOURCES), первый рабочий выигрывает."""
+    per_stream = max(1_000_000, budget_bytes // max(1, streams))
+    for url_tpl, name in sources:
+        # {size_mb} округляем к существующим файлам testdebit (10/100);
+        # фиксированные файлы (cachefly) читаем до бюджета и закрываем
+        size_mb = 10 if per_stream <= 10_000_000 else 100
+        url = url_tpl.format(size=min(per_stream, BIG_DOWNLOAD_BYTES),
+                             size_mb=size_mb)
+        res = _parallel_download_one(url, streams, budget_bytes, active_cap)
+        if res and res.get("speed_bps", 0) > 0:
+            res["source"] = name
+            return res
+    return None
+
+
+def _ookla_test(timeout: int = 180) -> Optional[dict]:
+    """Полный замер через Ookla speedtest CLI (кейс №16: единственный
+    способ увидеть настоящее число на порту > 1 Gbps — ~16 параллельных
+    соединений). Цена: десятки GB трафика за прогон — только opt-in.
+
+    Возвращает {dl_mbps, ul_mbps, latency_ms, server} или None.
+    """
+    if not shutil.which("speedtest"):
+        return None
+    r = _run(["speedtest", "--accept-license", "--accept-gdpr", "-f", "json"],
+             capture=True, timeout=timeout)
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout or "{}")
+        dl = data.get("download", {}).get("bandwidth", 0)
+        ul = data.get("upload", {}).get("bandwidth", 0)
+        if not dl:
+            return None
+        return {
+            "dl_mbps": round(dl * 8 / 1e6, 2),
+            "ul_mbps": round(ul * 8 / 1e6, 2) if ul else None,
+            "latency_ms": data.get("ping", {}).get("latency"),
+            "server": "{} — {}".format(
+                data.get("server", {}).get("name", "?"),
+                data.get("server", {}).get("location", "?")),
+        }
+    except Exception:
+        return None
+
+
+def _baseline_mbps(hours: int = BASELINE_WINDOW_HOURS,
+                   min_samples: int = BASELINE_MIN_SAMPLES) -> Optional[float]:
+    """Медиана download_mbps за последние N часов (вызывается ДО save_sample,
+    так что текущий замер в базлайн не попадает). None, если сэмплов мало."""
+    try:
+        samples = read_samples(days=2)
+    except Exception:
+        return None
+    cutoff = time.time() - hours * 3600
+    vals = []
+    for s in samples:
+        try:
+            if int(s.get("epoch", 0)) >= cutoff and float(s.get("download_mbps", 0)) > 0:
+                vals.append(float(s["download_mbps"]))
+        except (TypeError, ValueError):
+            continue
+    if len(vals) < min_samples:
+        return None
+    vals.sort()
+    n = len(vals)
+    if n % 2:
+        return vals[n // 2]
+    return (vals[n // 2 - 1] + vals[n // 2]) / 2.0
+
+
+def _classify_level(download_mbps: float, cfg: dict) -> str:
+    """Классификация замера.
+
+    auto (по умолчанию): относительно медианы-базлайна за 24ч — ловит обрез
+    порта > 1 Gbps, на котором абсолютные пороги 100/50 слепы (обрез
+    16.5G → 1G выглядел бы «normal» при 950 Mbps). Нет базлайна
+    (< min_samples) — fallback на абсолютные пороги.
+    absolute: старое поведение по thresholds.normal_mbps/degraded_mbps.
+    """
+    mode = str(cfg.get("level_mode", "auto") or "auto").strip().lower()
+    th = cfg.get("thresholds") or {}
+    if mode == "auto":
+        baseline = _baseline_mbps()
+        if baseline:
+            if download_mbps >= baseline * float(cfg.get("baseline_normal_ratio", 0.5)):
+                return "normal"
+            if download_mbps >= baseline * float(cfg.get("baseline_degraded_ratio", 0.2)):
+                return "degraded"
+            return "critical"
+    normal = float(th.get("normal_mbps", 100.0))
+    degraded = float(th.get("degraded_mbps", 50.0))
+    if download_mbps >= normal:
+        return "normal"
+    if download_mbps >= degraded:
+        return "degraded"
+    return "critical"
+
+
+def _run_download_probe(cfg: dict, big: bool) -> dict:
+    """Загрузочный тест согласно cfg. Единственная точка выбора методики:
+    Ookla (opt-in, только полный) → параллельные потоки → легаси-однопоток.
+
+    Возвращает {speed_bps, peak_bps, source, streams, probe_mb, ookla};
+    speed_bps == 0.0 → скачать не удалось вовсе.
+    """
+    streams_cfg = int(cfg.get("parallel_streams", 0) or 0)
+    if big:
+        streams = streams_cfg if streams_cfg > 0 else DEFAULT_PARALLEL_STREAMS_BIG
+        probe_mb = float(cfg.get("probe_mb_big", PROBE_MB_BIG))
+        cap = STREAM_ACTIVE_CAP_BIG
+    else:
+        streams = streams_cfg if streams_cfg > 0 else DEFAULT_PARALLEL_STREAMS_LIGHT
+        probe_mb = float(cfg.get("probe_mb_light", PROBE_MB_LIGHT))
+        cap = STREAM_ACTIVE_CAP_LIGHT
+    budget_bytes = int(probe_mb * 1_000_000)
+
+    # Ookla: настоящее число вместо нижней оценки (десятки GB за прогон)
+    if big and cfg.get("use_ookla"):
+        ook = _ookla_test()
+        if ook:
+            return {"speed_bps": ook["dl_mbps"] / 8 * 1e6, "peak_bps": None,
+                    "source": "ookla", "streams": 1, "probe_mb": 0.0,
+                    "ookla": ook}
+
+    if streams >= 2:
+        res = _parallel_download(PARALLEL_DOWNLOAD_SOURCES, streams,
+                                 budget_bytes, cap)
+        if res and res.get("speed_bps", 0) > 0:
+            return {"speed_bps": res["speed_bps"], "peak_bps": res["peak_bps"],
+                    "source": res["source"], "streams": streams,
+                    "probe_mb": probe_mb, "ookla": None,
+                    "total_bytes": res.get("total_bytes", 0),
+                    "duration": res.get("duration", 0.0)}
+
+    # Легаси-путь: один curl (parallel_streams=1 или все источники упали)
+    size = BIG_DOWNLOAD_BYTES if big else SMALL_DOWNLOAD_BYTES
+    timeout = BIG_DOWNLOAD_TIMEOUT if big else SMALL_DOWNLOAD_TIMEOUT
+    speed_bps, source = _try_download(DOWNLOAD_SOURCES, size, timeout)
+    return {"speed_bps": speed_bps or 0.0, "peak_bps": None, "source": source,
+            "streams": 1, "probe_mb": round(size / 1e6, 1), "ookla": None}
+
+
 def measure_once(big: bool = False) -> dict:
-    """Один замер. big=False — лёгкая проба (10 MB), big=True — полный (100 MB).
+    """Один замер. big=False — лёгкая проба (~60 MB, 6 потоков),
+    big=True — полный (~760 MB, 8 потоков; или Ookla при use_ookla).
 
     Возвращает dict:
-      {ts, label, ip, download_mbps, download_source, latency_ms,
-       latency_target, level, big}
+      {ts, label, ip, download_mbps, download_source, peak_mbps, streams,
+       probe_mb, latency_ms, latency_target, level, big}
     """
     cfg = load_config()
     label = (cfg.get("node_label") or "").strip() or _node_hostname()
     ip = (cfg.get("node_ip") or "").strip() or _node_public_ip()
-    th = cfg.get("thresholds") or {}
-
-    size = BIG_DOWNLOAD_BYTES if big else SMALL_DOWNLOAD_BYTES
-    timeout = BIG_DOWNLOAD_TIMEOUT if big else SMALL_DOWNLOAD_TIMEOUT
 
     # 1. Latency — первый рабочий target
     latency_ms = None
@@ -325,9 +609,11 @@ def measure_once(big: bool = False) -> dict:
             latency_target = target
             break
 
-    # 2. Download
-    speed_bps, source = _try_download(DOWNLOAD_SOURCES, size, timeout)
+    # 2. Download (Ookla → параллельные потоки → легаси-однопоток)
+    probe = _run_download_probe(cfg, big)
+    speed_bps = probe.get("speed_bps", 0.0)
     download_mbps = (speed_bps * 8 / 1e6) if speed_bps else 0.0
+    peak_mbps = (probe.get("peak_bps") or 0) * 8 / 1e6
 
     # 3. iperf3 (только для big)
     iperf3_mbps = None
@@ -335,15 +621,8 @@ def measure_once(big: bool = False) -> dict:
         iperf3_mbps = _iperf3_test(cfg.get("iperf3_server", "ping.online.net"),
                                    int(cfg.get("iperf3_port", 5200)))
 
-    # 4. Классификация
-    normal = float(th.get("normal_mbps", 100.0))
-    degraded = float(th.get("degraded_mbps", 50.0))
-    if download_mbps >= normal:
-        level = "normal"
-    elif download_mbps >= degraded:
-        level = "degraded"
-    else:
-        level = "critical"
+    # 4. Классификация (auto: относительно базлайна 24ч; см. _classify_level)
+    level = _classify_level(download_mbps, cfg)
 
     sample = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -351,12 +630,21 @@ def measure_once(big: bool = False) -> dict:
         "label": label,
         "ip": ip,
         "download_mbps": round(download_mbps, 2),
-        "download_source": source,
+        "download_source": probe.get("source", "none"),
+        "peak_mbps": round(peak_mbps, 2) if peak_mbps else None,
+        "streams": probe.get("streams", 1),
+        "probe_mb": probe.get("probe_mb", 0.0),
         "latency_ms": round(latency_ms, 2) if latency_ms else None,
         "latency_target": latency_target,
         "level": level,
         "big": big,
     }
+    if probe.get("ookla"):
+        ook = probe["ookla"]
+        if ook.get("ul_mbps") is not None:
+            sample["ookla_ul_mbps"] = ook["ul_mbps"]
+        if ook.get("server"):
+            sample["ookla_server"] = ook["server"]
     if iperf3_mbps is not None:
         sample["iperf3_mbps"] = round(iperf3_mbps, 2)
     return sample
@@ -548,13 +836,16 @@ def _check_alert(sample: dict, cfg: dict) -> Optional[str]:
     if now - last_alert < cooldown:
         return None
 
-    # Consecutive check: N сэмплов подряд < degraded
+    # Consecutive check: N сэмплов подряд degraded/critical.
+    # Смотрим level сэмплов, а не абсолютный Mbps: в auto-режиме порог —
+    # базлайн ноды (кейс №16: обрез 16.5G → 1G даёт level=critical при
+    # 950 Mbps, хотя абсолютный порог 50 Mbps пройден с запасом)
     consecutive_needed = int(th.get("alert_consecutive", 2))
     recent = read_samples(days=1)[-consecutive_needed:]
     if len(recent) < consecutive_needed:
         return None
-    degraded_mbps = float(th.get("degraded_mbps", 50.0))
-    all_degraded = all(s.get("download_mbps", 999) < degraded_mbps for s in recent)
+    all_degraded = all(s.get("level") in ("degraded", "critical")
+                       for s in recent)
     if not all_degraded:
         return None
 
@@ -573,10 +864,14 @@ def _check_alert(sample: dict, cfg: dict) -> Optional[str]:
         text += f"Latency: {latency} ms ({sample.get('latency_target', '')})\n"
     text += f"Время: {sample.get('ts', '')}\n\n"
     if level == "critical":
-        text += "🚨 Скорость ниже 50 Mbps — возможно, хостер обрезал канал.\n"
-        text += "Проверьте договор и условия тарифа.\n"
+        if speed is not None and speed < 50:
+            text += "🚨 Скорость ниже 50 Mbps — возможно, хостер обрезал канал.\n"
+            text += "Проверьте договор и условия тарифа.\n"
+        else:
+            text += "🚨 Падение > 80% от базлайна за 24ч — возможно, хостер обрезал канал.\n"
+            text += "Проверьте договор и условия тарифа.\n"
     else:
-        text += "⚠️ Скорость ниже нормы, но выше 50 Mbps.\n"
+        text += "⚠️ Скорость ниже нормы (базлайн/порог деградации).\n"
         text += "Возможно, временная деградация или нагрузка.\n"
     text += f"\n<i>Алерт отправлен раз в {cooldown // 60} мин.</i>"
 
@@ -646,8 +941,26 @@ def send_periodic_report() -> str:
     ip = big_sample.get("ip", "unknown")
     text = f"📊 <b>Bandwidth отчёт — {label}</b>\n"
     text += f"({ip})\n\n"
-    text += f"<b>Текущий замер (100 MB):</b>\n"
-    text += f"  Скорость: <b>{big_sample['download_mbps']} Mbps</b>\n"
+
+    if big_sample.get("download_source") == "ookla":
+        text += "<b>Текущий замер (Ookla speedtest):</b>\n"
+        text += f"  Скорость: <b>{big_sample['download_mbps']} Mbps</b>\n"
+        if big_sample.get("ookla_ul_mbps"):
+            text += f"  Upload: {big_sample['ookla_ul_mbps']} Mbps\n"
+        if big_sample.get("ookla_server"):
+            text += f"  Server: {big_sample['ookla_server']}\n"
+    else:
+        streams = big_sample.get("streams", 1) or 1
+        probe_mb = big_sample.get("probe_mb", 0) or 0
+        if streams > 1:
+            text += f"<b>Текущий замер ({streams} потоков, ~{probe_mb:.0f} MB):</b>\n"
+            text += (f"  Скорость: <b>≥ {big_sample['download_mbps']} Mbps</b>"
+                     " (нижняя оценка)\n")
+        else:
+            text += "<b>Текущий замер (однопотоковый):</b>\n"
+            text += f"  Скорость: <b>{big_sample['download_mbps']} Mbps</b>\n"
+        if big_sample.get("peak_mbps"):
+            text += f"  Пик (окно 1 с): {big_sample['peak_mbps']} Mbps\n"
     if big_sample.get("iperf3_mbps"):
         text += f"  iperf3 (4 потока): {big_sample['iperf3_mbps']} Mbps\n"
     if big_sample.get("latency_ms"):
@@ -734,7 +1047,10 @@ def send_daily_report(date_str: Optional[str] = None, send_tg: bool = True) -> s
         text += f"Полные замеры ({len(big_speeds)}): avg {sum(big_speeds)/len(big_speeds):.1f} Mbps\n"
     if latencies:
         text += f"\nLatency: avg {avg_lat:.1f} ms\n"
-    text += f"\n<i>Пороги: normal ≥ {normal} Mbps, degraded ≥ {degraded} Mbps</i>"
+    text += f"\n<i>Пороги: normal ≥ {normal} Mbps, degraded ≥ {degraded} Mbps"
+    if str(cfg.get("level_mode", "auto") or "auto").lower() == "auto":
+        text += " · auto: относительно базлайна 24ч"
+    text += "</i>"
 
     if send_tg:
         _tg_send(text, event="bandwidth_daily")
@@ -881,7 +1197,10 @@ def do_bandwidth_monitor_menu() -> None:
         core._box_row(f"  Дневной: {cfg.get('daily_hour', 23):02d}:{cfg.get('daily_minute', 50):02d}")
         th = cfg.get("thresholds", {})
         core._box_row(f"  Пороги: normal ≥ {th.get('normal_mbps', 100)} Mbps, "
-                      f"degraded ≥ {th.get('degraded_mbps', 50)} Mbps")
+                      f"degraded ≥ {th.get('degraded_mbps', 50)} Mbps"
+                      f" · режим: {cfg.get('level_mode', 'auto')}")
+        core._box_row(f"  Потоки: {'авто' if not cfg.get('parallel_streams') else cfg.get('parallel_streams')}"
+                      f" · Ookla: {'вкл' if cfg.get('use_ookla') else 'выкл'}")
         core._box_row(f"  Алерты: {'вкл' if cfg.get('alerts_enabled') else 'выкл'}")
         core._box_bottom()
     else:
@@ -912,7 +1231,7 @@ def do_bandwidth_monitor_menu() -> None:
         s = sample_once(verbose=True)
         print(f"  Результат: {s.get('download_mbps', '?')} Mbps [{s.get('level', '?')}]")
     elif choice == "4":
-        print("  Полный замер (100 MB)...")
+        print("  Полный замер (параллельные потоки / Ookla)...")
         s = measure_once(big=True)
         print(f"  Результат: {s.get('download_mbps', '?')} Mbps [{s.get('level', '?')}]")
         save_sample(s)
@@ -1005,6 +1324,9 @@ def _cli() -> None:
         print(f"report_interval: {cfg.get('report_interval_hours', 6)} h")
         th = cfg.get("thresholds", {})
         print(f"thresholds: normal≥{th.get('normal_mbps', 100)} degraded≥{th.get('degraded_mbps', 50)}")
+        print(f"level_mode: {cfg.get('level_mode', 'auto')} · "
+              f"streams: {cfg.get('parallel_streams', 0) or 'авто'} · "
+              f"ookla: {cfg.get('use_ookla', False)}")
         samples = read_samples(days=1)
         print(f"samples (24h): {len(samples)}")
         if samples:
