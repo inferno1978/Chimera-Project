@@ -180,10 +180,72 @@ def _diag_live_port() -> int:
     return 0
 
 
+def _diag_masq_covers(stdout: str, subnet: str) -> bool:
+    """Покрывает ли какое-нибудь MASQUERADE-правило подсеть.
+
+    Инцидент 09.11.2026 (каскад-entry, follow-up): awg-nat helper
+    ставит ШИРОКОЕ 172.16.0.0/12 → WAN, а подсеть ноды —
+    172.16.82.0/24; легаси-строковый grep '172.16.82' не матчит
+    '172.16.0.0/12' → ложный FAIL при живом NAT. Честно: в каждой
+    MASQUERADE-строке берём первый CIDR-токен (в выводе -L … -n
+    источник идёт раньше адресата; в -S первым идёт -s) и проверяем
+    ip_network(subnet).subnet_of(сеть_правила).
+    """
+    import ipaddress
+    try:
+        want = ipaddress.ip_network(subnet, strict=False)
+    except ValueError:
+        return False
+    for line in stdout.splitlines():
+        if "MASQUERADE" not in line:
+            continue
+        for tok in line.split():
+            if "/" not in tok:
+                continue
+            try:
+                net = ipaddress.ip_network(tok, strict=False)
+            except ValueError:
+                continue
+            # 0.0.0.0/0 (правило без -s, «на всё») покрывает любую подсеть
+            return want.subnet_of(net)
+        # MASQUERADE без CIDR-токенов (голое -o awg1 в -S) — не покрывает
+    return False
+
+
+def _diag_is_cascade_entry(state: dict) -> bool:
+    """Каскад-entry ли нода («режим В») — для честной семантики
+    MASQUERADE-проверки.
+
+    Инцидент 09.11.2026 (follow-up): на каскад-entry отсутствие
+    ЛОКАЛЬНОГО MASQUERADE не лишает клиентов интернета — зарубежный
+    трафик форвардится awg0 → awg1 и NATится на EXIT-ноде; локальный
+    MASQ на entry нужен только РФ-направлениям (клиентские подсети РФ
+    ходят через основного провайдера, oif=WAN). Поэтому для entry
+    отсутствие MASQ — WARN «отвалится RU-direct», а не FAIL «клиенты
+    без интернета».
+
+    Первично cascade_role из state; при вайпе state (корень инцидента
+    awg-state 72568b4) — живой сигнал: awg-quick@awg1 active
+    (клиентский туннель к exit существует только на entry-ноде).
+    """
+    if state.get("cascade_role") == "entry":
+        return True
+    core = _core_module()
+    r = core._run(["systemctl", "is-active", "awg-quick@awg1"],
+                  capture=True, check=False)
+    return r.stdout.strip().lower().startswith("active")
+
+
 def _diag_nat_routing() -> dict:
     """
     Проверка NAT/MASQUERADE + ip_forward + маршрутизации.
     КРИТИЧНО: без этого 'подключение есть, но интернета нет'.
+
+    Каскад-осознанность (FIX 09.11.2026, follow-up): для каскад-entry
+    локальный MASQUERADE не является условием интернета клиентов
+    (зарубежный трафик NATится на exit) — отсутствие даёт WARN про
+    РФ-направления, а не FAIL; покрытие правила проверяется по
+    IP-сетям (subnet_of), а не строковым grep.
     """
     core = _core_module()
     from .awg_constants import AWGS_INTERFACE
@@ -192,8 +254,10 @@ def _diag_nat_routing() -> dict:
     # FIX 09.11.2026: subnet/port из state доверяем только при живом
     # state; при утерянном — из живой системы (интерфейс/awg0.conf).
     subnet = state.get("subnet", "")
+    live_subnet = ""
     if not subnet:
-        subnet = _diag_live_subnet()
+        live_subnet = _diag_live_subnet()
+        subnet = live_subnet
     if not subnet:
         subnet = "10.66.66.0/24"
 
@@ -210,16 +274,44 @@ def _diag_nat_routing() -> dict:
         "msg":     f"net.ipv4.ip_forward = {ip_fwd} (нужно 1)",
     })
 
-    # 2. MASQUERADE правило
+    # 2. MASQUERADE правило (каскад-осознанно, FIX 09.11.2026)
     r = core._run(["iptables", "-t", "nat", "-L", "POSTROUTING", "-n", "-v"],
                   capture=True, check=False)
-    has_masq = "MASQUERADE" in r.stdout and subnet.split("/")[0].rsplit(".", 1)[0] in r.stdout
-    checks.append({
-        "name":    "MASQUERADE",
-        "ok":      has_masq,
-        "status":  "OK" if has_masq else "FAIL",
-        "msg":     f"MASQUERADE для {subnet}: {'есть' if has_masq else 'ОТСУТСТВУЕТ — клиенты не получат интернет!'}",
-    })
+    # Покрытие честным матчингом сетей: широкое 172.16.0.0/12 → WAN
+    # покрывает подсеть ноды; если state-подсеть не покрыта — вторая
+    # попытка живой подсетью awg0 (stale state).
+    covered = _diag_masq_covers(r.stdout, subnet)
+    if not covered:
+        live = live_subnet or _diag_live_subnet()
+        if live and live != subnet and _diag_masq_covers(r.stdout, live):
+            covered = True
+            subnet = live  # в сообщениях — реально покрытая подсеть
+    if covered:
+        checks.append({
+            "name":    "MASQUERADE",
+            "ok":      True,
+            "status":  "OK",
+            "msg":     f"MASQUERADE для {subnet}: есть",
+        })
+    elif _diag_is_cascade_entry(state):
+        checks.append({
+            "name":    "MASQUERADE",
+            "ok":      True,
+            "status":  "WARN",
+            "msg":     (f"MASQUERADE для {subnet}: не найден — для "
+                        f"каскад-entry НЕ критичен (зарубежный интернет "
+                        f"клиентов NATится на exit-ноде); отваливаются "
+                        f"только РФ-направления (direct через провайдера "
+                        f"entry) — как правило лечится "
+                        f"systemctl restart awg-nat"),
+        })
+    else:
+        checks.append({
+            "name":    "MASQUERADE",
+            "ok":      False,
+            "status":  "FAIL",
+            "msg":     f"MASQUERADE для {subnet}: ОТСУТСТВУЕТ — клиенты не получат интернет!",
+        })
 
     # 3. FORWARD правило (awg0 → anywhere)
     r = core._run(["iptables", "-L", "FORWARD", "-n", "-v"],

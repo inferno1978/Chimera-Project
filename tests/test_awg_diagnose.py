@@ -345,17 +345,164 @@ class TestDiagNatRouting(unittest.TestCase):
         from chimera.modules import awg_diagnose
         with self._patch_state(), \
              patch("chimera._core._run") as mock_run:
+            # ip_forward, iptables-nat (нет MASQ), живая подсеть awg0
+            # (пусто — не покрыта), роль каскада (standalone: inactive),
+            # FORWARD, route, rp_filter
             mock_run.side_effect = [
                 MagicMock(returncode=0, stdout="1\n", stderr=""),
                 MagicMock(returncode=0, stdout="", stderr=""),  # нет MASQUERADE
+                MagicMock(returncode=0, stdout="", stderr=""),  # ip -4 addr: пусто
+                MagicMock(returncode=3, stdout="inactive\n", stderr=""),  # awg1
                 MagicMock(returncode=0, stdout="ACCEPT awg0\n", stderr=""),
                 MagicMock(returncode=0, stdout="10.66.66.0/24 dev awg0\n", stderr=""),
                 MagicMock(returncode=0, stdout="0\n", stderr=""),
             ]
             r = awg_diagnose._diag_nat_routing()
             self.assertFalse(r["ok"])
-            # MASQUERADE-fail → FAIL
+            # MASQUERADE-fail → FAIL (standalone: клиенты без интернета)
             self.assertEqual(r["status"], "FAIL")
+
+    # ── каскад-осознанность MASQUERADE (follow-up инцидента 09.11) ──
+
+    def _masq_check(self, r):
+        return next(c for c in r["checks"] if c["name"] == "MASQUERADE")
+
+    def test_wide_rule_covers_node_subnet(self):
+        """Широкое 172.16.0.0/12 → WAN (ставит awg-nat helper) покрывает
+        подсеть ноды 172.16.82.0/24: честный subnet_of вместо строкового
+        grep, который не матчил '172.16.82' в '172.16.0.0/12' → ложный FAIL."""
+        from chimera.modules import awg_diagnose
+        self._state_file.write_text(json.dumps({
+            "installed": True, "subnet": "172.16.82.0/24",
+        }))
+        with patch("chimera.modules.awg_state.AWGS_STATE_FILE",
+                   self._state_file), \
+             patch("chimera._core._run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="1\n", stderr=""),
+                MagicMock(returncode=0, stdout=(
+                    "  123  456 MASQUERADE  all  --  *  ens3  "
+                    "172.16.0.0/12  0.0.0.0/0\n"), stderr=""),
+                MagicMock(returncode=0, stdout="ACCEPT awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="172.16.82.0/24 dev awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="0\n", stderr=""),
+            ]
+            r = awg_diagnose._diag_nat_routing()
+            masq = self._masq_check(r)
+            self.assertTrue(masq["ok"])
+            self.assertEqual(masq["status"], "OK")
+            self.assertIn("172.16.82.0/24", masq["msg"])
+
+    def test_stale_state_subnet_falls_back_to_live(self):
+        """State-подсеть не покрыта (stale), а живая awg0 — покрыта: проверка
+        должна увидеть покрытие по ЖИВОЙ подсети, а не FAIL по устаревшей."""
+        from chimera.modules import awg_diagnose
+        self._state_file.write_text(json.dumps({
+            "installed": True, "subnet": "10.66.66.0/24",
+        }))
+        with patch("chimera.modules.awg_state.AWGS_STATE_FILE",
+                   self._state_file), \
+             patch("chimera._core._run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="1\n", stderr=""),
+                MagicMock(returncode=0, stdout=(
+                    "  123  456 MASQUERADE  all  --  *  ens3  "
+                    "172.16.0.0/12  0.0.0.0/0\n"), stderr=""),
+                MagicMock(returncode=0, stdout=(
+                    "5: awg0 inet 172.16.82.1/24 scope global awg0\n"),
+                    stderr=""),
+                MagicMock(returncode=0, stdout="ACCEPT awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="172.16.82.0/24 dev awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="0\n", stderr=""),
+            ]
+            r = awg_diagnose._diag_nat_routing()
+            masq = self._masq_check(r)
+            self.assertTrue(masq["ok"])
+            self.assertEqual(masq["status"], "OK")
+            self.assertIn("172.16.82.0/24", masq["msg"])
+
+    def test_cascade_entry_masq_missing_is_warn(self):
+        """Каскад-entry без локального MASQ: НЕ FAIL «клиенты без
+        интернета» (зарубежный трафик NATится на exit), а WARN про
+        отваливающиеся РФ-направления. Роль — из state."""
+        from chimera.modules import awg_diagnose
+        self._state_file.write_text(json.dumps({
+            "installed": True, "subnet": "172.16.82.0/24",
+            "cascade_role": "entry",
+        }))
+        with patch("chimera.modules.awg_state.AWGS_STATE_FILE",
+                   self._state_file), \
+             patch("chimera._core._run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="1\n", stderr=""),
+                MagicMock(returncode=0, stdout="", stderr=""),  # нет MASQ
+                MagicMock(returncode=0, stdout="", stderr=""),  # ip -4 addr: пусто
+                MagicMock(returncode=0, stdout="ACCEPT awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="172.16.82.0/24 dev awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="0\n", stderr=""),
+            ]
+            r = awg_diagnose._diag_nat_routing()
+            masq = self._masq_check(r)
+            self.assertTrue(masq["ok"])          # интернет клиентов жив
+            self.assertEqual(masq["status"], "WARN")
+            self.assertIn("exit", masq["msg"])   # объяснение: NAT на exit
+            self.assertIn("РФ", masq["msg"])      # что реально отваливается
+            self.assertEqual(r["status"], "WARN")
+            self.assertTrue(r["ok"])
+
+    def test_cascade_entry_live_detect_when_state_wiped(self):
+        """Инцидент 09.11: state вайпнут (ни подсети, ни роли) — роль
+        берётся из живой системы (awg-quick@awg1 active), подсеть из
+        живого awg0; отсутствие MASQ = WARN, не FAIL."""
+        from chimera.modules import awg_diagnose
+        self._state_file.write_text("{}")
+        with patch("chimera.modules.awg_state.AWGS_STATE_FILE",
+                   self._state_file), \
+             patch("chimera._core._run") as mock_run:
+            # порядок: живая подсеть awg0 (state пуст), ip_forward,
+            # iptables-nat (нет MASQ), роль awg1 (active), FORWARD,
+            # route, rp_filter
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout=(
+                    "5: awg0 inet 172.16.82.1/24 scope global awg0\n"),
+                    stderr=""),
+                MagicMock(returncode=0, stdout="1\n", stderr=""),
+                MagicMock(returncode=0, stdout="", stderr=""),  # нет MASQ
+                MagicMock(returncode=0, stdout="active\n", stderr=""),  # awg1
+                MagicMock(returncode=0, stdout="ACCEPT awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="172.16.82.0/24 dev awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="0\n", stderr=""),
+            ]
+            r = awg_diagnose._diag_nat_routing()
+            masq = self._masq_check(r)
+            self.assertTrue(masq["ok"])
+            self.assertEqual(masq["status"], "WARN")
+            self.assertIn("172.16.82.0/24", masq["msg"])  # не дефолт 10.66.66
+            self.assertIn("exit", masq["msg"])
+
+    def test_cascade_entry_masq_present_no_role_probe(self):
+        """Здоровый entry с MASQ: роль не пробуем (5 стандартных вызовов —
+        лишний systemctl был бы 6-м и исчерпал бы side_effect-список)."""
+        from chimera.modules import awg_diagnose
+        self._state_file.write_text(json.dumps({
+            "installed": True, "subnet": "172.16.82.0/24",
+            "cascade_role": "entry",
+        }))
+        with patch("chimera.modules.awg_state.AWGS_STATE_FILE",
+                   self._state_file), \
+             patch("chimera._core._run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="1\n", stderr=""),
+                MagicMock(returncode=0, stdout=(
+                    "  123  456 MASQUERADE  all  --  *  ens3  "
+                    "172.16.82.0/24  0.0.0.0/0\n"), stderr=""),
+                MagicMock(returncode=0, stdout="ACCEPT awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="172.16.82.0/24 dev awg0\n", stderr=""),
+                MagicMock(returncode=0, stdout="0\n", stderr=""),
+            ]
+            r = awg_diagnose._diag_nat_routing()
+            self.assertEqual(r["status"], "OK")
+            self.assertEqual(self._masq_check(r)["status"], "OK")
 
     # ── state-aware подсказка Route awg0 (инцидент AWG 3.1, 2026-10-16) ──
 
