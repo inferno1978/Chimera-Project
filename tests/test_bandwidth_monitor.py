@@ -57,8 +57,11 @@ class TestConfigManagement(unittest.TestCase):
         self.assertEqual(cfg["sample_interval_min"], 30)
         self.assertEqual(cfg["report_interval_hours"], 6)
         self.assertIn("thresholds", cfg)
-        self.assertEqual(cfg["thresholds"]["normal_mbps"], 100.0)
-        self.assertEqual(cfg["thresholds"]["degraded_mbps"], 50.0)
+        # Политика флота 08.11.2026: ≥1G зелёный, <100M красный
+        self.assertEqual(cfg["thresholds"]["normal_mbps"], 1000.0)
+        self.assertEqual(cfg["thresholds"]["degraded_mbps"], 100.0)
+        self.assertEqual(cfg["level_mode"], "absolute")
+        self.assertFalse(cfg["alert_degraded"])
 
     def test_save_and_load(self):
         cfg = self._m.load_config()
@@ -78,7 +81,7 @@ class TestConfigManagement(unittest.TestCase):
         # normal из конфига
         self.assertEqual(cfg["thresholds"]["normal_mbps"], 150.0)
         # degraded из дефолта (не указан в конфиге)
-        self.assertEqual(cfg["thresholds"]["degraded_mbps"], 50.0)
+        self.assertEqual(cfg["thresholds"]["degraded_mbps"], 100.0)
 
 
 def _probe_result(speed_bps, source="cloudflare", peak_bps=None, streams=6,
@@ -95,11 +98,29 @@ class TestMeasureOnce(unittest.TestCase):
         from chimera.modules import bandwidth_monitor
         self._m = bandwidth_monitor
 
+    def test_classifies_critical_de_case_1564_is_normal(self):
+        """Кейс DE 08.11.2026: 1564 Mbps на 5G-порту — ЗЕЛЁНЫЙ,
+        а не ⚠️-алерт, как было в auto-режиме от базлайна."""
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "_baseline_mbps", return_value=5000.0):
+            self.assertEqual(self._m._classify_level(1564.33, cfg), "normal")
+
+    def test_classifies_absolute_bands(self):
+        """Политика флота: ≥1000 normal, 100-1000 degraded, <100 critical."""
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "_baseline_mbps", return_value=None):
+            self.assertEqual(self._m._classify_level(1000.0, cfg), "normal")
+            self.assertEqual(self._m._classify_level(4790.0, cfg), "normal")
+            self.assertEqual(self._m._classify_level(999.9, cfg), "degraded")
+            self.assertEqual(self._m._classify_level(100.0, cfg), "degraded")
+            self.assertEqual(self._m._classify_level(99.9, cfg), "critical")
+            self.assertEqual(self._m._classify_level(16.0, cfg), "critical")
+
     def test_classifies_normal(self):
         """Скорость ≥ normal_mbps → level=normal (базлайна нет → absolute)."""
         with patch.object(self._m, "_ping_latency", return_value=2.5), \
              patch.object(self._m, "_run_download_probe",
-                          return_value=_probe_result(15_000_000)), \
+                          return_value=_probe_result(150_000_000)), \
              patch.object(self._m, "_baseline_mbps", return_value=None), \
              patch.object(self._m, "_node_hostname", return_value="test-host"), \
              patch.object(self._m, "_node_public_ip", return_value="1.2.3.4"), \
@@ -108,9 +129,9 @@ class TestMeasureOnce(unittest.TestCase):
                                         "node_label": "TEST",
                                         "node_ip": "1.2.3.4"}):
             s = self._m.measure_once(big=False)
-        # 15 MB/s = 120 Mbps → normal (>100)
+        # 150 MB/s = 1200 Mbps → normal (≥1000, политика флота 08.11.2026)
         self.assertEqual(s["level"], "normal")
-        self.assertAlmostEqual(s["download_mbps"], 120.0, places=1)
+        self.assertAlmostEqual(s["download_mbps"], 1200.0, places=1)
         self.assertEqual(s["label"], "TEST")
         self.assertFalse(s["big"])
         # новые поля методики
@@ -118,22 +139,22 @@ class TestMeasureOnce(unittest.TestCase):
         self.assertEqual(s["download_source"], "cloudflare")
 
     def test_classifies_degraded(self):
-        """Скорость 50-100 Mbps → level=degraded."""
+        """Скорость 100-1000 Mbps → level=degraded (жёлтый)."""
         with patch.object(self._m, "_ping_latency", return_value=5.0), \
              patch.object(self._m, "_run_download_probe",
-                          return_value=_probe_result(7_500_000)), \
+                          return_value=_probe_result(25_000_000)), \
              patch.object(self._m, "_baseline_mbps", return_value=None), \
              patch.object(self._m, "_node_hostname", return_value="h"), \
              patch.object(self._m, "_node_public_ip", return_value="1.2.3.4"), \
              patch.object(self._m, "load_config",
                           return_value=self._m.DEFAULT_CONFIG):
             s = self._m.measure_once(big=False)
-        # 7.5 MB/s = 60 Mbps → degraded (50-100)
+        # 25 MB/s = 200 Mbps → degraded (100-1000)
         self.assertEqual(s["level"], "degraded")
-        self.assertAlmostEqual(s["download_mbps"], 60.0, places=1)
+        self.assertAlmostEqual(s["download_mbps"], 200.0, places=1)
 
     def test_classifies_critical(self):
-        """Скорость < 50 Mbps → level=critical."""
+        """Скорость < 100 Mbps → level=critical (хостер обрезал)."""
         with patch.object(self._m, "_ping_latency", return_value=10.0), \
              patch.object(self._m, "_run_download_probe",
                           return_value=_probe_result(2_000_000)), \
@@ -143,7 +164,7 @@ class TestMeasureOnce(unittest.TestCase):
              patch.object(self._m, "load_config",
                           return_value=self._m.DEFAULT_CONFIG):
             s = self._m.measure_once(big=False)
-        # 2 MB/s = 16 Mbps → critical (<50)
+        # 2 MB/s = 16 Mbps → critical (<100)
         self.assertEqual(s["level"], "critical")
         self.assertAlmostEqual(s["download_mbps"], 16.0, places=1)
 
@@ -359,39 +380,43 @@ class TestRunDownloadProbe(unittest.TestCase):
 
 
 class TestBaselineClassification(unittest.TestCase):
-    """_classify_level auto-режим: базлайн-медиана 24ч вместо абсолютных порогов."""
+    """_classify_level auto-режим (opt-in): базлайн-медиана 24ч."""
     def setUp(self):
         _setup_core_in_sysmodules()
         from chimera.modules import bandwidth_monitor
         self._m = bandwidth_monitor
 
     def test_auto_fast_port_cut_is_critical(self):
-        """Кейс №16: обрез 16.5G → ~1G. Абсолютные пороги дали бы normal."""
-        cfg = {**self._m.DEFAULT_CONFIG}
+        """Кейс №16 (auto): обрез 16.5G → ~1G = critical."""
+        cfg = {**self._m.DEFAULT_CONFIG, "level_mode": "auto"}
         with patch.object(self._m, "_baseline_mbps", return_value=9000.0):
             self.assertEqual(self._m._classify_level(950.0, cfg), "critical")
 
     def test_auto_half_baseline_is_normal(self):
-        cfg = {**self._m.DEFAULT_CONFIG}
+        cfg = {**self._m.DEFAULT_CONFIG, "level_mode": "auto"}
         with patch.object(self._m, "_baseline_mbps", return_value=9000.0):
             self.assertEqual(self._m._classify_level(5000.0, cfg), "normal")
 
     def test_auto_quarter_baseline_is_degraded(self):
-        cfg = {**self._m.DEFAULT_CONFIG}
+        cfg = {**self._m.DEFAULT_CONFIG, "level_mode": "auto"}
         with patch.object(self._m, "_baseline_mbps", return_value=9000.0):
             self.assertEqual(self._m._classify_level(2000.0, cfg), "degraded")
 
     def test_auto_falls_back_to_absolute_without_baseline(self):
-        cfg = {**self._m.DEFAULT_CONFIG}
+        """Нет базлайна — абсолютные пороги политики флота (1000/100)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "level_mode": "auto"}
         with patch.object(self._m, "_baseline_mbps", return_value=None):
-            self.assertEqual(self._m._classify_level(120.0, cfg), "normal")
-            self.assertEqual(self._m._classify_level(60.0, cfg), "degraded")
+            self.assertEqual(self._m._classify_level(1200.0, cfg), "normal")
+            self.assertEqual(self._m._classify_level(200.0, cfg), "degraded")
+            self.assertEqual(self._m._classify_level(60.0, cfg), "critical")
             self.assertEqual(self._m._classify_level(16.0, cfg), "critical")
 
     def test_absolute_mode_ignores_baseline(self):
+        """Дефолт absolute: базлайн не зовётся, пороги фиксированные."""
         cfg = {**self._m.DEFAULT_CONFIG, "level_mode": "absolute"}
         with patch.object(self._m, "_baseline_mbps", return_value=9000.0) as pbl:
-            self.assertEqual(self._m._classify_level(120.0, cfg), "normal")
+            self.assertEqual(self._m._classify_level(1200.0, cfg), "normal")
+            self.assertEqual(self._m._classify_level(950.0, cfg), "degraded")
         pbl.assert_not_called()
 
     def test_baseline_median_from_samples(self):
@@ -421,15 +446,17 @@ class TestBaselineClassification(unittest.TestCase):
 
 
 class TestAlertFastPortCut(unittest.TestCase):
-    """Кейс №16: обрез 16.5G → ~1G должен давать critical-алерт,
-    хотя абсолютный порог 50 Mbps пройден с запасом."""
+    """Кейс №16 (auto, opt-in): обрез 16.5G → ~1G должен давать
+    critical-алерт в auto-режиме; в дефолтном absolute тот же обрез —
+    жёлтый статус без мгновенного пуша (политика флота 08.11.2026)."""
     def setUp(self):
         _setup_core_in_sysmodules()
         from chimera.modules import bandwidth_monitor
         self._m = bandwidth_monitor
 
     def test_cut_triggers_critical_alert(self):
-        cfg = {**self._m.DEFAULT_CONFIG, "alerts_enabled": True}
+        cfg = {**self._m.DEFAULT_CONFIG, "alerts_enabled": True,
+               "level_mode": "auto"}
         with patch.object(self._m, "_baseline_mbps", return_value=9000.0):
             level = self._m._classify_level(950.0, cfg)
         self.assertEqual(level, "critical")
@@ -445,9 +472,26 @@ class TestAlertFastPortCut(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIn("КРИТИЧНО", result)
 
+    def test_cut_950_silent_in_default_absolute(self):
+        """Дефолт (absolute): обрез до 950 Mbps = degraded → БЕЗ алерта
+        (жёлтый не пушится); статус виден в отчётах."""
+        cfg = {**self._m.DEFAULT_CONFIG, "alerts_enabled": True}
+        level = self._m._classify_level(950.0, cfg)
+        self.assertEqual(level, "degraded")
+        sample = {"level": level, "download_mbps": 950, "label": "test",
+                  "ip": "1.2.3.4", "ts": "2026-11-08T10:00:00",
+                  "latency_ms": 4.0, "latency_target": "1.1.1.1"}
+        recent = [{"download_mbps": 900, "level": "degraded"},
+                  {"download_mbps": 950, "level": "degraded"}]
+        with patch.object(self._m, "read_samples", return_value=recent), \
+             patch.object(self._m, "_load_tg_state", return_value={}), \
+             patch.object(self._m, "_save_tg_state"):
+            result = self._m._check_alert(sample, cfg)
+        self.assertIsNone(result)
+
 
 class TestAlertLogic(unittest.TestCase):
-    """_check_alert — алерты при деградации."""
+    """_check_alert — алерты: critical пушится, degraded — нет (дефолт)."""
     def setUp(self):
         _setup_core_in_sysmodules()
         from chimera.modules import bandwidth_monitor
@@ -510,6 +554,101 @@ class TestAlertLogic(unittest.TestCase):
              patch.object(self._m, "_save_tg_state"):
             result = self._m._check_alert(sample, cfg)
         self.assertIsNone(result)
+
+    def test_no_alert_for_degraded_by_default(self):
+        """Политика флота 08.11.2026: жёлтый (100-1000) не пушится —
+        даже при 2 сэмплах подряд и вне кулдауна (кейс DE 1564 Mbps)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "alerts_enabled": True}
+        sample = {"level": "degraded", "download_mbps": 700, "label": "test",
+                  "ip": "1.2.3.4", "ts": "2026-11-08T08:30:06"}
+        recent = [
+            {"download_mbps": 800, "level": "degraded"},
+            {"download_mbps": 700, "level": "degraded"},
+        ]
+        with patch.object(self._m, "read_samples", return_value=recent), \
+             patch.object(self._m, "_load_tg_state", return_value={}), \
+             patch.object(self._m, "_save_tg_state"):
+            result = self._m._check_alert(sample, cfg)
+        self.assertIsNone(result)
+
+    def test_alert_for_degraded_when_opt_in(self):
+        """alert_degraded=true (opt-in) — жёлтый пушится как ВНИМАНИЕ."""
+        cfg = {**self._m.DEFAULT_CONFIG, "alerts_enabled": True,
+               "alert_degraded": True}
+        sample = {"level": "degraded", "download_mbps": 700, "label": "test",
+                  "ip": "1.2.3.4", "ts": "2026-11-08T08:30:06",
+                  "latency_ms": 3.0, "latency_target": "1.1.1.1"}
+        recent = [
+            {"download_mbps": 800, "level": "degraded"},
+            {"download_mbps": 700, "level": "degraded"},
+        ]
+        with patch.object(self._m, "read_samples", return_value=recent), \
+             patch.object(self._m, "_load_tg_state", return_value={}), \
+             patch.object(self._m, "_save_tg_state"):
+            result = self._m._check_alert(sample, cfg)
+        self.assertIsNotNone(result)
+        self.assertIn("ВНИМАНИЕ", result)
+
+
+class TestDailyReportClassification(unittest.TestCase):
+    """send_daily_report: классификация дня по полным замерам, если есть
+    (лёгкая проба — нижняя оценка; NL 16.5G даёт ~830 Mbps лёгкой пробой
+    при 2.4G+ полной — вечное «жёлтое ВНИМАНИЕ» на живом порту)."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _samples(self, light, big):
+        rows = [{"download_mbps": v, "level": "degraded", "big": False,
+                 "label": "t", "ip": "1.2.3.4", "latency_ms": 4.0}
+                for v in light]
+        rows += [{"download_mbps": v, "level": "normal", "big": True,
+                  "label": "t", "ip": "1.2.3.4", "latency_ms": 4.0}
+                 for v in big]
+        return rows
+
+    def test_day_level_prefers_big_samples(self):
+        """Лёгкие ~830 (жёлтые) + полный 2400 → день ЗЕЛЁНЫЙ."""
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "load_config", return_value=cfg), \
+             patch.object(self._m, "read_samples",
+                          return_value=self._samples([700, 800, 900],
+                                                      [2400])), \
+             patch.object(self._m, "_tg_send", return_value=True), \
+             patch.object(self._m, "REPORTS_DIR", self._tmp), \
+             patch.object(self._m, "_log"):
+            text = self._m.send_daily_report(send_tg=False)
+        self.assertIn("НОРМА", text)
+
+    def test_day_level_all_samples_when_no_big(self):
+        """Полных нет — день по всем сэмплам (avg 800 → ВНИМАНИЕ)."""
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "load_config", return_value=cfg), \
+             patch.object(self._m, "read_samples",
+                          return_value=self._samples([700, 800, 900], [])), \
+             patch.object(self._m, "_tg_send", return_value=True), \
+             patch.object(self._m, "REPORTS_DIR", self._tmp), \
+             patch.object(self._m, "_log"):
+            text = self._m.send_daily_report(send_tg=False)
+        self.assertIn("ВНИМАНИЕ", text)
+
+    def test_day_level_cut_to_sub100_is_critical(self):
+        """Обрез канала < 100 Mbps → день КРИТИЧНО (красный)."""
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "load_config", return_value=cfg), \
+             patch.object(self._m, "read_samples",
+                          return_value=self._samples([40, 60], [80])), \
+             patch.object(self._m, "_tg_send", return_value=True), \
+             patch.object(self._m, "REPORTS_DIR", self._tmp), \
+             patch.object(self._m, "_log"):
+            text = self._m.send_daily_report(send_tg=False)
+        self.assertIn("КРИТИЧНО", text)
 
 
 class TestSamplesStorage(unittest.TestCase):

@@ -28,14 +28,18 @@ Bandwidth монитор — периодический замер пропус�
 (≥ X Mbps); настоящее число — только Ookla (~16 соединений, десятки GB
 трафика за прогон, поэтому opt-in через use_ookla).
 
-Пороги (level_mode=absolute, или fallback пока < 5 сэмплов за 24ч):
-  normal:    > 100 Mbps
-  degraded:  50-100 Mbps
-  critical:  < 50 Mbps  (хостер обрезал)
-Пороги (level_mode=auto, по умолчанию): относительно МЕДИАНЫ сэмплов
-за 24ч — normal ≥ 50% базлайна, degraded ≥ 20%, ниже — critical.
-Абсолютные пороги слепы на портах > 1 Gbps: обрез 16.5G → 1G выглядел
-бы «🟢 normal» при 950 Mbps.
+Пороги (level_mode=absolute, по умолчанию — политика флота 08.11.2026):
+  normal:    ≥ 1000 Mbps  (гигабит и выше — зелёный)
+  degraded:  100-1000 Mbps (жёлтый: статус в отчётах, без мгновенного TG-пуша)
+  critical:  < 100 Mbps  (красный: хостер обрезал канал → TG-алерт)
+Мгновенные TG-алерты — только для critical; жёлтый пушится лишь при
+alert_degraded=true (opt-in). Кейс DE 08.11.2026: auto-режим на 5G-порту
+дал ⚠️ при 1564 Mbps (< 50% базлайна) — ложный сработ; политика владельца:
+«уведы, только если ниже 100 Mbps».
+Пороги (level_mode=auto, opt-in): относительно МЕДИАНЫ сэмплов за 24ч —
+normal ≥ 50% базлайна, degraded ≥ 20%, ниже — critical. Ловит обрез
+>1G-портов мгновенным алертом; жёлтая зона absolute (100-1000) покрывает
+тот же кейс №16 видимость в отчётах: обрез 16.5G → 1G = 🟡 в отчёте.
 
 Файлы:
   /var/lib/xray-installer/bandwidth-monitor.json     — конфиг
@@ -113,9 +117,9 @@ TG_CHUNK_LIMIT   = 3900
 
 # Пороги (Mbps)
 DEFAULT_THRESHOLDS = {
-    "normal_mbps":     100.0,   # ≥ — норма
-    "degraded_mbps":    50.0,   # 50-100 — внимание
-    # < degraded_mbps — critical (хостер обрезал)
+    "normal_mbps":     1000.0,  # ≥ гигабита — зелёный (политика флота 08.11.2026)
+    "degraded_mbps":    100.0,  # 100-1000 — жёлтый (статус в отчётах, без пуша)
+    # < degraded_mbps — critical (красный: хостер обрезал → TG-алерт)
     "degradation_pct":  50.0,   # падение > 50% от среднего за час → alarm
     "alert_cooldown_min": 180,  # анти-спам: 3 часа между алертами одного уровня
     "alert_consecutive":  2,    # 2 сэмпла подряд < degraded → алерт
@@ -177,9 +181,12 @@ DEFAULT_CONFIG: dict = {
     "probe_mb_light": PROBE_MB_LIGHT,
     "probe_mb_big": PROBE_MB_BIG,
     "use_ookla": False,              # полный замер через Ookla CLI (десятки GB трафика за прогон!)
-    "level_mode": "auto",            # auto = базлайн-медиана 24ч; absolute = пороги normal/degraded
+    "level_mode": "absolute",        # absolute = пороги normal/degraded (политика флота);
+                                     # auto = базлайн-медиана 24ч (opt-in)
     "baseline_normal_ratio": 0.5,    # auto: normal ≥ 50% базлайна
     "baseline_degraded_ratio": 0.2,  # auto: degraded ≥ 20% базлайна
+    "alert_degraded": False,         # мгновенный TG-пуш для жёлтого (100-1000);
+                                     # False = пуш только для critical < 100 Mbps
 }
 
 
@@ -518,13 +525,16 @@ def _baseline_mbps(hours: int = BASELINE_WINDOW_HOURS,
 def _classify_level(download_mbps: float, cfg: dict) -> str:
     """Классификация замера.
 
-    auto (по умолчанию): относительно медианы-базлайна за 24ч — ловит обрез
-    порта > 1 Gbps, на котором абсолютные пороги 100/50 слепы (обрез
-    16.5G → 1G выглядел бы «normal» при 950 Mbps). Нет базлайна
-    (< min_samples) — fallback на абсолютные пороги.
-    absolute: старое поведение по thresholds.normal_mbps/degraded_mbps.
+    absolute (по умолчанию, политика флота 08.11.2026): фиксированные
+    пороги thresholds.normal_mbps (1000) / degraded_mbps (100) —
+    ≥1G зелёный, 100-1000 жёлтый, <100 красный. Кейс DE 08.11.2026:
+    auto-режим дал ⚠️ при 1564 Mbps на 5G-порту (< 50% базлайна) —
+    ложный сработ.
+    auto (opt-in): относительно медианы-базлайна за 24ч — ловит обрез
+    порта > 1 Gbps мгновенным алертом. Нет базлайна (< min_samples) —
+    fallback на абсолютные пороги.
     """
-    mode = str(cfg.get("level_mode", "auto") or "auto").strip().lower()
+    mode = str(cfg.get("level_mode", "absolute") or "absolute").strip().lower()
     th = cfg.get("thresholds") or {}
     if mode == "auto":
         baseline = _baseline_mbps()
@@ -828,6 +838,14 @@ def _check_alert(sample: dict, cfg: dict) -> Optional[str]:
     if level == "normal":
         return None
 
+    # Политика флота (08.11.2026): мгновенный TG-пуш только для critical
+    # (< degraded_mbps, по умолчанию 100 Mbps). Жёлтый (degraded,
+    # 100-1000) — статус в периодических/дневных отчётах без пуша;
+    # пушится только при alert_degraded=true (opt-in). Кейс DE:
+    # ⚠️-алерт при 1564 Mbps на 5G-порту = ложный сработ auto-режима.
+    if level == "degraded" and not cfg.get("alert_degraded", False):
+        return None
+
     # Anti-spam: cooldown
     state = _load_tg_state()
     now = int(time.time())
@@ -864,8 +882,10 @@ def _check_alert(sample: dict, cfg: dict) -> Optional[str]:
         text += f"Latency: {latency} ms ({sample.get('latency_target', '')})\n"
     text += f"Время: {sample.get('ts', '')}\n\n"
     if level == "critical":
-        if speed is not None and speed < 50:
-            text += "🚨 Скорость ниже 50 Mbps — возможно, хостер обрезал канал.\n"
+        crit_thr = float(th.get("degraded_mbps", 100.0))
+        if speed is not None and speed < crit_thr:
+            text += (f"🚨 Скорость ниже {crit_thr:.0f} Mbps — возможно, "
+                     "хостер обрезал канал.\n")
             text += "Проверьте договор и условия тарифа.\n"
         else:
             text += "🚨 Падение > 80% от базлайна за 24ч — возможно, хостер обрезал канал.\n"
@@ -1021,14 +1041,19 @@ def send_daily_report(date_str: Optional[str] = None, send_tg: bool = True) -> s
     mx = max(speeds) if speeds else 0
     avg_lat = sum(latencies) / len(latencies) if latencies else 0
 
-    # Классификация дня
+    # Классификация дня: по полным замерам, если есть (лёгкая проба —
+    # нижняя оценка: на широких портах занижает — NL 16.5G даёт ~830 Mbps
+    # лёгкой пробой при 2.4G+ полной; классифицировать день по ней —
+    # вечное «жёлтое ВНИМАНИЕ» на живом порту). Нет полных — по всем.
     th = cfg.get("thresholds") or {}
-    normal = float(th.get("normal_mbps", 100.0))
-    degraded = float(th.get("degraded_mbps", 50.0))
-    if avg >= normal:
+    normal = float(th.get("normal_mbps", 1000.0))
+    degraded = float(th.get("degraded_mbps", 100.0))
+    day_pool = big_speeds if big_speeds else speeds
+    day_avg = (sum(day_pool) / len(day_pool)) if day_pool else 0.0
+    if day_avg >= normal:
         day_level = "НОРМА"
         emoji = "🟢"
-    elif avg >= degraded:
+    elif day_avg >= degraded:
         day_level = "ВНИМАНИЕ"
         emoji = "🟡"
     else:
@@ -1048,7 +1073,7 @@ def send_daily_report(date_str: Optional[str] = None, send_tg: bool = True) -> s
     if latencies:
         text += f"\nLatency: avg {avg_lat:.1f} ms\n"
     text += f"\n<i>Пороги: normal ≥ {normal} Mbps, degraded ≥ {degraded} Mbps"
-    if str(cfg.get("level_mode", "auto") or "auto").lower() == "auto":
+    if str(cfg.get("level_mode", "absolute") or "absolute").lower() == "auto":
         text += " · auto: относительно базлайна 24ч"
     text += "</i>"
 
@@ -1196,9 +1221,9 @@ def do_bandwidth_monitor_menu() -> None:
         core._box_row(f"  Отчёт: каждые {cfg.get('report_interval_hours', 6)} ч")
         core._box_row(f"  Дневной: {cfg.get('daily_hour', 23):02d}:{cfg.get('daily_minute', 50):02d}")
         th = cfg.get("thresholds", {})
-        core._box_row(f"  Пороги: normal ≥ {th.get('normal_mbps', 100)} Mbps, "
-                      f"degraded ≥ {th.get('degraded_mbps', 50)} Mbps"
-                      f" · режим: {cfg.get('level_mode', 'auto')}")
+        core._box_row(f"  Пороги: normal ≥ {th.get('normal_mbps', 1000)} Mbps, "
+                      f"degraded ≥ {th.get('degraded_mbps', 100)} Mbps"
+                      f" · режим: {cfg.get('level_mode', 'absolute')}")
         core._box_row(f"  Потоки: {'авто' if not cfg.get('parallel_streams') else cfg.get('parallel_streams')}"
                       f" · Ookla: {'вкл' if cfg.get('use_ookla') else 'выкл'}")
         core._box_row(f"  Алерты: {'вкл' if cfg.get('alerts_enabled') else 'выкл'}")
@@ -1259,8 +1284,8 @@ def _settings_menu(cfg: dict) -> None:
     print("\n=== Настройки ===")
     print(f"  [1] Интервал пробы (мин): {cfg.get('sample_interval_min', 30)}")
     print(f"  [2] Интервал отчёта (ч): {cfg.get('report_interval_hours', 6)}")
-    print(f"  [3] Порог normal (Mbps): {cfg.get('thresholds', {}).get('normal_mbps', 100)}")
-    print(f"  [4] Порог degraded (Mbps): {cfg.get('thresholds', {}).get('degraded_mbps', 50)}")
+    print(f"  [3] Порог normal (Mbps): {cfg.get('thresholds', {}).get('normal_mbps', 1000)}")
+    print(f"  [4] Порог degraded (Mbps): {cfg.get('thresholds', {}).get('degraded_mbps', 100)}")
     print(f"  [5] Метка ноды: {cfg.get('node_label', '') or '(hostname)'}")
     print("  [0] Назад")
     choice = input("  Выбор: ").strip()
@@ -1278,7 +1303,7 @@ def _settings_menu(cfg: dict) -> None:
             save_config(cfg)
             print("  Сохранено.")
     elif choice == "3":
-        v = input(f"  Порог normal (Mbps) [{cfg.get('thresholds', {}).get('normal_mbps', 100)}]: ").strip()
+        v = input(f"  Порог normal (Mbps) [{cfg.get('thresholds', {}).get('normal_mbps', 1000)}]: ").strip()
         try:
             cfg.setdefault("thresholds", {})["normal_mbps"] = float(v)
             save_config(cfg)
@@ -1286,7 +1311,7 @@ def _settings_menu(cfg: dict) -> None:
         except ValueError:
             print("  Неверное значение.")
     elif choice == "4":
-        v = input(f"  Порог degraded (Mbps) [{cfg.get('thresholds', {}).get('degraded_mbps', 50)}]: ").strip()
+        v = input(f"  Порог degraded (Mbps) [{cfg.get('thresholds', {}).get('degraded_mbps', 100)}]: ").strip()
         try:
             cfg.setdefault("thresholds", {})["degraded_mbps"] = float(v)
             save_config(cfg)
@@ -1323,8 +1348,8 @@ def _cli() -> None:
         print(f"sample_interval: {cfg.get('sample_interval_min', 30)} min")
         print(f"report_interval: {cfg.get('report_interval_hours', 6)} h")
         th = cfg.get("thresholds", {})
-        print(f"thresholds: normal≥{th.get('normal_mbps', 100)} degraded≥{th.get('degraded_mbps', 50)}")
-        print(f"level_mode: {cfg.get('level_mode', 'auto')} · "
+        print(f"thresholds: normal≥{th.get('normal_mbps', 1000)} degraded≥{th.get('degraded_mbps', 100)}")
+        print(f"level_mode: {cfg.get('level_mode', 'absolute')} · "
               f"streams: {cfg.get('parallel_streams', 0) or 'авто'} · "
               f"ookla: {cfg.get('use_ookla', False)}")
         samples = read_samples(days=1)
