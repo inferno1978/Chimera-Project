@@ -41,6 +41,30 @@ normal ≥ 50% базлайна, degraded ≥ 20%, ниже — critical. Лов
 >1G-портов мгновенным алертом; жёлтая зона absolute (100-1000) покрывает
 тот же кейс №16 видимость в отчётах: обрез 16.5G → 1G = 🟡 в отчёте.
 
+Учёт порта канала (port_mbps > 0, 08.11.2026) — «правдивые» результаты
+для юзеров И с 1G, и с более широкими каналами:
+  • полный замер (раз в 6 ч) и дневной отчёт — пороги ОТНОСИТЕЛЬНО ПОРТА:
+    зелёный ≥ port_normal_ratio (70%) порта, жёлтый ≥ port_degraded_ratio
+    (20%), ниже — красный. Кейс 1G-юзера: 950 Mbps на порту 1000 = 🟢
+    (Ethernet-потолок ~95%), а не вечное 🟡 от флот-порога 1000; обрез
+    5G-порта до 900 Mbps = 🔴 (18% порта), а не 🟢 «гигабит есть».
+  • лёгкая проба (раз в 30 мин) — по-прежнему флот-политика ≥1G/100M:
+    это проверка живости (< 100 Mbps = обрез), а не замер порта — так
+    поведение нод без изменений и нет ложных critical от нижней оценки.
+  • HTTP-проба (пусть и параллельная) подтверждает порт только до
+    ~5 Gbps (DE-эмпирика: 8 потоков ≈ 4.8-5.5G на 5G-порту; NL 16.5G —
+    потолок ~2.4-5G). Поэтому port-пороги применяются к не-Ookla
+    замерам только при port ≤ PROBE_VERIFIABLE_MAX_MBPS (5000); для более
+    широких портов — только к Ookla-замерам (verified), HTTP даёт нижнюю
+    оценку + подсказку «включите use_ookla» в отчёте.
+  • потоки масштабируются под порт (parallel_streams=0=авто): полный
+    замер ceil(порт/500 Mbps), 8-16 потоков, бюджет ≥ streams×95 MB
+    (1G → без изменений 8×760 MB; 5G → 10×950; 16.5G → 16×1520 — ~6
+    GB/сутки полными замерами, потому порт задавайте только на unmetered);
+    лёгкая проба ceil(порт/1000), 6-12 потоков, бюджет прежний 60 MB.
+  • port_mbps задаётся в TUI (вопрос при установке + Настройки[6])
+    в Mbps или с суффиксом: «1000», «1g», «2.5G», «500m»; 0 = не задан.
+
 Файлы:
   /var/lib/xray-installer/bandwidth-monitor.json     — конфиг
   /var/lib/xray-installer/bandwidth-monitor/         — данные
@@ -152,6 +176,16 @@ READ_BLOCK_BYTES = 65536
 BASELINE_WINDOW_HOURS = 24
 BASELINE_MIN_SAMPLES  = 5
 
+# Учёт порта канала (port_mbps > 0)
+PORT_NORMAL_RATIO   = 0.7    # полный замер: ≥ 70% порта — зелёный
+PORT_DEGRADED_RATIO = 0.2    # ≥ 20% порта — жёлтый, ниже — красный
+PROBE_VERIFIABLE_MAX_MBPS = 5000.0   # HTTP-проба подтверждает порт ≤ ~5G
+                                      # (DE: 8 потоков ≈ 4.8-5.5G на 5G-порту);
+                                      # шире — port-пороги только для Ookla
+PORT_STREAM_MBPS_BIG   = 500.0   # планировочная ёмкость потока полного замера
+PORT_STREAM_MBPS_LIGHT = 1000.0  # лёгкой пробы (лёгкая — проверка живости)
+MAX_PARALLEL_STREAMS   = 16      # потолок потоков (как Ookla CLI)
+
 # Порядок источников для параллельного замера (отличается от легаси:
 # cloudflare первым — точный {size} без привязки к фиксированным файлам)
 PARALLEL_DOWNLOAD_SOURCES = [
@@ -181,6 +215,10 @@ DEFAULT_CONFIG: dict = {
     "probe_mb_light": PROBE_MB_LIGHT,
     "probe_mb_big": PROBE_MB_BIG,
     "use_ookla": False,              # полный замер через Ookla CLI (десятки GB трафика за прогон!)
+    "port_mbps": 0,                  # порт канала ноды (0 = не задан → флот-пороги);
+                                     # >0: полные замеры и дневной отчёт — относительно порта
+    "port_normal_ratio": PORT_NORMAL_RATIO,     # ≥ 70% порта — зелёный
+    "port_degraded_ratio": PORT_DEGRADED_RATIO, # ≥ 20% — жёлтый, ниже — красный
     "level_mode": "absolute",        # absolute = пороги normal/degraded (политика флота);
                                      # auto = базлайн-медиана 24ч (opt-in)
     "baseline_normal_ratio": 0.5,    # auto: normal ≥ 50% базлайна
@@ -261,6 +299,80 @@ def _node_label_fallback() -> str:
     if label:
         return label
     return _node_hostname()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ПОРТ КАНАЛА (port_mbps)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _parse_port_mbps(text: str) -> Optional[float]:
+    """Парсинг ввода юзера: '1000', '1g', '2.5G', '500m', '16,5g' → Mbps.
+
+    Поддерживаются суффиксы k/m/g (и кириллические к/м/г), запятая как
+    десятичный разделитель, хвосты bps/bit/мбит, голое число = Mbps.
+    0.0 — явный сброс («порт не задан»); None — мусорный ввод.
+    """
+    s = (text or "").strip().lower().replace(",", ".")
+    if not s:
+        return None
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([kmgкмг])?\s*(?:bps|bit|бит.*)?$", s)
+    if not m:
+        return None
+    val = float(m.group(1))
+    if val == 0:
+        return 0.0
+    unit = (m.group(2) or "m")
+    for cyr, lat in (("к", "k"), ("м", "m"), ("г", "g")):
+        unit = unit.replace(cyr, lat)
+    mult = {"k": 1e-3, "m": 1.0, "g": 1e3}[unit]
+    mbps = val * mult
+    if not (1.0 <= mbps <= 1_000_000.0):
+        return None
+    return round(mbps, 1)
+
+
+def _port_mbps(cfg: dict) -> float:
+    """port_mbps из конфига, валидированный (0 = не задан)."""
+    try:
+        port = float(cfg.get("port_mbps") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not (1.0 <= port <= 1_000_000.0):
+        return 0.0
+    return port
+
+
+def _fmt_port(mbps: float) -> str:
+    """16500 → '16500 Mbps (16.5G)'; 950 → '950 Mbps'."""
+    if mbps >= 1000:
+        return f"{mbps:.0f} Mbps ({mbps / 1000:g}G)"
+    return f"{mbps:.0f} Mbps"
+
+
+def _streams_for_port(port_mbps: float, per_stream_mbps: float,
+                      lo: int, hi: int) -> int:
+    """Сколько потоков нужно, чтобы наполнить порт: ceil(порт/поток),
+    зажатое в [lo, hi]. Эмпирика: HTTP-поток на DC-пути ~500 Mbps
+    (DE: 8 потоков ≈ 4.8-5.5G); потолок 16 — как у Ookla CLI."""
+    need = -(-int(port_mbps) // int(per_stream_mbps))
+    return max(lo, min(hi, need))
+
+
+def _port_thresholds_active(cfg: dict, big: bool, verified: bool) -> bool:
+    """Применяются ли порт-пороги к данному замеру.
+
+    Полный замер (или любой Ookla — он меряет порт честно) при
+    port ≤ PROBE_VERIFIABLE_MAX_MBPS: HTTP-проба способна подтвердить
+    порт. Шире 5G — только verified (Ookla): HTTP даёт лишь нижнюю
+    оценку, порт-пороги от неё вечно красили бы живую ноду.
+    Лёгкая проба — никогда: это проверка живости по флот-политике.
+    """
+    port = _port_mbps(cfg)
+    if port <= 0:
+        return False
+    if verified:
+        return True
+    return big and port <= PROBE_VERIFIABLE_MAX_MBPS
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -522,9 +634,17 @@ def _baseline_mbps(hours: int = BASELINE_WINDOW_HOURS,
     return (vals[n // 2 - 1] + vals[n // 2]) / 2.0
 
 
-def _classify_level(download_mbps: float, cfg: dict) -> str:
+def _classify_level(download_mbps: float, cfg: dict,
+                    big: bool = False, verified: bool = False) -> str:
     """Классификация замера.
 
+    port_mbps > 0 (08.11.2026) — пороги ОТНОСИТЕЛЬНО ПОРТА для полных
+    замеров и любых Ookla (verified): ≥ port_normal_ratio (70%) — normal,
+    ≥ port_degraded_ratio (20%) — degraded, ниже — critical. Кейс 1G-юзера:
+    950 Mbps на порту 1000 = normal (Ethernet-потолок ~95%), а не degraded
+    от флот-порога 1000; обрез 5G-порта до 900 = critical (18%), а не
+    normal «гигабит есть». Лёгкая проба и HTTP-замеры на портах > 5G —
+    флот-политика/базлайн (см. _port_thresholds_active).
     absolute (по умолчанию, политика флота 08.11.2026): фиксированные
     пороги thresholds.normal_mbps (1000) / degraded_mbps (100) —
     ≥1G зелёный, 100-1000 жёлтый, <100 красный. Кейс DE 08.11.2026:
@@ -534,8 +654,19 @@ def _classify_level(download_mbps: float, cfg: dict) -> str:
     порта > 1 Gbps мгновенным алертом. Нет базлайна (< min_samples) —
     fallback на абсолютные пороги.
     """
-    mode = str(cfg.get("level_mode", "absolute") or "absolute").strip().lower()
     th = cfg.get("thresholds") or {}
+    # 1. Порт-пороги — только для полных замеров / Ookla (см. докстринг)
+    if _port_thresholds_active(cfg, big, verified):
+        port = _port_mbps(cfg)
+        if download_mbps >= port * float(cfg.get("port_normal_ratio",
+                                                 PORT_NORMAL_RATIO)):
+            return "normal"
+        if download_mbps >= port * float(cfg.get("port_degraded_ratio",
+                                                 PORT_DEGRADED_RATIO)):
+            return "degraded"
+        return "critical"
+    # 2. auto: относительно базлайна 24ч
+    mode = str(cfg.get("level_mode", "absolute") or "absolute").strip().lower()
     if mode == "auto":
         baseline = _baseline_mbps()
         if baseline:
@@ -544,8 +675,9 @@ def _classify_level(download_mbps: float, cfg: dict) -> str:
             if download_mbps >= baseline * float(cfg.get("baseline_degraded_ratio", 0.2)):
                 return "degraded"
             return "critical"
-    normal = float(th.get("normal_mbps", 100.0))
-    degraded = float(th.get("degraded_mbps", 50.0))
+    # 3. absolute: флот-политика
+    normal = float(th.get("normal_mbps", 1000.0))
+    degraded = float(th.get("degraded_mbps", 100.0))
     if download_mbps >= normal:
         return "normal"
     if download_mbps >= degraded:
@@ -557,16 +689,40 @@ def _run_download_probe(cfg: dict, big: bool) -> dict:
     """Загрузочный тест согласно cfg. Единственная точка выбора методики:
     Ookla (opt-in, только полный) → параллельные потоки → легаси-однопоток.
 
+    При port_mbps > 0 и parallel_streams=0 (авто) потоки масштабируются
+    под порт: полный замер ceil(порт/500) зажат 8-16 + бюджет ≥ streams×95
+    MB; лёгкая проба ceil(порт/1000) зажат 6-12, бюджет прежний (лёгкая —
+    проверка живости). Явный parallel_streams — пин юзера, не трогаем.
+
     Возвращает {speed_bps, peak_bps, source, streams, probe_mb, ookla};
     speed_bps == 0.0 → скачать не удалось вовсе.
     """
     streams_cfg = int(cfg.get("parallel_streams", 0) or 0)
+    port = _port_mbps(cfg)
     if big:
-        streams = streams_cfg if streams_cfg > 0 else DEFAULT_PARALLEL_STREAMS_BIG
+        if streams_cfg > 0:
+            streams = streams_cfg
+        elif port > 0:
+            streams = _streams_for_port(port, PORT_STREAM_MBPS_BIG,
+                                        DEFAULT_PARALLEL_STREAMS_BIG,
+                                        MAX_PARALLEL_STREAMS)
+        else:
+            streams = DEFAULT_PARALLEL_STREAMS_BIG
         probe_mb = float(cfg.get("probe_mb_big", PROBE_MB_BIG))
+        # бюджет ≥ streams×95 MB: каждый поток получает потолок Cloudflare
+        # __down (95 MB), иначе широкие порты меряются в slow start
+        if port > 0 and streams_cfg <= 0:
+            probe_mb = max(probe_mb,
+                           streams * (BIG_DOWNLOAD_BYTES // 1_000_000))
         cap = STREAM_ACTIVE_CAP_BIG
     else:
-        streams = streams_cfg if streams_cfg > 0 else DEFAULT_PARALLEL_STREAMS_LIGHT
+        if streams_cfg > 0:
+            streams = streams_cfg
+        elif port > 0:
+            streams = _streams_for_port(port, PORT_STREAM_MBPS_LIGHT,
+                                        DEFAULT_PARALLEL_STREAMS_LIGHT, 12)
+        else:
+            streams = DEFAULT_PARALLEL_STREAMS_LIGHT
         probe_mb = float(cfg.get("probe_mb_light", PROBE_MB_LIGHT))
         cap = STREAM_ACTIVE_CAP_LIGHT
     budget_bytes = int(probe_mb * 1_000_000)
@@ -631,8 +787,10 @@ def measure_once(big: bool = False) -> dict:
         iperf3_mbps = _iperf3_test(cfg.get("iperf3_server", "ping.online.net"),
                                    int(cfg.get("iperf3_port", 5200)))
 
-    # 4. Классификация (auto: относительно базлайна 24ч; см. _classify_level)
-    level = _classify_level(download_mbps, cfg)
+    # 4. Классификация (port: относительно порта для полных/Ookla;
+    #    auto: относительно базлайна 24ч; см. _classify_level)
+    verified = probe.get("source") == "ookla"
+    level = _classify_level(download_mbps, cfg, big=big, verified=verified)
 
     sample = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -649,6 +807,9 @@ def measure_once(big: bool = False) -> dict:
         "level": level,
         "big": big,
     }
+    port = _port_mbps(cfg)
+    if port > 0:
+        sample["port_mbps"] = round(port, 1)
     if probe.get("ookla"):
         ook = probe["ookla"]
         if ook.get("ul_mbps") is not None:
@@ -882,14 +1043,23 @@ def _check_alert(sample: dict, cfg: dict) -> Optional[str]:
         text += f"Latency: {latency} ms ({sample.get('latency_target', '')})\n"
     text += f"Время: {sample.get('ts', '')}\n\n"
     if level == "critical":
-        crit_thr = float(th.get("degraded_mbps", 100.0))
-        if speed is not None and speed < crit_thr:
-            text += (f"🚨 Скорость ниже {crit_thr:.0f} Mbps — возможно, "
-                     "хостер обрезал канал.\n")
+        port = _port_mbps(cfg)
+        big = bool(sample.get("big"))
+        verified = sample.get("download_source") == "ookla"
+        if _port_thresholds_active(cfg, big, verified):
+            # Порт-пороги: обрез относительно ЗАЯВЛЕННОГО порта
+            text += (f"🚨 {speed} Mbps при порте {_fmt_port(port)} — "
+                     f"канал обрезан ~в {port / max(float(speed or 1), 1):.0f}x.\n")
             text += "Проверьте договор и условия тарифа.\n"
         else:
-            text += "🚨 Падение > 80% от базлайна за 24ч — возможно, хостер обрезал канал.\n"
-            text += "Проверьте договор и условия тарифа.\n"
+            crit_thr = float(th.get("degraded_mbps", 100.0))
+            if speed is not None and speed < crit_thr:
+                text += (f"🚨 Скорость ниже {crit_thr:.0f} Mbps — возможно, "
+                         "хостер обрезал канал.\n")
+                text += "Проверьте договор и условия тарифа.\n"
+            else:
+                text += "🚨 Падение > 80% от базлайна за 24ч — возможно, хостер обрезал канал.\n"
+                text += "Проверьте договор и условия тарифа.\n"
     else:
         text += "⚠️ Скорость ниже нормы (базлайн/порог деградации).\n"
         text += "Возможно, временная деградация или нагрузка.\n"
@@ -962,6 +1132,10 @@ def send_periodic_report() -> str:
     text = f"📊 <b>Bandwidth отчёт — {label}</b>\n"
     text += f"({ip})\n\n"
 
+    port = _port_mbps(cfg)
+    if port > 0:
+        text += f"Порт канала: <b>{_fmt_port(port)}</b>\n"
+
     if big_sample.get("download_source") == "ookla":
         text += "<b>Текущий замер (Ookla speedtest):</b>\n"
         text += f"  Скорость: <b>{big_sample['download_mbps']} Mbps</b>\n"
@@ -981,6 +1155,10 @@ def send_periodic_report() -> str:
             text += f"  Скорость: <b>{big_sample['download_mbps']} Mbps</b>\n"
         if big_sample.get("peak_mbps"):
             text += f"  Пик (окно 1 с): {big_sample['peak_mbps']} Mbps\n"
+        # Порт шире потолка HTTP-пробы — честная подсказка, а не ложное 🟢/🔴
+        if port > PROBE_VERIFIABLE_MAX_MBPS:
+            text += ("  ℹ️ Порт &gt; 5G: HTTP-проба даёт только нижнюю оценку; "
+                     "точное число — Ookla (use_ookla)\n")
     if big_sample.get("iperf3_mbps"):
         text += f"  iperf3 (4 потока): {big_sample['iperf3_mbps']} Mbps\n"
     if big_sample.get("latency_ms"):
@@ -1045,12 +1223,21 @@ def send_daily_report(date_str: Optional[str] = None, send_tg: bool = True) -> s
     # нижняя оценка: на широких портах занижает — NL 16.5G даёт ~830 Mbps
     # лёгкой пробой при 2.4G+ полной; классифицировать день по ней —
     # вечное «жёлтое ВНИМАНИЕ» на живом порту). Нет полных — по всем.
+    # Полные замеры классифицируются через _classify_level(big=True):
+    # при port_mbps > 0 — относительно ПОРТА (1G-юзер на 950 Mbps = НОРМА,
+    # а не ВНИМАНИЕ от флот-порога 1000), иначе — флот-политика/auto.
     th = cfg.get("thresholds") or {}
     normal = float(th.get("normal_mbps", 1000.0))
     degraded = float(th.get("degraded_mbps", 100.0))
     day_pool = big_speeds if big_speeds else speeds
     day_avg = (sum(day_pool) / len(day_pool)) if day_pool else 0.0
-    if day_avg >= normal:
+    if big_speeds:
+        lvl = _classify_level(day_avg, cfg, big=True)
+        day_level = {"normal": "НОРМА", "degraded": "ВНИМАНИЕ",
+                     "critical": "КРИТИЧНО"}[lvl]
+        emoji = {"normal": "🟢", "degraded": "🟡",
+                 "critical": "🔴"}[lvl]
+    elif day_avg >= normal:
         day_level = "НОРМА"
         emoji = "🟢"
     elif day_avg >= degraded:
@@ -1073,6 +1260,12 @@ def send_daily_report(date_str: Optional[str] = None, send_tg: bool = True) -> s
     if latencies:
         text += f"\nLatency: avg {avg_lat:.1f} ms\n"
     text += f"\n<i>Пороги: normal ≥ {normal} Mbps, degraded ≥ {degraded} Mbps"
+    port = _port_mbps(cfg)
+    if port > 0:
+        p_norm = port * float(cfg.get("port_normal_ratio", 0.7))
+        p_degr = port * float(cfg.get("port_degraded_ratio", 0.2))
+        text += (f" · порт {_fmt_port(port)}: полные замеры "
+                 f"≥{p_norm:.0f}/≥{p_degr:.0f} Mbps")
     if str(cfg.get("level_mode", "absolute") or "absolute").lower() == "auto":
         text += " · auto: относительно базлайна 24ч"
     text += "</i>"
@@ -1196,6 +1389,29 @@ def uninstall_bandwidth_monitor() -> tuple:
 #  TUI-МЕНЮ (минимальное)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _ask_port_mbps(current: float) -> Optional[float]:
+    """TUI-вопрос: пропускная способность порта ноды (port_mbps).
+
+    Возвращает распарсенное значение (float Mbps) или None — юзер
+    оставил как есть / ввёл мусор. 0 = сбросить (флот-пороги).
+    """
+    cur = int(current) if current else 0
+    hint = _fmt_port(float(cur)) if cur else "не задан (флот-пороги)"
+    print("\n  Пропускная способность порта ноды по договору —")
+    print("  это делает замеры «правдивыми»: полный замер и дневной")
+    print("  отчёт считаются относительно порта (1G-юзер на 950 Mbps")
+    print("  = зелёный, а не жёлтый; обрез 5G до 900 Mbps = красный).")
+    v = input(f"  Порт в Mbps [можно 1000 / 1g / 2.5G / 500m; 0 = не задан; "
+              f"сейчас: {hint}]: ").strip()
+    if not v:
+        return None
+    parsed = _parse_port_mbps(v)
+    if parsed is None:
+        print("  Неверное значение (примеры: 1000, 1g, 2.5G, 500m, 0).")
+        return None
+    return parsed
+
+
 def do_bandwidth_monitor_menu() -> None:
     """Интерактивное меню управления bandwidth-мониторингом."""
     try:
@@ -1224,6 +1440,8 @@ def do_bandwidth_monitor_menu() -> None:
         core._box_row(f"  Пороги: normal ≥ {th.get('normal_mbps', 1000)} Mbps, "
                       f"degraded ≥ {th.get('degraded_mbps', 100)} Mbps"
                       f" · режим: {cfg.get('level_mode', 'absolute')}")
+        port = _port_mbps(cfg)
+        core._box_row(f"  Порт канала: {_fmt_port(port) if port else 'не задан (флот-пороги)'}")
         core._box_row(f"  Потоки: {'авто' if not cfg.get('parallel_streams') else cfg.get('parallel_streams')}"
                       f" · Ookla: {'вкл' if cfg.get('use_ookla') else 'выкл'}")
         core._box_row(f"  Алерты: {'вкл' if cfg.get('alerts_enabled') else 'выкл'}")
@@ -1246,6 +1464,10 @@ def do_bandwidth_monitor_menu() -> None:
     choice = input("\n  Выбор: ").strip()
 
     if choice == "1":
+        # TUI-вопрос: порт канала — до установки (попадает в сохраняемый конфиг)
+        port = _ask_port_mbps(_port_mbps(cfg))
+        if port is not None:
+            cfg["port_mbps"] = port
         ok, msg = install_bandwidth_monitor(cfg)
         print(f"  {msg}")
     elif choice == "2":
@@ -1287,6 +1509,7 @@ def _settings_menu(cfg: dict) -> None:
     print(f"  [3] Порог normal (Mbps): {cfg.get('thresholds', {}).get('normal_mbps', 1000)}")
     print(f"  [4] Порог degraded (Mbps): {cfg.get('thresholds', {}).get('degraded_mbps', 100)}")
     print(f"  [5] Метка ноды: {cfg.get('node_label', '') or '(hostname)'}")
+    print(f"  [6] Порт канала (Mbps): {(_fmt_port(_port_mbps(cfg)) if _port_mbps(cfg) else 'не задан (флот-пороги ≥1G/100M)')}")
     print("  [0] Назад")
     choice = input("  Выбор: ").strip()
 
@@ -1323,6 +1546,17 @@ def _settings_menu(cfg: dict) -> None:
         cfg["node_label"] = v
         save_config(cfg)
         print("  Сохранено.")
+    elif choice == "6":
+        port = _ask_port_mbps(_port_mbps(cfg))
+        if port is not None:
+            cfg["port_mbps"] = port
+            save_config(cfg)
+            if port > 0:
+                print(f"  Сохранено: {_fmt_port(port)} — полные замеры "
+                      f"≥{port * float(cfg.get('port_normal_ratio', 0.7)):.0f}/"
+                      f"≥{port * float(cfg.get('port_degraded_ratio', 0.2)):.0f} Mbps.")
+            else:
+                print("  Сохранено: порт не задан — флот-пороги (≥1G/100M).")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1349,6 +1583,8 @@ def _cli() -> None:
         print(f"report_interval: {cfg.get('report_interval_hours', 6)} h")
         th = cfg.get("thresholds", {})
         print(f"thresholds: normal≥{th.get('normal_mbps', 1000)} degraded≥{th.get('degraded_mbps', 100)}")
+        port = _port_mbps(cfg)
+        print(f"port: {_fmt_port(port) if port else 'не задан (флот-пороги)'}")
         print(f"level_mode: {cfg.get('level_mode', 'absolute')} · "
               f"streams: {cfg.get('parallel_streams', 0) or 'авто'} · "
               f"ookla: {cfg.get('use_ookla', False)}")

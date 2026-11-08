@@ -774,6 +774,464 @@ class TestTgConfig(unittest.TestCase):
         self.assertEqual(proxy, "")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  PORT_MBPS — учёт порта канала (08.11.2026)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPortParse(unittest.TestCase):
+    """_parse_port_mbps — парсер TUI-ввода порта."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+
+    def test_plain_number_is_mbps(self):
+        self.assertEqual(self._m._parse_port_mbps("1000"), 1000.0)
+        self.assertEqual(self._m._parse_port_mbps("16500"), 16500.0)
+        self.assertEqual(self._m._parse_port_mbps(" 950 "), 950.0)
+
+    def test_g_suffix(self):
+        self.assertEqual(self._m._parse_port_mbps("1g"), 1000.0)
+        self.assertEqual(self._m._parse_port_mbps("2.5G"), 2500.0)
+        self.assertEqual(self._m._parse_port_mbps("16.5g"), 16500.0)
+
+    def test_m_and_k_suffix(self):
+        self.assertEqual(self._m._parse_port_mbps("500m"), 500.0)
+        self.assertEqual(self._m._parse_port_mbps("100Mbps"), 100.0)
+        self.assertEqual(self._m._parse_port_mbps("1gbps"), 1000.0)
+        # 100k = 0.1 Mbps — бессмыслица для порта, валидатор режет
+        self.assertIsNone(self._m._parse_port_mbps("100k"))
+
+    def test_cyrillic_and_comma(self):
+        """Запятая как разделитель + кириллические суффиксы/хвосты."""
+        self.assertEqual(self._m._parse_port_mbps("16,5г"), 16500.0)
+        self.assertEqual(self._m._parse_port_mbps("1г"), 1000.0)
+        self.assertEqual(self._m._parse_port_mbps("100мбит"), 100.0)
+
+    def test_zero_resets(self):
+        """0 — явный сброс («порт не задан»), а не мусор."""
+        self.assertEqual(self._m._parse_port_mbps("0"), 0.0)
+
+    def test_garbage_returns_none(self):
+        for bad in ("", "abc", "-5", "1t", "тысяча", "10 20", "1.2.3"):
+            self.assertIsNone(self._m._parse_port_mbps(bad), repr(bad))
+
+    def test_out_of_range_returns_none(self):
+        self.assertIsNone(self._m._parse_port_mbps("2000000g"))
+
+    def test_port_mbps_cfg_validation(self):
+        """_port_mbps: мусор/отрицательное/0 → 0 (не задан)."""
+        self.assertEqual(self._m._port_mbps({}), 0.0)
+        self.assertEqual(self._m._port_mbps({"port_mbps": 0}), 0.0)
+        self.assertEqual(self._m._port_mbps({"port_mbps": "garbage"}), 0.0)
+        self.assertEqual(self._m._port_mbps({"port_mbps": -100}), 0.0)
+        self.assertEqual(self._m._port_mbps({"port_mbps": 5000}), 5000.0)
+
+    def test_fmt_port(self):
+        self.assertEqual(self._m._fmt_port(16500.0), "16500 Mbps (16.5G)")
+        self.assertEqual(self._m._fmt_port(5000.0), "5000 Mbps (5G)")
+        self.assertEqual(self._m._fmt_port(950.0), "950 Mbps")
+
+
+class TestPortClassification(unittest.TestCase):
+    """_classify_level с port_mbps — пороги относительно ПОРТА."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+
+    def test_1g_user_950_is_normal(self):
+        """ГЛАВНЫЙ кейс: 950 Mbps на порту 1000 (Ethernet-потолок ~95%)
+        = ЗЕЛЁНЫЙ, а не вечное жёлтое от флот-порога 1000."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 1000}
+        self.assertEqual(self._m._classify_level(950.0, cfg, big=True), "normal")
+
+    def test_port_band_boundaries(self):
+        """Порт 1000: ≥700 normal, 200-700 degraded, <200 critical."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 1000}
+        self.assertEqual(self._m._classify_level(700.0, cfg, big=True), "normal")
+        self.assertEqual(self._m._classify_level(699.9, cfg, big=True), "degraded")
+        self.assertEqual(self._m._classify_level(200.0, cfg, big=True), "degraded")
+        self.assertEqual(self._m._classify_level(199.9, cfg, big=True), "critical")
+
+    def test_de_case_5g_port(self):
+        """DE: порт 5000 — 4800 normal (96%), 1564 degraded (31%),
+        900 critical (18% — «гигабит есть» больше не зелёный)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 5000}
+        self.assertEqual(self._m._classify_level(4800.0, cfg, big=True), "normal")
+        self.assertEqual(self._m._classify_level(1564.33, cfg, big=True), "degraded")
+        self.assertEqual(self._m._classify_level(900.0, cfg, big=True), "critical")
+
+    def test_light_probe_stays_fleet_absolute(self):
+        """Лёгкая проба — флот-политика даже при заданном порте:
+        проверка живости, не замер порта (нулевая регрессия нод)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 1000}
+        self.assertEqual(self._m._classify_level(950.0, cfg, big=False), "degraded")
+        self.assertEqual(self._m._classify_level(1200.0, cfg, big=False), "normal")
+        self.assertEqual(self._m._classify_level(80.0, cfg, big=False), "critical")
+
+    def test_fat_port_http_not_verified(self):
+        """Порт 16.5G > PROBE_VERIFIABLE_MAX: HTTP-полный замер НЕ
+        верифицирован → флот-политика (2400 → normal; NL не краснеет
+        от структурного потолка пробы)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 16500}
+        self.assertEqual(self._m._classify_level(2400.0, cfg, big=True), "normal")
+        self.assertEqual(self._m._classify_level(80.0, cfg, big=True), "critical")
+
+    def test_fat_port_ookla_verified(self):
+        """Тот же порт, но Ookla (verified) меряет честно: 16500 → normal,
+        обрез до 2400 (15%) → critical — правдиво для >5G портов."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 16500}
+        self.assertEqual(self._m._classify_level(16500.0, cfg, big=True,
+                                                 verified=True), "normal")
+        self.assertEqual(self._m._classify_level(2400.0, cfg, big=True,
+                                                 verified=True), "critical")
+
+    def test_port_zero_unchanged(self):
+        """port_mbps=0/отсутствует — прежняя семантика absolute."""
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "_baseline_mbps", return_value=None):
+            self.assertEqual(self._m._classify_level(950.0, cfg, big=True), "degraded")
+            self.assertEqual(self._m._classify_level(1200.0, cfg, big=True), "normal")
+
+    def test_port_overrides_auto_for_big(self):
+        """Порт + auto: для полных замеров порт — ground truth лучше
+        базлайна (auto-кейс №16: 950 при базлайне 9000 был critical;
+        при порте 1000 это normal — порт и есть истина)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 1000,
+               "level_mode": "auto"}
+        with patch.object(self._m, "_baseline_mbps", return_value=9000.0):
+            self.assertEqual(self._m._classify_level(950.0, cfg, big=True), "normal")
+            # лёгкая проба в auto — по-прежнему базлайн
+            self.assertEqual(self._m._classify_level(950.0, cfg, big=False), "critical")
+
+    def test_custom_port_ratios(self):
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 1000,
+               "port_normal_ratio": 0.9, "port_degraded_ratio": 0.5}
+        self.assertEqual(self._m._classify_level(950.0, cfg, big=True), "normal")
+        self.assertEqual(self._m._classify_level(600.0, cfg, big=True), "degraded")
+        self.assertEqual(self._m._classify_level(400.0, cfg, big=True), "critical")
+
+    def test_port_thresholds_active_matrix(self):
+        base = {**self._m.DEFAULT_CONFIG}
+        self.assertFalse(self._m._port_thresholds_active(base, big=True, verified=False))
+        cfg = {**base, "port_mbps": 1000}
+        self.assertTrue(self._m._port_thresholds_active(cfg, big=True, verified=False))
+        self.assertFalse(self._m._port_thresholds_active(cfg, big=False, verified=False))
+        self.assertTrue(self._m._port_thresholds_active(cfg, big=False, verified=True))
+        fat = {**base, "port_mbps": 16500}
+        self.assertFalse(self._m._port_thresholds_active(fat, big=True, verified=False))
+        self.assertTrue(self._m._port_thresholds_active(fat, big=True, verified=True))
+
+
+class TestPortProbeScaling(unittest.TestCase):
+    """_run_download_probe — масштабирование потоков/бюджета под порт."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+
+    def _probe_with(self, cfg, big):
+        par = {"speed_bps": 500_000_000, "peak_bps": 700_000_000,
+               "source": "cloudflare", "total_bytes": 60_000_000,
+               "duration": 1.0, "streams": 6}
+        with patch.object(self._m, "_parallel_download", return_value=par) as ppar:
+            res = self._m._run_download_probe(cfg, big=big)
+        kwargs = ppar.call_args[0]
+        return res, kwargs
+
+    def test_1g_port_unchanged(self):
+        """Порт 1G → полный замер БЕЗ изменений: 8 потоков, 760 MB
+        (текущая методика уже наполняет 1G-порт)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 1000}
+        res, (src, streams, budget, cap) = self._probe_with(cfg, big=True)
+        self.assertEqual(streams, 8)
+        self.assertEqual(budget, 760_000_000)
+        self.assertEqual(res["streams"], 8)
+        self.assertEqual(res["probe_mb"], 760.0)
+
+    def test_5g_port_scales_streams_and_budget(self):
+        """Порт 5G → ceil(5000/500)=10 потоков, бюджет 10×95=950 MB."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 5000}
+        res, (src, streams, budget, cap) = self._probe_with(cfg, big=True)
+        self.assertEqual(streams, 10)
+        self.assertEqual(budget, 950_000_000)
+        self.assertEqual(res["probe_mb"], 950.0)
+
+    def test_16g_port_caps_at_16_streams(self):
+        """Порт 16.5G → потолок 16 потоков (как Ookla), бюджет 1520 MB."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 16500}
+        res, (src, streams, budget, cap) = self._probe_with(cfg, big=True)
+        self.assertEqual(streams, 16)
+        self.assertEqual(budget, 1_520_000_000)
+        self.assertEqual(res["probe_mb"], 1520.0)
+
+    def test_light_scales_modestly(self):
+        """Лёгкая проба: ceil(порт/1000) зажат 6-12, бюджет прежний 60 MB."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 1000}
+        res, (src, streams, budget, cap) = self._probe_with(cfg, big=False)
+        self.assertEqual(streams, 6)
+        self.assertEqual(budget, 60_000_000)
+        cfg16 = {**self._m.DEFAULT_CONFIG, "port_mbps": 16500}
+        res, (src, streams, budget, cap) = self._probe_with(cfg16, big=False)
+        self.assertEqual(streams, 12)
+        self.assertEqual(budget, 60_000_000)
+
+    def test_explicit_streams_pin_wins(self):
+        """Явный parallel_streams — пин юзера: без скейлинга и без
+        раздувания бюджета."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 16500,
+               "parallel_streams": 8}
+        res, (src, streams, budget, cap) = self._probe_with(cfg, big=True)
+        self.assertEqual(streams, 8)
+        self.assertEqual(budget, 760_000_000)
+
+    def test_no_port_unchanged(self):
+        """Без порта — прежние дефолты (лёгкая 6, полный 8)."""
+        cfg = {**self._m.DEFAULT_CONFIG}
+        _, (src, streams, budget, cap) = self._probe_with(cfg, big=False)
+        self.assertEqual(streams, 6)
+        _, (src, streams, budget, cap) = self._probe_with(cfg, big=True)
+        self.assertEqual(streams, 8)
+        self.assertEqual(budget, 760_000_000)
+
+
+class TestPortMeasureOnce(unittest.TestCase):
+    """measure_once с портом: уровень для полных замеров — порт-пороги,
+    сэмпл несёт port_mbps; лёгкая проба — флот-политика."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+
+    def test_big_sample_port_level(self):
+        """Порт 1000, полный замер 950 Mbps → normal + port_mbps в сэмпле."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 1000,
+               "node_label": "T", "node_ip": "1.2.3.4"}
+        with patch.object(self._m, "_ping_latency", return_value=2.0), \
+             patch.object(self._m, "_run_download_probe",
+                          return_value=_probe_result(118_750_000, streams=8,
+                                                     probe_mb=760.0)), \
+             patch.object(self._m, "_baseline_mbps", return_value=None), \
+             patch.object(self._m, "_node_hostname", return_value="h"), \
+             patch.object(self._m, "_node_public_ip", return_value="1.2.3.4"), \
+             patch.object(self._m, "load_config", return_value=cfg):
+            s = self._m.measure_once(big=True)
+        self.assertEqual(s["level"], "normal")
+        self.assertAlmostEqual(s["download_mbps"], 950.0, places=1)
+        self.assertEqual(s["port_mbps"], 1000.0)
+        self.assertTrue(s["big"])
+
+    def test_light_sample_fleet_level_with_port(self):
+        """Тот же порт, лёгкая проба 950 Mbps → degraded (флот), port_mbps
+        всё равно в сэмпле (контекст для истории/TUI)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 1000,
+               "node_label": "T", "node_ip": "1.2.3.4"}
+        with patch.object(self._m, "_ping_latency", return_value=2.0), \
+             patch.object(self._m, "_run_download_probe",
+                          return_value=_probe_result(118_750_000, streams=6,
+                                                     probe_mb=60.0)), \
+             patch.object(self._m, "_baseline_mbps", return_value=None), \
+             patch.object(self._m, "_node_hostname", return_value="h"), \
+             patch.object(self._m, "_node_public_ip", return_value="1.2.3.4"), \
+             patch.object(self._m, "load_config", return_value=cfg):
+            s = self._m.measure_once(big=False)
+        self.assertEqual(s["level"], "degraded")
+        self.assertEqual(s["port_mbps"], 1000.0)
+        self.assertFalse(s["big"])
+
+    def test_no_port_no_field(self):
+        """Без порта поле port_mbps в сэмпл не пишется (обратная совместимость)."""
+        with patch.object(self._m, "_ping_latency", return_value=2.0), \
+             patch.object(self._m, "_run_download_probe",
+                          return_value=_probe_result(150_000_000)), \
+             patch.object(self._m, "_baseline_mbps", return_value=None), \
+             patch.object(self._m, "_node_hostname", return_value="h"), \
+             patch.object(self._m, "_node_public_ip", return_value="1.2.3.4"), \
+             patch.object(self._m, "load_config",
+                          return_value=self._m.DEFAULT_CONFIG):
+            s = self._m.measure_once(big=False)
+        self.assertNotIn("port_mbps", s)
+
+
+class TestPortDailyReport(unittest.TestCase):
+    """Дневной отчёт с портом: классификация дня (по полным замерам)
+    относительно ПОРТА — 1G-юзер видит НОРМА на 950 Mbps."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _samples(self, light, big):
+        rows = [{"download_mbps": v, "level": "degraded", "big": False,
+                 "label": "t", "ip": "1.2.3.4", "latency_ms": 4.0}
+                for v in light]
+        rows += [{"download_mbps": v, "level": "normal", "big": True,
+                  "label": "t", "ip": "1.2.3.4", "latency_ms": 4.0}
+                 for v in big]
+        return rows
+
+    def _daily(self, cfg, samples):
+        with patch.object(self._m, "load_config", return_value=cfg), \
+             patch.object(self._m, "read_samples", return_value=samples), \
+             patch.object(self._m, "_tg_send", return_value=True), \
+             patch.object(self._m, "REPORTS_DIR", self._tmp), \
+             patch.object(self._m, "_log"):
+            return self._m.send_daily_report(send_tg=False)
+
+    def test_day_1g_port_950_is_normal(self):
+        """ГЛАВНЫЙ кейс: порт 1000, полные 920-950 → день НОРМА
+        (без порта те же числа = ВНИМАНИЕ от флот-порога 1000)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 1000}
+        text = self._daily(cfg, self._samples([900, 930], [920, 950, 940]))
+        self.assertIn("НОРМА", text)
+        # footnote несёт порт и производные пороги
+        self.assertIn("порт 1000 Mbps", text)
+        self.assertIn("≥700/≥200", text)
+        # а без порта — прежнее поведение (регресс-фиксатор)
+        text2 = self._daily({**self._m.DEFAULT_CONFIG},
+                            self._samples([900, 930], [920, 950, 940]))
+        self.assertIn("ВНИМАНИЕ", text2)
+
+    def test_day_5g_port_cut_is_critical(self):
+        """Порт 5000, полные ~900 (18% порта) → день КРИТИЧНО,
+        хотя «гигабит есть» (без порта было бы ВНИМАНИЕ)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 5000}
+        text = self._daily(cfg, self._samples([850, 880], [900, 910]))
+        self.assertIn("КРИТИЧНО", text)
+        self.assertIn("порт 5000 Mbps (5G)", text)
+
+    def test_day_fat_port_http_absolute(self):
+        """Порт 16.5G: дневная классификация по полным HTTP-замерам —
+        флот-политика (не верифицировано), footnote с портом."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 16500}
+        text = self._daily(cfg, self._samples([800, 850], [2400, 2500]))
+        self.assertIn("НОРМА", text)
+        self.assertIn("порт 16500 Mbps (16.5G)", text)
+
+
+class TestPortPeriodicReport(unittest.TestCase):
+    """Периодический отчёт с портом: строка порта + подсказка про Ookla."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+        self._tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _big_sample(self, **extra):
+        s = {"ts": "2026-11-08T12:00:00", "label": "T", "ip": "1.2.3.4",
+             "download_mbps": 4800, "download_source": "cloudflare",
+             "peak_mbps": 5200, "streams": 10, "probe_mb": 950.0,
+             "latency_ms": 4.0, "latency_target": "1.1.1.1",
+             "level": "normal", "big": True}
+        s.update(extra)
+        return s
+
+    def _report(self, cfg, sample):
+        with patch.object(self._m, "load_config", return_value=cfg), \
+             patch.object(self._m, "measure_once", return_value=sample), \
+             patch.object(self._m, "read_samples", return_value=[]), \
+             patch.object(self._m, "_tg_send", return_value=True), \
+             patch.object(self._m, "REPORTS_DIR", self._tmp), \
+             patch.object(self._m, "_log"), \
+             patch.object(self._m, "save_sample"):
+            return self._m.send_periodic_report()
+
+    def test_report_shows_port_line(self):
+        """Отчёт несёт строку «Порт канала» и масштабированный замер."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 5000}
+        text = self._report(cfg, self._big_sample())
+        self.assertIn("Порт канала: <b>5000 Mbps (5G)</b>", text)
+        self.assertIn("10 потоков", text)
+        self.assertIn("~950 MB", text)
+        self.assertNotIn("Ookla (use_ookla)", text)
+
+    def test_fat_port_hint(self):
+        """Порт > 5G + HTTP-замер → подсказка включить Ookla."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 16500}
+        text = self._report(cfg, self._big_sample(
+            download_mbps=2400, streams=16, probe_mb=1520.0))
+        self.assertIn("Порт канала: <b>16500 Mbps (16.5G)</b>", text)
+        self.assertIn("HTTP-проба даёт только нижнюю оценку", text)
+        self.assertIn("use_ookla", text)
+
+    def test_fat_port_ookla_no_hint(self):
+        """Тот же порт, но замер Ookla — подсказка не нужна (число честное)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 16500}
+        text = self._report(cfg, self._big_sample(
+            download_mbps=16526, download_source="ookla", streams=1,
+            probe_mb=0.0, peak_mbps=None))
+        self.assertIn("Ookla speedtest", text)
+        self.assertNotIn("нижнюю оценку", text)
+
+    def test_no_port_no_port_line(self):
+        cfg = {**self._m.DEFAULT_CONFIG}
+        text = self._report(cfg, self._big_sample(streams=8, probe_mb=760.0))
+        self.assertNotIn("Порт канала", text)
+
+
+class TestPortAlert(unittest.TestCase):
+    """Алерты при порт-порогах: critical-текст честно называет порт."""
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+
+    def _alert(self, sample, cfg):
+        recent = [{"download_mbps": 900, "level": "critical"},
+                  {"download_mbps": 950, "level": "critical"}]
+        with patch.object(self._m, "read_samples", return_value=recent), \
+             patch.object(self._m, "_load_tg_state", return_value={}), \
+             patch.object(self._m, "_save_tg_state"):
+            return self._m._check_alert(sample, cfg)
+
+    def test_port_critical_names_port(self):
+        """Обрез 5G-порта до 900: текст «при порте 5000 Mbps … ~в 6x»."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 5000,
+               "alerts_enabled": True}
+        sample = {"level": "critical", "download_mbps": 900, "label": "DE",
+                  "ip": "1.2.3.4", "ts": "2026-11-08T12:00:00",
+                  "latency_ms": 4.0, "latency_target": "1.1.1.1",
+                  "big": True, "download_source": "cloudflare"}
+        result = self._alert(sample, cfg)
+        self.assertIsNotNone(result)
+        self.assertIn("КРИТИЧНО", result)
+        self.assertIn("при порте 5000 Mbps (5G)", result)
+        self.assertIn("~в 6x", result)
+
+    def test_fat_port_http_critical_keeps_fleet_text(self):
+        """Порт 16.5G, HTTP-полный замер 80 Mbps → critical по флот-порогу
+        (не верифицирован) — прежний текст про < 100 Mbps."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 16500,
+               "alerts_enabled": True}
+        sample = {"level": "critical", "download_mbps": 80, "label": "NL",
+                  "ip": "1.2.3.4", "ts": "2026-11-08T12:00:00",
+                  "big": True, "download_source": "cloudflare"}
+        result = self._alert(sample, cfg)
+        self.assertIsNotNone(result)
+        self.assertIn("ниже 100 Mbps", result)
+        self.assertNotIn("при порте", result)
+
+    def test_1g_port_yellow_not_pushed(self):
+        """Порт 1000, полный замер 500 Mbps (50%) → degraded — БЕЗ пуша
+        (политика: пуш только critical < 20% порта)."""
+        cfg = {**self._m.DEFAULT_CONFIG, "port_mbps": 1000,
+               "alerts_enabled": True}
+        sample = {"level": "degraded", "download_mbps": 500, "label": "T",
+                  "ip": "1.2.3.4", "ts": "2026-11-08T12:00:00",
+                  "big": True, "download_source": "cloudflare"}
+        self.assertIsNone(self._alert(sample, cfg))
+
+
 if __name__ == "__main__":
     import time
     unittest.main()
