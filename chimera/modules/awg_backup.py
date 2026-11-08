@@ -42,9 +42,26 @@ def awgs_backup_create(label: str = "") -> Path | None:
     success = core.success
     warn = core.warn
 
-    if not AWGS_STATE_FILE.exists():
+    # FIX 09.11.2026: отказ «backup невозможен» только когда снимать
+    # НЕЧЕГО. При утерянном/повреждённом state, но живых конфигах/ключах
+    # — делаем snapshot оставшегося (catch-22 «нет state → нет backup →
+    # нет восстановления» ломался об этот гейт; конфиги и ключи переживают
+    # потерю state — их-то и надо спасти в первую очередь).
+    _have_conf = AWGS_SERVER_CONF.exists()
+    _have_keys = AWGS_KEYS_DIR.exists() and any(
+        f.is_file() for f in AWGS_KEYS_DIR.iterdir())
+    if not AWGS_STATE_FILE.exists() and not _have_conf and not _have_keys:
         warn("Standalone AWG не установлен — backup невозможен")
         return None
+    if not AWGS_STATE_FILE.exists():
+        try:
+            from .awg_state import awgs_state_integrity
+            _integ = awgs_state_integrity()
+        except Exception:
+            _integ = "missing"
+        warn(f"state {'повреждён' if _integ == 'corrupt' else 'утерян'} — "
+             f"в backup попадут только конфиги/ключи. "
+             f"Восстановление state: AWG-меню → пункт 9")
 
     AWGS_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")

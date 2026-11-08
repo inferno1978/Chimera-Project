@@ -53,7 +53,10 @@ State management для AmneziaWG 2.0 standalone-режима.
 """
 from __future__ import annotations
 
+import itertools
 import json
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -72,12 +75,67 @@ def _core_module():
 
 # ── State load/save ──────────────────────────────────────────────────────────
 
+# Уникальные имена tmp в awgs_state_save (FIX 09.11.2026): счётчик
+# процесса атомарен под GIL, pid различает процессы, ns — тройная защита
+_TMP_SEQ = itertools.count()
+
+
+def awgs_state_integrity() -> str:
+    """Целостность state-файла для меню/диагностики: ok | missing | corrupt.
+
+    corrupt = файл существует, но JSON не парсится. Именно эта ситуация
+    09.11.2026 выглядела для пользователя как «AWG пропал, Не установлен»:
+    load молча возвращал {} — при живом туннеле (peers=39) и рабочем
+    каскаде. Меню и диагностика обязаны отличать «не установлен» от
+    «state утерян/повреждён».
+    """
+    try:
+        if not AWGS_STATE_FILE.exists():
+            return "missing"
+        json.loads(AWGS_STATE_FILE.read_text())
+        return "ok"
+    except Exception:
+        return "corrupt"
+
+
+def _awgs_state_quarantine(reason: str) -> str:
+    """Карантин-КОПИЯ повреждённого state (данные могут быть частично
+    восстановимы руками). Возвращает имя карантин-файла или "".
+    НЕ удаляет и не изменяет оригинал."""
+    try:
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        q = AWGS_STATE_FILE.with_suffix(f".corrupt.{ts}")
+        q.write_bytes(AWGS_STATE_FILE.read_bytes())
+        return q.name
+    except Exception:
+        return ""
+
+
 def awgs_state_load() -> dict:
-    """Загружает state. Возвращает {} если файл не существует или corrupt."""
+    """Загружает state. Возвращает {} если файл не существует или corrupt.
+
+    При повреждённом JSON (инцидент 09.11.2026): карантин-копия
+    .corrupt.<ts> рядом с файлом + ERROR в лог — вместо прежнего
+    молчаливого WARN, из-за которого панель честно-обманно показывала
+    «Не установлен» при живом туннеле.
+    """
     try:
         if not AWGS_STATE_FILE.exists():
             return {}
         return json.loads(AWGS_STATE_FILE.read_text())
+    except json.JSONDecodeError as e:
+        qname = _awgs_state_quarantine(f"{e}")
+        try:
+            core = _core_module()
+            core.log_to_file(
+                "ERROR",
+                f"awgs_state_load: STATE ПОВРЕЖДЁН ({e}). Карантин: "
+                f"{qname or 'не создан'}. load вернёт {{}} — меню покажет "
+                f"«state утерян»; восстановление: AWG-меню → пункт 9 "
+                f"(rebuild из живой системы) или restore из backup")
+        except Exception:
+            pass
+        return {}
     except Exception as e:
         try:
             core = _core_module()
@@ -88,17 +146,42 @@ def awgs_state_load() -> dict:
 
 
 def awgs_state_save(state: dict) -> bool:
-    """Атомарно сохраняет state. Возвращает True при успехе."""
+    """Атомарно сохраняет state. Возвращает True при успехе.
+
+    FIX 09.11.2026 (инцидент «AWG 3.1 пропал после обновления»):
+    tmp-файл теперь УНИКАЛЕН (pid + monotonic_ns). Раньше ВСЕ процессы
+    (TUI, ежеминутный failover/LB-тик, веб-панель, cron expires)
+    писали в ОДИН фиксированный awg_standalone_state.tmp: два
+    одновременных write_text в один inode перемешивали JSON, а rename
+    фиксировал порчу навсегда (репро: 3 писателя → битый JSON за 12
+    сек; следом любой read-modify-write писатель закреплял {} поверх —
+    файл вида {"lb": ...} без installed/peers/cascade_exits).
+    Плюс fsync перед rename — durability при падении питания.
+    """
+    tmp = None
     try:
         AWGS_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # Атомарная запись через tmp + rename
-        tmp = AWGS_STATE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+        # Атомарная запись через УНИКАЛЬНЫЙ tmp + rename (счётчик процесса
+        # атомарен под GIL + pid различает процессы + ns — тройная защита)
+        tmp = AWGS_STATE_FILE.with_suffix(
+            f".tmp.{os.getpid()}.{next(_TMP_SEQ)}"
+            f".{time.monotonic_ns()}")
+        data = json.dumps(state, indent=2, ensure_ascii=False)
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
         tmp.replace(AWGS_STATE_FILE)
+        tmp = None
         # Права 0600 — внутри state есть приватные ключи
         AWGS_STATE_FILE.chmod(0o600)
         return True
     except Exception as e:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
         try:
             core = _core_module()
             core.log_to_file("ERROR", f"awgs_state_save: {e}")

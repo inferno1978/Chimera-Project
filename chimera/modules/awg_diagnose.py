@@ -398,7 +398,25 @@ def do_awg_diagnose_menu() -> None:
     if report["installed"]:
         _box_row(f"  {GREEN}●{NC} Standalone AWG установлен")
     else:
-        _box_row(f"  {RED}●{NC} Standalone AWG НЕ установлен")
+        # FIX 09.11.2026: отличаем «не установлен» от «STATE УТЕРЯН при
+        # живом туннеле» (инцидент: peers=39, handshakes=38, каскад жив,
+        # панель показывала «НЕ установлен» — юзер не мог ни клиентов,
+        # ни каскад, ни backup).
+        from .awg_state import awgs_state_integrity
+        _integ = awgs_state_integrity()
+        _t = report.get("tunnel") or {}
+        _peers_live = _t.get("peers") or 0
+        _svc_live = (report.get("service") or {}).get("active")
+        _state_lost = (_integ in ("corrupt", "missing")
+                       and (_peers_live or _svc_live or AWGS_SERVER_CONF.exists()))
+        if _integ == "corrupt":
+            _box_row(f"  {RED}●{NC} STATE ПОВРЕЖДЁН (JSON не читается)")
+        if _state_lost:
+            _box_row(f"  {RED}●{NC} Standalone AWG НЕ установлен в state, НО "
+                     f"туннель жив (peers={_peers_live}) — state утерян.")
+            _box_row(f"    {YELLOW}→ Восстановление: AWG-меню → пункт 9{NC}")
+        else:
+            _box_row(f"  {RED}●{NC} Standalone AWG НЕ установлен")
     _box_sep()
 
     # Protocol version (2.0 / 3.1)

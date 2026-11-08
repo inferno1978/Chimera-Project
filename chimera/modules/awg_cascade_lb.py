@@ -225,6 +225,24 @@ def _lb_tree(state: dict) -> dict:
     return lb
 
 
+def _lb_merge_save(state: dict) -> bool:
+    """FIX 09.11.2026 (репорт «добавляю exit — штатно, а толку 0»):
+    merge-save для фоновых писателей LB.
+
+    Ежеминутный health-тик держит снапшот state всё время проб (десятки
+    секунд пингов слотов), прежний полный awgs_state_save(state)
+    затирал правки, сделанные в TUI/панели за это окно. Сохраняем
+    ТОЛЬКО lb-поддерево поверх СВЕЖЕГО state — lb-поля принадлежат
+    исключительно LB-коду, всё остальное берём с диска как есть.
+    """
+    fresh = awgs_state_load()
+    if isinstance(state.get("lb"), dict):
+        fresh["lb"] = state["lb"]
+    else:
+        fresh.setdefault("lb", {})
+    return awgs_state_save(fresh)
+
+
 def lb_strategy(state: Optional[dict] = None) -> str:
     if state is None:
         state = awgs_state_load()
@@ -732,7 +750,9 @@ def lb_dispatcher_install(state: Optional[dict] = None) -> bool:
 
     lb["slots_snapshot"] = {k: v["slot"] for k, v in slots.items()}
     lb["ts_last_install"] = _now_iso()
-    awgs_state_save(state)
+    # FIX 09.11: merge-save — dispatcher вызывается и из ежеминутного
+    # health-тика со СТАРЫМ снапшком state; сохраняем только lb-поддерево
+    _lb_merge_save(state)
     return ok
 
 
@@ -1146,7 +1166,8 @@ def lb_health_tick() -> str:
              "стоит; прямой выход = deanon). Ждём восстановления.")
         _notify("AWG-балансировка: все exit-ноды недоступны — туннели "
                 "стоят, ждём восстановления")
-        awgs_state_save(state)
+        # FIX 09.11: merge-save (не затирать чужие правки снапшком T0)
+        _lb_merge_save(state)
         return "all-dead"
 
     # 2. закрепление: фазы A/B
@@ -1199,7 +1220,9 @@ def lb_health_tick() -> str:
     if need_rewrite:
         if not lb_dispatcher_install(state):
             _warn("health: dispatcher_install вернул False (см. лог)")
-    awgs_state_save(state)
+    # FIX 09.11: merge-save — тик держал снапшот T0 всё время проб;
+    # полный save затирал правки TUI/панели, сделанные в этом окне
+    _lb_merge_save(state)
     _info(f"health[{strategy}]: alive={len(alive)}/{len(slots)}"
           f"{' (pin)' if pinned else ''} → {status}")
     return status

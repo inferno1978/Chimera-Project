@@ -1,5 +1,7 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
-# v11: 322 = 321 + test_xhttp_extra (персистенс xHTTP+TLS extra-инбаунда:
+# v11: 323 = 322 + test_awg_state_race (инцидент 09.11 «AWG пропал»:
+# конкурентная порча state, LB merge-save, восстановление из живой
+# системы). Пред-счётчик: 322 = 321 + test_xhttp_extra (персистенс xHTTP+TLS extra-инбаунда:
 # restore-хук после rebuild, выделенный клиент не затирается юзер-синком,
 # seed из живого конфига; инцидент 05.11 — generate_* стирал инбаунд).
 # v10: 321 = 316 + test_librechat (модуль LibreChat: AI-чат панель docker
@@ -66,6 +68,7 @@ tests.test_awg_rest_api
 tests.test_awg_standalone
 tests.test_awg_standalone_31
 tests.test_awg_state
+tests.test_awg_state_race
 tests.test_awg_transport
 tests.test_awg_transport_31
 tests.test_awg_ui_smoke

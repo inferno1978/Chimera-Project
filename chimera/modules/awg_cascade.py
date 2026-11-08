@@ -1162,7 +1162,13 @@ def awgs_cascade_register_exit(
     state[AWGS_CASCADE_EXITS_KEY] = exits
     if not state.get(AWGS_CASCADE_ACTIVE_KEY):
         state[AWGS_CASCADE_ACTIVE_KEY] = name
-    awgs_state_save(state)
+    # FIX 09.11.2026 (репорт «добавляю exit — штатно, а толку 0»): раньше
+    # результат save игнорировался — при сбое записи success-сообщение
+    # врало, exit жил только в памяти до перерисовки меню.
+    if not awgs_state_save(state):
+        warn(f"НЕ УДАЛОСЬ СОХРАНИТЬ state — exit '{name}' НЕ добавлен "
+             f"на диск (см. лог). Изменения не переживут рестарт.")
+        return False
     info(f"Exit-нода '{name}' ({endpoint}:{port}, "
          f"{awg_protocol_label(protocol_version)}) добавлена в каскад "
          f"(всего exit: {len(exits)})")
@@ -1254,15 +1260,24 @@ def awgs_cascade_activate_exit(name: str, probe_timeout: int = 0) -> bool:
               check=False, quiet=True)
 
     # 3. state: активный exit + зеркало legacy-полей (обратная совместимость)
+    #    FIX 09.11.2026: state перезагружается СВЕЖИМ (выше), а cascade_exits
+    #    больше НЕ затирается списком, снятым до restart'а awg1 — за секунды
+    #    рестарта юзер в TUI мог добавить/удалить exit (ежеминутный
+    #    failover-тик тоже пишет state). Штампуем только если ключа нет
+    #    (легаси-migration в _awgs_cascade_exits_load уже позаботилась бы).
     state = awgs_state_load()
-    state[AWGS_CASCADE_EXITS_KEY] = exits
+    if AWGS_CASCADE_EXITS_KEY not in state:
+        state[AWGS_CASCADE_EXITS_KEY] = exits
     state[AWGS_CASCADE_ACTIVE_KEY] = name
     state["cascade_peer_host"] = box.get("endpoint", "")
     state["cascade_peer_port"] = int(box.get("port", 51820))
     state["cascade_peer_pubkey"] = box.get("server_pubkey", "")
     state["cascade_peer_privkey"] = box.get("peer_privkey", "")
     state["cascade_subnet"] = subnet
-    awgs_state_save(state)
+    if not awgs_state_save(state):
+        warn(f"НЕ УДАЛОСЬ СОХРАНИТЬ state — активация exit '{name}' НЕ "
+             f"зафиксирована на диске (см. лог)")
+        return False
     info(f"Активный exit каскада: {name} ({box.get('endpoint')}:{box.get('port')})")
 
     # 4. Проба живости (failover-кандидаты): ждём свежий handshake или ping
@@ -1297,7 +1312,11 @@ def awgs_cascade_remove_exit(name: str) -> bool:
     state[AWGS_CASCADE_EXITS_KEY] = exits
     if state.get(AWGS_CASCADE_ACTIVE_KEY) == name:
         state[AWGS_CASCADE_ACTIVE_KEY] = exits[0].get("name", "") if exits else ""
-    awgs_state_save(state)
+    # FIX 09.11.2026: честный результат сохранения (как в register_exit)
+    if not awgs_state_save(state):
+        warn(f"НЕ УДАЛОСЬ СОХРАНИТЬ state — удаление exit '{name}' НЕ "
+             f"зафиксировано на диске (см. лог)")
+        return False
     _lb_on = False
     try:
         from . import awg_cascade_lb as _lbm

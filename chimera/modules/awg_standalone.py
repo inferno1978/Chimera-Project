@@ -2436,7 +2436,8 @@ def do_manage_awg_standalone() -> None:
     _box_wrap_msg = core._box_wrap_msg
     warn = core.warn
     info = core.info
-    CYAN, NC, GREEN, YELLOW, DIM, BOLD = core.CYAN, core.NC, core.GREEN, core.YELLOW, core.DIM, core.BOLD
+    CYAN, NC, GREEN, YELLOW, RED, DIM, BOLD = (core.CYAN, core.NC, core.GREEN,
+                                                core.YELLOW, core.RED, core.DIM, core.BOLD)
 
     while True:
         import os
@@ -2461,7 +2462,20 @@ def do_manage_awg_standalone() -> None:
                      f"порт {st.get('port', '?')}, "
                      f"пиры: {len(st.get('peers', []))})")
         else:
-            _box_row(f"  {YELLOW}○ Не установлен{NC}")
+            # FIX 09.11.2026: «Не установлен» может значить ПОТЕРЮ state при
+            # живом туннеле (инцидент: peers=39, handshakes=38, каскад жив,
+            # но панель врала «Не установлен»). Отличаем три состояния.
+            from .awg_state import awgs_state_integrity
+            _integ = awgs_state_integrity()
+            if _integ == "corrupt":
+                _box_row(f"  {RED}● STATE ПОВРЕЖДЁН{NC} — туннель может быть жив!"
+                         f"  {YELLOW}восстановление: п.9{NC}")
+            elif _integ == "missing" and AWGS_SERVER_CONF.exists():
+                _box_row(f"  {YELLOW}○ Не установлен{NC}  "
+                         f"{RED}— но найден awg0.conf: state утерян"
+                         f" (живой туннель?) — п.9{NC}")
+            else:
+                _box_row(f"  {YELLOW}○ Не установлен{NC}")
         _box_row()
         _box_item("1", f"Установить standalone AWG (выбор протокола: 2.0 / 3.1)")
         _box_item("2", f"Управление клиентами (пиры)")
@@ -2472,6 +2486,8 @@ def do_manage_awg_standalone() -> None:
         _box_item("7", f"Ротация обфускации (Jc/Jmin/Jmax/I1 без разрыва)")
         _box_item("8", f"IPv6: включить на существующей установке "
                        f"(анти-утечка AAAA, без сброса пиров)")
+        _box_item("9", f"Восстановить state из живой системы "
+                       f"(AWG «пропал» при живом туннеле)")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -2500,6 +2516,12 @@ def do_manage_awg_standalone() -> None:
         elif ch == "8":
             # включение IPv6 на живой установке (upgrade без сброса)
             awgs_enable_ipv6()
+            input(f"{core.BLUE}Нажмите Enter...{NC}")
+        elif ch == "9":
+            # FIX 09.11.2026: восстановление state после потери
+            # (конкурентная порча/{}-вайп; инцидент «AWG пропал»)
+            from .awg_recover import do_awg_recover_menu
+            do_awg_recover_menu()
             input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch in ("q", ""):
             break
