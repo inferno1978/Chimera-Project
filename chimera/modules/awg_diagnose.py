@@ -138,6 +138,48 @@ def _diag_tunnel() -> dict:
     }
 
 
+def _diag_live_subnet() -> str:
+    """Подсеть из ЖИВОГО awg0 (fallback при утерянном state).
+
+    Инцидент 09.11.2026: при вайпе state диагностика проверяла
+    MASQUERADE/маршрут для ДЕФОЛТНОЙ 10.66.66.0/24 при реальной
+    подсети иной — ложная тревога «ОТСУТСТВУЕТ — клиенты не получат
+    интернет!» на каскад-entry с живым туннелем. State — не истина
+    в последней инстанции: при его потере смотрим на интерфейс.
+
+    (Свой парсинг, а не awgs_interface_address: та возвращает адрес
+    БЕЗ префикса, а для сети нужен CIDR целиком.)
+    """
+    core = _core_module()
+    r = core._run(["ip", "-4", "-o", "address", "show", "dev", AWGS_INTERFACE],
+                  capture=True, check=False)
+    for line in r.stdout.splitlines():
+        # '5: awg0 inet 172.16.82.1/24 scope global awg0'
+        tokens = line.split()
+        if "inet" in tokens:
+            cidr = tokens[tokens.index("inet") + 1]
+            if "/" in cidr:
+                try:
+                    import ipaddress
+                    return str(ipaddress.ip_interface(cidr).network)
+                except ValueError:
+                    continue
+    return ""
+
+
+def _diag_live_port() -> int:
+    """ListenPort из живого awg0.conf (fallback при утерянном state;
+    0 — конфига нет/не распарсилась)."""
+    try:
+        for line in AWGS_SERVER_CONF.read_text().splitlines():
+            s = line.strip()
+            if s.startswith("ListenPort") and "=" in s:
+                return int(s.split("=", 1)[1].strip())
+    except Exception:
+        pass
+    return 0
+
+
 def _diag_nat_routing() -> dict:
     """
     Проверка NAT/MASQUERADE + ip_forward + маршрутизации.
@@ -147,7 +189,13 @@ def _diag_nat_routing() -> dict:
     from .awg_constants import AWGS_INTERFACE
     from .awg_state import awgs_state_load
     state = awgs_state_load()
-    subnet = state.get("subnet", "10.66.66.0/24")
+    # FIX 09.11.2026: subnet/port из state доверяем только при живом
+    # state; при утерянном — из живой системы (интерфейс/awg0.conf).
+    subnet = state.get("subnet", "")
+    if not subnet:
+        subnet = _diag_live_subnet()
+    if not subnet:
+        subnet = "10.66.66.0/24"
 
     checks = []
 
@@ -328,7 +376,9 @@ def awgs_diagnose_full(carrier: str = "") -> dict:
     """
     core = _core_module()
     state = awgs_state_load()
-    port = state.get("port", AWGS_DEFAULT_PORT)
+    # FIX 09.11.2026: при утерянном state порт берём из живого awg0.conf
+    # (было: дефолт 51820 → ложный WARN в UFW-чеке при реальном порту ином)
+    port = state.get("port") or _diag_live_port() or AWGS_DEFAULT_PORT
 
     report = {
         "installed":     awgs_state_is_installed(),
