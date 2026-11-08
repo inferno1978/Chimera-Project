@@ -1233,9 +1233,17 @@ def chk_xray_version(ctx: DoctorCtx) -> None:
         ctx.record("xray_version", "warn",
                    f"Xray {ver} ≠ цели {target} (дрифт версий по флоту; "
                    f"обновление — руками владельца)")
+    elif target:
+        ctx.record("xray_version", "ok", f"Xray {ver} = цели {target}")
     else:
-        ctx.record("xray_version", "ok",
-                   f"Xray {ver}" + (f" = цели {target}" if target else ""))
+        # цель не задана (нет system-doctor.json / пустой xray_target_version):
+        # дрифт НЕ сверяется — молчаливое «ok» маскировало это (кейс chexit4:
+        # нода жила без цели, версия молча уплывала по флоту). Теперь info —
+        # видно в ежедневном отчёте, но не дёргает TG-фильтры
+        ctx.record("xray_version", "info",
+                   f"Xray {ver} (цель не задана — дрифт версий не "
+                   f"сверяется; задайте xray_target_version в "
+                   f"system-doctor.json)")
 
 
 def chk_cert_expiry(ctx: DoctorCtx) -> None:

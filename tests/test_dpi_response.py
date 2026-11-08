@@ -14,6 +14,9 @@ Unit-тесты для chimera/modules/dpi_response.py.
   5. dpi_response_run_once — полный цикл: уведомление + фаззер + ротация,
      деградация в notify-only при сбоях, авто-возврат в auto
   6. cron_install / cron_remove (мок файловой системы)
+  7. кейс DMZHOST 07.11: хвост лога по ВРЕМЕНИ (TestTailCoveringWindow —
+     вместо «последних 2000 строк»), забаненные файрволом источники
+     (fail2ban/ipset) не раздувают probe_score (skipped_banned)
 """
 from __future__ import annotations
 
@@ -525,6 +528,143 @@ class TestFuzzCooldown(DrTestBase):
         self.assertIn("fuzz-skipped:cooldown", out2["actions"])
         self.assertEqual(mock_fz.call_count, 1)
         self.assertEqual(dr.state_load()["stats"]["fuzz_runs"], 1)
+
+
+# ── кейс DMZHOST 07.11.2026: хвост по времени + забаненные источники ─────────
+class TestParseLineTs(DrTestBase):
+    def test_xray_ts_parsed(self):
+        ts = dr._parse_line_ts("2026/11/07 21:25:48.123 [Warning] ...")
+        self.assertEqual(ts, datetime(2026, 11, 7, 21, 25, 48))
+
+    def test_undated_line_is_none(self):
+        self.assertIsNone(dr._parse_line_ts("stack trace line without date"))
+        self.assertIsNone(dr._parse_line_ts(""))
+
+
+class TestTailCoveringWindow(DrTestBase):
+    """Хвост читается ДО реальной границы окна, а не «N строк»."""
+
+    def _w(self, minutes=30):
+        return datetime.now() - timedelta(minutes=minutes)
+
+    def test_only_window_lines_returned(self):
+        now = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        old = (datetime.now() - timedelta(hours=2)).strftime(
+            "%Y/%m/%d %H:%M:%S")
+        # «старых» строк специально много — прежний хвост[-2000:] их бы считал
+        content = "\n".join([f"{old} old probe"] * 5000 + [f"{now} fresh probe"])
+        dr.XRAY_ERROR_LOG.write_text(content, encoding="utf-8")
+        lines = dr._tail_covering_window(dr.XRAY_ERROR_LOG, self._w())
+        self.assertEqual(len(lines), 1)
+        self.assertIn("fresh probe", lines[0])
+
+    def test_undated_lines_kept(self):
+        # строка без даты = продолжение стека, прежняя семантика «считать свежей»
+        now = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        dr.XRAY_ERROR_LOG.write_text(
+            f"{now} dated\n\tat foo(bar:1)\n", encoding="utf-8")
+        lines = dr._tail_covering_window(dr.XRAY_ERROR_LOG, self._w())
+        self.assertEqual(len(lines), 2)
+
+    def test_missing_file_empty(self):
+        self.assertEqual(
+            dr._tail_covering_window(self.tmp / "nope.log", self._w()), [])
+
+    def test_max_bytes_fluShield(self):
+        # флуд-щит: огромный лог не читается целиком, хвост обрезается
+        now = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        dr.XRAY_ERROR_LOG.write_text(
+            "\n".join([f"{now} x" * 4] * 100000), encoding="utf-8")
+        lines = dr._tail_covering_window(dr.XRAY_ERROR_LOG, self._w(),
+                                         max_bytes=64 * 1024)
+        total = dr.XRAY_ERROR_LOG.stat().st_size
+        self.assertLess(len(lines) * 8, total)  # взяли лишь хвост
+
+
+class TestBannedSources(DrTestBase):
+    """fail2ban-баны + ipset ручных банов → ip_network; fail-open."""
+
+    def test_fail2ban_and_ipset_parsed(self):
+        import ipaddress
+        f2b = MagicMock(returncode=0, stdout=(
+            "[{'ip': '203.0.113.9', 'jail': 'xray-probe'}, "
+            "{'ip': '2001:db8::17', 'jail': 'sshd'}]"))
+        ipset_out = MagicMock(returncode=0, stdout=(
+            "Name: xray_manual_ban\nType: hash:net\nMembers:\n"
+            "198.51.100.0/24\n"))
+        def fake_run(cmd, **kw):
+            if cmd[0] == "fail2ban-client":
+                return f2b
+            return ipset_out
+        with patch.object(dr.subprocess, "run", side_effect=fake_run):
+            nets = dr._banned_sources()
+        got = {str(n) for n in nets}
+        self.assertIn("203.0.113.9/32", got)
+        self.assertIn("2001:db8::17/128", got)
+        self.assertIn("198.51.100.0/24", got)
+
+    def test_fail_open_on_errors(self):
+        def boom(cmd, **kw):
+            raise RuntimeError("no fail2ban here")
+        with patch.object(dr.subprocess, "run", side_effect=boom):
+            self.assertEqual(dr._banned_sources(), [])
+
+
+class TestLineSourceBanned(DrTestBase):
+    def test_v4_and_subnet_match(self):
+        import ipaddress
+        nets = [ipaddress.ip_network("203.0.113.0/24")]
+        self.assertTrue(dr._line_source_banned(
+            "rejected ... from 203.0.113.9:4444", nets))
+        self.assertFalse(dr._line_source_banned(
+            "rejected ... from 192.0.2.1:4444", nets))
+
+    def test_v6_match(self):
+        import ipaddress
+        nets = [ipaddress.ip_network("2001:db8::/64")]
+        self.assertTrue(dr._line_source_banned(
+            "rejected ... from [2001:db8::17]:555", nets))
+
+    def test_no_nets_or_no_ip(self):
+        import ipaddress
+        self.assertFalse(dr._line_source_banned("from 1.2.3.4", []))
+        self.assertFalse(dr._line_source_banned("plain line no ip",
+                                                [ipaddress.ip_network(
+                                                    "203.0.113.0/24")]))
+
+
+class TestCollectSignalsBannedSkip(DrTestBase):
+    """Кейс DMZHOST: пробы от уже отрезанных файрволом IP не раздувают
+    probe_score; счётчики skipped_banned / window_lines видны в сигналах."""
+
+    def _line(self, ip, ts=None):
+        ts = ts or datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        return f"{ts} tls: failed to get client hello: no sni from client from {ip}:4444"
+
+    def test_banned_source_skipped(self):
+        import ipaddress
+        banned = [self._line("203.0.113.9")] * 91   # живой кейс: 91 проба/мин
+        fresh = [self._line("192.0.2.7")] * 2
+        dr.XRAY_ERROR_LOG.write_text("\n".join(banned + fresh),
+                                     encoding="utf-8")
+        cfg = dr.state_load()
+        with patch.object(dr, "_banned_sources",
+                          return_value=[ipaddress.ip_network("203.0.113.0/24")]):
+            signals = dr.collect_signals(cfg)
+        # 91 строка забаненного сканера не дала НИ одного очка
+        self.assertEqual(signals["probe_score"], 6)
+        self.assertEqual(signals["skipped_banned"], 91)
+        self.assertEqual(signals["window_lines"], 93)
+
+    def test_no_bans_previous_behavior(self):
+        # банов нет → все пробы считаются как раньше
+        dr.XRAY_ERROR_LOG.write_text("\n".join([self._line("192.0.2.7")] * 3),
+                                     encoding="utf-8")
+        cfg = dr.state_load()
+        with patch.object(dr, "_banned_sources", return_value=[]):
+            signals = dr.collect_signals(cfg)
+        self.assertGreaterEqual(signals["probe_score"], 3)
+        self.assertEqual(signals["skipped_banned"], 0)
 
 
 if __name__ == "__main__":

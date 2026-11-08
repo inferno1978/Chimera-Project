@@ -38,6 +38,9 @@ reboot-required) — модуль закрывает класс «гигиена
                                  ядра + классификация same/moved
  24. chk_vm_migration          — базовая линия / тот же бут / новый бут
                                  (джиттер) / переезд (crit) / dry-run
+ 25. chk_xray_version          — уровни: цель совпала ok / дрифт warn /
+                                 цель не задана info (кейс chexit4) /
+                                 бинаря нет — info-skip
 """
 from __future__ import annotations
 
@@ -46,7 +49,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
@@ -1118,6 +1121,50 @@ class AptCacheArchivesOnlyTests(unittest.TestCase):
         self.assertIsNone(ok2)
         self.assertEqual(msg2, "")
         self.assertEqual(ctx2.records, [])
+
+
+class TestChkXrayVersionLevels(unittest.TestCase):
+    """Кейс chexit4: цель не задана — раньше молчаливое «ok» маскировало
+    отсутствие сверки дрифта; теперь честный «info» с подсказкой."""
+
+    def _run_chk(self, target, ver="26.10.31"):
+        from chimera.modules.system_doctor import DoctorCtx, chk_xray_version
+        ctx = DoctorCtx({"xray_target_version": target})
+        res = MagicMock(returncode=0, stdout=f"Xray {ver} (Xray, custom) ...")
+        with patch("chimera.modules.system_doctor._run", return_value=res):
+            chk_xray_version(ctx)
+        return ctx
+
+    def test_target_equal_ok(self):
+        ctx = self._run_chk("26.10.31")
+        rec = [f for f in ctx.findings if f["check"] == "xray_version"]
+        self.assertEqual(len(rec), 1)
+        self.assertEqual(rec[0]["level"], "ok")
+        self.assertIn("= цели", rec[0]["msg"])
+
+    def test_target_drift_warn(self):
+        ctx = self._run_chk("26.10.17")
+        rec = [f for f in ctx.findings if f["check"] == "xray_version"]
+        self.assertEqual(rec[0]["level"], "warn")
+        self.assertIn("дрифт", rec[0]["msg"])
+
+    def test_target_missing_info(self):
+        ctx = self._run_chk("")
+        rec = [f for f in ctx.findings if f["check"] == "xray_version"]
+        self.assertEqual(len(rec), 1)
+        self.assertEqual(rec[0]["level"], "info")
+        self.assertIn("цель не задана", rec[0]["msg"])
+        self.assertIn("xray_target_version", rec[0]["msg"])
+
+    def test_no_binary_skip(self):
+        from chimera.modules.system_doctor import DoctorCtx, chk_xray_version
+        ctx = DoctorCtx({"xray_target_version": "26.10.31"})
+        res = MagicMock(returncode=1, stdout="xray binary not found")
+        with patch("chimera.modules.system_doctor._run", return_value=res):
+            chk_xray_version(ctx)
+        rec = [f for f in ctx.findings if f["check"] == "xray_version"]
+        self.assertEqual(rec[0]["level"], "info")
+        self.assertIn("не найден", rec[0]["msg"])
 
 
 if __name__ == "__main__":

@@ -32,8 +32,11 @@ CLI (main.py): --dpi-response (cron-прогон), --dpi-response-status
 from __future__ import annotations
 
 import copy
+import ipaddress
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -148,17 +151,164 @@ def _score_baseline(cfg: dict) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. ВХОДЫ: сбор сигналов
 # ══════════════════════════════════════════════════════════════════════════════
+# ── Хвост лога по времени + учёт уже отработанных файрволом источников ────────
+# Фиксы после кейса DMZHOST 07.11.2026 (91 REALITY-проба за минуту → score 310,
+# два TG-алерта об уже забаненном fail2ban сканере):
+#   1) прежнее «последние 2000 строк» при живом логе 150-250 строк/мин
+#      покрывало лишь ~8-13 мин из заявленных window_min=30 → короткий
+#      всплеск раздувался до «атаки». Теперь хвост читается блоками с конца
+#      до реальной границы окна (с лимитом по байтам — защита от флуда).
+#   2) строки от IP, уже отрезанных файрволом (fail2ban / ipset
+#      xray_manual_ban*), не раздувают score: пакеты оттуда дропаются
+#      до Xray, угроза нейтрализована — алертить по её хвосту в окне
+#      не нужно. Пропущенное пишется в лог (audit-trail сохраняется).
+_FROM_IPV4_RE = re.compile(r"\bfrom\s+(\d{1,3}(?:\.\d{1,3}){3})")
+_FROM_IPV6_RE = re.compile(r"\bfrom\s+\[([0-9a-fA-F:]+)\]")
+_BANNED_IPSETS = ("xray_manual_ban", "xray_manual_ban6")
+
+
+def _parse_line_ts(line: str) -> Optional[datetime]:
+    """Таймстамп xray-строки («2026/11/07 21:25:48.123 …») или None."""
+    try:
+        return datetime.strptime(line[:19], "%Y/%m/%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _tail_covering_window(path: Path, cutoff: datetime,
+                          max_bytes: int = 32 * 1024 * 1024,
+                          chunk_size: int = 65536) -> list:
+    """Строки лога от cutoff до конца файла (в хронологическом порядке).
+
+    Читает файл блоками с конца: как только самая старая полная строка
+    блока старее cutoff — стоп (весь блок берём: лишнее отфильтрует
+    вызывающий код). Ограничители: конец файла / max_bytes (флуд-щит).
+    """
+    out: list = []
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            pos = f.tell()
+            partial = b""
+            read = 0
+            stop = False
+            while pos > 0 and not stop and read < max_bytes:
+                sz = min(chunk_size, pos)
+                pos -= sz
+                f.seek(pos)
+                buf = f.read(sz) + partial
+                read += sz
+                parts = buf.split(b"\n")
+                partial = parts.pop(0)  # неполная строка (начало блока)
+                if parts:
+                    ts = _parse_line_ts(
+                        parts[0].decode("utf-8", "replace"))
+                    if ts is not None and ts < cutoff:
+                        stop = True
+                    out.extend(reversed(parts))
+            if pos <= 0 and partial:
+                out.append(partial)  # первая строка файла без \n
+    except OSError:
+        return []
+    out.reverse()
+    lines = [ln.decode("utf-8", "replace") for ln in out]
+    # точная обрезка: в граничном блоке могли оказаться строки старее cutoff;
+    # идём с начала, пока строки датированы и старые (бездатные — не трогаем:
+    # продолжение стека, прежняя семантика «считать свежей»)
+    i = 0
+    while i < len(lines):
+        ts = _parse_line_ts(lines[i])
+        if ts is None or ts >= cutoff:
+            break
+        i += 1
+    # пустые строки (хвостовой \n и пр.) не интересуют скоринг
+    return [l for l in lines[i:] if l.strip()]
+
+
+def _banned_sources(timeout: int = 15) -> list:
+    """Список ip_network источников, уже отрезанных файрволом:
+    fail2ban-баны (все jail, «fail2ban-client banned») + ручные баны
+    ipset xray_manual_ban / xray_manual_ban6 (подсети сканеров).
+
+    Fail-open: при недоступности fail2ban/ipset возвращает пустой
+    список — скоринг деградирует к прежнему поведению (считать всё).
+    """
+    nets: list = []
+    raw: list = []
+
+    # 1) fail2ban: все активные баны всех jail
+    try:
+        r = subprocess.run(["fail2ban-client", "banned"],
+                           capture_output=True, text=True, timeout=timeout)
+        if r.returncode == 0:
+            raw += re.findall(r"[0-9a-fA-F:.]+(?:/\d+)?", r.stdout or "")
+    except Exception:
+        pass
+
+    # 2) ipset ручных банов (подсети сканеров и пр.)
+    for setname in _BANNED_IPSETS:
+        try:
+            r = subprocess.run(["ipset", "list", setname],
+                               capture_output=True, text=True, timeout=timeout)
+            in_members = False
+            for ln in (r.stdout or "").splitlines():
+                s = ln.strip()
+                if s.startswith("Members:"):
+                    in_members = True
+                    continue
+                if in_members and s:
+                    raw.append(s.split()[0])
+        except Exception:
+            pass
+
+    for tok in raw:
+        tok = tok.strip().strip("[]")
+        if not tok:
+            continue
+        try:
+            if "/" not in tok:
+                tok += "/128" if ":" in tok else "/32"
+            nets.append(ipaddress.ip_network(tok, strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def _line_source_banned(line: str, nets: list) -> bool:
+    """True, если в строке есть «from <ip>» и этот ip уже в бан-листе."""
+    if not nets:
+        return False
+    m = _FROM_IPV4_RE.search(line) or _FROM_IPV6_RE.search(line)
+    if not m:
+        return False
+    try:
+        addr = ipaddress.ip_address(m.group(1))
+    except ValueError:
+        return False
+    for net in nets:
+        try:
+            if addr in net:
+                return True
+        except TypeError:  # смешение v4/v6
+            continue
+    return False
+
+
 def collect_signals(cfg: dict) -> dict:
     """Собирает все сигналы за окно window_min.
 
-    Возвращает {probe_score, mask_gate, dpi_gate, banned_now}:
-      probe_score  — сумма весов DPI-зондов по IP за окно (error.log,
-                     паттерны dpi_detector)
-      mask_gate    — свежий вердикт mask_gate (PASS/SUSPECT/FAIL)
-      dpi_gate     — свежий вердикт dpi_gate (tunnel/benign)
+    Возвращает {probe_score, mask_gate, dpi_gate, banned_now,
+    skipped_banned, window_lines}:
+      probe_score     — сумма весов DPI-зондов по IP за окно (error.log,
+                        паттерны dpi_detector), БЕЗ строк от уже
+                        забаненных файрволом источников
+      mask_gate       — свежий вердикт mask_gate (PASS/SUSPECT/FAIL)
+      dpi_gate        — свежий вердикт dpi_gate (tunnel/benign)
+      skipped_banned  — сколько матов пришлось на уже отрезанные IP
+      window_lines    — сколько строк лога реально покрывало окно
     """
     signals = {"probe_score": 0, "mask_gate": None, "dpi_gate": None,
-               "banned_now": 0}
+               "banned_now": 0, "skipped_banned": 0, "window_lines": 0}
     window_start = time.time() - cfg["window_min"] * 60
 
     # 1) DPI-зонды из error.log (реиспользуем паттерны dpi_detector)
@@ -166,27 +316,32 @@ def collect_signals(cfg: dict) -> dict:
         from chimera.modules.dpi_detector import _DPI_PATTERNS
         if XRAY_ERROR_LOG.exists():
             cutoff = datetime.fromtimestamp(window_start)
+            banned_nets = _banned_sources()
+            lines = _tail_covering_window(XRAY_ERROR_LOG, cutoff)
+            signals["window_lines"] = len(lines)
             score = 0
-            # читаем хвост лога (последние 2000 строк)
-            lines = XRAY_ERROR_LOG.read_text(
-                encoding="utf-8", errors="replace").splitlines()[-2000:]
+            skipped = 0
             for line in lines:
-                # грубая проверка времени строки (формат xray: 2026/10/28 21:00:00)
-                m = line[:19]
-                skip_ts = False
-                try:
-                    ts = datetime.strptime(m, "%Y/%m/%d %H:%M:%S")
-                    if ts < cutoff:
-                        skip_ts = True
-                except ValueError:
-                    skip_ts = False  # строка без даты — считаем свежей
-                if skip_ts:
+                ts = _parse_line_ts(line)
+                if ts is not None and ts < cutoff:
+                    continue
+                # строка без даты — считаем свежей (как и раньше)
+                if _line_source_banned(line, banned_nets):
+                    # источник уже дропается файрволом — score не дёргаем
+                    for pat, _desc, weight in _DPI_PATTERNS:
+                        if pat.search(line):
+                            skipped += 1
+                            break
                     continue
                 for pat, _desc, weight in _DPI_PATTERNS:
                     if pat.search(line):
                         score += weight
                         break
+            if skipped:
+                _log("INFO", f"score: пропущено {skipped} строк от уже "
+                             f"забаненных источников (fail2ban/ipset)")
             signals["probe_score"] = score
+            signals["skipped_banned"] = skipped
     except Exception as e:
         _log("WARN", f"probe collection failed: {e}")
 
@@ -536,7 +691,9 @@ def dpi_response_run_once() -> dict:
 
     state_save(cfg)
     _log("INFO", f"run: level={level} actions={outcome['actions']} "
-                 f"probe_score={signals['probe_score']}")
+                 f"probe_score={signals['probe_score']} "
+                 f"window_lines={signals.get('window_lines', 0)} "
+                 f"skipped_banned={signals.get('skipped_banned', 0)}")
     return outcome
 
 
