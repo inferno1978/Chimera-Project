@@ -65,6 +65,19 @@ normal ≥ 50% базлайна, degraded ≥ 20%, ниже — critical. Лов
   • port_mbps задаётся в TUI (вопрос при установке + Настройки[6])
     в Mbps или с суффиксом: «1000», «1g», «2.5G», «500m»; 0 = не задан.
 
+Честность пробы (кейс №17, EE 08.11.2026: 6 проб подряд 0.0 Mbps [critical]
+при живом v4 — curl -4 качал 240 Mbps): три независимых корня, все в
+параллельном пути скачивания:
+  • cachefly-WAF стал отдавать без User-Agent 7-байтный HTML «100mb\r\n»
+    (content-type: text/html) вместо файла → проба шлёт PROBE_USER_AGENT;
+  • у хостера сломан v6-егресс, а getaddrinfo отдаёт AAAA первыми (на EE —
+    только их) → http.client виснет на connect; соединение строим сами,
+    IPv4 вперёд (_https_connect), TLS/SNI поверх нашего сокета;
+  • мусорный ответ (42 байта на 6 потоков) принимался за «рабочий источник»
+    (speed_bps 311 B/s > 0) → статус ответа обязан быть 200, суммарный
+    объём — не меньше MIN_VALID_PROBE_BYTES (1 MB), иначе источник
+    отвергается и проба уходит в легаси-однопоток curl.
+
 Файлы:
   /var/lib/xray-installer/bandwidth-monitor.json     — конфиг
   /var/lib/xray-installer/bandwidth-monitor/         — данные
@@ -91,6 +104,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -185,6 +199,13 @@ PROBE_VERIFIABLE_MAX_MBPS = 5000.0   # HTTP-проба подтверждает 
 PORT_STREAM_MBPS_BIG   = 500.0   # планировочная ёмкость потока полного замера
 PORT_STREAM_MBPS_LIGHT = 1000.0  # лёгкой пробы (лёгкая — проверка живости)
 MAX_PARALLEL_STREAMS   = 16      # потолок потоков (как Ookla CLI)
+
+# Честность пробы (кейс EE 08.11.2026: 6 проб подряд 0.0 Mbps при живом v4)
+PROBE_USER_AGENT       = "curl/8.5.0"  # cachefly-WAF без UA отдаёт 7-байтный
+                                       # HTML «100mb\r\n» вместо файла
+MIN_VALID_PROBE_BYTES  = 1_000_000     # < 1 MB = страница-ошибка CDN, а не
+                                       # замер; честный медленный канал меряет
+                                       # легаси-однопоток (curl)
 
 # Порядок источников для параллельного замера (отличается от легаси:
 # cloudflare первым — точный {size} без привязки к фиксированным файлам)
@@ -500,6 +521,49 @@ def _steady_and_peak(events: list, t0: float, duration: float,
     return steady_bps, peak_bps
 
 
+def _https_connect(host: str, timeout: float) -> HTTPSConnection:
+    """HTTPSConnection с IPv4-приоритетом (кейс EE 08.11.2026).
+
+    У части хостеров сломан v6-егресс, а getaddrinfo отдаёт AAAA первыми
+    (на EE — вообще только их): потоки python виснут на connect и проба
+    пишет 0.0 Mbps при живом v4. curl такие сети переживает
+    happy-eyeballs'ом, http.client — нет. Поэтому соединение строим сами:
+    сначала AF_INET, затем UNSPEC-фолбэк; TLS-обёртка http.client поверх
+    нашего сокета даёт корректные SNI и проверку сертификата (server_hostname
+    берётся из conn.host).
+    """
+    conn = HTTPSConnection(host, timeout=timeout)
+
+    def _connect_v4first(address, t, source_address=None):
+        last_err = None
+        for family in (socket.AF_INET, socket.AF_UNSPEC):
+            try:
+                infos = socket.getaddrinfo(address[0], address[1],
+                                           family, socket.SOCK_STREAM)
+            except socket.gaierror as e:
+                last_err = e
+                continue
+            for af, _ty, _pr, _cn, sa in infos:
+                s = None
+                try:
+                    s = socket.socket(af, socket.SOCK_STREAM)
+                    s.settimeout(t)
+                    s.connect(sa)
+                    return s
+                except OSError as e:
+                    last_err = e
+                    if s is not None:
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+        raise last_err if last_err else OSError("no address for " + str(address[0]))
+
+    # instance-патч: HTTPConnection.connect вызывает self._create_connection
+    conn._create_connection = _connect_v4first
+    return conn
+
+
 def _parallel_download_one(url: str, streams: int, budget_bytes: int,
                            active_cap: int) -> Optional[dict]:
     """Параллельная загрузка N потоками с одного URL.
@@ -525,9 +589,16 @@ def _parallel_download_one(url: str, streams: int, budget_bytes: int,
         got = 0
         t_start = time.time()
         try:
-            conn = HTTPSConnection(host, timeout=active_cap + 10)
-            conn.request("GET", path, headers={"Connection": "close"})
+            conn = _https_connect(host, active_cap + 10)
+            conn.request("GET", path, headers={
+                "Connection": "close",
+                "User-Agent": PROBE_USER_AGENT,   # cachefly-WAF: без UA — 7 байт HTML
+            })
             resp = conn.getresponse()
+            if resp.status != 200:
+                # редирект/403 с мелким телом — не замер; поток считается
+                # упавшим, источник отвергается целиком (кейс №17)
+                return
             while got < per_stream and time.time() - t_start < active_cap:
                 buf = resp.read(READ_BLOCK_BYTES)
                 if not buf:
@@ -555,6 +626,12 @@ def _parallel_download_one(url: str, streams: int, budget_bytes: int,
     if not events:
         return None
     events.sort()
+    # Sanity: меньше MIN_VALID_PROBE_BYTES — это страница-ошибка/пустой
+    # ответ CDN, а не измерение (кейс №17: cachefly без UA, 6×7 байт HTML
+    # → «311 B/s» принимались за рабочий источник). Честный медленный
+    # канал уходит в легаси-однопоток curl, который меряет и его.
+    if events[-1][1] < MIN_VALID_PROBE_BYTES:
+        return None
     steady_bps, peak_bps = _steady_and_peak(events, t0, duration)
     return {"speed_bps": steady_bps, "peak_bps": peak_bps,
             "total_bytes": events[-1][1], "duration": round(duration, 2),

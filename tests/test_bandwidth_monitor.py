@@ -234,6 +234,7 @@ class TestParallelDownloadOne(unittest.TestCase):
     _conns = []
 
     class _FakeResp:
+        status = 200   # контракт пробы (кейс №17): не-200 — не замер
         def __init__(self, chunk_count):
             self._n = chunk_count
         def read(self, n):
@@ -1230,6 +1231,173 @@ class TestPortAlert(unittest.TestCase):
                   "ip": "1.2.3.4", "ts": "2026-11-08T12:00:00",
                   "big": True, "download_source": "cloudflare"}
         self.assertIsNone(self._alert(sample, cfg))
+
+
+class TestProbeHonesty(unittest.TestCase):
+    """Кейс №17 (EE 08.11.2026): мусорные ответы CDN — не замер.
+
+    Три корня инцидента «6 проб подряд 0.0 Mbps [critical] при живом v4»:
+    cachefly-WAF отдаёт 7-байтный HTML без User-Agent; http.client без
+    v4-приоритета виснет на сломанном v6-егрессе; 42 байта на 6 потоков
+    принимались за «рабочий источник» (311 B/s > 0).
+    """
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+
+    def _fake_https(self, status=200, body=b"x" * 2_000_000):
+        """Фейковая фабрика _https_connect: пишет request-заголовки в sent."""
+        sent = {"headers": []}
+
+        class _Resp:
+            def __init__(self):
+                self.status = status
+                self._off = 0
+
+            def read(self, n):
+                chunk = body[self._off:self._off + n]
+                self._off += n
+                return chunk
+
+        class _Conn:
+            def request(self, method, path, headers=None):
+                sent["headers"].append(headers or {})
+
+            def getresponse(self):
+                return _Resp()
+
+            def close(self):
+                pass
+
+        def _factory(host, timeout):
+            return _Conn()
+
+        return _factory, sent
+
+    def test_user_agent_sent(self):
+        """Проба шлёт User-Agent: cachefly-WAF без UA отдаёт 7-байтный HTML."""
+        factory, sent = self._fake_https()
+        with patch.object(self._m, "_https_connect", factory):
+            self._m._parallel_download_one(
+                "https://cachefly.cachefly.net/100mb.test", 2, 2_000_000, 5)
+        self.assertTrue(sent["headers"])
+        for headers in sent["headers"]:
+            self.assertEqual(headers.get("User-Agent"), self._m.PROBE_USER_AGENT)
+
+    def test_non200_rejected(self):
+        """403/редирект с мелким телом → источник отвергается (None)."""
+        factory, _ = self._fake_https(status=403, body=b"err")
+        with patch.object(self._m, "_https_connect", factory):
+            res = self._m._parallel_download_one(
+                "https://speed.cloudflare.com/__down?bytes=10000000", 6,
+                60_000_000, 15)
+        self.assertIsNone(res)
+
+    def test_cachefly_7byte_garbage_rejected(self):
+        """Живой кейс: 200 OK, content-type text/html, body «100mb\\r\\n» —
+        6 потоков × 7 байт = 42 байта, «скорость» 311 B/s. Это страница
+        WAF, не замер → None (раньше принималось за рабочий источник)."""
+        factory, _ = self._fake_https(status=200, body=b"100mb\r\n")
+        with patch.object(self._m, "_https_connect", factory):
+            res = self._m._parallel_download_one(
+                "https://cachefly.cachefly.net/100mb.test", 6,
+                60_000_000, 15)
+        self.assertIsNone(res)
+
+    def test_valid_download_accepted(self):
+        """Нормальный ответ (≥ 1 MB суммарно) — принимается."""
+        factory, _ = self._fake_https(status=200, body=b"x" * 3_000_000)
+        with patch.object(self._m, "_https_connect", factory):
+            res = self._m._parallel_download_one(
+                "https://speed.cloudflare.com/__down?bytes=10000000", 3,
+                3_000_000, 15)
+        self.assertIsNotNone(res)
+        self.assertGreaterEqual(res["total_bytes"], self._m.MIN_VALID_PROBE_BYTES)
+        self.assertGreater(res["speed_bps"], 0)
+
+    def test_garbage_falls_to_legacy_curl(self):
+        """Все параллельные источники отвергнуты → легаси-однопоток curl
+        честно меряет (на EE он и в момент инцидента качал 135 MB/s)."""
+        cfg = dict(self._m.DEFAULT_CONFIG)
+        with patch.object(self._m, "_parallel_download", return_value=None), \
+             patch.object(self._m, "_try_download",
+                          return_value=(135_000_000, "cachefly")) as ptd:
+            res = self._m._run_download_probe(cfg, big=False)
+        self.assertEqual(res["source"], "cachefly")
+        self.assertGreater(res["speed_bps"], 0)
+        ptd.assert_called_once()
+
+    def test_v4_first_connect(self):
+        """_https_connect: AF_INET пробуется ДО UNSPEC и до v6 (кейс EE:
+        getaddrinfo отдаёт только AAAA, v6-егресс сломан)."""
+        m = self._m
+        families_queried = []
+        sockets_made = []
+
+        def fake_getaddrinfo(host, port, family, socktype):
+            families_queried.append(family)
+            if family == m.socket.AF_INET:
+                return [(m.socket.AF_INET, m.socket.SOCK_STREAM, 6, "",
+                         ("162.159.140.220", 443))]
+            return [(m.socket.AF_INET6, m.socket.SOCK_STREAM, 6, "",
+                     ("2a06:98c1:58::da", 443))]
+
+        class _FakeSock:
+            def __init__(self, af):
+                self._af = af
+                sockets_made.append(af)
+
+            def settimeout(self, t):
+                pass
+
+            def connect(self, sa):
+                if self._af == m.socket.AF_INET6:
+                    raise OSError("v6 unreachable (EE)")
+
+            def close(self):
+                pass
+
+        with patch.object(m.socket, "getaddrinfo", fake_getaddrinfo), \
+             patch.object(m.socket, "socket", lambda af, ty: _FakeSock(af)):
+            conn = m._https_connect("speed.cloudflare.com", 8)
+            sock = conn._create_connection(("speed.cloudflare.com", 443), 8)
+        self.assertEqual(sockets_made[0], m.socket.AF_INET)
+        self.assertEqual(families_queried[0], m.socket.AF_INET)
+        self.assertNotIn(m.socket.AF_INET6, sockets_made)
+
+    def test_v6_fallback_when_no_v4(self):
+        """Нет A-записей → UNSPEC-фолбэк: v6-адрес используется."""
+        m = self._m
+        queried = []
+
+        def fake_getaddrinfo(host, port, family, socktype):
+            queried.append(family)
+            if family == m.socket.AF_INET:
+                return []
+            return [(m.socket.AF_INET6, m.socket.SOCK_STREAM, 6, "",
+                     ("2a06:98c1:58::da", 443))]
+
+        class _FakeSock:
+            def settimeout(self, t):
+                pass
+
+            def connect(self, sa):
+                pass
+
+            def close(self):
+                pass
+
+        made = []
+        with patch.object(m.socket, "getaddrinfo", fake_getaddrinfo), \
+             patch.object(m.socket, "socket",
+                          lambda af, ty: (made.append(af), _FakeSock())[1]):
+            conn = m._https_connect("v6only.example", 8)
+            conn._create_connection(("v6only.example", 443), 8)
+        # сначала спросили AF_INET (пусто), затем UNSPEC → сокет v6
+        self.assertEqual(queried,
+                         [m.socket.AF_INET, m.socket.AF_UNSPEC])
+        self.assertEqual(made, [m.socket.AF_INET6])
 
 
 if __name__ == "__main__":
