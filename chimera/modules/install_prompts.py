@@ -108,6 +108,7 @@ def prompt_parameters() -> None:
     MAGENTA = core.MAGENTA
     BOLD    = core.BOLD
     DIM     = core.DIM
+    RED     = core.RED
     NC      = core.NC
 
     _box_top(f"Настройка параметров установки")
@@ -560,6 +561,13 @@ def prompt_parameters() -> None:
     _box_top(f" {BLUE}[12/12] TLS Fingerprint (uTLS):{NC}")
     _box_row(f"   Определяет, под какой браузер маскируется TLS-хендшейк клиента.")
     _box_row(f"   Влияет на обход DPI. Должен совпадать в клиенте и на сервере.")
+    _box_row(f"   {RED}⚠ chrome: ТСПУ уже отличает Chrome 133 — без фрагментации{NC}")
+    _box_row(f"   {RED}  ClientHello может резаться по JA4 (клиенты из РФ);{NC}")
+    _box_row(f"   {RED}  фрагменты в конфигах Химеры прикрывают любой FP{NC}")
+    _box_row(f"   {RED}⚠ firefox: mihomo-клиенты (Clash Verge / FlClash /{NC}")
+    _box_row(f"   {RED}  роутеры) с ним не подключатся к серверам Xray ≥ 26.9.8 —{NC}")
+    _box_row(f"   {RED}  X25519MLKEM768 у mihomo есть только в fp=chrome;{NC}")
+    _box_row(f"   {RED}  sing-box-семья несовместима при любом FP{NC}")
     _box_bottom()
     PARAM_FINGERPRINT = _fm_prompt_fingerprint(current=PARAM_FINGERPRINT)
     setattr(core, "PARAM_FINGERPRINT", PARAM_FINGERPRINT)

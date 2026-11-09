@@ -318,6 +318,7 @@ def prompt_split_tunnel() -> None:
     CYAN   = core.CYAN
     NC     = core.NC
     DIM    = core.DIM
+    RED    = core.RED
     info    = core.info
     warn    = core.warn
     success = core.success
@@ -331,6 +332,9 @@ def prompt_split_tunnel() -> None:
     _box_top(f"Включить раздельное туннелирование?")
     _box_item("Y", f"Да — заблокированное через VPN, остальное напрямую")
     _box_item("N", f"Нет — весь трафик через VPN (текущее поведение)")
+    _box_row()
+    _box_row(f"  {RED}⚠ Нужно только в Режиме B (каскад): не-RU трафик идёт{NC}")
+    _box_row(f"  {RED}  на exit-ноду, которой в Режиме A нет.{NC}")
     _box_bottom()
 
     while True:
