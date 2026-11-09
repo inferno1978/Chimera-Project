@@ -102,6 +102,8 @@ from chimera.modules.routing_rules import (
 )
 from chimera.modules.fingerprint_manager import (
     XRAY_FP_LIST  as _FM_FP_LIST,
+    FP_CLIENT_ONLY as _FM_FP_CLIENT_ONLY,
+    FP_MENU_MARKER as _FM_FP_MENU_MARKER,
     prompt_fingerprint as _fm_prompt_fingerprint,
 )
 from chimera.modules.dnscrypt_selector import do_dnscrypt_selector_menu
@@ -5007,7 +5009,11 @@ def _fp_install_cron(interval_hours: int) -> None:
     """Устанавливает cron-скрипт для ротации fingerprint."""
     # v4.31: live-валидация 26.10.29 — randomized-семейство несовместимо
     # с REALITY, "none" ядром не поддерживается вовсе (удалён из XRAY_FP_LIST).
-    _FP_ROTATE_EXCLUDE = {"random", "randomized", "randomizednoalpn"}
+    # 09.11.2026: форк-имена (FP_CLIENT_ONLY, ядро ≥ 26.11.9) тоже исключены —
+    # ротация пишет FP в СЕРВЕРНЫЙ config.json, который парсит ядро сервера,
+    # а флот ещё на старых ядрах (hellochrome_155 → unknown fingerprint →
+    # конфиг невалиден, рестарт не пройдёт).
+    _FP_ROTATE_EXCLUDE = {"random", "randomized", "randomizednoalpn"} | set(_FM_FP_CLIENT_ONLY)
     fp_list_str = " ".join(fp for fp in _FP_LIST if fp not in _FP_ROTATE_EXCLUDE)  # только реальные браузеры
     script_content = textwrap.dedent(f"""\
         #!/bin/bash
@@ -5113,22 +5119,36 @@ def do_manage_fingerprint() -> None:
         if ch == "1":
             print()
             _box_top(f"Доступные fingerprint'ы")
-            for i, fp in enumerate(_FP_LIST, 1):
+            # Серверный контекст: форк-имена (FP_CLIENT_ONLY) не предлагаем —
+            # их парсит только ядро ≥ 26.11.9, а флот ещё на старых.
+            _fp_server_safe = [fp for fp in _FP_LIST
+                               if fp not in _FM_FP_CLIENT_ONLY]
+            for i, fp in enumerate(_fp_server_safe, 1):
                 marker = f" {GREEN}← текущий{NC}" if fp == current_fp else ""
                 _box_item(f"{i}", f"{fp}{marker}")
+            _box_row()
+            _box_row(f"  {DIM}hellochrome_155 (Chrome 155, ТСПУ пока не видит) —{NC}")
+            _box_row(f"  {DIM}только для клиентских ссылок: серверное ядро поймёт{NC}")
+            _box_row(f"  {DIM}его лишь с Xray-core 26.11.9 — сюда не входит.{NC}")
             _box_bottom()
-            raw = input(f"  Выбор (1-{len(_FP_LIST)}) или введите имя: ").strip()
+            raw = input(f"  Выбор (1-{len(_fp_server_safe)}) или введите имя: ").strip()
             new_fp = ""
-            if raw.isdigit() and 1 <= int(raw) <= len(_FP_LIST):
-                new_fp = _FP_LIST[int(raw) - 1]
-            elif raw in _FP_LIST:
+            if raw.isdigit() and 1 <= int(raw) <= len(_fp_server_safe):
+                new_fp = _fp_server_safe[int(raw) - 1]
+            elif raw in _fp_server_safe:
                 new_fp = raw
+            elif raw in _FM_FP_CLIENT_ONLY:
+                warn(f"  FP '{raw}' — только для клиентских ссылок (шаг 12 "
+                     "установки / генераторы): серверное ядро поймёт его "
+                     "лишь с Xray-core 26.11.9.")
+                input(f"{BLUE}Нажмите Enter...{NC}")
+                continue
             if not new_fp:
                 warn("Неверный выбор")
                 time.sleep(1)
                 continue
             if new_fp == "random":
-                _fp_real = [fp for fp in _FP_LIST
+                _fp_real = [fp for fp in _fp_server_safe
                             if fp not in {"random", "randomized", "randomizednoalpn"}]
                 new_fp = random.choice(_fp_real)
                 info(f"Random → выбран: {new_fp}")
@@ -5192,7 +5212,9 @@ def do_manage_fingerprint() -> None:
             print()
             for fp in _FP_LIST:
                 marker = f"  {GREEN}← текущий{NC}" if fp == current_fp else ""
-                print(f"    • {fp}{marker}")
+                client_only = (f"  {DIM}(только клиентские ссылки, ядро ≥ "
+                               f"26.11.9){NC}") if fp in _FM_FP_CLIENT_ONLY else ""
+                print(f"    • {fp}{marker}{client_only}")
             print()
             input(f"{BLUE}Нажмите Enter...{NC}")
 

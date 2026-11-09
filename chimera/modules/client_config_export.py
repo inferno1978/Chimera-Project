@@ -104,6 +104,13 @@ def do_generate_client_config() -> None:
         short_id  = state.get("short_id", "")
     proto     = state.get("protocol_mode", "reality")
     fp        = state.get("fingerprint", "chrome")
+    # Форк-имена XTLS uTLS (hellochrome_155, ядро ≥ 26.11.9) знает только
+    # Xray-семья клиентов. sing-box/mihomo со своими uTLS форковые имена
+    # НЕ парсят (конфиг не стартует) — их экспорты всегда получают
+    # классический FP. vless-ссылка ниже несёт настоящий fp: её парсит
+    # ядро клиента Xray-семьи. См. fingerprint_manager.FP_CLIENT_ONLY.
+    from chimera.modules.fingerprint_manager import FP_CLIENT_ONLY as _FP_CLIENT_ONLY
+    _fp_sb = "chrome" if fp in _FP_CLIENT_ONLY else fp
     # === FIX 2: SNI строго из reality_dest (AWG/REALITY) или domain (классика/xHTTP) ===
     # Ключ "sni" не сохраняется в state.json — state.get("sni", domain) всегда давал domain.
     # Важно: reality_dest и awg_exit_enabled сохраняются ТОЛЬКО при INSTALL_MODE="B" (AWG/chain).
@@ -221,7 +228,7 @@ def do_generate_client_config() -> None:
                 udp: false
                 http-opts:
                   path: [{xhttp_path}]
-                client-fingerprint: {fp}
+                client-fingerprint: {_fp_sb}
                 servername: {domain}
 
             proxy-groups:
@@ -263,7 +270,7 @@ def do_generate_client_config() -> None:
                 "tls": {
                     "enabled": True,
                     "server_name": sni,
-                    "utls": {"enabled": True, "fingerprint": fp},
+                    "utls": {"enabled": True, "fingerprint": _fp_sb},
                     "reality": {
                         "enabled": True,
                         "public_key": pub_key,
@@ -294,7 +301,7 @@ def do_generate_client_config() -> None:
                 "tls": {
                     "enabled": True,
                     "server_name": domain,
-                    "utls": {"enabled": True, "fingerprint": fp},
+                    "utls": {"enabled": True, "fingerprint": _fp_sb},
                 }
             }]
         }
@@ -314,7 +321,7 @@ def do_generate_client_config() -> None:
                 "tls": {
                     "enabled": True,
                     "server_name": domain,
-                    "utls": {"enabled": True, "fingerprint": fp},
+                    "utls": {"enabled": True, "fingerprint": _fp_sb},
                 }
             }]
         }
@@ -499,6 +506,15 @@ def do_generate_client_config() -> None:
             _p, _l, _i = _cf["packets"], _cf["length"], _cf["interval"]
             # v4.31: FP fragment-аддона (client_fragment.fp) — None → дефолт ноды
             _fp_frag = _cf.get("fp")
+            # Форк-имена (XTLS uTLS, ядро ≥ 26.11.9) sing-box НЕ парсит —
+            # sing-box-вариант аддона всегда получает классический FP
+            # (_fp_sb выше — гардит и override, и дефолт ноды, когда
+            # override=None). Xray JSON и Happ/Incy/Nekoray-ссылки несут
+            # настоящий: их парсит ядро Xray-семьи клиентов.
+            _fp_frag_sb = (_fp_frag
+                           if (_fp_frag is not None
+                               and _fp_frag not in _FP_CLIENT_ONLY)
+                           else _fp_sb)
             # Xray JSON — v2rayN / v2rayNG / Nekoray(Xray) / xray CLI
             _xray_frag_file = out_dir / "xray-client-fragment.json"
             _xray_frag_file.write_text(json.dumps(
@@ -511,7 +527,7 @@ def do_generate_client_config() -> None:
                 _sb_frag_file = out_dir / "singbox-client-fragment.json"
                 _sb_frag_file.write_text(json.dumps(
                     _fl._build_singbox_json(state, _p, _l, _i,
-                                            fp_override=_fp_frag),
+                                            fp_override=_fp_frag_sb),
                     ensure_ascii=False, indent=2))
                 _frag_files.append(_sb_frag_file)
             # URI-ссылки Happ/Incy/Nekoray — fragment прямо в ссылке

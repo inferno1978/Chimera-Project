@@ -357,11 +357,12 @@ def do_fragment_noise_menu() -> None:
     v4.31 «Fragment & FP Customizer» — всё настраиваемо:
       шаг 1 — fragment: 3 пресета + tlshello + СВОИ параметры;
       шаг 2 — noise: 3 пресета + СВОИ параметры (packet/delay);
-      шаг 3 — Fingerprint: 11 live-валидированных имён (REALITY-guard).
+      шаг 3 — Fingerprint: 12 имён — 11 классических + hellochrome_155
+      (форк uTLS, только клиенты с ядром ≥ 26.11.9; REALITY-guard).
     """
     from chimera.modules.fingerprint_manager import (
         XRAY_FP_LIST, reality_fp_warning, resolve_client_fp,
-        save_default_fingerprint,
+        save_default_fingerprint, FP_CLIENT_ONLY, FP_MIN_CORE_VERSION,
     )
     os.system("clear")
     print()
@@ -473,7 +474,14 @@ def do_fragment_noise_menu() -> None:
     _box_row()
     for i, name in enumerate(XRAY_FP_LIST, 1):
         mark = f" {GREEN}← текущий{NC}" if name == eff_fp else ""
-        dim = f" {YELLOW}(REALITY: несовместим){NC}" if name in ("random", "randomized", "randomizednoalpn") else ""
+        if name in ("random", "randomized", "randomizednoalpn"):
+            dim = f" {YELLOW}(REALITY: несовместим){NC}"
+        elif name in FP_CLIENT_ONLY:
+            # Форк-имя (XTLS uTLS): работает только в свежих Xray-клиентах
+            dim = (f" {DIM}(клиент: ядро ≥ "
+                   f"{FP_MIN_CORE_VERSION.get(name, '?')}){NC}")
+        else:
+            dim = ""
         _box_item(str(i), f"{name}{mark}{dim}")
     _box_row()
     _box_back()

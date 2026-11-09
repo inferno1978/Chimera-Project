@@ -618,6 +618,7 @@ def do_export_fragment_toggle_menu() -> None:
     """
     from chimera.modules.fingerprint_manager import (
         XRAY_FP_LIST, reality_fp_warning, save_default_fingerprint,
+        FP_CLIENT_ONLY, FP_MIN_CORE_VERSION,
     )
     # Текущее состояние
     state: dict = {}
@@ -685,6 +686,11 @@ def do_export_fragment_toggle_menu() -> None:
         print()
         _info("FP для fragment-аддона (пустой ввод = сброс на дефолт ноды):")
         print(f"  {DIM}Доступные: {', '.join(XRAY_FP_LIST)}{NC}")
+        # Форк-имена (XTLS uTLS): помечаем требование к ядру клиента
+        _co = [f"{n} — ядро ≥ {FP_MIN_CORE_VERSION.get(n, '?')}"
+               for n in XRAY_FP_LIST if n in FP_CLIENT_ONLY]
+        if _co:
+            print(f"  {DIM}Только свежие Xray-клиенты: {'; '.join(_co)}{NC}")
         try:
             raw = input(f"  {CYAN}FP (имя/Enter=сброс):{NC} ").strip().lower()
         except KeyboardInterrupt:
@@ -707,6 +713,13 @@ def do_export_fragment_toggle_menu() -> None:
         w = reality_fp_warning(raw)
         if w:
             _warn(w)
+        if raw in FP_CLIENT_ONLY:
+            # Форк-имя (XTLS uTLS): предупреждаем о требовании к ядру;
+            # sing-box-вариант экспорта автоматически получит chrome.
+            _warn(f"FP '{raw}' запустится только в клиентах с "
+                  f"Xray-core ≥ {FP_MIN_CORE_VERSION.get(raw, '?')} "
+                  "(старым клиентам и mihomo — chrome; sing-box-файл "
+                  "экспорта получит chrome автоматически)")
         cf = dict(cur or {})
         if _save_client_fragment_state({"enabled": True, **cf, "fp": raw}):
             _success(f"FP fragment-аддона: {raw} (применится в xray/singbox "
@@ -768,6 +781,7 @@ def do_fragment_config_menu() -> None:
     """
     from chimera.modules.fingerprint_manager import (
         XRAY_FP_LIST, reality_fp_warning, save_default_fingerprint,
+        FP_CLIENT_ONLY, FP_MIN_CORE_VERSION,
     )
 
     state: dict = {}
@@ -822,7 +836,12 @@ def do_fragment_config_menu() -> None:
         if ch == "f":
             print()
             _info(f"Текущий FP: {eff_fp}. Ввод: имя из списка или номер.")
-            print(f"  {DIM}Список (live 26.10.29): {', '.join(XRAY_FP_LIST)}{NC}")
+            print(f"  {DIM}Список: {', '.join(XRAY_FP_LIST)}{NC}")
+            # Форк-имена (XTLS uTLS): помечаем требование к ядру клиента
+            _co = [f"{n} — ядро ≥ {FP_MIN_CORE_VERSION.get(n, '?')}"
+                   for n in XRAY_FP_LIST if n in FP_CLIENT_ONLY]
+            if _co:
+                print(f"  {DIM}Только свежие Xray-клиенты: {'; '.join(_co)}{NC}")
             try:
                 raw = input(f"  {CYAN}FP (Enter = {eff_fp}):{NC} ").strip().lower()
             except KeyboardInterrupt:
@@ -835,6 +854,12 @@ def do_fragment_config_menu() -> None:
                 w = reality_fp_warning(raw)
                 if w:
                     _warn(w)
+                if raw in FP_CLIENT_ONLY:
+                    # Форк-имя (XTLS uTLS): предупреждаем о требовании к ядру
+                    _warn(f"FP '{raw}' запустится только в клиентах с "
+                          f"Xray-core ≥ {FP_MIN_CORE_VERSION.get(raw, '?')} "
+                          "— старым клиентам и mihomo-семье оставляйте "
+                          "chrome")
                 session_fp = raw
                 _success(f"FP сессии: {raw}")
                 try:

@@ -491,7 +491,9 @@ def prompt_chain_params() -> None:
     # Fingerprint
     _box_row(f"{BLUE}[E7] Fingerprint браузера:{NC}")
     _box_bottom()
-    CHAIN_EXIT_FP = _fm_prompt_fingerprint(label="Exit Node", current=CHAIN_EXIT_FP or "chrome")
+    # server_side=True: FP попадает в outbound entry→exit, который парсит
+    # ЯДРО СЕРВЕРА — форк-имена (FP_CLIENT_ONLY, ядро ≥ 26.11.9) не предлагаются.
+    CHAIN_EXIT_FP = _fm_prompt_fingerprint(label="Exit Node", current=CHAIN_EXIT_FP or "chrome", server_side=True)
     setattr(core, "CHAIN_EXIT_FP", CHAIN_EXIT_FP)
 
     _box_row(f"{BOLD}Параметры Exit Node:{NC}")
@@ -2172,7 +2174,8 @@ def _prompt_one_node_manual(index: int) -> dict | None:
     _fp_e = "E10" if _is_xhr else "E8"
     _box_row(f"{BLUE}[{_fp_e}] Fingerprint браузера:{NC}")
     _box_bottom()
-    fp = _fm_prompt_fingerprint(label=f"Exit Node #{index}", current="chrome")
+    # server_side=True: см. комментарий в _prompt_exit_node() выше.
+    fp = _fm_prompt_fingerprint(label=f"Exit Node #{index}", current="chrome", server_side=True)
 
     node = {
         "host":       host,

@@ -247,6 +247,7 @@ def apply_fp(new_fp: str) -> tuple[bool, str]:
     """
     from chimera.modules.fingerprint_manager import (
         XRAY_FP_LIST, reality_fp_warning,
+        FP_CLIENT_ONLY, FP_MIN_CORE_VERSION,
     )
     if new_fp not in XRAY_FP_LIST:
         return False, f"Неизвестный fingerprint: {new_fp!r}"
@@ -256,6 +257,19 @@ def apply_fp(new_fp: str) -> tuple[bool, str]:
     w = reality_fp_warning(new_fp)
     if w:
         return False, w
+
+    # Форк-FP (XTLS uTLS, ядро ≥ 26.11.9) — только клиентские артефакты:
+    # apply_fp пишет FP в СЕРВЕРНЫЙ config.json, который парсит ядро
+    # сервера — на ядрах < 26.11.9 будет «unknown fingerprint»
+    # (валидация run -test откатит, рестарт не пройдёт).
+    if new_fp in FP_CLIENT_ONLY:
+        return False, (
+            f"FP '{new_fp}' не применяется к серверу: его парсит только "
+            f"Xray-core ≥ {FP_MIN_CORE_VERSION.get(new_fp, '26.11.9')} "
+            "(форк uTLS у XTLS, 09.11.2026). Это отпечаток для КЛИЕНТСКИХ "
+            "ссылок — его выбирают на шаге 12 установки или в генераторах "
+            "конфигов, а серверу оставляют классический FP (chrome)."
+        )
 
     ok, err = _patch_config_fp(new_fp)
     if not ok:
@@ -304,6 +318,9 @@ def do_change_fp_interactive() -> None:
     Показывает текущий FP, список вариантов, применяет после подтверждения.
     Вызывается из любого меню управления пользователями.
     """
+    from chimera.modules.fingerprint_manager import (
+        FP_CLIENT_ONLY, FP_MIN_CORE_VERSION,
+    )
     c = _core_imports()
     _box_top = c["_box_top"]
     _box_item = c["_box_item"]
@@ -347,7 +364,14 @@ def do_change_fp_interactive() -> None:
 
     for i, fp in enumerate(FP_LIST, 1):
         marker = f"  {GREEN}← текущий{NC}" if fp == cur else ""
-        _box_item(f"{i}", f"{fp}{marker}")
+        # Форк-имена (XTLS uTLS): только клиентские ссылки — серверу
+        # не подходят (ядро < 26.11.9 их не парсит), помечаем в меню.
+        extra = ""
+        if fp in FP_CLIENT_ONLY:
+            extra = (f"  {DIM}— только клиентские ссылки (ядро клиента ≥ "
+                     f"{FP_MIN_CORE_VERSION.get(fp, '?')}); к серверу "
+                     f"не применяется{NC}")
+        _box_item(f"{i}", f"{fp}{marker}{extra}")
     _box_row()
     _box_bottom()
 
@@ -370,6 +394,17 @@ def do_change_fp_interactive() -> None:
 
     if new_fp == cur:
         info(f"Fingerprint уже установлен в {cur!r}. Ничего не изменено.")
+        return
+
+    # Форк-FP (XTLS uTLS, ядро ≥ 26.11.9): клиентский-only — к серверному
+    # config.json не применяем, объясняем и выходим (гард apply_fp продублирован
+    # здесь ради понятного сообщения до попытки применения).
+    if new_fp in FP_CLIENT_ONLY:
+        warn(f"  FP '{new_fp}' — только для клиентских ссылок: серверное ядро "
+             f"поймёт его лишь с Xray-core "
+             f"{FP_MIN_CORE_VERSION.get(new_fp, '26.11.9')}. К серверу "
+             "не применяю — выберите классический FP.")
+        input(f"{BLUE}Нажмите Enter...{NC}")
         return
 
     print()
@@ -435,6 +470,10 @@ TG_FP_COMMANDS_BLOCK: str = r'''
 _FP_LIST_BOT = [
     "chrome", "firefox", "safari", "ios", "android", "edge",
     "360", "qq", "random", "randomized", "randomizednoalpn",
+    # hellochrome_155 (Chrome 155, форк uTLS у XTLS, 09.11.2026) сюда
+    # НЕ вносится: /setfp пишет FP в СЕРВЕРНЫЙ config.json, который
+    # парсит ядро сервера — на ядрах < 26.11.9 будет unknown fingerprint.
+    # Это клиентский FP: шаг 12 установки / fragment-генераторы.
 ]
 
 def _fp_apply_via_xray(new_fp):

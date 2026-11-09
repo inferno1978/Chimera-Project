@@ -102,6 +102,7 @@ from chimera.modules.fragment_config import (
 from chimera.modules.fingerprint_manager import (
     XRAY_FP_LIST, REALITY_INCOMPATIBLE_FP, reality_fp_warning,
     resolve_client_fp, save_default_fingerprint,
+    FP_CLIENT_ONLY, FP_MIN_CORE_VERSION,
 )
 
 # ── Делегирование в _core.py (без circular import, без дублирования) ──────
@@ -795,7 +796,8 @@ def _pick_fingerprint_step(state: dict) -> Optional[str]:
       ""     — Ctrl+C: отмена ВСЕЙ генерации (меню завершается).
 
     Список — LIVE-валидированный (ядро 26.10.29 отвергает неизвестные
-    имена при парсинге конфига): 11 FP из XRAY_FP_LIST.
+    имена при парсинге конфига): 11 классических FP + hellochrome_155
+    (форк uTLS от XTLS — парсится только клиентскими ядрами ≥ 26.11.9).
     REALITY-guard: randomized-семейство (random/randomized/
     randomizednoalpn) с REALITY несовместимо — предупреждаем.
     """
@@ -811,7 +813,14 @@ def _pick_fingerprint_step(state: dict) -> Optional[str]:
     _box_row()
     for i, name in enumerate(XRAY_FP_LIST, 1):
         mark = f" {GREEN}← текущий{NC}" if name == eff else ""
-        dim = f" {YELLOW}(REALITY: несовместим){NC}" if name in REALITY_INCOMPATIBLE_FP else ""
+        if name in REALITY_INCOMPATIBLE_FP:
+            dim = f" {YELLOW}(REALITY: несовместим){NC}"
+        elif name in FP_CLIENT_ONLY:
+            # Форк-имя (XTLS uTLS): работает только в свежих Xray-клиентах
+            dim = (f" {DIM}(клиент: ядро ≥ "
+                   f"{FP_MIN_CORE_VERSION.get(name, '?')}){NC}")
+        else:
+            dim = ""
         _box_item(str(i), f"{name}{mark}{dim}")
     _box_row()
     _box_back()
@@ -919,7 +928,8 @@ def do_fragment_link_menu() -> None:
     Вызывается из _menu_users() в _core.py (пункт F).
 
     v4.31 «Fragment & FP Customizer»:
-      шаг 0 — FP (11 live-валидированных имён, REALITY-guard, опция
+      шаг 0 — FP (12 имён: 11 классических + hellochrome_155 — форк
+      uTLS, только клиенты с ядром ≥ 26.11.9; REALITY-guard, опция
                «сохранить как дефолт ноды»);
       шаг 1 — пресет фрагментации (агрессивная/сбалансированная/лёгкая/
                tlshello/своя);

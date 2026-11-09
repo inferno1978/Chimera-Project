@@ -48,16 +48,37 @@ class TestFingerprintManager(unittest.TestCase):
         from chimera.modules.fingerprint_manager import XRAY_FP_LIST
         # LIVE-валидация 31.10.2026, xray run -test, ядро 26.10.29:
         # 11 принятых имён; «none» отвергнут (латентный баг старого списка);
-        # randomizednoalpn — принят, добавлен.
-        self.assertEqual(len(XRAY_FP_LIST), 11)
+        # randomizednoalpn — принят, добавлен. 09.11.2026, Xray-core
+        # v26.11.9 (форк uTLS у XTLS): +hellochrome_155 — парсится только
+        # ядрами ≥ 26.11.9, поэтому в списке последним и клиент-only.
+        self.assertEqual(len(XRAY_FP_LIST), 12)
         for name in ("chrome", "firefox", "safari", "ios", "android",
                      "edge", "360", "qq", "random", "randomized",
-                     "randomizednoalpn"):
+                     "randomizednoalpn", "hellochrome_155"):
             self.assertIn(name, XRAY_FP_LIST)
         self.assertNotIn("none", XRAY_FP_LIST)  # ядро: unknown "fingerprint": none
         self.assertNotIn("golang", XRAY_FP_LIST)
         for banned in ("chrome_120", "ios_17_0", "firefox_133"):
             self.assertNotIn(banned, XRAY_FP_LIST)  # utls-версионные не принимаются
+        # Нумерация 1–11 не меняется (hellochrome_155 — строго последним:
+        # мышечная память юзера, доки, индексы в скринкастах).
+        self.assertEqual(XRAY_FP_LIST[-1], "hellochrome_155")
+
+    def test_client_only_fp_invariants(self):
+        """Форк-имена (XTLS uTLS, ядро ≥ 26.11.9) — только клиентские артефакты."""
+        from chimera.modules.fingerprint_manager import (
+            XRAY_FP_LIST, FP_CLIENT_ONLY, FP_MIN_CORE_VERSION,
+            fp_client_only_note,
+        )
+        self.assertTrue(FP_CLIENT_ONLY.issubset(set(XRAY_FP_LIST)))
+        self.assertIn("hellochrome_155", FP_CLIENT_ONLY)
+        self.assertEqual(FP_MIN_CORE_VERSION["hellochrome_155"], "26.11.9")
+        # Полное пояснение непустое, короткой пометки — тоже
+        self.assertTrue(fp_client_only_note("hellochrome_155"))
+        self.assertEqual(fp_client_only_note("chrome"), "")
+        # Классические FP не попадают в клиент-only множество
+        for fp in ("chrome", "firefox", "safari", "random"):
+            self.assertNotIn(fp, FP_CLIENT_ONLY)
     def test_default_fp_is_chrome(self):
         from chimera.modules.fingerprint_manager import DEFAULT_FP
         self.assertEqual(DEFAULT_FP, "chrome")
