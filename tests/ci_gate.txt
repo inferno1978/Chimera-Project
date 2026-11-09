@@ -1,4 +1,8 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v12: 324 = 323 + test_exit_traffic_watcher (наблюдатель трафика
+# exit-нод: уведы «через какую ноду реально идёт трафик» — счётчики
+# Stats API outbound>>>chain-exit-N, режим-агностично для всех стратегий
+# балансировки; кейс окт.2026 №8-продолжение).
 # v11: 323 = 322 + test_awg_state_race (инцидент 09.11 «AWG пропал»:
 # конкурентная порча state, LB merge-save, восстановление из живой
 # системы). Пред-счётчик: 322 = 321 + test_xhttp_extra (персистенс xHTTP+TLS extra-инбаунда:
@@ -124,6 +128,7 @@ tests.test_entry_mirrors
 tests.test_entry_mirrors_ui_smoke
 tests.test_env_isolation
 tests.test_exit_switch_watcher
+tests.test_exit_traffic_watcher
 tests.test_fail2ban_manager
 tests.test_failover
 tests.test_fake_login_template

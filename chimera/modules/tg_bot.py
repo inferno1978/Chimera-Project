@@ -263,6 +263,12 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "exit_switch":     "🔀",   # exit_switch_watcher: режимное переключение
         "exit_ip_change":  "🌐",   # exit_switch_watcher: смена exit-IP
         "exit_snapshot":   "📊",   # exit_switch_watcher: дайджест ротации
+        # наблюдатель трафика exit-нод (exit_traffic_watcher.py; счётчики
+        # Stats API — фактическое распределение трафика по нодам)
+        "traffic_dominant_change": "🧭",  # доминирующая нода сменилась
+        "traffic_snapshot":        "📈",  # дайджест распределения трафика
+        "traffic_node_starved":    "💤",  # нода в ротации без трафика
+        "traffic_stats_error":     "⚠️",  # Stats API недоступен
         "ttl_expiring":    "⏳",   # TTL-пользователи: скоро истекает
         "ttl_expired":     "⌛",   # TTL-пользователи: истёк
         "port_knocking":   "🚪",   # port knocking: события
@@ -2387,6 +2393,11 @@ def do_manage_telegram() -> None:
             "exit_switch":    "Наблюдатель: режимное переключение (нода/стратегия/pin)",
             "exit_ip_change": "Наблюдатель: смена exit-IP ноды",
             "exit_snapshot":  "Наблюдатель: дайджест ротации exit-нод",
+            # наблюдатель трафика exit-нод (exit_traffic_watcher.py)
+            "traffic_dominant_change": "Трафик-наблюдатель: доминирующая нода сменилась",
+            "traffic_snapshot":        "Трафик-наблюдатель: дайджест распределения по нодам",
+            "traffic_node_starved":    "Трафик-наблюдатель: нода в ротации без трафика",
+            "traffic_stats_error":     "Трафик-наблюдатель: Stats API недоступен",
             # TTL-пользователи (user_lifecycle / ttl_users)
             "ttl_expiring":   "TTL-пользователь: срок истекает (<24ч)",
             "ttl_expired":    "TTL-пользователь: срок истёк (удалён)",
@@ -2426,6 +2437,8 @@ def do_manage_telegram() -> None:
         _box_item("4", "Установить cron-мониторинг Xray")
         _box_item("6", "🔀 Наблюдатель переключений exit-нод  "
                      f"{DIM}(состав ротации / стратегии / IP){NC}")
+        _box_item("7", "🧭 Наблюдатель трафика exit-нод  "
+                     f"{DIM}(через какую ноду идёт трафик){NC}")
         _box_item("5", f"{RED}Отключить уведомления{NC} (удалить конфиг)")
         _box_back()
         _box_bottom()
@@ -2476,6 +2489,8 @@ def do_manage_telegram() -> None:
                        "node_connect","relay_failover","cascade_lb_change",
                        "awg_failover","exit_set_change","exit_switch",
                        "exit_ip_change","exit_snapshot",
+                       "traffic_dominant_change","traffic_snapshot",
+                       "traffic_node_starved","traffic_stats_error",
                        "ttl_expiring","ttl_expired","port_knocking",
                        "ingress_geoip","install_complete",
                        "users_drift","users_restored","users_restore_failed",
@@ -2503,6 +2518,10 @@ def do_manage_telegram() -> None:
                 "Наблюдатель: режимное переключение",
                 "Наблюдатель: смена exit-IP ноды",
                 "Наблюдатель: дайджест ротации",
+                "Трафик-наблюдатель: сменилась доминирующая нода",
+                "Трафик-наблюдатель: дайджест распределения",
+                "Трафик-наблюдатель: нода без трафика",
+                "Трафик-наблюдатель: Stats API недоступен",
                 "TTL: срок истекает","TTL: срок истёк",
                 "Port Knocking: события","Блокировка входящих: события",
                 "Установка завершена",
@@ -2546,6 +2565,18 @@ def do_manage_telegram() -> None:
                 do_exit_watcher_menu()
             except Exception as _e:
                 _warn(f"Наблюдатель недоступен: {_e}")
+                time.sleep(1)
+
+        elif ch == "7":
+            # Наблюдатель трафика exit-нод (exit_traffic_watcher):
+            # фактическое распределение трафика по нодам через счётчики
+            # Stats API — работает во всех режимах балансировки.
+            try:
+                from chimera.modules.exit_traffic_watcher import (
+                    do_traffic_watcher_menu)
+                do_traffic_watcher_menu()
+            except Exception as _e:
+                _warn(f"Трафик-наблюдатель недоступен: {_e}")
                 time.sleep(1)
 
         elif ch == "5":

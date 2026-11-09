@@ -174,6 +174,9 @@ from chimera.modules.cold_boot_restore   import do_cold_boot_menu
 from chimera.modules.fw_guard           import do_manage_fw_guard
 from chimera.modules.node_health_monitor import do_health_monitor_menu
 from chimera.modules.exit_switch_watcher import do_exit_watcher_menu
+# ── Наблюдатель трафика exit-нод (через какую ноду реально идёт трафик;
+#    счётчики Stats API — работает во всех режимах балансировки) ──────────
+from chimera.modules.exit_traffic_watcher import do_traffic_watcher_menu
 # ── CPU Steal монитор (оверселл гипервизора: замер + дневной отчёт в TG) ────────
 from chimera.modules.steal_monitor        import do_steal_monitor_menu
 from chimera.modules.bandwidth_monitor    import do_bandwidth_monitor_menu
@@ -9636,6 +9639,7 @@ def _menu_security() -> None:
         _box_item("CB", f"🔄 Cold Boot Restore  {DIM}(авто-восстановление после reboot){NC}")
         _box_item("HM", f"📡 Health Monitor нод  {DIM}(проверка exit-нод по расписанию){NC}")
         _box_item("EW", f"🔀 Наблюдатель переключений exit-нод  {DIM}(уведы о ротации/составе/стратегии){NC}")
+        _box_item("TW", f"🧭 Наблюдатель трафика exit-нод  {DIM}(через какую ноду идёт трафик — все режимы балансировки){NC}")
         _box_back()
         _box_bottom()
         try:
@@ -9714,6 +9718,12 @@ def _menu_security() -> None:
             # Наблюдатель переключений exit-нод (кейс окт.2026 №8):
             # единая точка наблюдения ротации + TG-уведы
             do_exit_watcher_menu()
+        elif ch.lower() == "tw":
+            # Наблюдатель трафика exit-нод: фактическое распределение
+            # трафика по нодам (Stats API) — работает во всех режимах
+            # балансировки (roundRobin/leastPing/leastLoad/random/
+            # smartBalancer/pinned)
+            do_traffic_watcher_menu()
         elif ch.lower() == "q" or ch == "":
             break
         else:

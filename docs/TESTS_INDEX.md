@@ -2,7 +2,7 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **323** (гейт-манифест: **323**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **324** (гейт-манифест: **324**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
 ## AmneziaWG (transport Mode B + standalone 2.0) (31)
@@ -449,6 +449,15 @@
 | [`test_tg_nets.py`](../tests/test_tg_nets.py) | Unit-тесты для chimera/modules/tg_nets.py. | ✓ |
 | [`test_tgmon_v2.py`](../tests/test_tgmon_v2.py) | Тесты v2 генератора _install_monitor_cron (chimera/modules/tg_bot.py). | ✓ |
 
+## Прочее (4)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_custom_outbounds.py`](../tests/test_custom_outbounds.py) | Unit-тесты для chimera/modules/custom_outbounds.py. | ✓ |
+| [`test_exit_traffic_watcher.py`](../tests/test_exit_traffic_watcher.py) | Unit-тесты для chimera/modules/exit_traffic_watcher.py. | ✓ |
+| [`test_routing_rules.py`](../tests/test_routing_rules.py) | Unit-тесты для chimera/modules/routing_rules.py. | ✓ |
+| [`test_v6_adaptive.py`](../tests/test_v6_adaptive.py) | Unit-тесты v6-adaptive watcher (chimera/modules/v6_adaptive.py). | ✓ |
+
 ## xHTTP + REALITY (4)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -474,11 +483,3 @@
 | [`test_backup_registry.py`](../tests/test_backup_registry.py) | Unit-тесты для chimera/modules/backup_registry.py — единой автоматической | ✓ |
 | [`test_config_backup.py`](../tests/test_config_backup.py) | Unit-тесты для chimera/modules/config_backup.py. | ✓ |
 | [`test_migration.py`](../tests/test_migration.py) | Unit-тесты для chimera/modules/migration.py. | ✓ |
-
-## Прочее (3)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_custom_outbounds.py`](../tests/test_custom_outbounds.py) | Unit-тесты для chimera/modules/custom_outbounds.py. | ✓ |
-| [`test_routing_rules.py`](../tests/test_routing_rules.py) | Unit-тесты для chimera/modules/routing_rules.py. | ✓ |
-| [`test_v6_adaptive.py`](../tests/test_v6_adaptive.py) | Unit-тесты v6-adaptive watcher (chimera/modules/v6_adaptive.py). | ✓ |

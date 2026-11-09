@@ -104,6 +104,7 @@
 | `traffic_tracking.py` | Лимиты трафика пользователей + auto-disable при превышении (cron) |
 | `traffic_history.py` | История трафика по дням (ASCII-гистограмма, снимки каждые N мин) |
 | `node_health_monitor.py` | Мониторинг состояния exit-нод |
+| `exit_traffic_watcher.py` | **Наблюдатель трафика exit-нод (кейс №8-продолжение).** Фактическое распределение трафика по нодам через счётчики Stats API (`outbound>>>chain-exit-N>>>traffic>>>uplink/downlink`, дельты между прогонами) — режим-агностично: roundRobin / leastPing / leastLoad / random / smartBalancer / pinned. События: 🧭 смена доминирующей ноды (пороги доли/объёма), 📈 дайджест распределения (+опция per-user из access.log), 💤 нода в selector без трафика, ⚠️ Stats API недоступен. Кастомизация (exit_traffic_watcher.json): шаблоны, тихие часы, анти-спам, алиасы нод, chat_id override; cron + меню TUI (`[6] Безопасность → TW`, меню TG-уведомлений [7]) |
 | `steal_monitor.py` | **CPU Steal-монитор (оверселл гипервизора).** Периодический замер %steal по /proc/stat (агрегат + per-core, дельты между тиками + boot-avg с бута) локальной ноды и peers по SSH (cascade_peers из tg_bot.json + extra_peers, BatchMode). ↴
 | `network_bench.py` | Бенчмарк сети (скорость/латентность до разных хостов) |
 | `status_panel.py` | Статусная панель (сводка системы) |
