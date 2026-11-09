@@ -28,6 +28,8 @@ exit_traffic_watcher закрывает его счётчиками Stats API
  15. Интеграция с tg_bot: события наблюдателя в icons/event_labels/
      ev_keys/ev_labels (управляемость из «менюшки»)
  16. Интеграция с _core.py: пункт меню TW + импорт (канон test_dns_redirect)
+ 17. _tw_strategy_label/_tw_dominant_change_text — человекочитаемый
+     заголовок уведы смены ноды (режим + откуда → куда)
 """
 from __future__ import annotations
 
@@ -386,6 +388,78 @@ class TestAccessUsers(unittest.TestCase):
         self.assertEqual(len(rows), 3)
 
 
+class TestStrategyLabelAndDominantText(unittest.TestCase):
+    """Человекочитаемый заголовок уведы traffic_dominant_change:
+    «Режим: активная нода X» + «Переключение ноды: Y → X» (откуда/куда
+    полностью) + доля окна; метка режима — SmartBalancer / нативная
+    стратегия / каскад (запрос владельца 09.11.2026)."""
+
+    def test_strategy_label_smart_balancer(self):
+        from chimera.modules.exit_traffic_watcher import _tw_strategy_label
+        self.assertEqual(
+            _tw_strategy_label({"strategy": "leastPing"},
+                               {"enabled": True}),
+            "SmartBalancer")
+
+    def test_strategy_label_native(self):
+        from chimera.modules.exit_traffic_watcher import _tw_strategy_label
+        for raw, pretty in (("leastPing", "LeastPing"),
+                            ("roundRobin", "RoundRobin"),
+                            ("leastLoad", "LeastLoad"),
+                            ("random", "Random")):
+            self.assertEqual(_tw_strategy_label({"strategy": raw}, {}),
+                             pretty)
+
+    def test_strategy_label_unknown_passthrough(self):
+        from chimera.modules.exit_traffic_watcher import _tw_strategy_label
+        self.assertEqual(_tw_strategy_label({"strategy": "myStrategy"}, {}),
+                         "myStrategy")
+
+    def test_strategy_label_no_balancer_cascade(self):
+        """Без балансировщика (pinned/single, failover) — «Каскад»."""
+        from chimera.modules.exit_traffic_watcher import _tw_strategy_label
+        self.assertEqual(_tw_strategy_label({"strategy": ""}, {}),
+                         "Каскад")
+        self.assertEqual(_tw_strategy_label({}, None), "Каскад")
+
+    def test_strategy_label_sb_disabled_falls_back(self):
+        """SB выключен — метка от нативной стратегии chain-balancer."""
+        from chimera.modules.exit_traffic_watcher import _tw_strategy_label
+        self.assertEqual(
+            _tw_strategy_label({"strategy": "leastPing"},
+                               {"enabled": False}),
+            "LeastPing")
+
+    def test_dominant_change_text_format(self):
+        """Заголовок: «Режим: активная нода X» / «Переключение ноды:
+        Y → X» / доля окна — все имена полностью (host:port)."""
+        from chimera.modules.exit_traffic_watcher import (
+            _tw_dominant_change_text)
+        txt = _tw_dominant_change_text(
+            "SmartBalancer", "chimeraprodvpn.online:443",
+            "totalshadows.online:443", 72.4,
+            720 * MB, 1000 * MB)
+        lines = txt.split("\n")
+        self.assertEqual(
+            lines[0],
+            "SmartBalancer: активная нода "
+            "<b><code>totalshadows.online:443</code></b>")
+        self.assertEqual(
+            lines[1],
+            "Переключение ноды: <code>chimeraprodvpn.online:443</code> "
+            "→ <b><code>totalshadows.online:443</code></b>")
+        self.assertIn("72% окна", lines[2])
+
+    def test_dominant_change_text_alias_names(self):
+        """Имена — уже разрешённые (алиас либо host:port) — как есть."""
+        from chimera.modules.exit_traffic_watcher import (
+            _tw_dominant_change_text)
+        txt = _tw_dominant_change_text(
+            "LeastPing", "RU1", "DE", 100.0, 5 * MB, 5 * MB)
+        self.assertIn("активная нода <b><code>DE</code></b>", txt)
+        self.assertIn("Переключение ноды: <code>RU1</code> → ", txt)
+
+
 class TestSnapshotText(unittest.TestCase):
     """_tw_snapshot_text — текст дайджеста."""
 
@@ -559,6 +633,7 @@ class TestRunOnce(unittest.TestCase):
                 "strategy": {"type": "roundRobin"}}]}}),
             encoding="utf-8")
         self._events: list[str] = []
+        self._details: list[tuple] = []
 
     def tearDown(self):
         import shutil
@@ -567,8 +642,9 @@ class TestRunOnce(unittest.TestCase):
     def _patch_all(self, stats=None):
         import chimera.modules.exit_traffic_watcher as tw
 
-        def fake_notify(event, detail, cfg):
+        def fake_notify(event, detail, cfg, extra=None):
             self._events.append(event)
+            self._details.append((event, detail, extra))
             return True
 
         return patch.multiple(
@@ -630,11 +706,24 @@ class TestRunOnce(unittest.TestCase):
         self.assertEqual(res["dominant"]["tag"], TAG_A)
 
         # Прогон 3: трафик переехал на B (16 МБ против 10 МБ A в окне —
-        # доля 61% ≥ порога) → смена доминирующей
+        # доля 61% ≥ порога) → смена доминирующей: человекочитаемый
+        # заголовок «Режим: активная нода B» + «Переключение ноды: A → B»
         with self._patch_all(stats=self._stats(100 + 5 * MB, 100 + 5 * MB,
                                                9 * MB, 7 * MB)):
             res = tw.run_once()
         self.assertIn("traffic_dominant_change", res["events"])
+        det = next(d for ev, d, _ in self._details
+                   if ev == "traffic_dominant_change")
+        self.assertIn(
+            f"RoundRobin: активная нода <b><code>{KEY_B}</code></b>", det)
+        self.assertIn(
+            f"Переключение ноды: <code>{KEY_A}</code> → "
+            f"<b><code>{KEY_B}</code></b>", det)
+        extra = next(x for ev, _, x in self._details
+                     if ev == "traffic_dominant_change")
+        self.assertEqual(extra["strategy"], "RoundRobin")
+        self.assertEqual(extra["node_from"], KEY_A)
+        self.assertEqual(extra["node_to"], KEY_B)
         st = json.loads(self._cfg.read_text())["__state__"]
         self.assertEqual(st["dominant_tag"], TAG_B)
 

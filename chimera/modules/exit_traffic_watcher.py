@@ -28,7 +28,9 @@ pinned/single-pick (100% трафика на закреплённой ноде).
 
 События (ключи фильтра в telegram.json, иконки в tg_bot.tg_notify_event):
   • traffic_dominant_change — доминирующая нода (по объёму за окно
-    накопления) сменилась; пороги настраиваются (доля %, мин. объём);
+    накопления) сменилась; заголовок человекочитаемый — «Режим:
+    активная нода X. Переключение ноды: Y → X» (откуда/куда —
+    полностью); пороги настраиваются (доля %, мин. объём);
   • traffic_snapshot        — периодический дайджест: распределение
     трафика по нодам (байты + %), стратегия, опционально разбор
     по пользователям (кто через какую ноду — из access.log);
@@ -95,10 +97,13 @@ EVENTS = ("traffic_dominant_change", "traffic_snapshot",
 
 # Дефолтные шаблоны (HTML для parse_mode=HTML). Плейсхолдеры:
 #   {host} — короткое имя этого сервера; {ts} — локальное время;
-#   {detail} — тело события.
+#   {detail} — тело события (для смены ноды его первая строка уже
+#   человекочитаемый заголовок «Режим: активная нода X»);
+#   {strategy} / {node_from} / {node_to} — доп. поля события смены ноды
+#   (метка режима балансировки, прежняя и новая нода).
 DEFAULT_TEMPLATES = {
     "traffic_dominant_change":
-        "🧭 <b>[{host}]</b> Смена доминирующей exit-ноды\n{detail}\n<i>{ts}</i>",
+        "🧭 <b>[{host}]</b> {detail}\n<i>{ts}</i>",
     "traffic_snapshot":
         "📈 <b>[{host}]</b> Распределение трафика по exit-нодам\n{detail}\n<i>{ts}</i>",
     "traffic_node_starved":
@@ -449,6 +454,44 @@ def _tw_snapshot_text(acc: dict, names: dict, strategy: str,
     return "\n".join(lines)
 
 
+# Красивые имена стратегий chain-balancer для заголовков увед
+_STRATEGY_PRETTY = {
+    "roundRobin": "RoundRobin",
+    "leastPing":  "LeastPing",
+    "leastLoad":  "LeastLoad",
+    "random":     "Random",
+}
+
+
+def _tw_strategy_label(live: dict, sb: dict) -> str:
+    """Метка режима балансировки для заголовка уведы: «SmartBalancer»,
+    если SB включён (он патчит selector и владеет ротацией); иначе —
+    стратегия нативного chain-balancer (красивое имя); без
+    балансировщика — «Каскад» (закреплённая нода / failover).
+    Чистая функция."""
+    if (sb or {}).get("enabled"):
+        return "SmartBalancer"
+    raw = str((live or {}).get("strategy") or "").strip()
+    if not raw:
+        return "Каскад"
+    return _STRATEGY_PRETTY.get(raw, raw)
+
+
+def _tw_dominant_change_text(strategy_label: str, old_name: str,
+                             new_name: str, share_pct: float,
+                             bytes_: int, total: int) -> str:
+    """Текст уведы traffic_dominant_change: первая строка —
+    человекочитаемый заголовок («Режим: активная нода X»), вторая —
+    «Переключение ноды: Y → X» (откуда и куда — полностью), третья —
+    доля окна. Чистая функция."""
+    return (f"{strategy_label}: активная нода "
+            f"<b><code>{new_name}</code></b>\n"
+            f"Переключение ноды: <code>{old_name}</code> → "
+            f"<b><code>{new_name}</code></b>\n"
+            f"Доминирование: {share_pct:.0f}% окна "
+            f"({_tw_fmt_bytes(bytes_)} из {_tw_fmt_bytes(total)})")
+
+
 def _tw_tag_names(chain_nodes: list, aliases: dict | None = None) -> tuple:
     """Карты тегов: ({tag: отображаемое имя}, {tag: host:port}).
     chain-exit-N → нода с индексом N-1 (сопоставление как в
@@ -591,11 +634,15 @@ def _now_str() -> str:
 # ── Уведомления ───────────────────────────────────────────────────────────────
 
 
-def _tw_notify_event(event: str, detail: str, cfg: dict) -> bool:
+def _tw_notify_event(event: str, detail: str, cfg: dict,
+                     extra: dict | None = None) -> bool:
     """Отправка события. Основной путь — tg_bot.tg_notify_event
-    (уважает фильтр событий меню «Telegram-уведомления» и ключ proxy);
+    (уважает фильтр событий меню «Telegram-уведомления» и ключ proxy;
+    первая строка detail становится заголовком уведы);
     fallback — прямая отправка curl-ом (паттерн exit_switch_watcher),
-    если tg_bot недоступен. Возвращает True при доставке."""
+    если tg_bot недоступен. extra — доп. плейсхолдеры шаблона
+    ({strategy}/{node_from}/{node_to} для смены ноды).
+    Возвращает True при доставке."""
     notify_map = (cfg or {}).get("notify") or {}
     if notify_map.get(event, True) is False:
         return False
@@ -606,8 +653,10 @@ def _tw_notify_event(event: str, detail: str, cfg: dict) -> bool:
         if chat_override:
             tpl = (cfg.get("templates") or {}).get(event) \
                 or DEFAULT_TEMPLATES.get(event, "{detail}")
-            text = _tw_render(tpl, host=_hostname(), ts=_now_str(),
-                              detail=detail)
+            kw = {"host": _hostname(), "ts": _now_str(), "detail": detail}
+            if extra:
+                kw.update(extra)
+            text = _tw_render(tpl, **kw)
             ok = tg_bot.tg_send(text, chat_id=chat_override)
             _tw_log(f"TG[{event}] direct-override -> {chat_override}: "
                     f"{'OK' if ok else 'FAIL'}")
@@ -626,8 +675,10 @@ def _tw_notify_event(event: str, detail: str, cfg: dict) -> bool:
     try:
         tpl = (cfg.get("templates") or {}).get(event) \
             or DEFAULT_TEMPLATES.get(event, "{detail}")
-        text = _tw_render(tpl, host=_hostname(), ts=_now_str(),
-                          detail=detail)
+        kw = {"host": _hostname(), "ts": _now_str(), "detail": detail}
+        if extra:
+            kw.update(extra)
+        text = _tw_render(tpl, **kw)
         cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
                "-m", "10"]
         px = str(tcfg.get("proxy") or "").strip()
@@ -701,7 +752,8 @@ def run_once(force: bool = False) -> dict:
     quiet = _tw_quiet(now_hhmm, cfg.get("quiet_hours") or {})
     events_sent: list[str] = []
 
-    def _emit(event: str, detail: str) -> None:
+    def _emit(event: str, detail: str,
+              extra: dict | None = None) -> None:
         """Отправка с учётом анти-спама (min_gap) и quiet-часов."""
         if not force and quiet:
             _tw_log(f"SKIP[{event}]: тихие часы")
@@ -711,7 +763,7 @@ def run_once(force: bool = False) -> dict:
                 now, cfg.get("min_gap_min")):
             _tw_log(f"SKIP[{event}]: анти-спам min_gap")
             return
-        if _tw_notify_event(event, detail, cfg):
+        if _tw_notify_event(event, detail, cfg, extra):
             events_sent.append(event)
             prev.setdefault("last_notify", {})[event] = now
 
@@ -756,12 +808,14 @@ def run_once(force: bool = False) -> dict:
     if dominant and prev_dom and dominant["tag"] != prev_dom:
         old_name = names.get(prev_dom) or prev_dom
         new_name = names.get(dominant["tag"]) or dominant["tag"]
+        strat = _tw_strategy_label(_tw_live_balancer(),
+                                   _read_json(SB_STATE_FILE))
         _emit("traffic_dominant_change",
-              f"Трафик окна переехал: <code>{old_name}</code> → "
-              f"<b><code>{new_name}</code></b> "
-              f"({dominant['share']:.0f}% окна, "
-              f"{_tw_fmt_bytes(dominant['bytes'])} из "
-              f"{_tw_fmt_bytes(dominant['total'])})")
+              _tw_dominant_change_text(
+                  strat, old_name, new_name, dominant["share"],
+                  dominant["bytes"], dominant["total"]),
+              extra={"strategy": strat, "node_from": old_name,
+                     "node_to": new_name})
     if dominant:
         prev["dominant_tag"] = dominant["tag"]
 
@@ -985,7 +1039,7 @@ def do_traffic_watcher_menu() -> None:
             api_str = f"{C['RED']}недоступен (xray упал?){C['NC']}"
         else:
             api_str = f"{C['RED']}нет в конфиге (пересоберите конфиг){C['NC']}"
-        strategy = live.get("strategy") or "нет"
+        strategy = _tw_strategy_label(live, _read_json(SB_STATE_FILE))
 
         print()
         _box_top("🧭  НАБЛЮДАТЕЛЬ ТРАФИКА EXIT-НОД")
@@ -1072,14 +1126,27 @@ def do_traffic_watcher_menu() -> None:
             input(f"{C['CYAN']}Нажмите Enter...{C['NC']}")
 
         elif ch == "T":
+            # тест-уведа смены ноды — ровно тот текст, что уйдёт в бою
+            # (режим + откуда → куда из живых нод), помеченный как тест
+            strat = _tw_strategy_label(live, _read_json(SB_STATE_FILE))
+            nl = list(names.values())
+            if len(nl) >= 2:
+                dom_txt = _tw_dominant_change_text(
+                    strat, nl[0], nl[-1], 72.0, 720 * MB, 1000 * MB)
+                dom_txt += "\n<i>🔔 тест-уведомление (ноды условные)</i>"
+            else:
+                dom_txt = ("🔔 Тест наблюдателя: смена доминирующей ноды "
+                           "(нужно ≥ 2 exit-ноды)")
             for ev, txt in (
-                ("traffic_dominant_change",
-                 "тест: трафик переехал node-a → node-b (70% окна)"),
-                ("traffic_snapshot", "тест: дайджест распределения трафика"),
-                ("traffic_node_starved", "тест: нода без трафика 6 ч"),
-                ("traffic_stats_error", "тест: Stats API недоступен"),
+                ("traffic_dominant_change", dom_txt),
+                ("traffic_snapshot",
+                 "🔔 Тест наблюдателя: дайджест распределения трафика"),
+                ("traffic_node_starved",
+                 "🔔 Тест наблюдателя: нода без трафика 6 ч"),
+                ("traffic_stats_error",
+                 "🔔 Тест наблюдателя: Stats API недоступен"),
             ):
-                ok = _tw_notify_event(ev, f"🔔 Тест наблюдателя: {txt}", cfg)
+                ok = _tw_notify_event(ev, txt, cfg)
                 print(f"  {'✅' if ok else '⚠️'} {ev}")
             input(f"{C['CYAN']}Нажмите Enter...{C['NC']}")
 
@@ -1128,7 +1195,7 @@ def _menu_settings(cfg: dict) -> None:
         _box_ok, _box_warn)
     C = _colors()
     labels = {
-        "traffic_dominant_change": "Смена доминирующей ноды (трафик переехал)",
+        "traffic_dominant_change": "Смена доминирующей ноды (уведа: режим + откуда → куда)",
         "traffic_snapshot":        "Дайджест распределения трафика",
         "traffic_node_starved":    "Нода в ротации без трафика (голод)",
         "traffic_stats_error":     "Stats API недоступен",
@@ -1311,7 +1378,8 @@ def _menu_aliases(cfg: dict) -> None:
 
 
 def _menu_templates(cfg: dict) -> None:
-    """Редактирование шаблонов сообщений (плейсхолдеры {host} {ts} {detail})."""
+    """Редактирование шаблонов сообщений (плейсхолдеры {host} {ts}
+    {detail}; для смены ноды также {strategy} {node_from} {node_to})."""
     from chimera.modules.box_renderer import (
         _box_top, _box_row, _box_sep, _box_bottom, _box_back, _box_ok)
     C = _colors()
@@ -1320,7 +1388,8 @@ def _menu_templates(cfg: dict) -> None:
         os.system("clear")
         print()
         _box_top("📝  ШАБЛОНЫ СООБЩЕНИЙ (HTML)")
-        _box_row(f"  {C['DIM']}Плейсхолдеры: {{host}} {{ts}} {{detail}}{C['NC']}")
+        _box_row(f"  {C['DIM']}Плейсхолдеры: {{host}} {{ts}} {{detail}}; для смены")
+        _box_row(f"  {C['DIM']}ноды ещё {{strategy}} {{node_from}} {{node_to}}{C['NC']}")
         _box_sep()
         for i, ev in enumerate(EVENTS, 1):
             _box_row(f"  {i}. {ev}")
