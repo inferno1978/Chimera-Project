@@ -38,7 +38,26 @@ pinned/single-pick (100% трафика на закреплённой ноде).
     трафик N часов, пока другие несут (roundRobin/leastPing может
     скипать ноду — сигнал, что что-то не так);
   • traffic_stats_error     — Stats API недоступен 3 прогона подряд
-    (не чаще раза в сутки): xray упал или конфиг без секции api.
+    (не чаще раза в сутки): xray упал или конфиг без секции api;
+  • traffic_node_down       — 📴 активная TCP-проба ноды не проходит
+    N прогонов подряд — нода недоступна (упала/порт закрыт);
+    контекст: когда нода последний раз несла трафик + вердикт
+    Health Monitor, если он это уже заметил;
+  • traffic_node_degraded   — 🐌 проба проходит, но RTT выше порога
+    M прогонов подряд — нода «тупит» (лагает, но жива);
+  • traffic_node_up         — 🔌 восстановление: проба снова ОК
+    после недоступности/деградации.
+
+Активные пробы: помимо пассивных счётчиков трафика, модуль сам
+TCP-пробует host:port КАЖДОЙ chain-ноды каждый прогон (stdlib socket,
+create_connection + time.monotonic; таймаут и пороги в cfg). Отказ
+ноды больше не «невидим» даже при молчащем/перераспределившемся
+трафике. Guard локальной проблемы: если ВСЕ ноды разом не отвечают —
+вероятна проблема на самом релее (сеть/DNS/исходящий трафик):
+персональные уведы подавляются, шлётся один «локальный»
+traffic_node_down и один traffic_node_up при восстановлении связи.
+Пробы покрывают ВСЕ chain-ноды (не только selector — в отличие от
+starve-детекта).
 
 Отправка идёт через tg_bot.tg_notify_event() — событие уважает фильтр
 из меню «Telegram-уведомления» (пункт «Включить/выключить отдельные
@@ -50,7 +69,8 @@ curl-ом (паттерн exit_switch_watcher / node_health_monitor).
 доминирования (доля %, мин. объём), quiet-часы, анти-спам min_gap,
 шаблоны сообщений с плейсхолдерами, отдельный chat_id, алиасы нод
 (host:port → человекочитаемое имя в уведах), разбор по пользователям
-(per_user, топ-N), пороги starve-детекта.
+(per_user, топ-N), пороги starve-детекта, пороги активных проб
+(таймаут, неудач подряд, порог RTT деградации).
 
 Публичный API:
     run_once()                        → dict   — одна итерация наблюдения
@@ -67,6 +87,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -86,6 +107,10 @@ XRAY_CFG_CANDIDATES = (Path("/etc/xray/config.json"),
 # из cron без импорта монолита _core; паттерн exit_switch_watcher)
 STATS_API_PORT = 10085
 
+# Вердикты Health Monitor (node_health_monitor.py) — обогащение
+# down-уведы проб (ключ host:port → {'up': bool}); паттерн exit_switch_watcher
+HM_STATE_FILE = Path("/var/lib/xray-installer/node-health-state.json")
+
 DEFAULT_INTERVAL    = 15   # минут
 DEFAULT_SNAPSHOT_HOURS = 12
 STATS_FAIL_THRESHOLD = 3    # прогонов подряд перед traffic_stats_error
@@ -93,7 +118,8 @@ STATS_ERROR_RETRY_SEC = 86400  # не чаще раза в сутки
 
 # События наблюдателя (ключи фильтра в telegram.json)
 EVENTS = ("traffic_dominant_change", "traffic_snapshot",
-          "traffic_node_starved", "traffic_stats_error")
+          "traffic_node_starved", "traffic_stats_error",
+          "traffic_node_down", "traffic_node_degraded", "traffic_node_up")
 
 # Дефолтные шаблоны (HTML для parse_mode=HTML). Плейсхолдеры:
 #   {host} — короткое имя этого сервера; {ts} — локальное время;
@@ -110,6 +136,12 @@ DEFAULT_TEMPLATES = {
         "💤 <b>[{host}]</b> Нода без трафика\n{detail}\n<i>{ts}</i>",
     "traffic_stats_error":
         "⚠️ <b>[{host}]</b> Stats API недоступен\n{detail}\n<i>{ts}</i>",
+    "traffic_node_down":
+        "📴 <b>[{host}]</b> Нода недоступна\n{detail}\n<i>{ts}</i>",
+    "traffic_node_degraded":
+        "🐌 <b>[{host}]</b> Нода тупит\n{detail}\n<i>{ts}</i>",
+    "traffic_node_up":
+        "🔌 <b>[{host}]</b> Нода восстановлена\n{detail}\n<i>{ts}</i>",
 }
 
 MB = 1024 * 1024
@@ -136,6 +168,12 @@ DEFAULTS = {
     # трафике на других (0 = выключен)
     "starve_hours":     0,
     "starve_min_total_mb": 50,
+    # Активные пробы нод (TCP host:port): недоступность/деградация
+    "probe":                True,   # вкл/выкл активных проб
+    "probe_timeout_sec":    5,      # таймаут TCP-пробы
+    "probe_fails":          2,      # неудач подряд → traffic_node_down
+    "probe_degraded_ms":    500,    # RTT выше порога → деградация (0 = выкл)
+    "probe_degraded_fails": 2,      # медленных проб подряд → traffic_node_degraded
     "templates":        dict(DEFAULT_TEMPLATES),
 }
 
@@ -338,6 +376,159 @@ def _tw_starve_update(zero_since: dict, deltas: dict, selector: list,
     return zs, starved
 
 
+def _tw_tcp_probe(host: str, port: int, timeout_sec) -> dict:
+    """TCP-проба host:port (socket.create_connection, время —
+    time.monotonic): {'ok': bool, 'ms': int|None, 'err': str}.
+    Отказ DNS (getaddrinfo внутри create_connection) → err='DNS';
+    таймаут → 'timeout'; прочее — короткий текст исключения без
+    префикса '[Errno N]' ('Connection refused'). Никогда не бросает."""
+    t0 = time.monotonic()
+    try:
+        with socket.create_connection((str(host), int(port)),
+                                      timeout=float(timeout_sec or 5)):
+            pass
+        return {"ok": True,
+                "ms": int((time.monotonic() - t0) * 1000), "err": ""}
+    except socket.gaierror:
+        return {"ok": False, "ms": None, "err": "DNS"}
+    except socket.timeout:
+        return {"ok": False, "ms": None, "err": "timeout"}
+    except Exception as e:
+        msg = str(e) or type(e).__name__
+        m = re.match(r"^\[Errno \d+\]\s*(.+)$", msg)
+        if m:
+            msg = m.group(1)
+        return {"ok": False, "ms": None, "err": msg[:60] or "error"}
+
+
+def _tw_probe_nodes(chain_nodes: list, cfg: dict) -> dict | None:
+    """Активные TCP-пробы всех chain-нод (host:port каждой —
+    сопоставление как в _tw_tag_names): {tag: результат _tw_tcp_probe}.
+    Пробы последовательные, таймаут каждой — cfg['probe_timeout_sec'].
+    Нет валидных нод → None. Модуль самодостаточен — stdlib socket."""
+    try:
+        timeout = int((cfg or {}).get("probe_timeout_sec") or 5)
+    except (TypeError, ValueError):
+        timeout = 5
+    timeout = max(1, min(30, timeout))
+    out: dict = {}
+    for i, nd in enumerate(chain_nodes or []):
+        host = str((nd or {}).get("host") or "").strip()
+        if not host:
+            continue
+        port = int((nd or {}).get("port") or 443)
+        out[f"chain-exit-{i + 1}"] = _tw_tcp_probe(host, port, timeout)
+    return out or None
+
+
+def _tw_probe_update(pstate: dict, results: dict | None, cfg: dict,
+                     now_ts: float) -> tuple:
+    """Активные пробы: машина состояний по результатам прогона.
+    pstate — срез __state__ с ключами probe_fails {tag: неудач подряд},
+    probe_slow {tag: медленных подряд}, probe_status {tag: последний
+    статус}, all_probes_down (bool); отсутствующие ключи/None — норма.
+    Логика: ok+быстрая проба → счётчики сброшены; ok+медленная
+    (ms > probe_degraded_ms, при пороге > 0) → slow+1; отказ → fails+1.
+    Статус: 'down' (fails ≥ probe_fails) / 'degraded' (slow ≥
+    probe_degraded_fails) / 'ok'; событие — только на ПЕРЕХОДЕ статуса.
+    Guard локальной проблемы: все пробы разом не прошли → персональные
+    статусы/счётчики не трогаем, один 'local' traffic_node_down
+    (единожды, пока all_probes_down) и traffic_node_up с
+    local_recovery при рассасывании.
+    Возвращает (new_pstate, events); переходы одного типа агрегированы
+    в одно событие {'event', 'tags': [...], 'info': {tag: {...}}}.
+    Чистая функция."""
+    st = pstate or {}
+    fails_map = dict(st.get("probe_fails") or {})
+    slow_map = dict(st.get("probe_slow") or {})
+    status_map = dict(st.get("probe_status") or {})
+    all_down = bool(st.get("all_probes_down") or False)
+    new = {"probe_fails": fails_map, "probe_slow": slow_map,
+           "probe_status": status_map, "all_probes_down": all_down}
+    events: list = []
+    if not results:
+        return new, events
+
+    # Все пробы разом пали — вероятна локальная проблема на релее
+    if all(not r.get("ok") for r in results.values()):
+        if not all_down:
+            events.append({"event": "traffic_node_down", "local": True,
+                           "total": len(results)})
+            new["all_probes_down"] = True
+        return new, events
+
+    if all_down:
+        new["all_probes_down"] = False
+        events.append({"event": "traffic_node_up", "local_recovery": True,
+                       "ok_count": sum(1 for r in results.values()
+                                       if r.get("ok")),
+                       "total": len(results)})
+
+    def _cfg_int(key: str, default: int) -> int:
+        raw = (cfg or {}).get(key)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
+
+    fail_thr = max(1, _cfg_int("probe_fails", 2))
+    deg_ms = _cfg_int("probe_degraded_ms", 500)
+    deg_thr = max(1, _cfg_int("probe_degraded_fails", 2))
+
+    trans = {ev: {"tags": [], "info": {}}
+             for ev in ("traffic_node_down", "traffic_node_degraded",
+                        "traffic_node_up")}
+    for tag, r in results.items():
+        ok = bool(r.get("ok"))
+        ms = r.get("ms")
+        fails = int(fails_map.get(tag) or 0)
+        slow = int(slow_map.get(tag) or 0)
+        if not ok:
+            fails += 1
+            slow = 0
+        elif deg_ms > 0 and ms is not None and int(ms) > deg_ms:
+            slow += 1
+            fails = 0
+        else:
+            fails = 0
+            slow = 0
+        fails_map[tag] = fails
+        slow_map[tag] = slow
+        status = "down" if fails >= fail_thr else \
+            ("degraded" if slow >= deg_thr else "ok")
+        prev_status = str(status_map.get(tag) or "ok")
+        status_map[tag] = status
+        if status == prev_status:
+            continue
+        if status == "down":
+            trans["traffic_node_down"]["tags"].append(tag)
+            trans["traffic_node_down"]["info"][tag] = {
+                "err": str(r.get("err") or ""), "fails": fails}
+        elif status == "degraded":
+            trans["traffic_node_degraded"]["tags"].append(tag)
+            trans["traffic_node_degraded"]["info"][tag] = {
+                "ms": ms, "threshold": deg_ms, "fails": slow}
+        else:
+            trans["traffic_node_up"]["tags"].append(tag)
+            trans["traffic_node_up"]["info"][tag] = {
+                "ms": ms, "prev": prev_status}
+
+    # теги, которых больше нет в составе нод, — прочистка от роста
+    for m in (fails_map, slow_map, status_map):
+        for t in list(m):
+            if t not in results:
+                m.pop(t)
+
+    for ev in ("traffic_node_down", "traffic_node_degraded",
+               "traffic_node_up"):
+        if trans[ev]["tags"]:
+            events.append({"event": ev, "tags": trans[ev]["tags"],
+                           "info": trans[ev]["info"]})
+    return new, events
+
+
 _UNITS = (("ТБ", 1024 ** 4), ("ГБ", 1024 ** 3),
           ("МБ", 1024 ** 2), ("КБ", 1024), ("Б", 1))
 
@@ -509,6 +700,106 @@ def _tw_tag_names(chain_nodes: list, aliases: dict | None = None) -> tuple:
         names[tag] = alias or key
         keys[tag] = key
     return names, keys
+
+
+def _tw_probe_ago_str(last_ts, now_ts: float) -> str:
+    """«N мин назад» / «N ч назад» для метки последнего трафика ноды
+    (пусто, если метки нет). Чистая функция."""
+    try:
+        delta = max(0, float(now_ts) - float(last_ts))
+    except (TypeError, ValueError):
+        return ""
+    if delta < 3600:
+        return f"{int(delta // 60)} мин назад"
+    return f"{int(delta // 3600)} ч назад"
+
+
+def _tw_probe_down_line(alias: str, key: str, fails: int, err: str,
+                        last_ts, now_ts: float, hm_down: bool) -> str:
+    """Строка уведы traffic_node_down (одна нода): недоступна N
+    прогонов подряд + контекст — когда нода последний раз несла
+    трафик; вердикт HM (если уже DOWN) — доп. строка-довесок.
+    Чистая функция."""
+    txt = (f"Нода <b><code>{alias}</code></b> ({key}) недоступна: "
+           f"TCP-проба не проходит {fails} прогонов подряд ({err}).")
+    if hm_down:
+        txt += " (Health Monitor: DOWN)"
+    ago = _tw_probe_ago_str(last_ts, now_ts)
+    if ago:
+        txt += f"\nПоследний трафик через ноду: {ago}"
+    else:
+        txt += "\nТрафика через ноду в этом окне не было."
+    return txt
+
+
+def _tw_probe_degraded_line(alias: str, key: str, ms, threshold,
+                            fails: int) -> str:
+    """Строка уведы traffic_node_degraded (одна нода). Чистая
+    функция."""
+    return (f"Нода <b><code>{alias}</code></b> ({key}) тупит: "
+            f"TCP-проба проходит, но RTT {ms} мс выше порога "
+            f"{threshold} мс ({fails} прогонов подряд).")
+
+
+def _tw_probe_up_line(alias: str, key: str, ms, prev: str) -> str:
+    """Строка уведы traffic_node_up (одна нода): восстановление после
+    отказа ('down') либо деградации. Чистая функция."""
+    why = "после деградации" if str(prev or "") == "degraded" \
+        else "после отказа"
+    return (f"Нода <b><code>{alias}</code></b> ({key}) восстановлена: "
+            f"RTT {ms} мс ({why}).")
+
+
+def _tw_probe_event_text(event: dict, names: dict, keys: dict,
+                         last_traffic: dict, now_ts: float,
+                         hm_state: dict, hostname: str) -> str:
+    """Текст уведы событий активных проб: down/degraded/up (строки
+    нод агрегируются через \\n в одно сообщение — один тип = одна
+    уведа) + локальные сценарии (все ноды разом / восстановление
+    связи). alias — тот же механизм, что и в остальных уведах.
+    Чистая функция."""
+    ev = str((event or {}).get("event") or "")
+    tags = (event or {}).get("tags") or []
+    info = (event or {}).get("info") or {}
+    if ev == "traffic_node_down" and (event or {}).get("local"):
+        n = (event or {}).get("total") or 0
+        return (f"Все {n} exit-нод недоступны одновременно — вероятна "
+                f"локальная проблема на {hostname} "
+                f"(сеть/DNS/исходящий трафик). "
+                f"Уведы по отдельным нодам подавлены.")
+    if ev == "traffic_node_up" and (event or {}).get("local_recovery"):
+        m = (event or {}).get("ok_count") or 0
+        n = (event or {}).get("total") or 0
+        return f"Связь с exit-нодами восстановлена: {m} из {n} отвечают."
+    lines: list[str] = []
+    for tag in tags:
+        key = (keys or {}).get(tag) or tag
+        alias = (names or {}).get(tag) or key
+        d = info.get(tag) or {}
+        if ev == "traffic_node_down":
+            lines.append(_tw_probe_down_line(
+                alias, key, int(d.get("fails") or 0),
+                str(d.get("err") or ""),
+                (last_traffic or {}).get(tag), now_ts,
+                ((hm_state or {}).get(key) or {}).get("up") is False))
+        elif ev == "traffic_node_degraded":
+            lines.append(_tw_probe_degraded_line(
+                alias, key, d.get("ms"), d.get("threshold"),
+                int(d.get("fails") or 0)))
+        elif ev == "traffic_node_up":
+            lines.append(_tw_probe_up_line(
+                alias, key, d.get("ms"), str(d.get("prev") or "")))
+    return "\n".join(lines)
+
+
+def _tw_probe_event_extra(event: dict, names: dict, keys: dict) -> dict:
+    """Доп. плейсхолдеры шаблона для событий проб: {node} — алиас
+    первой затронутой ноды (паттерн {node_to} у смены ноды)."""
+    tags = (event or {}).get("tags") or []
+    if not tags:
+        return {}
+    t = tags[0]
+    return {"node": (names or {}).get(t) or (keys or {}).get(t) or t}
 
 
 # ── IO: конфиг / лог / чтение источников ──────────────────────────────────────
@@ -767,6 +1058,26 @@ def run_once(force: bool = False) -> dict:
             events_sent.append(event)
             prev.setdefault("last_notify", {})[event] = now
 
+    # ── Активные пробы нод (TCP host:port): недоступность/деградация.
+    # Проба покрывает ВСЕ chain-ноды (не только selector — в отличие от
+    # starve); события идут через общий _emit (фильтр/тихие/min_gap) ──
+    if cfg.get("probe", True):
+        results = _tw_probe_nodes(chain_nodes, cfg)
+        pstate, probe_events = _tw_probe_update(
+            {k: prev.get(k) for k in ("probe_fails", "probe_slow",
+                                      "probe_status", "all_probes_down")
+             if prev.get(k) is not None},
+            results, cfg, now)
+        prev.update(pstate)
+        if probe_events:
+            hm_state = _read_json(HM_STATE_FILE)
+            last_traffic = dict(prev.get("last_traffic_ts") or {})
+            for ev in probe_events:
+                _emit(ev.get("event") or "",
+                      _tw_probe_event_text(ev, names, keys, last_traffic,
+                                           now, hm_state, _hostname()),
+                      _tw_probe_event_extra(ev, names, keys))
+
     # ── Источник данных: Stats API ──
     stats = _tw_query_stats()
     if stats is None:
@@ -792,6 +1103,15 @@ def run_once(force: bool = False) -> dict:
     # ── Дельты за окно прогона + накопитель окна дайджеста ──
     deltas = _tw_deltas(prev.get("counters") or {}, stats_chain)
     acc = _tw_acc_add(prev.get("acc") or {}, deltas)
+
+    # Метки «когда нода последний раз несла трафик» — контекст в
+    # down-уведе проб; теги вне текущего состава нод — прочистка
+    lt = {t: v for t, v in (prev.get("last_traffic_ts") or {}).items()
+          if t in names}
+    for tag, d in deltas.items():
+        if tag in names and _tw_bytes_of(d) > 0:
+            lt[tag] = now
+    prev["last_traffic_ts"] = lt
 
     # 1) Смена доминирующей ноды (пороги: доля %, мин. объём окна)
     try:
@@ -1077,7 +1397,13 @@ def do_traffic_watcher_menu() -> None:
                  f"  голод ноды="
                  f"{'вкл' if nf.get('traffic_node_starved', True) else 'выкл'}"
                  f"  ошибка API="
-                 f"{'вкл' if nf.get('traffic_stats_error', True) else 'выкл'}")
+                 f"{'вкл' if nf.get('traffic_stats_error', True) else 'выкл'}"
+                 f"  недоступна="
+                 f"{'вкл' if nf.get('traffic_node_down', True) else 'выкл'}"
+                 f"  тупит="
+                 f"{'вкл' if nf.get('traffic_node_degraded', True) else 'выкл'}"
+                 f"  восстановлена="
+                 f"{'вкл' if nf.get('traffic_node_up', True) else 'выкл'}")
         qh = cfg.get("quiet_hours") or {}
         qh_str = f"{qh.get('from', '')}–{qh.get('to', '')}" \
             if qh.get("from") else "нет"
@@ -1087,11 +1413,16 @@ def do_traffic_watcher_menu() -> None:
                  f" от {cfg.get('dominant_min_mb')} МБ"
                  f"   голод ноды: {cfg.get('starve_hours') or 0} ч"
                  f"   per-user: {'вкл' if cfg.get('per_user') else 'выкл'}")
+        _box_row(f"  Пробы нод (TCP): "
+                 f"{'вкл' if cfg.get('probe', True) else 'выкл'}"
+                 f"   таймаут: {cfg.get('probe_timeout_sec', 5)} сек"
+                 f"   недоступна после {cfg.get('probe_fails', 2)} неудач"
+                 f"   RTT-порог: {cfg.get('probe_degraded_ms', 500)} мс")
         _box_sep()
         _box_item("C", "Проверить сейчас (без ожидания cron)")
         _box_item("T", "Тест-уведомление (все типы событий)")
         _box_item("S", "Настройки уведомлений (события / паузы / тихие часы)")
-        _box_item("D", "Пороги детекции (доминирование / голод ноды)")
+        _box_item("D", "Пороги детекции (доминирование / голод / пробы нод)")
         _box_item("A", "Алиасы нод (имена в уведах) + пользователи")
         _box_item("M", "Шаблоны сообщений (кастомизация)")
         if not installed:
@@ -1145,6 +1476,12 @@ def do_traffic_watcher_menu() -> None:
                  "🔔 Тест наблюдателя: нода без трафика 6 ч"),
                 ("traffic_stats_error",
                  "🔔 Тест наблюдателя: Stats API недоступен"),
+                ("traffic_node_down",
+                 "🔔 Тест наблюдателя: нода недоступна (TCP-проба)"),
+                ("traffic_node_degraded",
+                 "🔔 Тест наблюдателя: нода тупит (RTT выше порога)"),
+                ("traffic_node_up",
+                 "🔔 Тест наблюдателя: нода восстановлена"),
             ):
                 ok = _tw_notify_event(ev, txt, cfg)
                 print(f"  {'✅' if ok else '⚠️'} {ev}")
@@ -1199,6 +1536,9 @@ def _menu_settings(cfg: dict) -> None:
         "traffic_snapshot":        "Дайджест распределения трафика",
         "traffic_node_starved":    "Нода в ротации без трафика (голод)",
         "traffic_stats_error":     "Stats API недоступен",
+        "traffic_node_down":       "Нода недоступна (TCP-проба не проходит)",
+        "traffic_node_degraded":   "Нода тупит (RTT пробы выше порога)",
+        "traffic_node_up":         "Нода восстановлена (проба снова ОК)",
     }
     while True:
         os.system("clear")
@@ -1211,16 +1551,16 @@ def _menu_settings(cfg: dict) -> None:
             _box_row(f"  {C['GREEN'] if on else C['DIM']}"
                      f"{'[ВКЛ]' if on else '[ВЫКЛ]'}{C['NC']} {i}. {labels[ev]}")
         _box_sep()
-        _box_row(f"  5. Анти-спам: мин. пауза между уведами — "
+        _box_row(f"  8. Анти-спам: мин. пауза между уведами — "
                  f"{C['BOLD']}{cfg.get('min_gap_min', 10)} мин{C['NC']}")
-        _box_row(f"  6. Тихие часы: {qh.get('from') or '—'} … {qh.get('to') or '—'} "
+        _box_row(f"  9. Тихие часы: {qh.get('from') or '—'} … {qh.get('to') or '—'} "
                  f"{C['DIM']}(пусто = выкл){C['NC']}")
-        _box_row(f"  7. Дайджест: раз в {C['BOLD']}{cfg.get('snapshot_hours', 0) or 0}"
+        _box_row(f"  10. Дайджест: раз в {C['BOLD']}{cfg.get('snapshot_hours', 0) or 0}"
                  f" ч{C['NC']} {C['DIM']}(0 = выкл){C['NC']}")
-        _box_row(f"  8. Chat ID override: {cfg.get('chat_id_override') or 'основной'}")
-        _box_row(f"  9. Наблюдатель: "
+        _box_row(f"  11. Chat ID override: {cfg.get('chat_id_override') or 'основной'}")
+        _box_row(f"  12. Наблюдатель: "
                  f"{'включён' if cfg.get('enabled', True) else 'выключен'}")
-        _box_row(f"  10. Дайджест: проценты="
+        _box_row(f"  13. Дайджест: проценты="
                  f"{'да' if cfg.get('include_percent', True) else 'нет'}"
                  f"  байты={'да' if cfg.get('include_bytes', True) else 'нет'}")
         _box_back()
@@ -1231,29 +1571,29 @@ def _menu_settings(cfg: dict) -> None:
             return
         if ch in ("0", "Q", ""):
             return
-        if ch.isdigit() and 1 <= int(ch) <= 4:
+        if ch.isdigit() and 1 <= int(ch) <= len(EVENTS):
             ev = EVENTS[int(ch) - 1]
             nf[ev] = not nf.get(ev, True)
-        elif ch == "5":
+        elif ch == "8":
             raw = input("  Мин. пауза, мин (Enter = без изменений): ").strip()
             if raw.isdigit():
                 cfg["min_gap_min"] = int(raw)
-        elif ch == "6":
+        elif ch == "9":
             f = input("  Тихие часы — от (ЧЧ:ММ, Enter = выкл): ").strip()
             t = input("  Тихие часы — до (ЧЧ:ММ): ").strip()
             qh["from"], qh["to"] = (f if f else ""), (t if f else "")
-        elif ch == "7":
+        elif ch == "10":
             raw = input("  Интервал дайджеста, часов (0 = выкл): ").strip()
             if raw.isdigit():
                 cfg["snapshot_hours"] = int(raw)
-        elif ch == "8":
+        elif ch == "11":
             raw = input("  Chat ID для уведов наблюдателя (Enter = основной): ").strip()
             cfg["chat_id_override"] = raw
-        elif ch == "9":
+        elif ch == "12":
             cfg["enabled"] = not cfg.get("enabled", True)
             _box_ok("Наблюдатель " + ("включён" if cfg["enabled"] else "выключен"))
             input(f"{C['CYAN']}Нажмите Enter...{C['NC']}")
-        elif ch == "10":
+        elif ch == "13":
             cfg["include_percent"] = not cfg.get("include_percent", True)
             cfg["include_bytes"] = not cfg.get("include_bytes", True)
             _box_ok(f"Дайджест: проценты="
@@ -1264,7 +1604,8 @@ def _menu_settings(cfg: dict) -> None:
 
 def _menu_thresholds(cfg: dict) -> None:
     """Пороги детекции: доминирование (доля %, мин. объём окна),
-    голод ноды (часы, мин. трафик окна)."""
+    голод ноды (часы, мин. трафик окна), активные пробы нод
+    (TCP host:port — недоступность/деградация)."""
     from chimera.modules.box_renderer import (
         _box_top, _box_row, _box_sep, _box_bottom, _box_back, _box_ok)
     C = _colors()
@@ -1288,6 +1629,20 @@ def _menu_thresholds(cfg: dict) -> None:
                  f"{C['NC']} {C['DIM']}(0 = выкл; нода в selector без трафика){C['NC']}")
         _box_row(f"  4. Мин. трафик окна для голода: {C['BOLD']}"
                  f"{cfg.get('starve_min_total_mb', 50)} МБ{C['NC']}")
+        _box_row(f"  5. Пробы нод (TCP): {C['BOLD']}"
+                 f"{'вкл' if cfg.get('probe', True) else 'выкл'}{C['NC']} "
+                 f"{C['DIM']}(недоступность/деградация — все chain-ноды){C['NC']}")
+        _box_row(f"  6. Таймаут пробы: {C['BOLD']}"
+                 f"{cfg.get('probe_timeout_sec', 5)} сек{C['NC']} "
+                 f"{C['DIM']}(1-30){C['NC']}")
+        _box_row(f"  7. Неудач подряд → «нода недоступна»: {C['BOLD']}"
+                 f"{cfg.get('probe_fails', 2)}{C['NC']} {C['DIM']}(1-10){C['NC']}")
+        _box_row(f"  8. Порог RTT деградации: {C['BOLD']}"
+                 f"{cfg.get('probe_degraded_ms', 500)} мс{C['NC']} "
+                 f"{C['DIM']}(0 = выкл; 0-5000){C['NC']}")
+        _box_row(f"  9. Медленных проб подряд → деградация: {C['BOLD']}"
+                 f"{cfg.get('probe_degraded_fails', 2)}{C['NC']} "
+                 f"{C['DIM']}(1-10){C['NC']}")
         _box_back()
         _box_bottom()
         try:
@@ -1312,6 +1667,25 @@ def _menu_thresholds(cfg: dict) -> None:
             raw = input("  Мин. трафик окна для голода, МБ (1-100000): ").strip()
             if raw.isdigit() and 1 <= int(raw) <= 100000:
                 cfg["starve_min_total_mb"] = int(raw)
+        elif ch == "5":
+            cfg["probe"] = not cfg.get("probe", True)
+            _box_ok("Пробы нод " + ("включены" if cfg["probe"] else "выключены"))
+        elif ch == "6":
+            raw = input("  Таймаут TCP-пробы, сек (1-30): ").strip()
+            if raw.isdigit() and 1 <= int(raw) <= 30:
+                cfg["probe_timeout_sec"] = int(raw)
+        elif ch == "7":
+            raw = input("  Неудач проб подряд → «нода недоступна» (1-10): ").strip()
+            if raw.isdigit() and 1 <= int(raw) <= 10:
+                cfg["probe_fails"] = int(raw)
+        elif ch == "8":
+            raw = input("  Порог RTT деградации, мс (0 = выкл, 0-5000): ").strip()
+            if raw.isdigit() and 0 <= int(raw) <= 5000:
+                cfg["probe_degraded_ms"] = int(raw)
+        elif ch == "9":
+            raw = input("  Медленных проб подряд → деградация (1-10): ").strip()
+            if raw.isdigit() and 1 <= int(raw) <= 10:
+                cfg["probe_degraded_fails"] = int(raw)
 
 
 def _menu_aliases(cfg: dict) -> None:

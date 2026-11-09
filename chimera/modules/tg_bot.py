@@ -269,6 +269,9 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "traffic_snapshot":        "📈",  # дайджест распределения трафика
         "traffic_node_starved":    "💤",  # нода в ротации без трафика
         "traffic_stats_error":     "⚠️",  # Stats API недоступен
+        "traffic_node_down":       "📴",  # активная проба: нода недоступна
+        "traffic_node_degraded":   "🐌",  # активная проба: нода тупит (RTT)
+        "traffic_node_up":         "🔌",  # активная проба: нода восстановлена
         "ttl_expiring":    "⏳",   # TTL-пользователи: скоро истекает
         "ttl_expired":     "⌛",   # TTL-пользователи: истёк
         "port_knocking":   "🚪",   # port knocking: события
@@ -2398,6 +2401,9 @@ def do_manage_telegram() -> None:
             "traffic_snapshot":        "Трафик-наблюдатель: дайджест распределения по нодам",
             "traffic_node_starved":    "Трафик-наблюдатель: нода в ротации без трафика",
             "traffic_stats_error":     "Трафик-наблюдатель: Stats API недоступен",
+            "traffic_node_down":       "Трафик-наблюдатель: нода недоступна (проба)",
+            "traffic_node_degraded":   "Трафик-наблюдатель: нода тупит (RTT)",
+            "traffic_node_up":         "Трафик-наблюдатель: нода восстановлена",
             # TTL-пользователи (user_lifecycle / ttl_users)
             "ttl_expiring":   "TTL-пользователь: срок истекает (<24ч)",
             "ttl_expired":    "TTL-пользователь: срок истёк (удалён)",
@@ -2491,6 +2497,8 @@ def do_manage_telegram() -> None:
                        "exit_ip_change","exit_snapshot",
                        "traffic_dominant_change","traffic_snapshot",
                        "traffic_node_starved","traffic_stats_error",
+                       "traffic_node_down","traffic_node_degraded",
+                       "traffic_node_up",
                        "ttl_expiring","ttl_expired","port_knocking",
                        "ingress_geoip","install_complete",
                        "users_drift","users_restored","users_restore_failed",
@@ -2522,6 +2530,9 @@ def do_manage_telegram() -> None:
                 "Трафик-наблюдатель: дайджест распределения",
                 "Трафик-наблюдатель: нода без трафика",
                 "Трафик-наблюдатель: Stats API недоступен",
+                "Трафик-наблюдатель: нода недоступна (проба)",
+                "Трафик-наблюдатель: нода тупит (RTT)",
+                "Трафик-наблюдатель: нода восстановлена",
                 "TTL: срок истекает","TTL: срок истёк",
                 "Port Knocking: события","Блокировка входящих: события",
                 "Установка завершена",

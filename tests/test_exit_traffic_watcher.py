@@ -30,15 +30,24 @@ exit_traffic_watcher закрывает его счётчиками Stats API
  16. Интеграция с _core.py: пункт меню TW + импорт (канон test_dns_redirect)
  17. _tw_strategy_label/_tw_dominant_change_text — человекочитаемый
      заголовок уведы смены ноды (режим + откуда → куда)
+ 18. _tw_tcp_probe/_tw_probe_nodes — TCP-проба host:port (патченный
+     socket: успех/таймаут/отказ/DNS — без сети)
+ 19. _tw_probe_update — машина состояний проб: down/degraded/up,
+     флап, агрегация, guard «все ноды разом» (локальная проблема)
+ 20. Тексты увед проб (_tw_probe_event_text + строки нод)
+ 21. run_once + пробы: события через общий _emit, персист
+     probe-состояния (в т.ч. на пути отказа Stats API), метки
+     last_traffic_ts, {node}-плейсхолдер
 """
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
@@ -306,6 +315,352 @@ class TestStarve(unittest.TestCase):
         zs, starved = _tw_starve_update(zs, {TAG_A: {"up": 1, "down": 1}},
                                         [TAG_A], 2000.0, 10, 0)
         self.assertEqual(starved, [])   # B вне selector — не наша забота
+
+
+class _FakeSock:
+    """Фейковый сокет для патча socket.create_connection (контекст-менеджер)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class TestTcpProbe(unittest.TestCase):
+    """_tw_tcp_probe — TCP-проба host:port (патченный socket — без сети)."""
+
+    def test_success_measures_ms(self):
+        from chimera.modules.exit_traffic_watcher import _tw_tcp_probe
+        with patch("socket.create_connection", return_value=_FakeSock()):
+            r = _tw_tcp_probe("node-a.example.com", 443, 5)
+        self.assertTrue(r["ok"])
+        self.assertIsInstance(r["ms"], int)
+        self.assertGreaterEqual(r["ms"], 0)
+        self.assertEqual(r["err"], "")
+
+    def test_timeout(self):
+        from chimera.modules.exit_traffic_watcher import _tw_tcp_probe
+        with patch("socket.create_connection",
+                   side_effect=socket.timeout("timed out")):
+            r = _tw_tcp_probe("node-a.example.com", 443, 1)
+        self.assertFalse(r["ok"])
+        self.assertIsNone(r["ms"])
+        self.assertEqual(r["err"], "timeout")
+
+    def test_refused_errno_prefix_stripped(self):
+        """ConnectionRefusedError '[Errno 111] Connection refused' →
+        короткий текст 'Connection refused'."""
+        from chimera.modules.exit_traffic_watcher import _tw_tcp_probe
+        with patch("socket.create_connection",
+                   side_effect=ConnectionRefusedError(111,
+                                                      "Connection refused")):
+            r = _tw_tcp_probe("node-a.example.com", 443, 5)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["err"], "Connection refused")
+
+    def test_dns_failure(self):
+        """Отказ getaddrinfo (внутри create_connection) → err='DNS'."""
+        from chimera.modules.exit_traffic_watcher import _tw_tcp_probe
+        with patch("socket.getaddrinfo",
+                   side_effect=socket.gaierror("name resolution failed")):
+            r = _tw_tcp_probe("nope.invalid", 443, 5)
+        self.assertFalse(r["ok"])
+        self.assertIsNone(r["ms"])
+        self.assertEqual(r["err"], "DNS")
+
+
+class TestProbeUpdate(unittest.TestCase):
+    """_tw_probe_update — машина состояний активных проб
+    (down/degraded/up, флап, guard «все ноды разом»)."""
+
+    CFG = {"probe_fails": 2, "probe_degraded_ms": 500,
+           "probe_degraded_fails": 2}
+
+    def _res(self, ok_a=True, ms_a=50, ok_b=True, ms_b=50) -> dict:
+        return {TAG_A: {"ok": ok_a, "ms": ms_a if ok_a else None,
+                        "err": "" if ok_a else "timeout"},
+                TAG_B: {"ok": ok_b, "ms": ms_b if ok_b else None,
+                        "err": "" if ok_b else "timeout"}}
+
+    def test_down_after_consecutive_fails_only(self):
+        """ok → 1 неудача (молчим) → 2-я подряд → down → 3-я (молчим)."""
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        st, ev = _tw_probe_update({}, self._res(ok_a=False),
+                                  self.CFG, 1000.0)
+        self.assertEqual(ev, [])
+        self.assertEqual(st["probe_fails"][TAG_A], 1)
+        self.assertEqual(st["probe_status"][TAG_A], "ok")
+        st, ev = _tw_probe_update(st, self._res(ok_a=False),
+                                  self.CFG, 1010.0)
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["event"], "traffic_node_down")
+        self.assertEqual(ev[0]["tags"], [TAG_A])
+        self.assertEqual(ev[0]["info"][TAG_A]["fails"], 2)
+        self.assertEqual(ev[0]["info"][TAG_A]["err"], "timeout")
+        st, ev = _tw_probe_update(st, self._res(ok_a=False),
+                                  self.CFG, 1020.0)
+        self.assertEqual(ev, [])   # статус не менялся — анти-спам
+
+    def test_recovery_after_down(self):
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        st = {"probe_fails": {TAG_A: 2}, "probe_slow": {},
+              "probe_status": {TAG_A: "down"}, "all_probes_down": False}
+        st, ev = _tw_probe_update(st, self._res(), self.CFG, 2000.0)
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["event"], "traffic_node_up")
+        self.assertEqual(ev[0]["tags"], [TAG_A])
+        self.assertEqual(ev[0]["info"][TAG_A]["prev"], "down")
+        self.assertEqual(st["probe_fails"][TAG_A], 0)
+        self.assertEqual(st["probe_status"][TAG_A], "ok")
+
+    def test_degraded_after_consecutive_slow_probes(self):
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        st, ev = _tw_probe_update({}, self._res(ms_a=800),
+                                  self.CFG, 1000.0)
+        self.assertEqual(ev, [])   # одна медленная — ещё не деградация
+        self.assertEqual(st["probe_slow"][TAG_A], 1)
+        st, ev = _tw_probe_update(st, self._res(ms_a=900),
+                                  self.CFG, 1010.0)
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["event"], "traffic_node_degraded")
+        self.assertEqual(ev[0]["info"][TAG_A]["ms"], 900)
+        self.assertEqual(ev[0]["info"][TAG_A]["threshold"], 500)
+        self.assertEqual(ev[0]["info"][TAG_A]["fails"], 2)
+        self.assertEqual(st["probe_status"][TAG_A], "degraded")
+
+    def test_degraded_recovery(self):
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        st = {"probe_fails": {}, "probe_slow": {TAG_A: 2},
+              "probe_status": {TAG_A: "degraded"}, "all_probes_down": False}
+        st, ev = _tw_probe_update(st, self._res(ms_a=40),
+                                  self.CFG, 2000.0)
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["event"], "traffic_node_up")
+        self.assertEqual(ev[0]["info"][TAG_A]["prev"], "degraded")
+        self.assertEqual(st["probe_slow"][TAG_A], 0)
+
+    def test_flap_fail_then_ok_resets_counters(self):
+        """Единичный отказ между успешными пробами — счётчики
+        сбрасываются, событий нет."""
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        st, ev = _tw_probe_update({}, self._res(ok_a=False),
+                                  self.CFG, 1000.0)
+        self.assertEqual(ev, [])
+        st, ev = _tw_probe_update(st, self._res(), self.CFG, 1010.0)
+        self.assertEqual(ev, [])
+        self.assertEqual(st["probe_fails"][TAG_A], 0)
+        st, ev = _tw_probe_update(st, self._res(ok_a=False),
+                                  self.CFG, 1020.0)
+        self.assertEqual(ev, [])   # снова 1/2 — порог не достигнут
+
+    def test_all_fail_guard_local_event_once(self):
+        """Все ноды разом пали → ОДИН «локальный» down без персональных
+        статусов; повторный прогон молчит (анти-спам)."""
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        st, ev = _tw_probe_update({}, self._res(ok_a=False, ok_b=False),
+                                  self.CFG, 1000.0)
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["event"], "traffic_node_down")
+        self.assertTrue(ev[0]["local"])
+        self.assertEqual(ev[0]["total"], 2)
+        self.assertNotIn("tags", ev[0])
+        # персональные счётчики/статусы не тронуты
+        self.assertEqual(st["probe_fails"], {})
+        self.assertEqual(st["probe_status"], {})
+        self.assertTrue(st["all_probes_down"])
+        st, ev = _tw_probe_update(st, self._res(ok_a=False, ok_b=False),
+                                  self.CFG, 1010.0)
+        self.assertEqual(ev, [])   # уже было — молчим
+
+    def test_local_recovery_after_guard(self):
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        st = {"probe_fails": {}, "probe_slow": {}, "probe_status": {},
+              "all_probes_down": True}
+        st, ev = _tw_probe_update(st, self._res(ok_a=True, ok_b=False),
+                                  self.CFG, 2000.0)
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["event"], "traffic_node_up")
+        self.assertTrue(ev[0]["local_recovery"])
+        self.assertEqual(ev[0]["ok_count"], 1)
+        self.assertEqual(ev[0]["total"], 2)
+        self.assertFalse(st["all_probes_down"])
+
+    def test_two_nodes_down_same_run_single_event(self):
+        """Две ноды падают в одном прогоне (третья жива — guard не
+        мешает) → ОДНО событие с двумя tags: одна TG-уведа на тип
+        за прогон (min_gap friendly)."""
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        TAG_C = "chain-exit-3"
+        res = {TAG_A: {"ok": False, "ms": None, "err": "timeout"},
+               TAG_B: {"ok": False, "ms": None, "err": "Connection refused"},
+               TAG_C: {"ok": True, "ms": 30, "err": ""}}
+        st = {"probe_fails": {TAG_A: 1, TAG_B: 1}, "probe_slow": {},
+              "probe_status": {TAG_A: "ok", TAG_B: "ok"},
+              "all_probes_down": False}
+        st, ev = _tw_probe_update(st, res, self.CFG, 2000.0)
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["event"], "traffic_node_down")
+        self.assertEqual(ev[0]["tags"], [TAG_A, TAG_B])
+        self.assertEqual(ev[0]["info"][TAG_A]["err"], "timeout")
+        self.assertEqual(ev[0]["info"][TAG_B]["err"],
+                         "Connection refused")
+        # обе ноды в статусе down, живая нода не затронута
+        self.assertEqual(st["probe_status"][TAG_A], "down")
+        self.assertEqual(st["probe_status"][TAG_B], "down")
+        self.assertEqual(st["probe_status"][TAG_C], "ok")
+        self.assertFalse(st["all_probes_down"])
+
+    def test_stale_tags_pruned_from_counters(self):
+        """Нода исчезла из результатов (состав chain_nodes сменился) —
+        её счётчики не копятся вечно."""
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        st = {"probe_fails": {TAG_A: 2, TAG_B: 1},
+              "probe_slow": {TAG_B: 1},
+              "probe_status": {TAG_A: "down", TAG_B: "ok"},
+              "all_probes_down": False}
+        st, ev = _tw_probe_update(st, {TAG_A: {"ok": True, "ms": 10,
+                                               "err": ""}},
+                                  self.CFG, 2000.0)
+        self.assertNotIn(TAG_B, st["probe_fails"])
+        self.assertNotIn(TAG_B, st["probe_slow"])
+        self.assertNotIn(TAG_B, st["probe_status"])
+        # A восстановлена — up-событие на переходе down→ok
+        self.assertEqual(ev[0]["event"], "traffic_node_up")
+
+    def test_degraded_disabled_when_threshold_zero(self):
+        """probe_degraded_ms=0 — деградация выключена, любые RTT = ok."""
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        cfg = dict(self.CFG, probe_degraded_ms=0)
+        st, ev = _tw_probe_update({}, self._res(ms_a=9999), cfg, 1000.0)
+        st, ev = _tw_probe_update(st, self._res(ms_a=9999), cfg, 1010.0)
+        self.assertEqual(ev, [])
+        self.assertEqual(st["probe_slow"][TAG_A], 0)
+        self.assertEqual(st["probe_status"][TAG_A], "ok")
+
+    def test_tolerates_missing_and_none_state_keys(self):
+        """Отсутствующие/None ключи pstate — норма (свежая __state__)."""
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        st, ev = _tw_probe_update(
+            {"probe_fails": None, "probe_slow": None,
+             "probe_status": None, "all_probes_down": None},
+            self._res(), self.CFG, 1000.0)
+        self.assertEqual(ev, [])
+        self.assertEqual(st["probe_fails"][TAG_A], 0)
+        self.assertFalse(st["all_probes_down"])
+        # None-значения внутри счётчиков — как 0
+        st, ev = _tw_probe_update(
+            {"probe_fails": {TAG_A: None}, "probe_slow": {TAG_A: None},
+             "probe_status": {TAG_A: None}, "all_probes_down": False},
+            self._res(ok_a=False), self.CFG, 1010.0)
+        self.assertEqual(st["probe_fails"][TAG_A], 1)
+
+    def test_empty_results_noop(self):
+        from chimera.modules.exit_traffic_watcher import _tw_probe_update
+        st, ev = _tw_probe_update({}, None, self.CFG, 1000.0)
+        self.assertEqual(ev, [])
+        self.assertEqual(st, {"probe_fails": {}, "probe_slow": {},
+                              "probe_status": {},
+                              "all_probes_down": False})
+
+
+class TestProbeTexts(unittest.TestCase):
+    """Тексты увед активных проб: строки нод + локальные сценарии +
+    агрегация нескольких нод в одно сообщение."""
+
+    NAMES = {TAG_A: "RU1", TAG_B: KEY_B}
+    KEYS = {TAG_A: KEY_A, TAG_B: KEY_B}
+
+    def test_down_line_with_traffic_context_and_hm(self):
+        from chimera.modules.exit_traffic_watcher import _tw_probe_event_text
+        ev = {"event": "traffic_node_down", "tags": [TAG_A],
+              "info": {TAG_A: {"err": "timeout", "fails": 2}}}
+        txt = _tw_probe_event_text(
+            ev, self.NAMES, self.KEYS, {TAG_A: 1000.0}, 1000.0 + 1800.0,
+            {KEY_A: {"up": False}}, "relay")
+        self.assertEqual(
+            txt.split("\n")[0],
+            f"Нода <b><code>RU1</code></b> ({KEY_A}) недоступна: "
+            f"TCP-проба не проходит 2 прогонов подряд (timeout). "
+            f"(Health Monitor: DOWN)")
+        self.assertIn("Последний трафик через ноду: 30 мин назад", txt)
+
+    def test_down_line_without_traffic(self):
+        from chimera.modules.exit_traffic_watcher import _tw_probe_event_text
+        ev = {"event": "traffic_node_down", "tags": [TAG_B],
+              "info": {TAG_B: {"err": "Connection refused", "fails": 3}}}
+        txt = _tw_probe_event_text(ev, self.NAMES, self.KEYS, {}, 0.0,
+                                   {KEY_B: {"up": True}}, "relay")
+        self.assertIn(
+            f"Нода <b><code>{KEY_B}</code></b> ({KEY_B}) недоступна: "
+            f"TCP-проба не проходит 3 прогонов подряд "
+            f"(Connection refused).", txt)
+        self.assertIn("Трафика через ноду в этом окне не было.", txt)
+        self.assertNotIn("Health Monitor", txt)
+
+    def test_degraded_line(self):
+        from chimera.modules.exit_traffic_watcher import _tw_probe_event_text
+        ev = {"event": "traffic_node_degraded", "tags": [TAG_A],
+              "info": {TAG_A: {"ms": 812, "threshold": 500, "fails": 2}}}
+        txt = _tw_probe_event_text(ev, self.NAMES, self.KEYS, {}, 0.0,
+                                   {}, "relay")
+        self.assertEqual(
+            txt, f"Нода <b><code>RU1</code></b> ({KEY_A}) тупит: "
+                 f"TCP-проба проходит, но RTT 812 мс выше порога "
+                 f"500 мс (2 прогонов подряд).")
+
+    def test_up_line_after_down_and_degraded(self):
+        from chimera.modules.exit_traffic_watcher import _tw_probe_up_line
+        self.assertEqual(
+            _tw_probe_up_line("RU1", KEY_A, 42, "down"),
+            f"Нода <b><code>RU1</code></b> ({KEY_A}) восстановлена: "
+            f"RTT 42 мс (после отказа).")
+        self.assertEqual(
+            _tw_probe_up_line("RU1", KEY_A, 42, "degraded"),
+            f"Нода <b><code>RU1</code></b> ({KEY_A}) восстановлена: "
+            f"RTT 42 мс (после деградации).")
+
+    def test_local_all_down_and_recovery(self):
+        from chimera.modules.exit_traffic_watcher import _tw_probe_event_text
+        txt = _tw_probe_event_text(
+            {"event": "traffic_node_down", "local": True, "total": 3},
+            {}, {}, {}, 0.0, {}, "relay-1")
+        self.assertEqual(
+            txt, "Все 3 exit-нод недоступны одновременно — вероятна "
+                 "локальная проблема на relay-1 (сеть/DNS/исходящий "
+                 "трафик). Уведы по отдельным нодам подавлены.")
+        txt = _tw_probe_event_text(
+            {"event": "traffic_node_up", "local_recovery": True,
+             "ok_count": 2, "total": 3}, {}, {}, {}, 0.0, {}, "relay-1")
+        self.assertEqual(txt, "Связь с exit-нодами восстановлена: "
+                              "2 из 3 отвечают.")
+
+    def test_multi_node_aggregation_one_detail(self):
+        """Две ноды в одном событии — строки через \\n в одном detail."""
+        from chimera.modules.exit_traffic_watcher import _tw_probe_event_text
+        ev = {"event": "traffic_node_down",
+              "tags": [TAG_A, TAG_B],
+              "info": {TAG_A: {"err": "timeout", "fails": 2},
+                       TAG_B: {"err": "DNS", "fails": 2}}}
+        txt = _tw_probe_event_text(ev, self.NAMES, self.KEYS, {}, 0.0,
+                                   {}, "relay")
+        lines = txt.split("\n")
+        self.assertEqual(len(lines), 4)   # 2 ноды × (строка + контекст)
+        self.assertIn("<code>RU1</code>", lines[0])
+        self.assertIn(f"<code>{KEY_B}</code>", lines[2])
+
+    def test_event_extra_node_placeholder(self):
+        from chimera.modules.exit_traffic_watcher import (
+            _tw_probe_event_extra)
+        ev = {"event": "traffic_node_down", "tags": [TAG_A, TAG_B],
+              "info": {}}
+        self.assertEqual(
+            _tw_probe_event_extra(ev, self.NAMES, self.KEYS),
+            {"node": "RU1"})
+        self.assertEqual(
+            _tw_probe_event_extra({"event": "traffic_node_down",
+                                   "local": True, "total": 2},
+                                  self.NAMES, self.KEYS), {})
 
 
 class TestFmtAndRows(unittest.TestCase):
@@ -639,7 +994,8 @@ class TestRunOnce(unittest.TestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def _patch_all(self, stats=None):
+    def _patch_all(self, stats=None, probe=None):
+        """Патчит пути IO + фейки Stats API/проб/увед (пробы — без сети)."""
         import chimera.modules.exit_traffic_watcher as tw
 
         def fake_notify(event, detail, cfg, extra=None):
@@ -651,6 +1007,7 @@ class TestRunOnce(unittest.TestCase):
             tw, TW_CFG_FILE=self._cfg, STATE_FILE=self._state,
             SB_STATE_FILE=self._sb, XRAY_CFG_CANDIDATES=(self._xray_cfg,),
             _tw_query_stats=lambda timeout=8: stats,
+            _tw_probe_nodes=lambda chain_nodes, cfg: probe,
             _tw_notify_event=fake_notify)
 
     def _stats(self, a_up=0, a_dn=0, b_up=0, b_dn=0) -> dict:
@@ -807,6 +1164,229 @@ class TestRunOnce(unittest.TestCase):
         self.assertIn("traffic_snapshot", self._events)
 
 
+class TestRunOnceProbe(unittest.TestCase):
+    """run_once + активные пробы: события через общий _emit (фильтр/
+    quiet/min_gap), персист probe-состояния (в т.ч. при отказе Stats
+    API), метки last_traffic_ts, {node}-плейсхолдер, вкл/выкл probe."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg = self._tmpdir / "exit_traffic_watcher.json"
+        self._state = self._tmpdir / "state.json"
+        self._sb = self._tmpdir / "smart_balancer.json"
+        self._xray_cfg = self._tmpdir / "config.json"
+        self._hm = self._tmpdir / "node-health-state.json"
+        self._state.write_text(json.dumps(
+            {"chain_nodes": [ND_A, ND_B]}), encoding="utf-8")
+        self._xray_cfg.write_text(json.dumps(
+            {"routing": {"balancers": [{
+                "tag": "chain-balancer",
+                "selector": [TAG_A, TAG_B],
+                "strategy": {"type": "roundRobin"}}]}}),
+            encoding="utf-8")
+        self._events: list[str] = []
+        self._details: list[tuple] = []
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_all(self, stats=None, probe=None, probe_fn=None):
+        """probe — готовые результаты; probe_fn — фейк-функция проб
+        (для assert not called)."""
+        import chimera.modules.exit_traffic_watcher as tw
+
+        def fake_notify(event, detail, cfg, extra=None):
+            self._events.append(event)
+            self._details.append((event, detail, extra))
+            return True
+
+        return patch.multiple(
+            tw, TW_CFG_FILE=self._cfg, STATE_FILE=self._state,
+            SB_STATE_FILE=self._sb, XRAY_CFG_CANDIDATES=(self._xray_cfg,),
+            HM_STATE_FILE=self._hm,
+            _tw_query_stats=lambda timeout=8: stats,
+            _tw_probe_nodes=probe_fn if probe_fn is not None
+            else (lambda chain_nodes, cfg: probe),
+            _tw_notify_event=fake_notify)
+
+    def _stats(self, a_up=0, a_dn=0, b_up=0, b_dn=0) -> dict:
+        return {TAG_A: {"up": a_up, "down": a_dn},
+                TAG_B: {"up": b_up, "down": b_dn}}
+
+    def _probe(self, ok_a=True, ms_a=40, ok_b=True, ms_b=40) -> dict:
+        return {TAG_A: {"ok": ok_a, "ms": ms_a if ok_a else None,
+                        "err": "" if ok_a else "timeout"},
+                TAG_B: {"ok": ok_b, "ms": ms_b if ok_b else None,
+                        "err": "" if ok_b else "timeout"}}
+
+    def _cfg_write(self, **kw):
+        cfg = {"enabled": True, "snapshot_hours": 0, "min_gap_min": 0,
+               "aliases": {KEY_A: "RU1"}, "starve_hours": 0}
+        cfg.update(kw)
+        self._cfg.write_text(json.dumps(cfg), encoding="utf-8")
+
+    def _state_of(self) -> dict:
+        return json.loads(self._cfg.read_text())["__state__"]
+
+    def test_dead_node_down_event_and_state_persisted(self):
+        """(a) нода умирает (2 неудачи подряд) → traffic_node_down через
+        _tw_notify_event + probe-состояние в __state__."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._cfg_write()
+        stats = self._stats(100, 100, 100, 100)
+        with self._patch_all(stats=stats, probe=self._probe()):
+            res = tw.run_once()
+        self.assertEqual(res["events"], [])   # 1-я проба прошла
+        with self._patch_all(stats=stats, probe=self._probe(ok_a=False)):
+            tw.run_once()                     # 1-я неудача — молчим
+        self.assertEqual(self._events, [])
+        with self._patch_all(stats=stats, probe=self._probe(ok_a=False)):
+            res = tw.run_once()               # 2-я подряд — down
+        self.assertIn("traffic_node_down", res["events"])
+        det = next(d for ev, d, _ in self._details
+                   if ev == "traffic_node_down")
+        self.assertIn(f"Нода <b><code>RU1</code></b> ({KEY_A}) недоступна",
+                      det)
+        self.assertIn("2 прогонов подряд (timeout)", det)
+        extra = next(x for ev, _, x in self._details
+                     if ev == "traffic_node_down")
+        self.assertEqual(extra, {"node": "RU1"})
+        st = self._state_of()
+        self.assertEqual(st["probe_fails"][TAG_A], 2)
+        self.assertEqual(st["probe_status"][TAG_A], "down")
+
+    def test_probe_disabled_no_calls(self):
+        """(b) probe=false в cfg → пробы не выполняются вовсе."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._cfg_write(probe=False)
+        probe_fn = MagicMock()
+        with self._patch_all(stats=self._stats(1, 1, 1, 1),
+                             probe_fn=probe_fn):
+            tw.run_once()
+        probe_fn.assert_not_called()
+
+    def test_stats_fail_path_persists_probe_state(self):
+        """(c) Stats API недоступен → ранний выход НЕ теряет
+        probe-состояние этого прогона (down-событие проб всё равно
+        уходит — пробы не зависят от Stats API)."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._cfg_write()
+        with self._patch_all(stats=None, probe=self._probe(ok_a=False)):
+            tw.run_once()
+        with self._patch_all(stats=None, probe=self._probe(ok_a=False)):
+            res = tw.run_once()
+        self.assertFalse(res["stats_ok"])
+        self.assertIn("traffic_node_down", res["events"])
+        st = self._state_of()
+        self.assertEqual(st["probe_fails"][TAG_A], 2)
+        self.assertEqual(st["probe_status"][TAG_A], "down")
+        self.assertEqual(st["stats_fails"], 2)
+
+    def test_last_traffic_ts_context_in_down_message(self):
+        """(d) нода несла трафик → умерла: down-уведа содержит «Последний
+        трафик через ноду: N мин назад»; без трафика — «в этом окне
+        не было»; метка обновляется только на живом трафике."""
+        import time as _t
+        import chimera.modules.exit_traffic_watcher as tw
+        self._cfg_write()
+        # прогон 1: A несла трафик (дельта > 0), обе ноды живы
+        with self._patch_all(stats=self._stats(10, 10, 5, 5),
+                             probe=self._probe()):
+            tw.run_once()
+        st = self._state_of()
+        self.assertAlmostEqual(st["last_traffic_ts"][TAG_A], _t.time(),
+                               delta=5)
+        # прогоны 2-3: A умирает, счётчики A не двигаются
+        for _ in range(2):
+            with self._patch_all(stats=self._stats(10, 10, 10, 15),
+                                 probe=self._probe(ok_a=False)):
+                tw.run_once()
+        det = next(d for ev, d, _ in self._details
+                   if ev == "traffic_node_down")
+        self.assertIn("Последний трафик через ноду:", det)
+        self.assertIn("мин назад", det)
+        # B без собственного трафика с базового прогона... нет: B
+        # получает дельту; отдельно проверяем ноду БЕЗ трафика —
+        # сбрасываем метки и роняем B (A жива, guard не мешает)
+        st_now = json.loads(self._cfg.read_text())
+        st_now["__state__"]["last_traffic_ts"] = {}
+        st_now["__state__"]["probe_fails"] = {TAG_B: 1}
+        st_now["__state__"]["probe_status"] = {TAG_B: "ok"}
+        self._cfg.write_text(json.dumps(st_now), encoding="utf-8")
+        with self._patch_all(stats=self._stats(10, 10, 10, 15),
+                             probe=self._probe(ok_b=False)):
+            tw.run_once()
+        det_b = self._details[-1][1]
+        self.assertIn("Трафика через ноду в этом окне не было.", det_b)
+
+    def test_recovery_run_sends_node_up(self):
+        """(e) после down — проба снова ОК → traffic_node_up
+        («восстановлена... после отказа»)."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._cfg_write()
+        stats = self._stats(100, 100, 100, 100)
+        for _ in range(2):
+            with self._patch_all(stats=stats, probe=self._probe(ok_a=False)):
+                tw.run_once()
+        self.assertIn("traffic_node_down", self._events)
+        with self._patch_all(stats=stats, probe=self._probe()):
+            res = tw.run_once()
+        self.assertIn("traffic_node_up", res["events"])
+        det = next(d for ev, d, _ in self._details
+                   if ev == "traffic_node_up")
+        self.assertIn(
+            f"Нода <b><code>RU1</code></b> ({KEY_A}) восстановлена: "
+            f"RTT 40 мс (после отказа).", det)
+        st = self._state_of()
+        self.assertEqual(st["probe_status"][TAG_A], "ok")
+        self.assertEqual(st["probe_fails"][TAG_A], 0)
+
+    def test_all_nodes_down_local_event(self):
+        """Все ноды разом недоступны → «локальная проблема», отдельные
+        down-уведы подавлены; восстановление связи — local_recovery."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._cfg_write()
+        stats = self._stats(100, 100, 100, 100)
+        with self._patch_all(stats=stats,
+                             probe=self._probe(ok_a=False, ok_b=False)):
+            res = tw.run_once()
+        self.assertIn("traffic_node_down", res["events"])
+        det = next(d for ev, d, _ in self._details
+                   if ev == "traffic_node_down")
+        self.assertIn("вероятна локальная проблема", det)
+        self.assertIn("Уведы по отдельным нодам подавлены", det)
+        # вторая итерация — анти-спам, молчим
+        with self._patch_all(stats=stats,
+                             probe=self._probe(ok_a=False, ok_b=False)):
+            res = tw.run_once()
+        self.assertEqual(res["events"], [])
+        # связь вернулась (B жива) → local_recovery
+        with self._patch_all(stats=stats,
+                             probe=self._probe(ok_a=False)):
+            res = tw.run_once()
+        self.assertIn("traffic_node_up", res["events"])
+        det = next(d for ev, d, _ in self._details
+                   if ev == "traffic_node_up")
+        self.assertIn("Связь с exit-нодами восстановлена: 1 из 2", det)
+
+    def test_hm_verdict_enriches_down_message(self):
+        """Health Monitor уже считает ноду DOWN → довесок
+        «(Health Monitor: DOWN)» в down-уведе."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._cfg_write()
+        self._hm.write_text(json.dumps({KEY_A: {"up": False}}),
+                            encoding="utf-8")
+        stats = self._stats(100, 100, 100, 100)
+        for _ in range(2):
+            with self._patch_all(stats=stats, probe=self._probe(ok_a=False)):
+                tw.run_once()
+        det = next(d for ev, d, _ in self._details
+                   if ev == "traffic_node_down")
+        self.assertIn("(Health Monitor: DOWN)", det)
+
+
 class TestTgBotMenuIntegration(unittest.TestCase):
     """Интеграция с «менюшкой» Telegram-уведомлений (управляемость
     событий наблюдателя — суть кейса №8)."""
@@ -822,7 +1402,9 @@ class TestTgBotMenuIntegration(unittest.TestCase):
         self.assertIsNotNone(m_labels, "event_labels не найден")
         body = m_labels.group(1)
         for ev in ("traffic_dominant_change", "traffic_snapshot",
-                   "traffic_node_starved", "traffic_stats_error"):
+                   "traffic_node_starved", "traffic_stats_error",
+                   "traffic_node_down", "traffic_node_degraded",
+                   "traffic_node_up"):
             self.assertIn(f'"{ev}"', body, f"{ev} отсутствует в event_labels")
 
     def test_ev_keys_labels_aligned(self):
@@ -839,13 +1421,21 @@ class TestTgBotMenuIntegration(unittest.TestCase):
         self.assertIn("traffic_dominant_change", keys)
         idx = keys.index("traffic_dominant_change")
         self.assertIn("доминирующая", labels[idx])
+        # новые события проб — в том же порядке keys↔labels
+        for ev, lbl in (("traffic_node_down", "недоступна"),
+                        ("traffic_node_degraded", "тупит"),
+                        ("traffic_node_up", "восстановлена")):
+            self.assertIn(ev, keys)
+            self.assertIn(lbl, labels[keys.index(ev)])
 
     def test_icons_for_watcher_events(self):
         from chimera.modules import tg_bot
         import inspect
         src = inspect.getsource(tg_bot.tg_notify_event)
         for ev in ("traffic_dominant_change", "traffic_snapshot",
-                   "traffic_node_starved", "traffic_stats_error"):
+                   "traffic_node_starved", "traffic_stats_error",
+                   "traffic_node_down", "traffic_node_degraded",
+                   "traffic_node_up"):
             self.assertIn(f'"{ev}"', src, f"нет иконки для {ev}")
 
     def test_tg_menu_item_seven(self):
