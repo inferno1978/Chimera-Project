@@ -1006,9 +1006,18 @@ class TestRunOnce(unittest.TestCase):
         return patch.multiple(
             tw, TW_CFG_FILE=self._cfg, STATE_FILE=self._state,
             SB_STATE_FILE=self._sb, XRAY_CFG_CANDIDATES=(self._xray_cfg,),
+            AWG_STATE_FILE=self._tmpdir / "awg-absent.json",
+            MIERU_STATE_FILE=self._tmpdir / "mieru-absent.json",
+            NAIVE_STATE_FILE=self._tmpdir / "naive-absent.json",
             _tw_query_stats=lambda timeout=8: stats,
             _tw_probe_nodes=lambda chain_nodes, cfg: probe,
-            _tw_notify_event=fake_notify)
+            _tw_notify_event=fake_notify,
+            _tw_ip_link_stats=lambda ifaces: {},
+            _tw_iptables_nat_output=lambda: {},
+            _tw_systemctl_show_ipacct=lambda unit: {
+                "IPAccounting": False, "IPIngressBytes": None,
+                "IPEgressBytes": None},
+            _tw_log=lambda *a, **kw: None)
 
     def _stats(self, a_up=0, a_dn=0, b_up=0, b_dn=0) -> dict:
         return {TAG_A: {"up": a_up, "down": a_dn},
@@ -1206,10 +1215,19 @@ class TestRunOnceProbe(unittest.TestCase):
             tw, TW_CFG_FILE=self._cfg, STATE_FILE=self._state,
             SB_STATE_FILE=self._sb, XRAY_CFG_CANDIDATES=(self._xray_cfg,),
             HM_STATE_FILE=self._hm,
+            AWG_STATE_FILE=self._tmpdir / "awg-absent.json",
+            MIERU_STATE_FILE=self._tmpdir / "mieru-absent.json",
+            NAIVE_STATE_FILE=self._tmpdir / "naive-absent.json",
             _tw_query_stats=lambda timeout=8: stats,
             _tw_probe_nodes=probe_fn if probe_fn is not None
             else (lambda chain_nodes, cfg: probe),
-            _tw_notify_event=fake_notify)
+            _tw_notify_event=fake_notify,
+            _tw_ip_link_stats=lambda ifaces: {},
+            _tw_iptables_nat_output=lambda: {},
+            _tw_systemctl_show_ipacct=lambda unit: {
+                "IPAccounting": False, "IPIngressBytes": None,
+                "IPEgressBytes": None},
+            _tw_log=lambda *a, **kw: None)
 
     def _stats(self, a_up=0, a_dn=0, b_up=0, b_dn=0) -> dict:
         return {TAG_A: {"up": a_up, "down": a_dn},
@@ -2094,6 +2112,7 @@ class TestRunOnceMultiCascade(unittest.TestCase):
             _tw_systemctl_show_ipacct=lambda unit: {
                 "IPAccounting": False, "IPIngressBytes": None,
                 "IPEgressBytes": None},
+            _tw_log=lambda *a, **kw: None,
             _tw_tcp_probe=lambda host, port, t: naive_probe
             if host.startswith("naive-exit") else
             {"ok": True, "ms": 10, "err": ""})
