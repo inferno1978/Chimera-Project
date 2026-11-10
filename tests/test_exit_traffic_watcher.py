@@ -1841,19 +1841,59 @@ class TestSourcesMultitransport(unittest.TestCase):
         self.assertEqual(src["probe_results"]["awg:nl1"]["ms"], 49)
 
     def test_awg_source_failover_mode(self):
+        """Failover + УСТАРЕВШИЕ слоты (LB был, выключен): awg1 — только
+        активному exit; слоты de→awg2/nl1→awg3 из прошлого LB — мимо
+        (туннели awg2+ снесены lb_deactivate; живой кейс RU2)."""
         import chimera.modules.exit_traffic_watcher as tw
         st = dict(AWG_STATE_LB)
         st["lb_mode"] = False
         self._awg.write_text(json.dumps(st), encoding="utf-8")
+        link = {"awg1": {"rx": 100, "tx": 200},
+                "awg2": {"rx": 999, "tx": 999},
+                "awg3": {"rx": 777, "tx": 777}}
         with patch.multiple(tw, AWG_STATE_FILE=self._awg,
-                            _tw_ip_link_stats=lambda ifaces: {}):
+                            _tw_ip_link_stats=lambda ifaces: link):
             src = tw._tw_awg_source()
         self.assertIsNotNone(src)
-        # failover: ротация = активный exit; awg1 по умолчанию (без слотов
-        # слоты_snapshot остаются — слоты есть и в failover после LB)
+        # failover: ротация = активный exit
         self.assertEqual(src["selector"], ["awg:pl1"])
         self.assertEqual(src["dead"], {"awg:de": True, "awg:nl1": True})
         self.assertEqual(src["strategy"], "AWG-каскад (failover)")
+        # счётчики ТОЛЬКО активному: awg1 принадлежит pl1, фантомных
+        # байтов у неактивных (устаревшие слоты awg2/awg3) — нет
+        self.assertEqual(src["counters"],
+                         {"awg:pl1": {"up": 200, "down": 100}})
+        self.assertEqual(src["nodes"]["awg:pl1"]["iface"], "awg1")
+        self.assertEqual(src["nodes"]["awg:de"]["iface"], "")
+        self.assertEqual(src["nodes"]["awg:nl1"]["iface"], "")
+
+    def test_awg_source_failover_no_lb_tree(self):
+        """Чистый failover без lb-поддерева (LB никогда не включался):
+        счётчики awg1 — только активному exit, запрос интерфейсов —
+        ровно [awg1] (живой кейс RU2: активный de, exits pl1/de/nl1)."""
+        import chimera.modules.exit_traffic_watcher as tw
+        st = {"cascade_role": "entry", "cascade_active_exit": "de",
+              "lb_mode": False,
+              "cascade_exits": AWG_STATE_LB["cascade_exits"]}
+        self._awg.write_text(json.dumps(st), encoding="utf-8")
+        link = {"awg1": {"rx": 500, "tx": 900},
+                "awg2": {"rx": 111, "tx": 222}}
+        seen: list = []
+
+        def fake_link(ifaces):
+            seen.append(list(ifaces))
+            return link
+
+        with patch.multiple(tw, AWG_STATE_FILE=self._awg,
+                            _tw_ip_link_stats=fake_link):
+            src = tw._tw_awg_source()
+        self.assertIsNotNone(src)
+        self.assertEqual(src["selector"], ["awg:de"])
+        self.assertEqual(src["dead"], {"awg:pl1": True, "awg:nl1": True})
+        self.assertEqual(src["counters"],
+                         {"awg:de": {"up": 900, "down": 500}})
+        # _tw_ip_link_stats вызван ровно с [awg1] — единственный туннель
+        self.assertEqual(seen, [["awg1"]])
 
     def test_awg_source_not_entry_or_missing(self):
         import chimera.modules.exit_traffic_watcher as tw
@@ -2178,6 +2218,48 @@ class TestRunOnceMultiCascade(unittest.TestCase):
                       "<b><code>pl1</code></b>", det)
         self.assertIn("Переключение ноды: <code>nl1</code> → "
                       "<b><code>pl1</code></b>", det)
+
+    def test_awg_failover_dominance_and_no_phantoms(self):
+        """Failover-AWG (RU2-кейс): счётчики только активному exit —
+        фантомных нод в acc/counters нет; смена активного (de→nl1,
+        awg1 перенацелен и рестартнут — счётчики с нуля) → событие
+        «AWG-каскад (failover): активная нода nl1»."""
+        import chimera.modules.exit_traffic_watcher as tw
+        st = {"cascade_role": "entry", "cascade_active_exit": "de",
+              "lb_mode": False,
+              "cascade_exits": AWG_STATE_LB["cascade_exits"]}
+        self._awg.write_text(json.dumps(st), encoding="utf-8")
+        self._write_cfg(snapshot_hours=0)
+        # прогон 1: база (de активен)
+        with self._patch_all(stats=self._stats(1, 1, 1, 1),
+                             link={"awg1": {"rx": 0, "tx": 0}}):
+            tw.run_once()
+        self._bump_snapshot_ts()
+        # прогон 2: весь awg-трафик через awg1 (= активный de)
+        with self._patch_all(stats=self._stats(1, 1, 1, 1),
+                             link={"awg1": {"rx": 4 * MB, "tx": 2 * MB}}):
+            tw.run_once()
+        st_w = json.loads(self._cfg.read_text())["__state__"]
+        self.assertEqual(st_w["dominant_tags"].get("awg"), "awg:de")
+        # фантомных счётчиков у неактивных exit-ов нет
+        self.assertNotIn("awg:nl1", st_w["counters"])
+        self.assertNotIn("awg:pl1", st_w["counters"])
+        self.assertNotIn("awg:nl1", st_w["acc"])
+        self._bump_snapshot_ts()
+        # прогон 3: failover переключил de→nl1, awg1 перенацелен и
+        # рестартнут (счётчики с нуля) — доминанта уходит на nl1
+        st["cascade_active_exit"] = "nl1"
+        self._awg.write_text(json.dumps(st), encoding="utf-8")
+        with self._patch_all(stats=self._stats(1, 1, 1, 1),
+                             link={"awg1": {"rx": 3 * MB, "tx": 10 * MB}}):
+            res = tw.run_once()
+        self.assertIn("traffic_dominant_change", res["events"])
+        det = next(d for ev, d, _ in self._details
+                   if ev == "traffic_dominant_change")
+        self.assertIn("AWG-каскад (failover): активная нода "
+                      "<b><code>nl1</code></b>", det)
+        self.assertIn("Переключение ноды: <code>de</code> → "
+                      "<b><code>nl1</code></b>", det)
 
     def test_naive_upstream_events(self):
         """Naive upstream: падение после probe_fails прогонов →

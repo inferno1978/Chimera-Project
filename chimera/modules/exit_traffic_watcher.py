@@ -38,6 +38,9 @@ pinned/single-pick (100% трафика на закреплённой ноде).
         дельта-логика «cur < prev → cur» уже покрывает). Состав/веса/
         health — awg_standalone_state.json (lb.slots_snapshot,
         lb.balance.shares, lb.probes от failover-тика раз в минуту);
+        failover-режим (LB выключен): туннель один — awg1, принадлежит
+        АКТИВНОМУ exit (cascade_active_exit/lb_pinned), счётчики только
+        ему, устаревшие слоты игнорируются, неактивные — без счётчиков;
   • Mieru-каскад (mieru_cascade) — байты per-exit двумя путями:
         a) IPAccounting systemd-юнитов mieru-hop@exit-* (точные
            IP-байты cgroup; включается из меню наблюдателя, по умолчанию
@@ -1313,7 +1316,8 @@ def _tw_awg_source() -> dict | None:
     """Источник AWG-каскада (awg_cascade / awg_cascade_lb):
     {'nodes': {tag: {'name','host','port','iface','key'}},
      'counters': {tag: {'up': tx, 'down': rx}} — ip -s link слотов
-     (LB-режим) или активного awg1 (failover-режим);
+     (LB-режим) или активного awg1 (failover-режим; неактивные exit-ы
+     счётчиков не получают — туннель один, принадлежит активному);
      'strategy': метка, 'selector': [теги в ротации],
      'dead': {tag: True} — вне ротации (alive=false / не активный exit),
      'probe_results': {tag: {'ok': alive, 'ms': rtt}} — из lb.probes
@@ -1335,7 +1339,6 @@ def _tw_awg_source() -> dict | None:
     pinned = str(st.get("lb_pinned") or "")
 
     nodes: dict = {}
-    ifaces: list = []
     for ex in exits:
         if not isinstance(ex, dict):
             continue
@@ -1344,34 +1347,51 @@ def _tw_awg_source() -> dict | None:
         port = int(ex.get("port") or 0)
         if not name or not host:
             continue
-        slot = slots.get(name)
-        iface = f"awg{int(slot)}" if isinstance(slot, int) else (
-            "awg1" if not lb_mode else "")
         tag = TAG_PREFIX_AWG + name
         nodes[tag] = {"name": name, "host": host, "port": port,
-                      "iface": iface, "key": f"{host}:{port}"}
+                      "key": f"{host}:{port}"}
+
+    # «В ротации»: LB — живые слоты (lb.alive); failover — активный exit
+    if lb_mode:
+        sel = [TAG_PREFIX_AWG + n for n in alive
+               if TAG_PREFIX_AWG + n in nodes]
+    else:
+        sel = ([TAG_PREFIX_AWG + pinned] if pinned and
+               TAG_PREFIX_AWG + pinned in nodes else
+               ([TAG_PREFIX_AWG + active_exit] if
+                TAG_PREFIX_AWG + active_exit in nodes else []))
+    dead = {t: True for t in nodes if t not in sel}
+
+    # Интерфейс-источник счётчиков per-exit. LB-режим: слот awg{N} из
+    # lb.slots_snapshot. Failover-режим: туннель ОДИН — awg1, и он
+    # принадлежит АКТИВНОМУ exit (перенацеливается
+    # awgs_cascade_activate_exit); слоты в выключенном LB устарели —
+    # awg2..awgN снесены lb_deactivate, игнорируем. Неактивные exit-ы
+    # счётчиков не получают вовсе: приписывать им байты awg1 — фантомный
+    # «трафик» у физически не подключённых нод (ломает доминирование и
+    # метки last_traffic_ts; живой кейс RU2 — failover, активный de).
+    ifaces: list = []
+    for tag, nd in nodes.items():
+        iface = ""
+        if lb_mode:
+            slot = slots.get(nd["name"])
+            if isinstance(slot, int):
+                iface = f"awg{slot}"
+        elif sel and tag == sel[0]:
+            iface = "awg1"
+        nd["iface"] = iface
         if iface and iface not in ifaces:
             ifaces.append(iface)
 
     link = _tw_ip_link_stats(ifaces) if ifaces else {}
     counters: dict = {}
     for tag, nd in nodes.items():
+        if not nd.get("iface"):
+            continue
         c = link.get(nd["iface"]) or {}
         if c:
             counters[tag] = {"up": int(c.get("tx") or 0),
                              "down": int(c.get("rx") or 0)}
-
-    # «В ротации»: LB — живые слоты (lb.alive); failover — активный exit
-    if lb_mode:
-        sel = [TAG_PREFIX_AWG + n for n in alive
-               if TAG_PREFIX_AWG + n in nodes]
-        dead = {t: True for t in nodes if t not in sel}
-    else:
-        sel = ([TAG_PREFIX_AWG + pinned] if pinned and
-               TAG_PREFIX_AWG + pinned in nodes else
-               ([TAG_PREFIX_AWG + active_exit] if
-                TAG_PREFIX_AWG + active_exit in nodes else []))
-        dead = {t: True for t in nodes if t not in sel}
 
     probe_results = {}
     for tag, nd in nodes.items():
