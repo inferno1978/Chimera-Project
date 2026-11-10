@@ -278,6 +278,18 @@ class TestFwGuardHeal(_FwGuardBase):
 class TestFwGuardRun(_FwGuardBase):
     def test_run_heals_and_logs(self):
         self.env.ufw_status = _UFW_MISSING_3128
+        # Герметичность (инцидент CI 10-11.11.2026, ci.yml #196-#203):
+        # patch.dict(sys.modules) на stop() откатывает sys.modules к СЛЕПКУ
+        # (clear+update) — модули, импортированные ВНУТРИ блока, ВЫЛЕТАЮТ
+        # из sys.modules. Первый ленивый from-import node_identity в
+        # _srv_header происходит именно здесь (первое увед с шапкой) → на
+        # выходе из with модуль изгнан, а следующие ленивые from-import'ы
+        # ПЕРЕИСПОЛНЯЮТ node_identity.py вторым инстансом с прод-путями по
+        # умолчанию → канон-заголовок TestNotifyHeaderCanon уходит в
+        # hostname-фолбэк реального хоста раннера ci-de. Пиним модуль
+        # в sys.modules ДО снапшота patch.dict — изгнания нет, все ленивые
+        # импорты дальше разрешаются в единый инстанс.
+        import chimera.modules.node_identity  # noqa: F401
         # волна-4: notify идёт через _tg_fw_event — конвейер первым;
         # для проверки уведомления гасим конвейер → фолбэк _notify_tg
         with patch.object(fw_guard, "_registry_open", return_value=(True, "ok")), \
@@ -334,6 +346,13 @@ class TestNotifyHeaderCanon(_FwGuardBase):
         (self.tmp / "ni-state.json").write_text(
             json.dumps({"domain": "entry-ru.example.com"}))
         from chimera.modules import node_identity as _ni
+        # регресс-фиксатор единого инстанса (инцидент CI 10-11.11.2026):
+        # шапка строится ЛЕНИВЫМ from-import внутри _srv_header — если
+        # какой-то тест раньше изгнал модуль из sys.modules (patch.dict
+        # слепка), from-import создаст ВТОРОЙ инстанс и патчи ниже лягут
+        # мимо кода, который реально строит заголовок. Любое расхождение
+        # теперь — громкий провал setUp, а не герметичный хейзенбаг.
+        self.assertIs(sys.modules["chimera.modules.node_identity"], _ni)
         for p in (
             patch.object(_ni, "TG_FILE", self.tmp / "ni-telegram.json"),
             patch.object(_ni, "STATE_FILE", self.tmp / "ni-state.json"),
