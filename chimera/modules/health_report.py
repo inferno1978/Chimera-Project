@@ -68,7 +68,18 @@ def do_health_report(send_tg_flag: bool = True) -> str:
     except Exception:
         pass
 
-    lines.append(f"📋 <b>Daily Health Report [{hostname}]</b>  {ts}")
+    # Заголовок «[имя · домен · IP]» — канон node_identity.server_header
+    # (волна-3; фолбэк — прежний [hostname])
+    hdr = ""
+    try:
+        from chimera.modules.node_identity import server_header
+        hdr = str(server_header(hostname=hostname or None) or "").strip()
+    except Exception:
+        hdr = ""
+    if not hdr:
+        hdr = hostname or "server"
+
+    lines.append(f"📋 <b>[{hdr}] Daily Health Report</b>  {ts}")
     lines.append("")
 
     # Xray
@@ -200,19 +211,31 @@ chat_id = cfg.get('chat_id','')
 if not (token and chat_id and cfg.get('events',{{}}).get('health_report',True)):
     sys.exit(0)
 
-hostname = _run(['hostname','-s']).stdout.strip()
 ts = datetime.now().strftime('%d.%m.%Y %H:%M')
-lines = [f'Daily Health Report [{{hostname}}]  {{ts}}', '']
-for svc in ('xray','nginx'):
-    ok = _run(['systemctl','is-active',svc]).stdout.strip() == 'active'
-    _icon = chr(9989) if ok else chr(10060)
-    _status = 'активен' if ok else 'НЕ АКТИВЕН'
-    lines.append(f'{{_icon}} {{svc}}: {{_status}}')
+# Домен — из state.json (нужен и для SSL-проверки, и для заголовка)
 domain = ''
 try:
     if STATE_FILE.exists():
         domain = json.loads(STATE_FILE.read_text()).get('domain','')
 except: pass
+# Заголовок «имя · домен · IP» — канон node_identity.server_header
+# (волна-3): имя из telegram.json server_name, домен из state.json,
+# IP из telegram.json server_ip; фолбэк — hostname (прежний вид)
+import socket as _sock
+_name = str(cfg.get('server_name') or '').strip() or _sock.gethostname().split('.')[0]
+_parts = [_name]
+if domain and domain.lower() != _name.lower():
+    _parts.append(domain)
+_sip = str(cfg.get('server_ip') or '').strip()
+if _sip:
+    _parts.append(_sip)
+_hdr = ' · '.join(_parts)
+lines = [f'📋 [{{_hdr}}] Daily Health Report  {{ts}}', '']
+for svc in ('xray','nginx'):
+    ok = _run(['systemctl','is-active',svc]).stdout.strip() == 'active'
+    _icon = chr(9989) if ok else chr(10060)
+    _status = 'активен' if ok else 'НЕ АКТИВЕН'
+    lines.append(f'{{_icon}} {{svc}}: {{_status}}')
 if domain:
     cert = Path(f'/etc/letsencrypt/live/{{domain}}/fullchain.pem')
     if cert.exists():

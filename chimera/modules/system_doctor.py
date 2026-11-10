@@ -1934,11 +1934,14 @@ def build_console_report(report: dict) -> str:
 
 
 def build_tg_text(report: dict) -> str:
-    """Компактный HTML-текст для TG. Чистая функция."""
-    label = report.get("label") or "?"
+    """Компактный HTML-текст для TG. Чистая функция.
+
+    Волна-3: без внутреннего заголовка [{label}] — конвейер
+    tg_notify_event добавляет свой [server_header], двойной заголовок
+    в чате убран; прямые пути (_tg_send_event) добавляют заголовок сами."""
     mode = "FIX" if report.get("mode") == "fix" else "CHECK"
     c = report.get("counts") or {}
-    head = (f"🩺 <b>[{label}] System Doctor</b> — {mode}\n"
+    head = (f"🩺 <b>System Doctor</b> — {mode}\n"
             f"ok {c.get('ok', 0)} · info {c.get('info', 0)} · "
             f"⚠️ {c.get('warn', 0)} · 🚨 {c.get('crit', 0)}")
     body = []
@@ -1959,14 +1962,37 @@ def build_tg_text(report: dict) -> str:
     return text
 
 
+def _srv_header(cfg: dict) -> str:
+    """Заголовок «[имя · домен · IP]» для прямых отправок (не через
+    конвейер tg_notify_event, который добавляет заголовок сам).
+    Канон node_identity.server_header; фолбэк — label из конфига
+    доктора (прежний вид «[NL]»). Не бросает."""
+    try:
+        from chimera.modules.node_identity import server_header
+        return f"[{server_header(hostname=_hostname())}]"
+    except Exception:
+        return f"[{_node_label(cfg)}]"
+
+
+def _with_header(detail: str, cfg: dict) -> str:
+    """detail с заголовком первой строкой (прямые пути без конвейера)."""
+    return f"{_srv_header(cfg)} {detail}"
+
+
 def _tg_send_event(event: str, detail: str, cfg: dict) -> bool:
     """Отправка через tg_bot.tg_notify_event (уважает фильтр событий);
-    fallback — curl напрямую (паттерн exit_switch_watcher)."""
+    fallback — curl напрямую (паттерн exit_switch_watcher).
+
+    Волна-3: конвейер добавляет заголовок [server_header] сам — detail
+    идёт без внутреннего [{label}] (двойной заголовок в чате убран);
+    прямые пути (chat_override / curl-fallback) добавляют заголовок
+    сами через _with_header."""
     chat_override = str((cfg or {}).get("chat_id_override") or "").strip()
     try:
         from chimera.modules import tg_bot
         if chat_override:
-            ok = tg_bot.tg_send(detail, chat_id=chat_override)
+            ok = tg_bot.tg_send(_with_header(detail, cfg),
+                                chat_id=chat_override)
             _log(f"TG[{event}] direct → {chat_override}: "
                  f"{'OK' if ok else 'FAIL'}")
             return bool(ok)
@@ -1989,7 +2015,8 @@ def _tg_send_event(event: str, detail: str, cfg: dict) -> bool:
         import urllib.parse
         api = f"https://api.telegram.org/bot{token}/sendMessage"
         data = urllib.parse.urlencode({
-            "chat_id": chat, "text": detail, "parse_mode": "HTML",
+            "chat_id": chat, "text": _with_header(detail, cfg),
+            "parse_mode": "HTML",
         }).encode()
         req = urllib.request.Request(api, data=data)
         urllib.request.urlopen(req, timeout=15)

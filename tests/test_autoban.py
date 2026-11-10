@@ -176,6 +176,37 @@ class TestCronScriptWritesHistory(unittest.TestCase):
         self.assertIn("cfg['ban_history'][-500:]", body)
 
 
+class TestCronHeaderCanon(unittest.TestCase):
+    """Волна-3: заголовок бана «🚫 [имя · домен · IP]» — канон
+    node_identity.server_header (рантайм из telegram.json/state.json),
+    фолбэк — hostname (прежний вид «🚫 [host | ip]»)."""
+
+    def _body(self) -> str:
+        import re
+        src = (_PROJECT_ROOT / "chimera" / "modules" / "autoban.py").read_text()
+        m = re.search(r'py_body = f"""(.*?)"""', src, re.DOTALL)
+        self.assertIsNotNone(m, "py_body f-string не найден в исходнике")
+        return m.group(1)
+
+    def test_header_canon_assembled(self):
+        body = self._body()
+        # имя из telegram.json server_name, фолбэк — hostname
+        self.assertIn("c.get('server_name')", body)
+        self.assertIn("_sock.gethostname().split('.')[0]", body)
+        # домен из state.json
+        self.assertIn("state.json", body)
+        # сборка «имя · домен · IP» с эмодзи 🚫 (FIX-2 сохранён)
+        self.assertIn("' · '.join(_parts)", body)
+        self.assertIn("'\\U0001f6ab [' + ' · '.join(_parts) + '] '", body)
+        # прежний формат «[host | ip]» ушёл
+        self.assertNotIn("'] ' if not _sip else ' | '", body)
+
+    def test_body_is_valid_python(self):
+        """py_body (после раскрытия {{}}) компилируется."""
+        body = self._body().replace("{{", "{").replace("}}", "}")
+        compile(body, "<autoban-cron>", "exec")
+
+
 class TestServerOwnIPsWhitelist(unittest.TestCase):
     """
     Регрессия: сервер не должен банить свой собственный IP.

@@ -1039,14 +1039,26 @@ def tg(msg):
     try:
         c = json.loads(TG_CONFIG.read_text()) if TG_CONFIG.exists() else {{}}
         t, ch = c.get('token'), c.get('chat_id')
-        # FIX: добавляем hostname + server_ip в начало сообщения,
-        # чтобы было видно на каком сервере сработал autoban.
-        # FIX-2 (2026-09-25): добавляем эмодзи 🚫 (No Entry, U+1F6AB)
-        # в начало — чтобы уведомление о бане визуально выделялось в чате.
+        # Заголовок «🚫 [имя · домен · IP]» — канон node_identity.
+        # server_header (волна-3): имя из telegram.json server_name, домен
+        # из state.json, IP из telegram.json server_ip; фолбэк — hostname
+        # (прежний вид FIX-а выше). Эмодзи 🚫 (U+1F6AB, FIX-2) — чтоб уведа
+        # о бане выделялась в чате.
         import socket as _sock
-        _host = _sock.gethostname().split('.')[0]
-        _sip  = c.get('server_ip', '')
-        _header = '\U0001f6ab [' + _host + ('] ' if not _sip else ' | ' + _sip + '] ')
+        _name = str(c.get('server_name') or '').strip() or _sock.gethostname().split('.')[0]
+        _parts = [_name]
+        try:
+            _sp = Path('/var/lib/xray-installer/state.json')
+            if _sp.exists():
+                _dom = str(json.loads(_sp.read_text()).get('domain') or '').strip()
+                if _dom and _dom.lower() != _name.lower():
+                    _parts.append(_dom)
+        except Exception:
+            pass
+        _sip = str(c.get('server_ip') or '').strip()
+        if _sip:
+            _parts.append(_sip)
+        _header = '\U0001f6ab [' + ' · '.join(_parts) + '] '
         if t and ch:
             _cmd=['curl','-s','-o','/dev/null','-m','10']
             _px=(c.get('proxy') or '').strip()

@@ -585,6 +585,10 @@ def _certbot_install_monitor_cron() -> None:
         меню подхватывается без переустановки cron'а);
       • токен больше не запекается в скрипт — читается из telegram.json
         при каждой отправке (смена токена в меню [5][1] действует сразу).
+
+    Волна-3 (канон node_identity): заголовок увед — «[имя · домен · IP]»
+    (server_name из telegram.json + domain из state.json + server_ip),
+    рантайм-чтение при каждой отправке — как токен; фолбэк — hostname.
     """
     core = _core_module()
     success   = core.success
@@ -624,6 +628,9 @@ def _certbot_install_monitor_cron() -> None:
 
         # Отправка в TG: только если token/chat_id заданы И событие
         # cert_expire включено в telegram.json (меню [5]→[3]).
+        # Заголовок «[имя · домен · IP]» — канон node_identity.server_header
+        # (волна-3): имя из telegram.json server_name, домен из state.json,
+        # IP из telegram.json server_ip; фолбэк — hostname (прежний вид).
         send_tg() {{
             python3 -c '
 import json, socket, subprocess, sys
@@ -636,9 +643,20 @@ try:
         sys.exit(0)
     if not cfg.get("events", {{}}).get("cert_expire", True):
         sys.exit(0)
-    host = socket.gethostname().split(".")[0]
-    ip = cfg.get("server_ip", "")
-    header = "[{{}} | {{}}]".format(host, ip) if ip else "[{{}}]".format(host)
+    name = str(cfg.get("server_name") or "").strip() or socket.gethostname().split(".")[0]
+    parts = [name]
+    domain = ""
+    try:
+        domain = str(json.loads(Path("/var/lib/xray-installer/state.json")
+                                .read_text()).get("domain") or "").strip()
+    except Exception:
+        domain = ""
+    if domain and domain.lower() != name.lower():
+        parts.append(domain)
+    ip = str(cfg.get("server_ip") or "").strip()
+    if ip:
+        parts.append(ip)
+    header = "[" + " · ".join(parts) + "]"
     _cmd = ["curl", "-s", "-o", "/dev/null", "-m", "10"]
     _px = (cfg.get("proxy") or "").strip()
     if _px:

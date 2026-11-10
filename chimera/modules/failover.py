@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 import textwrap
 import time
@@ -176,8 +177,50 @@ def _failover_save(data: dict) -> None:
         pass
 
 
+def _fo_node_labels(nodes: list) -> list:
+    """Человекочитаемые метки нод для вшивки в watchdog-скрипт:
+    «NL · node-nl.example.com [203.0.113.40]» (node_identity.key_label —
+    алиас из наблюдателя трафика + DNS-резолв с кэшем). Баш не умеет
+    DNS/алиасы, поэтому метки готовит генератор в момент установки.
+    Фолбэк — «host:port» (прежний вид). Не бросает."""
+    out: list = []
+    for nd in nodes or []:
+        host = str((nd or {}).get("host") or "").strip()
+        try:
+            port = int((nd or {}).get("port") or 443)
+        except (TypeError, ValueError):
+            port = 443
+        label = f"{host}:{port}" if host else "?"
+        if host:
+            try:
+                from chimera.modules.node_identity import key_label
+                label = key_label(f"{host}:{port}") or label
+            except Exception:
+                pass
+        out.append(label)
+    return out
+
+
+def _fo_hdr_prefix() -> str:
+    """Префикс заголовка «[RU1 · домен · IP] » для watchdog-увед
+    (node_identity.server_header). Вшивается при генерации: скрипт не
+    читает telegram.json в рантайме (токен/chat уже запечены — единый
+    стиль генератора). node_identity недоступен → без заголовка
+    (прежний вид уведы). Не бросает."""
+    try:
+        from chimera.modules.node_identity import server_header
+        hdr = str(server_header() or "").strip()
+        return f"[{hdr}] " if hdr else ""
+    except Exception:
+        return ""
+
+
 def _failover_install(nodes: list, tg_token: str = "", tg_chat: str = "") -> None:
-    """Устанавливает watchdog-скрипт для exit-нод с Telegram-алертом."""
+    """Устанавливает watchdog-скрипт для exit-нод с Telegram-алертом.
+
+    Метки нод и заголовок сервера вшиваются генератором (волна-3,
+    канон node_identity): bash-скрипт не умеет DNS/алиасы, а конфиги
+    токена уже запечены в текст — метки готовятся здесь же."""
     core = _core_module()
     success = core.success
 
@@ -186,6 +229,9 @@ def _failover_install(nodes: list, tg_token: str = "", tg_chat: str = "") -> Non
         f'  check_node "{nd["host"]}" "{nd.get("port", 443)}"'
         for nd in nodes
     )
+    # Метки нод + заголовок сервера (вшивка при генерации — см. докстринг)
+    _labels_bash = " ".join(shlex.quote(l) for l in _fo_node_labels(nodes))
+    _hdr_prefix_bash = shlex.quote(_fo_hdr_prefix())
     tg_block = ""
     if tg_token and tg_chat:
         try:
@@ -247,17 +293,26 @@ sys.exit(0 if prev.get('status') == '$STATUS' else 1)
 
 {nodes_str.replace('check_node', 'STATUS=$(check_node') }
 
+        # Метки нод (вшиты генератором — bash не умеет DNS/алиасы) и
+        # заголовок сервера «[RU1 · домен · IP] » (node_identity; пусто —
+        # уведа без заголовка, прежний вид)
+        NODE_LABELS=({_labels_bash})
+        HDR_PREFIX={_hdr_prefix_bash}
+
         # Inline loop — генерируем для каждой ноды
+        LI=0
         for ITEM in {' '.join(nd['host']+':'+str(nd.get('port',443)) for nd in nodes)}; do
             HOST=${{ITEM%%:*}}
             PORT=${{ITEM##*:}}
+            LABEL="${{NODE_LABELS[$LI]:-$HOST:$PORT}}"
+            LI=$((LI + 1))
             STATUS=$(check_node "$HOST" "$PORT")
             update_state "$HOST" "$STATUS"
             RET=$?
             if [ "$STATUS" = "down" ]; then
                 echo "[$DATE] FAILOVER: $HOST:$PORT DOWN" >> "$LOG"
                 if [ "$RET" -ne 0 ]; then
-                    send_tg "⚠️ VLESS Exit Node DOWN: $HOST:$PORT"
+                    send_tg "⚠️ ${{HDR_PREFIX}}VLESS Exit Node DOWN: $LABEL"
                 fi
             fi
         done
@@ -421,6 +476,10 @@ def _auto_fallback_install(nodes: list, tg_token: str = "", tg_chat: str = "") -
     Каждую минуту проверяет все exit-ноды; если ни одна не отвечает —
     переводит xray в временный Режим A (прямой выход).
     При восстановлении хотя бы одной ноды — возвращает Режим B.
+
+    Заголовок сервера и метки нод вшиты генератором (волна-3, канон
+    node_identity) — единый стиль с _failover_install: токен/chat уже
+    запечены в текст, bash не умеет DNS/алиасы.
     """
     core = _core_module()
     success           = core.success
@@ -432,6 +491,10 @@ def _auto_fallback_install(nodes: list, tg_token: str = "", tg_chat: str = "") -
     nodes_list = " ".join(
         f'{nd["host"]}:{nd.get("port", 443)}' for nd in nodes
     )
+    # Метки всех нод (состав каскада в all-dead-уведе) + заголовок сервера
+    all_labels = ", ".join(_fo_node_labels(nodes))
+    _labels_bash = shlex.quote(all_labels)
+    _hdr_prefix_bash = shlex.quote(_fo_hdr_prefix())
 
     tg_block = ""
     if tg_token and tg_chat:
@@ -454,6 +517,10 @@ def _auto_fallback_install(nodes: list, tg_token: str = "", tg_chat: str = "") -
         FAILOVER_STATE="{_FAILOVER_STATE}"
         DATE=$(date '+%Y-%m-%d %H:%M:%S')
         NODES="{nodes_list}"
+        # Метки всех нод + заголовок сервера (вшиты генератором; канон
+        # node_identity — состав каскада читается в уведе целиком)
+        ALL_LABELS={_labels_bash}
+        HDR_PREFIX={_hdr_prefix_bash}
         SCRIPT="{sys.argv[0]}"
 
         {tg_block}
@@ -513,7 +580,7 @@ d['_fallback_original_mode'] = d.get('install_mode', 'B')
 open(p, 'w').write(json.dumps(d, indent=2))
 "
                 python3 "$SCRIPT" --switch-mode-a
-                send_tg "⚠️ VLESS: все exit-ноды DOWN. Переключён в Режим A (прямой выход)."
+                send_tg "⚠️ ${{HDR_PREFIX}}VLESS: все exit-ноды DOWN (${{ALL_LABELS}}). Переключён в Режим A (прямой выход)."
             fi
         else
             # Есть живая нода
@@ -527,7 +594,7 @@ d['_fallback_active'] = False
 open(p, 'w').write(json.dumps(d, indent=2))
 "
                 python3 "$SCRIPT" --switch-mode-b
-                send_tg "✅ VLESS: exit-нода восстановлена. Возврат в Режим B (каскад)."
+                send_tg "✅ ${{HDR_PREFIX}}VLESS: exit-нода восстановлена. Возврат в Режим B (каскад)."
             fi
         fi
 

@@ -168,7 +168,9 @@ def _log(level: str, msg: str) -> None:
 
 def _tg_event(event: str, detail: str = "", cfg: dict | None = None) -> None:
     """TG-уведомление: сначала через chimera (уважает фильтр событий),
-    затем — автономный fallback по state.json (как nginx-watchdog)."""
+    затем — автономный fallback по state.json (как nginx-watchdog).
+    Заголовок fallback-уведы — «[имя · домен · IP]» (канон
+    node_identity.server_header; фолбэк — прежний [users-watchdog])."""
     try:
         if cfg is not None and cfg.get("notify") != "tg":
             return
@@ -194,10 +196,17 @@ def _tg_event(event: str, detail: str = "", cfg: dict | None = None) -> None:
                 px = (json.loads(tgj.read_text()) or {}).get("proxy", "") or ""
             except Exception:
                 pass
+        # Заголовок «[имя · домен · IP]» — канон node_identity.server_header
+        # (волна-3; фолбэк — прежний префикс [users-watchdog])
+        try:
+            from chimera.modules.node_identity import server_header
+            _hdr = str(server_header() or "").strip() or "users-watchdog"
+        except Exception:
+            _hdr = "users-watchdog"
         cmd = ["curl", "-s", "-X", "POST",
                f"https://api.telegram.org/bot{bot}/sendMessage",
                "--data-urlencode", f"chat_id={cid}",
-               "--data-urlencode", f"text=[users-watchdog] {event}: {detail}",
+               "--data-urlencode", f"text=[{_hdr}] {event}: {detail}",
                "--max-time", "10"]
         if px:
             cmd += ["-x", px]

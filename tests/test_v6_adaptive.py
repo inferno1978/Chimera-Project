@@ -733,6 +733,78 @@ class TestTgWiringV6Adaptive(unittest.TestCase):
         self.assertIn("TG-уведы", src)
 
 
+class TestTgNotifyFallbackHeader(unittest.TestCase):
+    """Волна-3: curl-fallback _tg_notify — заголовок «[имя · домен · IP]»
+    (канон node_identity.server_header), как у конвейера tg_notify_event;
+    node_identity недоступен → без заголовка (прежний вид).
+
+    Герметичность: telegram.json/node_identity — на tmp, curl-транспорт
+    перехвачен (боевой TG из тестов не уходит)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(self._rmtree)
+        (self.tmp / "telegram.json").write_text(json.dumps(
+            {"token": "TESTTOKEN", "chat_id": "12345",
+             "server_name": "RU1", "server_ip": "203.0.113.10"}))
+        (self.tmp / "ni-state.json").write_text(
+            json.dumps({"domain": "entry-ru.example.com"}))
+        from chimera.modules import node_identity as _ni
+        for p in (
+            patch.object(_ni, "TG_FILE", self.tmp / "telegram.json"),
+            patch.object(_ni, "STATE_FILE", self.tmp / "ni-state.json"),
+            patch.object(_ni, "DNS_CACHE_FILE", self.tmp / "ni-dns-absent.json"),
+            patch.object(_ni, "ALIASES_FILE", self.tmp / "ni-aliases-absent.json"),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        _ni._MEM.clear()
+        self.addCleanup(_ni._MEM.clear)
+        # конвейер tg_bot недоступен → curl-fallback
+        from chimera.modules import tg_bot
+        tb = patch.object(tg_bot, "tg_notify_event",
+                          side_effect=RuntimeError("bot down"))
+        tb.start()
+        self.addCleanup(tb.stop)
+        # curl-транспорт перехвачен
+        self.texts: list[str] = []
+
+        def _fake_run(cmd, **kw):
+            argv = list(cmd)
+            if argv[:1] == ["curl"]:
+                for i, a in enumerate(argv):
+                    if a == "-d" and argv[i + 1].startswith("text="):
+                        self.texts.append(argv[i + 1][len("text="):])
+            return _R(0, "")
+
+        for p in (
+            patch.object(v6a.subprocess, "run", side_effect=_fake_run),
+            patch.object(v6a, "TG_CFG_FILE", self.tmp / "telegram.json"),
+            patch.object(v6a, "_log", lambda *a, **kw: None),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _rmtree(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_fallback_header_canon(self):
+        v6a._tg_notify("стратегия → UseIPv4 (v6 egress мёртв)")
+        self.assertEqual(len(self.texts), 1)
+        self.assertEqual(
+            self.texts[0],
+            "[RU1 · entry-ru.example.com · 203.0.113.10] "
+            "стратегия → UseIPv4 (v6 egress мёртв)")
+
+    def test_fallback_no_header_when_no_identity(self):
+        with patch.dict(sys.modules,
+                        {"chimera.modules.node_identity": None}):
+            v6a._tg_notify("стратегия → UseIPv4")
+        self.assertEqual(len(self.texts), 1)
+        self.assertEqual(self.texts[0], "стратегия → UseIPv4")
+
+
 class TestCoreIntegration(unittest.TestCase):
     """Строковые ассерты на _core.py (канон test_dns_redirect: вход в
     меню залочен, чтобы рефакторинг монолита не потерял пункт V)."""

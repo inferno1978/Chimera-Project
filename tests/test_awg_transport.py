@@ -714,5 +714,109 @@ class TestCascadeFullParamsV4257(unittest.TestCase):
                                      f"быть (awg setconf падает)")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Волна-3 (канон node_identity): мультинодовый watchdog-генератор вшивает
+#  метки AWG-нод («alias · домен [IP]:порт») и читает заголовок сервера
+#  «[имя · домен · IP]» из telegram.json/state.json в рантайме (как токен).
+#  Герметичность: node_identity на tmp; проверяется ТЕКСТ скрипта + bash -n,
+#  скрипт не запускается (боевой TG из тестов не уходит).
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestMultinodeWatchdogCanon(unittest.TestCase):
+    """awg_multinode_watchdog_install: метки нод + заголовок в TG_MSG."""
+
+    NODES = [
+        {"host": "node-nl.example.com", "interface": "awg0", "fwmark": 1000,
+         "route_table": 1000, "port": 51820},
+        {"host": "203.0.113.99", "interface": "awg1", "fwmark": 1001,
+         "route_table": 1001, "port": 51821},
+    ]
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import time as _time
+        from chimera.modules import awg_transport as at
+        from chimera.modules import node_identity as _ni
+        self.at = at
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(self._rmtree)
+        # node_identity: прод-файлы не протекают; DNS — из кэша, без сети
+        (self.tmp / "telegram.json").write_text(json.dumps(
+            {"server_name": "RU1", "server_ip": "203.0.113.10"}))
+        (self.tmp / "state.json").write_text(json.dumps(
+            {"domain": "entry-ru.example.com"}))
+        (self.tmp / "node_dns_cache.json").write_text(json.dumps(
+            {"node-nl.example.com": {"ip": "203.0.113.40",
+                                     "ts": _time.time()}}))
+        (self.tmp / "exit_traffic_watcher.json").write_text(json.dumps(
+            {"aliases": {"node-nl.example.com:51820": "NL"}}))
+        for p in (
+            patch.object(_ni, "TG_FILE", self.tmp / "telegram.json"),
+            patch.object(_ni, "STATE_FILE", self.tmp / "state.json"),
+            patch.object(_ni, "DNS_CACHE_FILE", self.tmp / "node_dns_cache.json"),
+            patch.object(_ni, "ALIASES_FILE", self.tmp / "exit_traffic_watcher.json"),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        _ni._MEM.clear()
+        self.addCleanup(_ni._MEM.clear)
+        core = _mock_core()
+        core.AWG_NODES = [dict(n) for n in self.NODES]
+        core._AWG_MULTINODE_FAILOVER_LOG = self.tmp / "fo.log"
+        core._AWG_MULTINODE_WATCHDOG_CRON = self.tmp / "wd.cron"
+        core._AWG_MULTINODE_WATCHDOG_LOG = self.tmp / "wd.log"
+        core._AWG_MULTINODE_WATCHDOG_SCRIPT = self.tmp / "wd.sh"
+        self._cm = patch.object(at, "_core_module", return_value=core)
+        self._cm.start()
+        self.addCleanup(self._cm.stop)
+
+    def _rmtree(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _render(self) -> str:
+        with patch.object(self.at, "_awg_watchdog_set_flag",
+                          lambda v: None):
+            self.at.awg_multinode_watchdog_install()
+        return (self.tmp / "wd.sh").read_text()
+
+    def test_labels_baked(self):
+        """Метки нод вшиты генератором (bash не умеет DNS/алиасы)."""
+        script = self._render()
+        self.assertIn(
+            "LABELS=('NL · node-nl.example.com [203.0.113.40]:51820' "
+            "203.0.113.99:51821)", script)
+
+    def test_failover_msg_uses_labels_and_header(self):
+        """TG_MSG: заголовок в рантайме + метки вместо голых host."""
+        script = self._render()
+        self.assertIn(
+            'TG_MSG="[$(srv_header)] 🔁 AWG Failover: нода $old_idx '
+            '(${LABELS[$old_idx]}) → нода $new_idx (${LABELS[$new_idx]})"',
+            script)
+        # прежний голый host в уведе ушёл
+        self.assertNotIn(
+            'AWG Failover: нода $old_idx (${HOSTS[$old_idx]})', script)
+
+    def test_header_runtime_read_canon(self):
+        """srv_header() читает telegram.json/state.json в рантайме (как
+        токен) и собирает «имя · домен · IP» (канон server_header)."""
+        script = self._render()
+        self.assertIn("srv_header()", script)
+        self.assertIn("server_name", script)
+        self.assertIn("server_ip", script)
+        self.assertIn("domain", script)
+        self.assertIn("' · '.join(_parts)", script)
+        # фолбэк имени — hostname, как в certbot-мониторе v3
+        self.assertIn("socket.gethostname()", script)
+
+    def test_bash_syntax_ok(self):
+        import subprocess as _sp
+        self._render()
+        r = _sp.run(["bash", "-n", str(self.tmp / "wd.sh")],
+                    capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, f"bash -n: {r.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

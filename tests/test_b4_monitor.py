@@ -437,6 +437,23 @@ class _TgBase(unittest.TestCase):
             p = patch.object(bm, name, self.tmp / sub)
             p.start()
             self.addCleanup(p.stop)
+        # Волна-3: заголовок {H} — канон node_identity.server_header;
+        # прод-файлы node_identity (state.json/telegram.json живой ноды)
+        # не должны протекать в тесты (герметичность, паттерн 652e692)
+        try:
+            from chimera.modules import node_identity as _ni
+            for p in (
+                patch.object(_ni, "STATE_FILE", self.tmp / "ni-state-absent.json"),
+                patch.object(_ni, "TG_FILE", self.tmp / "ni-tg-absent.json"),
+                patch.object(_ni, "DNS_CACHE_FILE", self.tmp / "node_dns_cache.json"),
+                patch.object(_ni, "ALIASES_FILE", self.tmp / "aliases-absent.json"),
+            ):
+                p.start()
+                self.addCleanup(p.stop)
+            _ni._MEM.clear()
+            self.addCleanup(_ni._MEM.clear)
+        except Exception:
+            pass
         self.systemd = {"b4": "active"}
         self.sent: list[tuple[str, str]] = []
         self._last_curl_text = None
@@ -574,6 +591,42 @@ class TestTgTransitions(_TgBase):
         bm.check_b4_once()
         bm.check_b4_once()
         self.assertEqual(self.sent, [])
+
+
+class TestHeaderCanon(_TgBase):
+    """Волна-3: {H} — заголовок [имя · домен · IP] (node_identity.
+    server_header; фолбэк — прежний [host | ip])."""
+
+    def test_header_hostname_ip_fallback_shape(self):
+        """Нет server_name/domain → «hostname · IP» (server_ip из cfg)."""
+        self._write_tg()
+        self._write_tick()
+        bm.check_b4_once()
+        self.systemd["b4"] = "inactive"
+        bm.check_b4_once()
+        self.assertEqual([e for e, _ in self.sent], ["b4_down"])
+        # [testhost · 203.0.113.10] — единый вид с mieru-монитором
+        self.assertIn("[testhost · 203.0.113.10]", self.sent[0][1])
+        self.assertNotIn("{H}", self.sent[0][1])
+        self.assertNotIn("[testhost | 203.0.113.10]", self.sent[0][1])
+
+    def test_header_server_name_canon(self):
+        """server_name в telegram.json → «[RU1 · домен · IP]»."""
+        cfg = {"token": "TESTTOKEN", "chat_id": "12345",
+               "server_ip": "203.0.113.10", "server_name": "RU1"}
+        (self.tmp / "telegram.json").write_text(json.dumps(cfg))
+        from chimera.modules import node_identity as _ni
+        (self.tmp / "ni-state.json").write_text(
+            json.dumps({"domain": "entry-ru.example.com"}))
+        with patch.object(_ni, "STATE_FILE", self.tmp / "ni-state.json"):
+            _ni._MEM.clear()
+            self._write_tick()
+            bm.check_b4_once()
+            self.systemd["b4"] = "inactive"
+            bm.check_b4_once()
+        self.assertEqual([e for e, _ in self.sent], ["b4_down"])
+        self.assertIn("[RU1 · entry-ru.example.com · 203.0.113.10]",
+                      self.sent[0][1])
 
 
 class TestTgStalled(_TgBase):

@@ -533,11 +533,28 @@ def tg_send(msg):
         cfg=json.loads(TG_CONFIG_FILE.read_text()) if TG_CONFIG_FILE.exists() else {{}}
         t,c=cfg.get('token'),cfg.get('chat_id')
         if t and c:
+            # Заголовок «[имя · домен · IP]» — канон node_identity.
+            # server_header (волна-3): имя из telegram.json server_name,
+            # домен из state.json, IP из telegram.json server_ip;
+            # фолбэк — hostname (как в certbot-мониторе v3)
+            import socket as _sock
+            _name=str(cfg.get('server_name') or '').strip() or _sock.gethostname().split('.')[0]
+            _parts=[_name]
+            try:
+                _sp=Path('/var/lib/xray-installer/state.json')
+                if _sp.exists():
+                    _dom=str(json.loads(_sp.read_text()).get('domain') or '').strip()
+                    if _dom and _dom.lower()!=_name.lower():
+                        _parts.append(_dom)
+            except: pass
+            _sip=str(cfg.get('server_ip') or '').strip()
+            if _sip: _parts.append(_sip)
+            _hdr=' · '.join(_parts)
             _cmd=['curl','-s','-o','/dev/null','-m','10']
             _px=(cfg.get('proxy') or '').strip()
             if _px: _cmd+=['-x',_px]
             _cmd+=[f'https://api.telegram.org/bot{{t}}/sendMessage',
-                '-d',f'chat_id={{c}}','-d',f'text={{msg}}','-d','parse_mode=HTML']
+                '-d',f'chat_id={{c}}','-d',f'text=[{{_hdr}}] {{msg}}','-d','parse_mode=HTML']
             subprocess.run(_cmd,capture_output=True)
     except: pass
 
@@ -563,7 +580,8 @@ for email,lim in limits.items():
         if len(un)<len(users):
             _users_save(un); _users_apply(un)
             lim['disabled']=True; changed=True
-            tg_send(f'Warning user {{email}} disabled: {{used/1024**3:.2f}} GB of {{gb}} GB')
+            # Русский текст — как в интерактивном пути (_check_traffic_limits_once)
+            tg_send(f'⚠️ Пользователь <b>{{email}}</b> отключён: использовано {{used/1024**3:.2f}} ГБ из {{gb}} ГБ')
 if changed:
     TRAFFIC_LIMITS_FILE.write_text(json.dumps(limits,indent=2))
 " 2>>/var/log/xray-traffic-limits.log

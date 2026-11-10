@@ -1885,6 +1885,46 @@ def handle_health(msg):
     except Exception as e:
         send(uid, f"❌ Ошибка: {{str(e)[:100]}}")
 
+def _node_aliases():
+    """Алиасы нод {{host:port → имя}} из конфига наблюдателя трафика."""
+    try:
+        return (json.loads(Path("/var/lib/xray-installer/exit_traffic_watcher.json").read_text()) or {{}}).get("aliases") or {{}}
+    except Exception:
+        return {{}}
+
+
+def _node_cached_ip(host):
+    """IPv4 домена из кэша node_identity (/var/lib/xray-installer/
+    node_dns_cache.json — кэш ведёт node_identity в проде). Бот НЕ
+    резолвит сам (без getent/DNS): нет записи в кэше — без IP."""
+    try:
+        ent = (json.loads(Path("/var/lib/xray-installer/node_dns_cache.json").read_text()) or {{}}).get(host) or {{}}
+        return str(ent.get("ip") or "").strip()
+    except Exception:
+        return ""
+
+
+def _node_label(host, port, aliases):
+    """Человекочитаемая метка ноды «alias · домен [IP](:порт)» —
+    канон node_identity.node_label (алиас из наблюдателя трафика,
+    IP из DNS-кэша; дефолтный :443 не пишется)."""
+    h = str(host or "?")
+    al = str(aliases.get(f"{{h}}:{{port}}") or aliases.get(h) or "").strip()
+    try:
+        p = int(port or 0)
+    except (TypeError, ValueError):
+        p = 0
+    base = h
+    ip = _node_cached_ip(h)
+    if ip and ip != h:
+        base = f"{{base}} [{{ip}}]"
+    if p and p != 443:
+        base = f"{{base}}:{{p}}"
+    if al and al.lower() != h.lower():
+        return f"{{al}} · {{base}}"
+    return base
+
+
 def handle_nodes(msg):
     """Список exit-нод каскада + TCP-ping. /nodes"""
     uid = msg["from"]["id"]
@@ -1899,11 +1939,14 @@ def handle_nodes(msg):
     if not nodes:
         send(uid, "❌ Exit-ноды не настроены (не Режим B?)")
         return
+    aliases = _node_aliases()
     text_lines = [f"🔗 <b>Exit-ноды каскада</b> ({{len(nodes)}} шт)\\n"]
     for i, nd in enumerate(nodes, 1):
         host = nd.get("host", "?")
         port = nd.get("port", 443)
         sni = nd.get("sni", "")
+        # Метка «alias · домен [IP](:порт)» — канон node_identity
+        label = _node_label(host, port, aliases)
         # TCP-ping
         try:
             r = subprocess.run(["timeout", "5", "bash", "-c",
@@ -1912,9 +1955,9 @@ def handle_nodes(msg):
             status = "🟢 up" if r.returncode == 0 else "🔴 down"
         except Exception:
             status = "❓"
+        sni_line = f"\\n  SNI: <code>{{sni}}</code>" if sni and sni != host else ""
         text_lines.append(f"<b>Нода #{{i}}</b>: {{status}}\\n"
-                          f"  Host: <code>{{host}}</code>:{{port}}\\n"
-                          f"  SNI: <code>{{sni}}</code>")
+                          f"  {{label}}{{sni_line}}")
     send(uid, "\\n".join(text_lines))
 
 

@@ -3711,11 +3711,35 @@ def _awg_verify_all_tunnels() -> None:
     _awg_save_nodes_to_state(nodes)
 
 
+def _awg_node_label(host: str, port) -> str:
+    """Человекочитаемая метка AWG-ноды для вшивки в watchdog-скрипт:
+    «NL · node-nl.example.com [203.0.113.40]:51820» (node_identity.
+    key_label — алиас из наблюдателя трафика + DNS-резолв с кэшем;
+    нестандартный порт виден явно). Баш не умеет DNS/алиасы — метку
+    готовит генератор. Фолбэк — «host:port». Не бросает."""
+    h = str(host or "").strip()
+    try:
+        p = int(port or 0)
+    except (TypeError, ValueError):
+        p = 0
+    fallback = f"{h}:{p}" if h else "?"
+    if not h:
+        return fallback
+    try:
+        from chimera.modules.node_identity import key_label
+        return key_label(f"{h}:{p}") or fallback
+    except Exception:
+        return fallback
+
+
 def awg_multinode_watchdog_install() -> None:
     """
     Создаёт bash-скрипт мультинодового watchdog и cron-задачу.
     PATCH v2 п.2: при 1 ноде вызывает оригинальный awg_watchdog_install() — не дублирует.
     PATCH v2 п.4: switch_active_node() обновляет fwmark Xray в iptables mangle.
+    Волна-3 (канон node_identity): метки нод вшиты генератором (bash не
+    умеет DNS/алиасы), заголовок сервера читается из telegram.json/
+    state.json при каждой отправке — как токен/прокси ниже (стиль v2).
     """
     core = _core_module()
     info = core.info
@@ -3739,6 +3763,12 @@ def awg_multinode_watchdog_install() -> None:
     ifaces_arr  = " ".join(f'"{n["interface"]}"'  for n in nodes)
     fwmarks_arr = " ".join(str(n["fwmark"])        for n in nodes)
     rtables_arr = " ".join(str(n["route_table"])   for n in nodes)
+    # Метки нод «alias · домен [IP]:порт» — вшиты генератором (волна-3):
+    # bash не умеет DNS/алиасы, host:port в уведе нечитаем
+    import shlex as _shlex
+    labels_arr  = " ".join(
+        _shlex.quote(_awg_node_label(n.get("host"), n.get("port", 51820)))
+        for n in nodes)
 
     tg_cmd = (
         "TG_TOKEN=$(python3 -c \"import json; s=json.load(open('/etc/xray/state.json')); "
@@ -3762,6 +3792,9 @@ def awg_multinode_watchdog_install() -> None:
         IFACES=({ifaces_arr})
         FWMARKS=({fwmarks_arr})
         RTABLES=({rtables_arr})
+        # Метки нод «alias · домен [IP]:порт» (вшиты генератором —
+        # node_identity.key_label; выровнены по индексам с HOSTS)
+        LABELS=({labels_arr})
         NODE_COUNT=${{#HOSTS[@]}}
 
         ACTIVE_IDX_FILE="/var/run/awg-active-node"
@@ -3776,6 +3809,36 @@ def awg_multinode_watchdog_install() -> None:
         ts()    {{ date '+%Y-%m-%d %H:%M:%S'; }}
         log()   {{ echo "[$(ts)] $*" | tee -a "$LOG"; }}
         flog()  {{ echo "[$(ts)] $*" | tee -a "$FAILOVER_LOG" >> "$LOG"; }}
+
+        # Заголовок сервера «RU1 · домен · IP» (канон node_identity.
+        # server_header): читается из telegram.json/state.json при каждом
+        # вызове — как токен/прокси в tg-отправке ниже (стиль v2-скриптов).
+        srv_header() {{
+            python3 -c "
+import json, socket
+from pathlib import Path
+try:
+    _c = json.loads(Path('/var/lib/xray-installer/telegram.json').read_text())
+except Exception:
+    _c = {{}}
+_name = str(_c.get('server_name') or '').strip() or socket.gethostname().split('.')[0]
+_ip = str(_c.get('server_ip') or '').strip()
+_dom = ''
+for _sp in ('/var/lib/xray-installer/state.json', '/etc/xray/state.json'):
+    try:
+        _dom = str(json.loads(Path(_sp).read_text()).get('domain') or '').strip()
+        if _dom:
+            break
+    except Exception:
+        pass
+_parts = [_name]
+if _dom and _dom.lower() != _name.lower():
+    _parts.append(_dom)
+if _ip:
+    _parts.append(_ip)
+print(' · '.join(_parts))
+" 2>/dev/null || echo ""
+        }}
 
         get_active() {{ [ -f "$ACTIVE_IDX_FILE" ] && cat "$ACTIVE_IDX_FILE" || echo "0"; }}
         set_active() {{ echo "$1" > "$ACTIVE_IDX_FILE"; }}
@@ -3852,7 +3915,7 @@ try:
 except Exception as e: sys.stderr.write(str(e))
 " 2>/dev/null || true
 
-            TG_MSG="AWG Failover: нода $old_idx (${{HOSTS[$old_idx]}}) → нода $new_idx (${{HOSTS[$new_idx]}})"
+            TG_MSG="[$(srv_header)] 🔁 AWG Failover: нода $old_idx (${{LABELS[$old_idx]}}) → нода $new_idx (${{LABELS[$new_idx]}})"
             {tg_cmd}
             flog "FAILOVER DONE → активна нода $new_idx ($new_iface)"
         }}

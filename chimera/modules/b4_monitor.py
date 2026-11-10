@@ -188,7 +188,9 @@ def _systemd_is_active(unit: str) -> str:
 
 def _tg_send(msg: str, event: str = "") -> bool:
     """Отправка в TG с events-фильтром (паттерн v2-мониторов; отсутствующий
-    ключ = включено). {H} — заголовок [host | ip] как в xray-tg-monitor v2."""
+    ключ = включено). {H} — заголовок [имя · домен · IP] (канон
+    node_identity.server_header, волна-3; фолбэк — прежний [host | ip]
+    как в xray-tg-monitor v2)."""
     try:
         if not TG_CONFIG.exists():
             return False
@@ -198,9 +200,13 @@ def _tg_send(msg: str, event: str = "") -> bool:
             return False
         if event and not cfg.get("events", {}).get(event, True):
             return False
-        host = _hostname()
-        ip = cfg.get("server_ip", "")
-        header = f"[{host} | {ip}]" if ip else f"[{host}]"
+        try:
+            from chimera.modules.node_identity import server_header
+            header = f"[{server_header(cfg, hostname=_hostname())}]"
+        except Exception:
+            host = _hostname()
+            ip = cfg.get("server_ip", "")
+            header = f"[{host} | {ip}]" if ip else f"[{host}]"
         text = msg.replace("{H}", header)
         _cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
                 "-m", str(TG_TIMEOUT)]

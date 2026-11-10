@@ -211,6 +211,9 @@ def _safe_restart(runner: Optional[Any] = None,
 def _tg_notify(detail: str) -> None:
     """TG-уведомление. Основной путь — общий tg_bot (уважает events-фильтр
     telegram.json), fallback — прямой curl (паттерн exit_switch_watcher).
+    Fallback-уведа получает заголовок «[имя · домен · IP]» (канон
+    node_identity.server_header, волна-3) — как у конвейера; недоступен
+    node_identity — без заголовка (прежний вид).
     Best-effort: никогда не поднимает исключений."""
     try:
         from chimera.modules import tg_bot
@@ -224,10 +227,16 @@ def _tg_notify(detail: str) -> None:
         chat = str(cfg.get("chat_id") or "")
         if not token or not chat:
             return
+        try:
+            from chimera.modules.node_identity import server_header
+            _hdr = str(server_header(cfg) or "").strip()
+        except Exception:
+            _hdr = ""
+        text = f"[{_hdr}] {detail}" if _hdr else detail
         subprocess.run(
             ["curl", "-s", "-o", "/dev/null", "-m", "10",
              f"https://api.telegram.org/bot{token}/sendMessage",
-             "-d", f"chat_id={chat}", "-d", f"text={detail}"],
+             "-d", f"chat_id={chat}", "-d", f"text={text}"],
             capture_output=True, text=True, timeout=15)
     except Exception:
         pass

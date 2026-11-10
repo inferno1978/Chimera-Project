@@ -160,6 +160,24 @@ def _ssh_ports() -> list[int]:
     return ports or [22]
 
 
+def _fw_hostname() -> str:
+    """Короткое имя хоста (фолбэк заголовка; '' → 'vps', как раньше)."""
+    try:
+        return " ".join(_run(["hostname"]).stdout.split()) or "vps"
+    except Exception:
+        return "vps"
+
+
+def _srv_header() -> str:
+    """Заголовок сервера «RU1 · домен · IP» (канон node_identity.
+    server_header, волна-3; фолбэк — короткое имя хоста, как раньше)."""
+    try:
+        from chimera.modules.node_identity import server_header
+        return str(server_header() or "").strip() or _fw_hostname()
+    except Exception:
+        return _fw_hostname()
+
+
 def _notify_tg(msg: str) -> None:
     """Лёгкое TG-уведомление (как в cron-скрипте автобана): telegram.json + curl."""
     try:
@@ -554,12 +572,12 @@ def fw_guard_run(full: bool = False, notify: bool = True) -> dict:
         sig_changed = sig != st.get("last_signature")
         timeout_passed = now - (st.get("last_notify_ts") or 0) > NOTIFY_REPEAT_SEC
         if sig_changed or timeout_passed:
-            host = " ".join(_run(["hostname"]).stdout.split()) or "vps"
+            hdr = _srv_header()
             if actions:
-                _notify_tg(f"🧯 FW Guard ({host}): восстановлено {len(actions)} — " +
+                _notify_tg(f"🧯 FW Guard [{hdr}]: восстановлено {len(actions)} — " +
                            "; ".join(actions[:5]))
             else:
-                _notify_tg(f"🚨 FW Guard ({host}): проблемы без авто-лечения: " +
+                _notify_tg(f"🚨 FW Guard [{hdr}]: проблемы без авто-лечения: " +
                            "; ".join(after["problems"][:5]))
             st["last_notify_ts"] = now
     st["last_signature"] = sig

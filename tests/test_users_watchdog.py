@@ -936,6 +936,89 @@ class TestTgEventHumanCycle(unittest.TestCase):
                 env.close()
 
 
+class TestTgEventFallbackHeader(unittest.TestCase):
+    """Волна-3: curl-fallback _tg_event — заголовок «[имя · домен · IP]»
+    (канон node_identity.server_header; фолбэк — прежний [users-watchdog]).
+
+    Герметичность: state/telegram.json/node_identity — на tmp, транспорт
+    _sh перехвачен (боевой curl из тестов не уходит)."""
+
+    def setUp(self):
+        import types as _types
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(self._rmtree)
+        (self.tmp / "state.json").write_text(json.dumps(
+            {"tg_bot_token": "TESTTOKEN", "tg_chat_id": "12345"}))
+        (self.tmp / "telegram.json").write_text(json.dumps(
+            {"server_name": "RU1", "server_ip": "203.0.113.10"}))
+        (self.tmp / "ni-state.json").write_text(
+            json.dumps({"domain": "entry-ru.example.com"}))
+        from chimera.modules import node_identity as _ni
+        for p in (
+            patch.object(_ni, "TG_FILE", self.tmp / "telegram.json"),
+            patch.object(_ni, "STATE_FILE", self.tmp / "ni-state.json"),
+            patch.object(_ni, "DNS_CACHE_FILE", self.tmp / "ni-dns-absent.json"),
+            patch.object(_ni, "ALIASES_FILE", self.tmp / "ni-aliases-absent.json"),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        _ni._MEM.clear()
+        self.addCleanup(_ni._MEM.clear)
+        # конвейер chimera недоступен → автономный curl-fallback
+        fake_core = _types.ModuleType("chimera._core")
+
+        def _boom(event, detail=""):
+            raise RuntimeError("pipeline down")
+
+        fake_core._tg_notify_event = _boom
+        sm = patch.dict(sys.modules, {"chimera._core": fake_core})
+        sm.start()
+        self.addCleanup(sm.stop)
+        # транспорт перехвачен
+        self.cmds: list[list] = []
+
+        def _fake_sh(cmd, timeout=30):
+            self.cmds.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        for p in (
+            patch.object(uw, "_sh", side_effect=_fake_sh),
+            patch.object(uw, "_XRAY_STATE", self.tmp / "state.json"),
+            patch.object(uw, "_STATE_DIR", self.tmp),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _rmtree(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _sent_text(self) -> str:
+        self.assertEqual(len(self.cmds), 1, f"curl не вызван: {self.cmds}")
+        argv = self.cmds[0]
+        for i, a in enumerate(argv):
+            if a == "--data-urlencode" and argv[i + 1].startswith("text="):
+                return argv[i + 1][len("text="):]
+        self.fail("text= не найден в curl-аргументах")
+
+    def test_fallback_header_canon(self):
+        """Заголовок [RU1 · домен · IP] вместо [users-watchdog]."""
+        uw._tg_event("users_drift", "посторонние клиенты: 1")
+        self.assertEqual(
+            self._sent_text(),
+            "[RU1 · entry-ru.example.com · 203.0.113.10] "
+            "users_drift: посторонние клиенты: 1")
+
+    def test_fallback_prefix_when_no_identity(self):
+        """node_identity недоступен → прежний префикс [users-watchdog]."""
+        with patch.dict(sys.modules,
+                        {"chimera.modules.node_identity": None}):
+            uw._tg_event("users_drift", "посторонние клиенты: 1")
+        self.assertEqual(
+            self._sent_text(),
+            "[users-watchdog] users_drift: посторонние клиенты: 1")
+
+
 class TestTgWiringUsersWatchdog(unittest.TestCase):
     """Иконки и подписи событий users-* в tg_bot (по паттерну кейса №8)."""
 

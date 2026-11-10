@@ -826,7 +826,10 @@ class TestReports(unittest.TestCase):
     def test_tg_compact(self):
         from chimera.modules.system_doctor import build_tg_text
         txt = build_tg_text(self.REP)
-        self.assertIn("<b>[NL] System Doctor</b>", txt)
+        # Волна-3: внутренний [label] убран — заголовок добавляет конвейер
+        # tg_notify_event ([server_header]); двойной заголовок в чате нет
+        self.assertIn("<b>System Doctor</b>", txt)
+        self.assertNotIn("[NL]", txt)
         self.assertIn("failed: rc-local", txt)
         self.assertNotIn("476M", txt)  # ok-находки не уходят в TG
 
@@ -999,6 +1002,84 @@ class TestVmMigration(unittest.TestCase):
         self.assertTrue(m["checks"]["vm_migration"]["check"])
         self.assertFalse(m["checks"]["vm_migration"]["fix"])
         self.assertEqual(m["vm_tsc_tolerance_mhz"], 1.0)
+
+
+class TestTgHeaderCanon(unittest.TestCase):
+    """Волна-3: без двойного заголовка в чате.
+
+    Раньше detail нёс «[{label}] System Doctor», а конвейер
+    tg_notify_event добавлял свой [server_header] — в чате два заголовка
+    подряд. Теперь: конвейер получает detail без внутреннего label,
+    прямые пути (chat_override / curl-fallback) добавляют заголовок сами
+    (_with_header — канон node_identity.server_header, фолбэк — прежний
+    «[label]» из конфига доктора)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(self._rmtree)
+        (self.tmp / "telegram.json").write_text(json.dumps(
+            {"server_name": "RU1", "server_ip": "203.0.113.10"}))
+        (self.tmp / "ni-state.json").write_text(
+            json.dumps({"domain": "entry-ru.example.com"}))
+        from chimera.modules import node_identity as _ni
+        for p in (
+            patch.object(_ni, "TG_FILE", self.tmp / "telegram.json"),
+            patch.object(_ni, "STATE_FILE", self.tmp / "ni-state.json"),
+            patch.object(_ni, "DNS_CACHE_FILE", self.tmp / "ni-dns-absent.json"),
+            patch.object(_ni, "ALIASES_FILE", self.tmp / "ni-aliases-absent.json"),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        _ni._MEM.clear()
+        self.addCleanup(_ni._MEM.clear)
+        # лог доктора — в tmp (не трогаем /var/log живой ноды)
+        lg = patch.object(sd, "LOG_FILE", self.tmp / "system-doctor.log")
+        lg.start()
+        self.addCleanup(lg.stop)
+
+    def _rmtree(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_pipeline_detail_without_inner_header(self):
+        """Конвейер получает detail как есть — заголовок добавляет сам."""
+        from chimera.modules import tg_bot
+        detail = "🩺 <b>System Doctor</b> — FIX\nok 18"
+        with patch.object(tg_bot, "tg_notify_event") as m:
+            ok = sd._tg_send_event("doctor_alert", detail, {})
+        self.assertTrue(ok)
+        m.assert_called_once_with("doctor_alert", detail)
+
+    def test_direct_chat_override_gets_header(self):
+        """Прямая отправка (chat_override) — заголовок в тексте."""
+        from chimera.modules import tg_bot
+        sent = []
+        with patch.object(tg_bot, "tg_send",
+                          side_effect=lambda text, chat_id="": sent.append(text)):
+            sd._tg_send_event("doctor_alert", "🩺 текст", {"chat_id_override": "42"})
+        self.assertEqual(
+            sent,
+            ["[RU1 · entry-ru.example.com · 203.0.113.10] 🩺 текст"])
+
+    def test_with_header_canon(self):
+        self.assertEqual(
+            sd._with_header("текст", {}),
+            "[RU1 · entry-ru.example.com · 203.0.113.10] текст")
+
+    def test_header_fallback_doctor_label(self):
+        """node_identity недоступен → прежний вид «[label]» из конфига."""
+        with patch.dict(sys.modules,
+                        {"chimera.modules.node_identity": None}):
+            self.assertEqual(sd._srv_header({"node_label": "NL"}), "[NL]")
+            self.assertEqual(sd._with_header("текст", {"node_label": "NL"}),
+                             "[NL] текст")
+
+    def test_curl_fallback_uses_with_header(self):
+        """curl-fallback-путь добавляет заголовок (source-ассерт)."""
+        import inspect
+        src = inspect.getsource(sd._tg_send_event)
+        self.assertIn('"text": _with_header(detail, cfg)', src)
 
 
 class TestTgWiring(unittest.TestCase):

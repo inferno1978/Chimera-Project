@@ -240,6 +240,39 @@ class TestMonitorV3Content(unittest.TestCase):
         self.assertIn("0 5 * * * /other/job", installs[0][2])
 
 
+class TestMonitorHeaderCanon(unittest.TestCase):
+    """Волна-3: заголовок увед — «[имя · домен · IP]» (канон
+    node_identity.server_header), рантайм из telegram.json/state.json
+    (как токен). Фолбэк — hostname (прежний вид [host] / [host | ip])."""
+
+    def setUp(self):
+        self._tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_header_canon_in_send_tg(self):
+        script, _ = _render_monitor(self._tmpdir)
+        # имя сервера из telegram.json (server_name), фолбэк — hostname
+        self.assertIn('str(cfg.get("server_name") or "").strip()', script)
+        self.assertIn('socket.gethostname().split(".")[0]', script)
+        # домен из state.json (рендер уже читает его для DOMAIN)
+        self.assertIn('Path("/var/lib/xray-installer/state.json")', script)
+        # сборка «имя · домен · IP»
+        self.assertIn('" · ".join(parts)', script)
+        # прежний формат [host | ip] ушёл
+        self.assertNotIn('"[{} | {}]".format', script)
+
+    def test_header_python_snippet_compiles(self):
+        """python-хердок send_tg остаётся валидным питоном."""
+        import re
+        script, _ = _render_monitor(self._tmpdir)
+        m = re.search(r"python3 -c '\n(.*?)' \"\$1\"", script, re.S)
+        self.assertIsNotNone(m, "python-хердок send_tg не найден")
+        compile(m.group(1), "<certbot-send-tg>", "exec")
+
+
 class TestMonitorV3Functional(unittest.TestCase):
     """Функциональные прогоны v3-скрипта в песочнице.
 

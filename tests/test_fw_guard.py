@@ -319,6 +319,62 @@ class TestFwGuardRun(_FwGuardBase):
         self.assertIn("9443/tcp", st["rules_seen"])
 
 
+class TestNotifyHeaderCanon(_FwGuardBase):
+    """Волна-3: уведа «FW Guard [имя · домен · IP]» — канон
+    node_identity.server_header (фолбэк — hostname, как раньше).
+    Герметичность: node_identity на tmp; _notify_tg перехвачен."""
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "ni-telegram.json").write_text(json.dumps(
+            {"server_name": "RU1", "server_ip": "203.0.113.10"}))
+        (self.tmp / "ni-state.json").write_text(
+            json.dumps({"domain": "entry-ru.example.com"}))
+        from chimera.modules import node_identity as _ni
+        for p in (
+            patch.object(_ni, "TG_FILE", self.tmp / "ni-telegram.json"),
+            patch.object(_ni, "STATE_FILE", self.tmp / "ni-state.json"),
+            patch.object(_ni, "DNS_CACHE_FILE", self.tmp / "ni-dns-absent.json"),
+            patch.object(_ni, "ALIASES_FILE", self.tmp / "ni-aliases-absent.json"),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        _ni._MEM.clear()
+        self.addCleanup(_ni._MEM.clear)
+
+    def test_problems_notify_carries_canon_header(self):
+        # проблема БЕЗ авто-лечения (heal не дал действий) → «🚨 FW Guard
+        # [hdr]: проблемы …» — прямой шов fw_guard_heal→[], after-проверка
+        # честно видит ту же проблему
+        self.env.ipt_ok.discard(("chimera-clients-wl", "ACCEPT"))
+        with patch.object(fw_guard, "fw_guard_heal",
+                          return_value=[]) as _heal, \
+             patch.object(fw_guard, "_notify_tg") as notify:
+            fw_guard.fw_guard_run()
+        _heal.assert_called_once()
+        msg = notify.call_args[0][0]
+        self.assertIn(
+            "🚨 FW Guard [RU1 · entry-ru.example.com · 203.0.113.10]: "
+            "проблемы без авто-лечения", msg)
+        self.assertNotIn("FW Guard (testhost)", msg)
+
+    def test_heal_notify_carries_canon_header(self):
+        self.env.ufw_status = _UFW_MISSING_3128
+        with patch.object(fw_guard, "_registry_open", return_value=(True, "ok")), \
+             patch.object(fw_guard, "_notify_tg") as notify:
+            fw_guard.fw_guard_run()
+        msg = notify.call_args[0][0]
+        self.assertIn(
+            "🧯 FW Guard [RU1 · entry-ru.example.com · 203.0.113.10]: "
+            "восстановлено", msg)
+
+    def test_srv_header_fallback_hostname(self):
+        """node_identity недоступен → hostname (прежний вид «(host)»)."""
+        with patch.dict(sys.modules,
+                        {"chimera.modules.node_identity": None}):
+            self.assertEqual(fw_guard._srv_header(), "testhost")
+
+
 class TestFwGuardInstall(_FwGuardBase):
     def test_install_writes_units_and_enables(self):
         with patch.object(fw_guard, "_installer_path", return_value="/opt/chimera"), \
