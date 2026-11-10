@@ -96,7 +96,7 @@ def _tg_notify_event(event: str, detail: str = "") -> None:
 
 def _sb_node_label(key: str) -> str:
     """Человекочитаемая метка chain-ноды по ключу host:port — «NL ·
-    total-shadows.ru [132.243.221.181]» (node_identity: алиас
+    node-nl.example.com [203.0.113.40]» (node_identity: алиас
     наблюдателя трафика + DNS-резолв с кэшем). Фолбэк — сам ключ."""
     try:
         from chimera.modules.node_identity import key_label

@@ -698,18 +698,18 @@ AllowedIPs = 0.0.0.0/0
             endpoint="203.0.113.99", _HPKEY=_HPKEY))
         (self._tmpdir / "awg3.conf").write_text(self._AWGN_CONF_TMPL.format(
             priv="N" * 43 + "=", pub="Z" * 42 + "=",
-            endpoint="132.243.221.181", _HPKEY=_HPKEY))
+            endpoint="203.0.113.40", _HPKEY=_HPKEY))
         res = self.rec.awgs_recover_state(apply=True)
         self.assertTrue(res["ok"], res["report"])
         st = res["state"]
         # дедуп: awg1 (203.0.113.99) + дубль awg2 (203.0.113.99 из _AWG1_CONF
         # не дублируется) + awg3 → РОВНО два бокса с разными endpoint'ами
         endpoints = [b["endpoint"] for b in st["cascade_exits"]]
-        self.assertEqual(endpoints, ["203.0.113.99", "132.243.221.181"])
+        self.assertEqual(endpoints, ["203.0.113.99", "203.0.113.40"])
         self.assertEqual(st["cascade_active_exit"], "203.0.113.99")
         # lb-поддерево: физические слоты, lb_mode не включён
         self.assertEqual(st["lb"]["slots_snapshot"],
-                         {"203.0.113.99": 1, "132.243.221.181": 3})
+                         {"203.0.113.99": 1, "203.0.113.40": 3})
         self.assertNotIn("lb_mode", st)
         # отчёт ведёт оператора к реактивации LB
         self.assertTrue(any("по слотам" in r for r in res["report"]))

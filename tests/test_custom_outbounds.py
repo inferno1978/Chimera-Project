@@ -190,9 +190,9 @@ class TestStreamSettings(unittest.TestCase):
 #  vless://
 # ══════════════════════════════════════════════════════════════════════════════
 
-VLESS_REALITY = ("vless://3b7c1f44-8f66-4b45-9d5a-1e2f3a4b5c6d@total-shadows.ru:443"
+VLESS_REALITY = ("vless://3b7c1f44-8f66-4b45-9d5a-1e2f3a4b5c6d@node-nl.example.com:443"
                  "?encryption=none&flow=xtls-rprx-vision&security=reality"
-                 "&sni=total-shadows.ru&fp=firefox"
+                 "&sni=node-nl.example.com&fp=firefox"
                  "&pbk=P4gDz-wZD90iqSmen-ocScmwB3fIWQqBtfGU_uFa4mA"
                  "&sid=b6cb7d14cad79e94&type=tcp&spiderX=%2F"
                  "#%D0%94%D1%80%D1%83%D0%B3%20YYY")
@@ -204,7 +204,7 @@ class TestParseVless(unittest.TestCase):
         parts = co._parse_vless(VLESS_REALITY)
         self.assertEqual(parts["protocol"], "vless")
         v = parts["settings"]["vnext"][0]
-        self.assertEqual(v["address"], "total-shadows.ru")
+        self.assertEqual(v["address"], "node-nl.example.com")
         self.assertEqual(v["port"], 443)
         u = v["users"][0]
         self.assertEqual(u["id"], "3b7c1f44-8f66-4b45-9d5a-1e2f3a4b5c6d")

@@ -281,7 +281,7 @@ def _ew_snapshot_text(eff_set: dict, mode: dict, metrics: dict,
                       include_metrics: bool, labels: dict | None = None) -> str:
     """Текст дайджеста: состав ротации + статусы нод + латентности.
     labels — {host:port → человекочитаемая метка ноды}
-    («NL · total-shadows.ru [IP]»; node_identity) — без карты метка
+    («NL · node-nl.example.com [IP]»; node_identity) — без карты метка
     деградирует до голого host:port. Чистая функция."""
     def _lbl(k: str) -> str:
         return (labels or {}).get(k) or k
@@ -393,7 +393,7 @@ def _hostname() -> str:
 
 def _ew_node_label(key: str) -> str:
     """Человекочитаемая метка chain-ноды по ключу host:port:
-    «NL · total-shadows.ru [132.243.221.181]» — алиас из конфига
+    «NL · node-nl.example.com [203.0.113.40]» — алиас из конфига
     наблюдателя трафика + DNS-резолв (node_identity; кэш 6 ч).
     Фолбэк — исходный ключ."""
     try:

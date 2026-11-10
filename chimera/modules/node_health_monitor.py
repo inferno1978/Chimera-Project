@@ -173,7 +173,7 @@ def _hostname() -> str:
 
 def _node_label(key: str) -> str:
     """Человекочитаемая метка ноды по ключу host:port — «NL ·
-    total-shadows.ru [132.243.221.181]» (node_identity: алиас из
+    node-nl.example.com [203.0.113.40]» (node_identity: алиас из
     наблюдателя трафика + DNS-резолв с кэшем). Фолбэк — сам ключ."""
     try:
         from chimera.modules.node_identity import key_label

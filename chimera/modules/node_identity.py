@@ -6,7 +6,7 @@ node_identity.py — единая точка человекочитаемых и
 нод по доменам, IP-адреса» — во всех режимах и во всех каскадах
 (VLESS / AWG 2.0 / AWG 3.1 / Mieru / Naive). До этого каждый модуль
 рендерил ноды по-своему: голый alias («NL»), голый host:port
-(«total-shadows.ru:443»), код exit'а без адреса («de») — состав
+(«node-nl.example.com:443»), код exit'а без адреса («de») — состав
 каскада и адреса из уведы было не прочитать.
 
 Единый формат метки ноды (node_label):
@@ -24,7 +24,7 @@ node_identity.py — единая точка человекочитаемых и
     негативный — 30 мин) + in-memory кэш на процесс;
   • заголовок сервера (server_header) — telegram.json → server_name
     (ручное имя, напр. «RU1») + state.json → domain + telegram.json →
-    server_ip: «RU1 · chimeravpn.online · 91.224.87.154».
+    server_ip: «RU1 · node-ru1.example.com · 203.0.113.10».
 
 Модуль — лист дерева импортов (никаких chimera-импортов), безопасен
 для вызова из cron-скриптов и TUI. Все функции не бросают исключений
@@ -247,7 +247,7 @@ def _split_key(key: str) -> tuple:
 
 def key_label(key: str, resolve: bool = True) -> str:
     """Метка по ключу «host:port»: алиас подхватывается автоматически.
-    («total-shadows.ru:443» → «NL · total-shadows.ru [132.243.221.181]»)."""
+    («node-nl.example.com:443» → «NL · node-nl.example.com [203.0.113.40]»)."""
     host, port = _split_key(key)
     if not host:
         return str(key or "")

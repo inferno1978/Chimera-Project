@@ -438,7 +438,7 @@ class TestBoxNarrow(unittest.TestCase):
     def test_noop_for_clean_strings(self):
         from chimera.modules.box_renderer import _box_narrow
         # кириллица/ASCII/флаги — 1-клеточные и так, не трогаем
-        s = "  [1] total-shadows.ru:443  \U0001F1F3\U0001F1F1  ->  199 мс  |  RTT 43 мс"
+        s = "  [1] node-nl.example.com:443  \U0001F1F3\U0001F1F1  ->  199 мс  |  RTT 43 мс"
         self.assertEqual(_box_narrow(s), s)
 
     def test_ansi_untouched(self):
@@ -492,11 +492,11 @@ class TestPingBoxUniformRender(unittest.TestCase):
             "  RTT - эталон чистой сети: full-path ~ 3-4 x RTT -",
             "  норма, DOWN при живом RTT = \"сеть есть, туннеля нет\".",
             "  Зонды не палит нас анти-DPI, ноды без ключей - TCP.",
-            "  [1] total-shadows.ru:443  ->  измеряю...",
-            "  [1] total-shadows.ru:443  \U0001F1F3\U0001F1F1  ->  199 мс (full-path)  |  RTT 43 мс",
-            "  [2] totalshadows.online:443  \U0001F1E9\U0001F1EA  ->  163 мс (full-path)  |  RTT 43 мс",
-            "  [3] fi.total-shadows.online:443  \U0001F1EB\U0001F1EE  ->  115 мс (full-path)  |  RTT 29 мс",
-            "  [5] ee.total-shadows.online:443  \U0001F1EA\U0001F1EA  ->  175 мс (via hop-fi)  |  RTT 26 мс",
+            "  [1] node-nl.example.com:443  ->  измеряю...",
+            "  [1] node-nl.example.com:443  \U0001F1F3\U0001F1F1  ->  199 мс (full-path)  |  RTT 43 мс",
+            "  [2] node-de.example.com:443  \U0001F1E9\U0001F1EA  ->  163 мс (full-path)  |  RTT 43 мс",
+            "  [3] node-fi.example.com:443  \U0001F1EB\U0001F1EE  ->  115 мс (full-path)  |  RTT 29 мс",
+            "  [5] node-ee.example.com:443  \U0001F1EA\U0001F1EA  ->  175 мс (via hop-fi)  |  RTT 26 мс",
         ]
         out = self._render(lines)
         # _box_top: рамка + заголовок + сепаратор (3) + 12 строк + низ (1) = 16

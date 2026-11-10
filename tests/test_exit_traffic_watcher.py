@@ -793,18 +793,18 @@ class TestStrategyLabelAndDominantText(unittest.TestCase):
         from chimera.modules.exit_traffic_watcher import (
             _tw_dominant_change_text)
         txt = _tw_dominant_change_text(
-            "SmartBalancer", "chimeraprodvpn.online:443",
-            "totalshadows.online:443", 72.4,
+            "SmartBalancer", "node-a.example.com:443",
+            "node-de.example.com:443", 72.4,
             720 * MB, 1000 * MB)
         lines = txt.split("\n")
         self.assertEqual(
             lines[0],
             "SmartBalancer: активная нода "
-            "<b><code>totalshadows.online:443</code></b>")
+            "<b><code>node-de.example.com:443</code></b>")
         self.assertEqual(
             lines[1],
-            "Переключение ноды: <code>chimeraprodvpn.online:443</code> "
-            "→ <b><code>totalshadows.online:443</code></b>")
+            "Переключение ноды: <code>node-a.example.com:443</code> "
+            "→ <b><code>node-de.example.com:443</code></b>")
         self.assertIn("72% окна", lines[2])
 
     def test_dominant_change_text_alias_names(self):

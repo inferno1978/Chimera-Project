@@ -292,7 +292,7 @@ def check_cascade_once() -> list[dict]:
         })
 
         if changed and not first_seen:
-            # метка с портом: «de1 · 31.77.168.49:2012» — адрес виден
+            # метка с портом: «de1 · 203.0.113.20:2012» — адрес виден
             ep = f"{host}:{e.get('port') or ''}".rstrip(":")
             if not healthy:
                 alerts.append(("mieru_exit_down",

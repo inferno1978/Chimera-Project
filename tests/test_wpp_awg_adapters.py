@@ -100,7 +100,7 @@ class TestEnsureAwgAdapters(unittest.TestCase):
 
     def test_require_user_delegates_to_portal(self):
         sb = self._extras()
-        user = {"email": "user@chimeraprodvpn.online", "uuid": "u1"}
+        user = {"email": "user@example.com", "uuid": "u1"}
         h = _FakeWPPHandler(user=user)
         sb._ensure_awg_adapters(h)
 
