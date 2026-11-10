@@ -846,11 +846,14 @@ def _tw_naive_probe_update(pstate: dict, result: dict | None, cfg: dict,
     return new, events
 
 
-def _tw_naive_event_text(event: dict, host_port: str) -> str:
-    """Текст уведы событий Naive upstream. Чистая функция."""
+def _tw_naive_event_text(event: dict, label: str) -> str:
+    """Текст уведы событий Naive upstream (label — человекочитаемая
+    метка upstream'а «домен [IP]», готовится вызывающей стороной как у
+    остальных каскадов — node_identity/_tw_label_names). Чистая
+    функция."""
     ev = str((event or {}).get("event") or "")
     if ev == "naive_upstream_down":
-        return (f"Upstream <b><code>{host_port}</code></b> недоступен: "
+        return (f"Upstream <b><code>{label}</code></b> недоступен: "
                 f"TCP-проба не проходит {int(event.get('fails') or 0)} "
                 f"прогонов подряд "
                 f"({str(event.get('err') or 'нет ответа')}). "
@@ -858,7 +861,7 @@ def _tw_naive_event_text(event: dict, host_port: str) -> str:
     if ev == "naive_upstream_up":
         ms = event.get("ms")
         ms_str = f"RTT {ms} мс" if ms is not None else "проба снова ОК"
-        return (f"Upstream <b><code>{host_port}</code></b> восстановлен: "
+        return (f"Upstream <b><code>{label}</code></b> восстановлен: "
                 f"{ms_str}.")
     return ""
 
@@ -1084,6 +1087,17 @@ def _tw_node_label(alias: str, host: str, port=0) -> str:
         if hp and int(port or 0):
             hp = f"{hp}:{int(port)}"
         return f"{al} · {hp}" if al and hp and al != hp else (al or hp)
+
+
+def _tw_key_label(key: str) -> str:
+    """Метка по ключу «host:port»: алиас наблюдателя трафика + DNS-резолв
+    с кэшем — node_identity.key_label («NL · домен [IP]»). Фолбэк —
+    сам ключ. Не бросает (обёртка патчится в тестах)."""
+    try:
+        from chimera.modules.node_identity import key_label
+        return key_label(key)
+    except Exception:
+        return str(key or "")
 
 
 def _tw_nodes_word(n: int) -> str:
@@ -1899,11 +1913,15 @@ def run_once(force: bool = False) -> dict:
                  "naive_status": prev.get("naive_status")},
                 nres, cfg, now)
             prev.update(nstate)
+            # метка upstream — человекочитаемый вид «домен [IP]» (как у
+            # остальных каскадов: node_identity через _tw_label_names;
+            # фолбэк — key_label по ключу, затем сам ключ)
+            _naive_lbl = (names.get(TAG_PREFIX_NAIVE + "upstream")
+                          or _tw_key_label(nd["key"]) or nd["key"])
             for nev in naive_events:
                 _emit(nev.get("event") or "",
-                      _tw_naive_event_text(nev, nd["key"]),
-                      {"node": names.get(TAG_PREFIX_NAIVE + "upstream")
-                       or nd["key"]})
+                      _tw_naive_event_text(nev, _naive_lbl),
+                      {"node": _naive_lbl})
 
     # ── Источник данных VLESS: Stats API ──
     stats_chain: dict = {}

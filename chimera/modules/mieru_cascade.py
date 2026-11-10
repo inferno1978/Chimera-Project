@@ -1028,15 +1028,31 @@ def _lb_effective_exits(st: dict, act: Optional[list] = None) -> list:
     return [e for e in act if e.get("id") in set(sel)]
 
 
-def _lb_exits_summary(st: dict) -> str:
-    """Строка состава для меню/статуса: 'de, pl1 (2 из 4)' / 'все (4)'."""
+def _lb_exits_summary(st: dict, labeler=None) -> str:
+    """Строка состава для меню/статуса: 'de, pl1 (2 из 4)' / 'все (4)'.
+    labeler — callable(exit: dict) → человекочитаемая метка
+    (node_identity: «de1 · домен [IP]»); без него — голая метка
+    Exit-а (обратная совместимость). Чистая функция."""
     exits = st.get("exits", [])
     sel = _normalize_lb_selection(st.get("lb_exits"), exits)
     if not sel:
         return f"все ({len(exits)})"
-    labels = {e["id"]: (e.get("label") or e["id"]) for e in exits}
+    by_id = {e["id"]: e for e in exits if isinstance(e, dict)}
+
+    def _name(i):
+        e = by_id.get(i)
+        if e is None:
+            return i
+        base = e.get("label") or e.get("id")
+        if labeler is None:
+            return base
+        try:
+            return labeler(e) or base
+        except Exception:
+            return base
+
     eff = len(_lb_effective_exits(st))
-    return f"{', '.join(labels[i] for i in sel if i in labels)} ({eff} из {len(exits)})"
+    return f"{', '.join(_name(i) for i in sel)} ({eff} из {len(exits)})"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3161,10 +3177,40 @@ def set_lb_exits(exits: Optional[list]) -> bool:
     labels = {e["id"]: (e.get("label") or e["id"]) for e in all_exits}
     names = ", ".join(labels[i] for i in sel) if sel else "все"
     print(f"  {m.GREEN}✓{m.NC} состав балансировки: {names}")
-    try:      # TG-уведомление — best effort (монитор шлёт сам)
+    # TG-уведомление (best effort, как chain_nodes.set_lb_nodes): метки
+    # Exit-ов «метка · домен [IP]» (node_identity) + счётчик exits_word +
+    # {H}-заголовок монитора — состав каскада читается из уведы целиком
+    # (запрос владельца 10.11.2026)
+    try:
         from chimera.modules.mieru_cascade_monitor import _tg_send
-        _tg_send(f"Mieru-каскад: состав балансировки Exit-ов — {names}",
-                 "cascade_lb_change")
+        try:
+            from chimera.modules.node_identity import node_label, exits_word
+        except Exception:
+            node_label = None
+        if node_label is not None:
+            def _lbl(e):
+                try:
+                    return node_label(e.get("label") or e.get("id"),
+                                      str(e.get("host") or ""),
+                                      int(e.get("port") or 0))
+                except Exception:
+                    return e.get("label") or e.get("id")
+            if sel:
+                summary = _lb_exits_summary(
+                    {"exits": all_exits, "lb_exits": sel}, _lbl)
+            else:
+                # «все» — раскрываем состав полностью, с адресами
+                _lbls = [_lbl(e) for e in all_exits if isinstance(e, dict)]
+                summary = (f"все ({len(_lbls)}): " + ", ".join(_lbls)) \
+                    if _lbls else "все"
+            n = len(sel) if sel else len(all_exits)
+            _tg_send(
+                "⚖️ <b>{H}</b> Mieru-каскад: состав балансировки "
+                f"Exit-ов — <b>{summary}</b> ({n} {exits_word(n)})",
+                "cascade_lb_change")
+        else:
+            _tg_send(f"Mieru-каскад: состав балансировки Exit-ов — {names}",
+                     "cascade_lb_change")
     except Exception:
         pass
     return ok

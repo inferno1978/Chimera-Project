@@ -2291,8 +2291,26 @@ class TestRunOnceMultiCascade(unittest.TestCase):
 
     def test_naive_upstream_events(self):
         """Naive upstream: падение после probe_fails прогонов →
-        naive_upstream_down; восстановление → naive_upstream_up."""
+        naive_upstream_down; восстановление → naive_upstream_up.
+        Метка upstream — человекочитаемый node_identity-вид «домен [IP]»
+        (IP — из предзаполненного DNS-кэша, без getent; дефолтный :443
+        не пишется), а не сырой host:port (продолжение cc00f25)."""
+        import time as _t
         import chimera.modules.exit_traffic_watcher as tw
+        from chimera.modules import node_identity as _ni
+        _dns = self._tmpdir / "node_dns_cache.json"
+        _dns.write_text(json.dumps({
+            "naive-exit.example.com": {"ip": "203.0.113.60",
+                                       "ts": _t.time()},
+            # негативный кэш: VLESS-ноды фикстуры не резолвляем (без getent)
+            "node-a.example.com": {"ip": "", "ts": _t.time()},
+            "node-b.example.com": {"ip": "", "ts": _t.time()},
+        }))
+        _ni._MEM.clear()
+        _dns_patch = patch.object(_ni, "DNS_CACHE_FILE", _dns)
+        _dns_patch.start()
+        self.addCleanup(_dns_patch.stop)
+        self.addCleanup(_ni._MEM.clear)
         self._write_cfg(probe=True, probe_fails=2,
                         probe_timeout_sec=2)
         bad = {"ok": False, "ms": None, "err": "timeout"}
@@ -2310,8 +2328,13 @@ class TestRunOnceMultiCascade(unittest.TestCase):
         self.assertIn("naive_upstream_down", res["events"])
         det = next(d for ev, d, _ in self._details
                    if ev == "naive_upstream_down")
-        self.assertIn("naive-exit.example.com:443", det)
+        self.assertIn("naive-exit.example.com [203.0.113.60]", det)
+        self.assertNotIn("naive-exit.example.com:443", det)
         self.assertIn("2 прогонов подряд", det)
+        extra = next(x for ev, _, x in self._details
+                     if ev == "naive_upstream_down")
+        self.assertEqual(extra["node"],
+                         "naive-exit.example.com [203.0.113.60]")
         st = json.loads(self._cfg.read_text())["__state__"]
         self.assertEqual(st["naive_status"], "down")
         # прогон 3: восстановление

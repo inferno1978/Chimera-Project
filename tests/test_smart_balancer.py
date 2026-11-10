@@ -389,6 +389,60 @@ class TestSbGetRelayHops(unittest.TestCase):
             self.assertEqual(_sb_get_relay_hops(), [])
 
 
+class TestSbHopLabel(unittest.TestCase):
+    """_sb_hop_label — метка релей-хопа: «тег · домен [IP]» /
+    «тег · IP:порт» (node_identity.node_label; DNS — из предзаполненного
+    файлового кэша, без getent/сети; прод-файлы node_identity изолированы
+    в tmp — паттерн 652e692)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._dns = self._tmpdir / "node_dns_cache.json"
+        self._dns.write_text(json.dumps({
+            "hop-nl.example.com": {"ip": "203.0.113.40",
+                                   "ts": time.time()}}))
+        from chimera.modules import node_identity as _ni
+        _ni._MEM.clear()
+        for p in (patch.object(_ni, "DNS_CACHE_FILE", self._dns),
+                  patch.object(_ni, "ALIASES_FILE",
+                               self._tmpdir / "aliases.json")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(_ni._MEM.clear)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _hops(self):
+        return [
+            {"tag": "hop-nl", "host": "hop-nl.example.com", "port": 443,
+             "enabled": True},
+            {"tag": "hop-de", "host": "198.51.100.7", "port": 8443,
+             "enabled": True},
+        ]
+
+    def test_domain_hop_label_with_ip(self):
+        """Домен: [IP] из кэша, дефолтный :443 не пишется."""
+        from chimera.modules.smart_balancer import _sb_hop_label
+        self.assertEqual(_sb_hop_label("hop-nl", self._hops()),
+                         "hop-nl · hop-nl.example.com [203.0.113.40]")
+
+    def test_ip_hop_label_with_port(self):
+        """IP-хоп с нестандартным портом — «тег · IP:порт»."""
+        from chimera.modules.smart_balancer import _sb_hop_label
+        self.assertEqual(_sb_hop_label("hop-de", self._hops()),
+                         "hop-de · 198.51.100.7:8443")
+
+    def test_unknown_tag_plain(self):
+        """Тег без бокса в hops — просто тег (фолбэк)."""
+        from chimera.modules.smart_balancer import _sb_hop_label
+        self.assertEqual(_sb_hop_label("nope", self._hops()), "nope")
+        self.assertEqual(_sb_hop_label("hop-nl", []), "hop-nl")
+        self.assertEqual(_sb_hop_label("hop-nl", None), "hop-nl")
+
+
 class TestSbRelayProbeTarget(unittest.TestCase):
     """_sb_relay_probe_target — цель зонда для ноды (pure)."""
 

@@ -1486,5 +1486,66 @@ class TestPurgeLegacyTcpmss(_LbTestBase):
         self.assertEqual(len(purge_calls), 2)   # по одному на слот
 
 
+# ── 12. Метка exit-ноды (node_identity, продолжение cc00f25) ─────────────────
+
+class TestExitLabelCanon(unittest.TestCase):
+    """_exit_label — человекочитаемая метка exit-ноды AWG: «de · домен
+    [IP]:порт» / «de · IP(:порт)» (DNS — из предзаполненного файлового
+    кэша, без getent/сети; прод-файлы node_identity изолированы в tmp —
+    паттерн 652e692)."""
+
+    def setUp(self):
+        import time as _t
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        _dns = self._tmpdir / "node_dns_cache.json"
+        _dns.write_text(json.dumps({
+            "node-de.example.com": {"ip": "203.0.113.20",
+                                    "ts": _t.time()}}))
+        from chimera.modules import node_identity as _ni
+        _ni._MEM.clear()
+        for p in (patch.object(_ni, "DNS_CACHE_FILE", _dns),
+                  patch.object(_ni, "ALIASES_FILE",
+                               self._tmpdir / "aliases.json")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(_ni._MEM.clear)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_domain_label_with_ip_and_port(self):
+        """Домен: [IP] из кэша, нестандартный порт виден."""
+        from chimera.modules import awg_cascade_lb
+        st = {"cascade_exits": [
+            {"name": "de", "endpoint": "node-de.example.com",
+             "port": 52831},
+        ]}
+        self.assertEqual(
+            awg_cascade_lb._exit_label(st, "de"),
+            "de · node-de.example.com [203.0.113.20]:52831")
+
+    def test_ip_label_default_port_hidden(self):
+        """IP-хост с дефолтным :443 — порт не пишется."""
+        from chimera.modules import awg_cascade_lb
+        st = {"cascade_exits": [
+            {"name": "fi1", "endpoint": "198.51.100.7", "port": 443},
+        ]}
+        self.assertEqual(awg_cascade_lb._exit_label(st, "fi1"),
+                         "fi1 · 198.51.100.7")
+
+    def test_no_box_plain_name(self):
+        """Имя без бокса в cascade_exits — голое имя (фолбэк)."""
+        from chimera.modules import awg_cascade_lb
+        st = {"cascade_exits": [
+            {"name": "de", "endpoint": "node-de.example.com",
+             "port": 52831},
+        ]}
+        self.assertEqual(awg_cascade_lb._exit_label(st, "ghost"), "ghost")
+        self.assertEqual(awg_cascade_lb._exit_label({}, "de"), "de")
+        self.assertEqual(awg_cascade_lb._exit_label({}, ""), "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

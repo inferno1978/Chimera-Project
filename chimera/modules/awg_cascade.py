@@ -1408,6 +1408,22 @@ def _awgs_cascade_failover_notify(detail: str) -> None:
         pass
 
 
+def _awgs_exit_label(name: str, endpoint, port=0) -> str:
+    """Человекочитаемая метка exit-ноды AWG-каскада: «de · домен [IP]» /
+    «de · 1.2.3.4:52831» (node_identity.node_label: DNS-резолв с
+    файловым кэшем best-effort, дефолтный :443 не пишется; алиас
+    совпадает с хостом — без дубля). Без endpoint — голое имя
+    (активный exit без бокса в exits). Чистая функция, не бросает."""
+    host = str(endpoint or "").strip()
+    if not host:
+        return str(name or "")
+    try:
+        from .node_identity import node_label
+        return node_label(name, host, port) or str(name or "")
+    except Exception:
+        return f"{name} · {host}:{port}" if port else f"{name} · {host}"
+
+
 def awgs_cascade_failover_check() -> str:
     """Health-тик мульти-exit каскада (таймер раз в минуту).
 
@@ -1452,6 +1468,13 @@ def awgs_cascade_failover_check() -> str:
         "WARN",
         f"awg-cascade-failover: активный exit '{active}' не отвечает "
         f"(handshake age={age}s, ping fail) — перебор кандидатов")
+    # бокс активного для метки from→to (активный без бокса — голое имя)
+    _abox = next((e for e in exits
+                  if isinstance(e, dict) and e.get("name") == active), None)
+    _active_lbl = (_awgs_exit_label(
+                       active, _abox.get("endpoint") if _abox else "",
+                       _abox.get("port") if _abox else 0)
+                   if active else "—")
     for cand in [e for e in exits if e.get("name") != active]:
         _name = cand.get("name", "?")
         if awgs_cascade_activate_exit(_name, probe_timeout=AWGS_FAILOVER_PROBE_SEC):
@@ -1459,8 +1482,8 @@ def awgs_cascade_failover_check() -> str:
                 "INFO",
                 f"awg-cascade-failover: переключение на '{_name}' успешно")
             _awgs_cascade_failover_notify(
-                f"AWG-каскад: авто-failover <b>{active or '—'}</b> → "
-                f"<b>{_name} · {cand.get('endpoint')}:{cand.get('port')}</b>")
+                f"AWG-каскад: авто-failover <b>{_active_lbl}</b> → "
+                f"<b>{_awgs_exit_label(_name, cand.get('endpoint'), cand.get('port'))}</b>")
             return f"failover:{_name}"
 
     # Все кандидаты молчат — возвращаем исходный (стабильность приоритетов)
@@ -1469,13 +1492,14 @@ def awgs_cascade_failover_check() -> str:
         "ERROR",
         "awg-cascade-failover: все exit-ноды недоступны — восстановлен "
         "исходный exit, ждём восстановления сети")
-    # состав каскада с адресами — читается без открытия state
+    # состав каскада с адресами («имя · домен [IP]»/«имя · IP:порт») —
+    # читается без открытия state
     _comp = ", ".join(
-        f"{e.get('name')} · {e.get('endpoint')}:{e.get('port')}"
+        _awgs_exit_label(e.get("name"), e.get("endpoint"), e.get("port"))
         for e in exits if isinstance(e, dict))
     _awgs_cascade_failover_notify(
         "AWG-каскад: failover не удался — все exit-ноды недоступны "
-        f"({_comp}), восстановлен исходный <b>{active or '—'}</b>")
+        f"({_comp}), восстановлен исходный <b>{_active_lbl}</b>")
     return "all-dead"
 
 

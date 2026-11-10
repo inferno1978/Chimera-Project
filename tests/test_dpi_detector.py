@@ -17,6 +17,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -155,6 +156,149 @@ class TestDpiPatterns(unittest.TestCase):
         for pattern, desc, weight in _DPI_PATTERNS:
             with self.subTest(desc=desc):
                 self.assertGreater(weight, 0)
+
+
+class TestPinnedNodeLabels(unittest.TestCase):
+    """_dpi_node_label — key_label-метки chain-нод (node_identity: алиас
+    наблюдателя трафика + DNS из предзаполненного кэша — без getent;
+    прод-файлы node_identity изолированы в tmp, паттерн 652e692)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._dns = self._tmpdir / "node_dns_cache.json"
+        self._aliases = self._tmpdir / "exit_traffic_watcher.json"
+        self._dns.write_text(json.dumps({
+            "node-nl.example.com": {"ip": "203.0.113.40",
+                                    "ts": time.time()}}))
+        self._aliases.write_text(json.dumps({
+            "aliases": {"node-nl.example.com:443": "NL",
+                        "198.51.100.9:8443": "DE"}}))
+        from chimera.modules import node_identity as _ni
+        _ni._MEM.clear()
+        for p in (patch.object(_ni, "DNS_CACHE_FILE", self._dns),
+                  patch.object(_ni, "ALIASES_FILE", self._aliases)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(_ni._MEM.clear)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_domain_node_alias_and_ip(self):
+        """Домен: алиас из watcher-aliases + [IP] из кэша; :443 не пишется."""
+        from chimera.modules.dpi_detector import _dpi_node_label
+        self.assertEqual(_dpi_node_label("node-nl.example.com", 443),
+                         "NL · node-nl.example.com [203.0.113.40]")
+
+    def test_ip_node_with_port(self):
+        """IP-литерал + нестандартный порт: алиас + «IP:порт»."""
+        from chimera.modules.dpi_detector import _dpi_node_label
+        self.assertEqual(_dpi_node_label("198.51.100.9", 8443),
+                         "DE · 198.51.100.9:8443")
+
+    def test_ip_node_default_port_hidden(self):
+        """IP-литерал без алиаса, порт 443 — голый IP (порт не пишется)."""
+        from chimera.modules.dpi_detector import _dpi_node_label
+        self.assertEqual(_dpi_node_label("198.51.100.9", 443),
+                         "198.51.100.9")
+
+
+class TestPinnedFallbackNotify(unittest.TestCase):
+    """pinned-fallback/restore — TG-уведы с node_label-метками нод
+    («NL · домен [IP]»); TCP-пробы/Xray-рестарт/TG — замоканы
+    (герметичность, паттерн c3c1803)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "state.json"
+        self._dns = self._tmpdir / "node_dns_cache.json"
+        self._aliases = self._tmpdir / "exit_traffic_watcher.json"
+        self._dns.write_text(json.dumps({
+            "node-nl.example.com": {"ip": "203.0.113.40",
+                                    "ts": time.time()},
+            "node-de.example.com": {"ip": "192.0.2.20",
+                                    "ts": time.time()}}))
+        self._aliases.write_text(json.dumps({
+            "aliases": {"node-nl.example.com:443": "NL",
+                        "node-de.example.com:443": "DE"}}))
+        from chimera.modules import node_identity as _ni
+        _ni._MEM.clear()
+        for p in (patch.object(_ni, "DNS_CACHE_FILE", self._dns),
+                  patch.object(_ni, "ALIASES_FILE", self._aliases)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(_ni._MEM.clear)
+        self._nodes = [
+            {"host": "node-nl.example.com", "port": 443},
+            {"host": "node-de.example.com", "port": 443},
+        ]
+        self._notified: list[tuple] = []
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _run(self, state, tcp_hosts):
+        """Фаза pinned-чека с моками: tcp_hosts — хосты, отвечающие на
+        TCP-пробу (остальные — connection refused)."""
+        import socket as _sock
+        from chimera.modules import dpi_detector as dd
+
+        class _FakeConn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_conn(addr, timeout=None):
+            if addr[0] in tcp_hosts:
+                return _FakeConn()
+            raise ConnectionRefusedError(f"refused: {addr[0]}")
+
+        self._state.write_text(json.dumps(state))
+        # (_fallback_log — вложенная функция, не патчится; пишет в
+        # /var/log/xray-auto-fallback.log best-effort, без сети/TG)
+        with patch.object(dd, "_STATE_FILE", self._state), \
+             patch.object(dd, "_tg_notify_event",
+                          side_effect=lambda ev, d="":
+                              self._notified.append((ev, d))), \
+             patch.object(dd, "_set_chain_pinned_node_index", MagicMock()), \
+             patch.object(dd, "_rebuild_and_restart_xray", MagicMock()), \
+             patch.object(_sock, "create_connection", fake_conn):
+            dd._pinned_node_check_and_fallback()
+
+    def test_fallback_and_restore_labels(self):
+        """Смерть pinned (NL) → fallback на DE: обе ноды в уведе —
+        node_label-метками «алиас · домен [IP]» (не «#N (host)»);
+        восстановление NL → возврат с меткой fallback-ноды."""
+        st = {"chain_pinned_node_index": 0, "chain_nodes": self._nodes}
+        self._run(st, tcp_hosts={"node-de.example.com"})
+        self.assertEqual(len(self._notified), 1)
+        ev, det = self._notified[0]
+        self.assertEqual(ev, "xray_down")
+        self.assertIn("NL · node-nl.example.com [203.0.113.40]", det)
+        self.assertIn("DE · node-de.example.com [192.0.2.20]", det)
+        self.assertNotIn("#1 (", det)
+        # фаза A: оригинал (NL) поднялся → restore с fallback-ноды (DE)
+        st2 = {"chain_pinned_node_index": 1,
+               "_pinned_original_index": 0,
+               "chain_nodes": self._nodes}
+        self._run(st2, tcp_hosts={"node-nl.example.com"})
+        self.assertEqual(len(self._notified), 2)
+        ev2, det2 = self._notified[1]
+        self.assertEqual(ev2, "xray_up")
+        self.assertIn("NL · node-nl.example.com [203.0.113.40]", det2)
+        self.assertIn("DE · node-de.example.com [192.0.2.20]", det2)
+
+    def test_alive_pinned_no_notify(self):
+        """Pinned жив — увед нет (проверка молча)."""
+        st = {"chain_pinned_node_index": 0, "chain_nodes": self._nodes}
+        self._run(st, tcp_hosts={"node-nl.example.com"})
+        self.assertEqual(self._notified, [])
 
 
 class TestDpiRunOnce(unittest.TestCase):

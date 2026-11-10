@@ -28,6 +28,8 @@ Exit-ы (de/pl1, steal 0.00%) и проблемные (nl1 — steal до 22%);
 from __future__ import annotations
 
 import contextlib
+import json
+import time
 import types
 
 try:
@@ -227,13 +229,23 @@ def test_all_variants_cover_unselected_exits():
 # ── 5. set_lb_exits ────────────────────────────────────────────────────
 
 def _mock_set(monkeypatch, tmp_path, st, *, apply_ok=True):
+    """Фикстура set_lb_exits: моки state/правил + запись TG-увед
+    (шов mieru_cascade_monitor._tg_send — ленивый импорт в момент
+    вызова видит патч; TG-герметичность на живых нодах, паттерн
+    c3c1803/cc00f25). Возвращает (saved, applied, sent)."""
+    from chimera.modules import mieru_cascade_monitor as mcm_mon
     saved = {}
     applied = []
+    sent: list = []
 
     def fake_apply(s):
         applied.append(True)
         mc.state_save(s)          # как реальный _rules_apply (шаг 4)
         return apply_ok
+
+    def fake_tg_send(msg, event=""):
+        sent.append((msg, event))
+        return True
 
     monkeypatch.setattr(mc, "state_load", lambda: st)
     monkeypatch.setattr(mc, "state_save", lambda s: saved.update(s))
@@ -242,15 +254,16 @@ def _mock_set(monkeypatch, tmp_path, st, *, apply_ok=True):
     monkeypatch.setattr(mc, "_ROUTING_SH", tmp_path / "routing.sh")
     monkeypatch.setattr(mc, "_cascade_lock",
                         lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(mcm_mon, "_tg_send", fake_tg_send)
     monkeypatch.setattr(
         mc, "_mieru",
         lambda: types.SimpleNamespace(GREEN="", NC="", YELLOW=""))
-    return saved, applied
+    return saved, applied, sent
 
 
 def test_set_rejects_lt2(monkeypatch, tmp_path):
     st = _st()
-    saved, applied = _mock_set(monkeypatch, tmp_path, st)
+    saved, applied, _ = _mock_set(monkeypatch, tmp_path, st)
     assert mc.set_lb_exits(["de"]) is False
     assert applied == []                    # правила не трогали
     assert "lb_exits" not in saved          # state не сохраняли
@@ -258,13 +271,13 @@ def test_set_rejects_lt2(monkeypatch, tmp_path):
 
 def test_set_rejects_all_unknown(monkeypatch, tmp_path):
     st = _st()
-    saved, applied = _mock_set(monkeypatch, tmp_path, st)
+    saved, applied, _ = _mock_set(monkeypatch, tmp_path, st)
     assert mc.set_lb_exits(["xx", "yy"]) is False
 
 
 def test_set_rejects_non_entry_role(monkeypatch, tmp_path):
     st = _st(role="exit")
-    saved, applied = _mock_set(monkeypatch, tmp_path, st)
+    saved, applied, _ = _mock_set(monkeypatch, tmp_path, st)
     assert mc.set_lb_exits(["de", "pl1"]) is False
 
 
@@ -273,7 +286,7 @@ def test_set_updates_state_and_clears_ema(monkeypatch, tmp_path):
         "de": {"lat_ms": 10}, "fi1": {"lat_ms": 20},
         "nl1": {"lat_ms": 30}, "pl1": {"lat_ms": 40}},
         balance={"shares": {"de": .25, "fi1": .25, "nl1": .25, "pl1": .25}})
-    saved, applied = _mock_set(monkeypatch, tmp_path, st)
+    saved, applied, _ = _mock_set(monkeypatch, tmp_path, st)
     assert mc.set_lb_exits(["pl1", "de"]) is True
     assert applied == [True]
     assert saved["lb_exits"] == ["e1", "e4"]           # порядок st['exits']
@@ -284,7 +297,7 @@ def test_set_updates_state_and_clears_ema(monkeypatch, tmp_path):
 
 def test_set_none_resets_to_all(monkeypatch, tmp_path):
     st = _st(lb_exits=["e1", "e4"])
-    saved, applied = _mock_set(monkeypatch, tmp_path, st)
+    saved, applied, _ = _mock_set(monkeypatch, tmp_path, st)
     assert mc.set_lb_exits(None) is True
     assert saved["lb_exits"] == []
     assert applied == [True]
@@ -292,7 +305,7 @@ def test_set_none_resets_to_all(monkeypatch, tmp_path):
 
 def test_set_three_of_four(monkeypatch, tmp_path):
     st = _st()
-    saved, applied = _mock_set(monkeypatch, tmp_path, st)
+    saved, applied, _ = _mock_set(monkeypatch, tmp_path, st)
     assert mc.set_lb_exits(["de", "fi1", "pl1"]) is True
     assert saved["lb_exits"] == ["e1", "e2", "e4"]
 
@@ -300,7 +313,7 @@ def test_set_three_of_four(monkeypatch, tmp_path):
 def test_set_rejects_when_fleet_empty(monkeypatch, tmp_path):
     # флот пуст: имена не резолвятся → явный выбор отклонён
     st = _st(role="entry", exits=[])
-    saved, applied = _mock_set(monkeypatch, tmp_path, st)
+    saved, applied, _ = _mock_set(monkeypatch, tmp_path, st)
     assert mc.set_lb_exits(["de", "pl1"]) is False
     assert applied == []
     # сброс на «все» — применяется (запоминается, применять нечего)
@@ -312,9 +325,55 @@ def test_set_rejects_when_fleet_empty(monkeypatch, tmp_path):
 def test_set_pinned_untouched(monkeypatch, tmp_path):
     # пин ортогонален составу: set_lb_exits не снимает закрепление
     st = _st(pinned_exit="e3")
-    saved, applied = _mock_set(monkeypatch, tmp_path, st)
+    saved, applied, _ = _mock_set(monkeypatch, tmp_path, st)
     assert mc.set_lb_exits(["de", "pl1"]) is True
     assert saved.get("pinned_exit") == "e3"
+
+
+def test_set_notify_canon_labels(monkeypatch, tmp_path):
+    """TG-уведа состава — канон chain_nodes.set_lb_nodes: {H}-заголовок
+    монитора, node_label-метки («метка · домен [IP]:порт» из
+    предзаполненного DNS-кэша — без getent), счётчик exits_word;
+    «все» раскрывается полным составом с адресами."""
+    from chimera.modules import node_identity as _ni
+    (tmp_path / "dns.json").write_text(json.dumps({
+        "node-de.example.com": {"ip": "203.0.113.20",
+                                "ts": time.time()}}))
+    monkeypatch.setattr(_ni, "DNS_CACHE_FILE", tmp_path / "dns.json")
+    monkeypatch.setattr(_ni, "ALIASES_FILE", tmp_path / "aliases.json")
+    _ni._MEM.clear()
+    try:
+        st = {
+            "role": "entry", "matcher": "cgroup", "strategy": "rr",
+            "strict_udp_block": False, "lb_exits": [],
+            "exits": [
+                {"id": "e1", "label": "de", "host": "node-de.example.com",
+                 "port": 2012, "enabled": True, "healthy": True,
+                 "fail_streak": 0, "redsocks_port": 23081},
+                {"id": "e2", "label": "pl1", "host": "198.51.100.9",
+                 "port": 2012, "enabled": True, "healthy": True,
+                 "fail_streak": 0, "redsocks_port": 23082},
+            ],
+        }
+        saved, applied, sent = _mock_set(monkeypatch, tmp_path, st)
+        assert mc.set_lb_exits(["de", "pl1"]) is True
+        assert len(sent) == 1
+        msg, event = sent[0]
+        assert event == "cascade_lb_change"
+        # {H}-заголовок (подставляется монитором при отправке)
+        assert msg.startswith("⚖️ <b>{H}</b> Mieru-каскад")
+        # метки node_identity + счётчик состава
+        assert ("de · node-de.example.com [203.0.113.20]:2012, "
+                "pl1 · 198.51.100.9:2012 (2 из 2)") in msg
+        assert "(2 exit-ноды)" in msg
+        # сброс на «все» — полный состав с адресами
+        assert mc.set_lb_exits(None) is True
+        msg2, _ = sent[-1]
+        assert ("все (2): de · node-de.example.com [203.0.113.20]:2012, "
+                "pl1 · 198.51.100.9:2012") in msg2
+        assert "(2 exit-ноды)" in msg2
+    finally:
+        _ni._MEM.clear()
 
 
 # ── 6. health_tick: доли только по выбранным ───────────────────────────

@@ -68,16 +68,22 @@ class _TmpBase(unittest.TestCase):
             patch.object(mcm, "MONITOR_STATE", self.tmp / "monitor-state.json"),
             patch.object(mcm, "MONITOR_LOG", self.tmp / "monitor.log"),
         ]
-        # node_identity (заголовок {H}): state.json/telegram.json прод-ноды
-        # НЕ должны протекать в тесты (герметичность на живых нодах —
-        # паттерн 40ed22f/c3c1803); резолв не нужен — IP в конфиге
+        # node_identity (заголовок {H} + метки Exit-ов): state.json/
+        # telegram.json/DNS-кэш/aliases прод-ноды НЕ должны протекать в
+        # тесты (герметичность на живых нодах — паттерн 40ed22f/c3c1803/
+        # 652e692); резолв доменов — только через предзаполненный кэш
         try:
             from chimera.modules import node_identity as _ni
             patches += [
                 patch.object(_ni, "STATE_FILE", self.tmp / "state-absent.json"),
                 patch.object(_ni, "TG_FILE", self.tmp / "tg-absent.json"),
+                patch.object(_ni, "DNS_CACHE_FILE",
+                             self.tmp / "node_dns_cache.json"),
+                patch.object(_ni, "ALIASES_FILE",
+                             self.tmp / "aliases-absent.json"),
             ]
             _ni._MEM.clear()
+            self.addCleanup(_ni._MEM.clear)
         except Exception:
             pass
         for p in patches:
@@ -205,6 +211,60 @@ class TestExitTransitions(_TmpBase):
         mcm.check_cascade_once()
         mcm.check_cascade_once()
         self.assertEqual(self.sent, [])
+
+
+class TestExitLabelCanon(_TmpBase):
+    """Метки Exit-ов — node_identity-вид (продолжение cc00f25):
+    домен получает [IP] из предзаполненного DNS-кэша (без getent/сети),
+    IP-хост — «метка · IP:порт»; состав no_exits — все метки."""
+
+    def _seed_dns(self):
+        from chimera.modules import node_identity as _ni
+        (self.tmp / "node_dns_cache.json").write_text(json.dumps({
+            "node-nl.example.com": {"ip": "203.0.113.40",
+                                    "ts": time.time()}}))
+        _ni._MEM.clear()
+
+    def _dom_exits(self):
+        return [
+            {"id": "exit-1-nl1", "label": "nl1",
+             "host": "node-nl.example.com", "port": 2012,
+             "enabled": True, "healthy": True, "fail_streak": 0,
+             "last_check": _fresh_ts()},
+            {"id": "exit-1-de1", "label": "de1", "host": "10.0.0.2",
+             "port": 2012, "enabled": True, "healthy": True,
+             "fail_streak": 0, "last_check": _fresh_ts()},
+        ]
+
+    def test_exit_down_label_with_ip(self):
+        """Домен: «nl1 · домен [IP]:порт» — IP и порт видны в уведе."""
+        self._seed_dns()
+        ex = self._dom_exits()
+        self._write_cascade(ex)
+        mcm.check_cascade_once()                       # first-seen, молча
+        ex[0]["healthy"] = False
+        ex[0]["fail_streak"] = 3
+        self._write_cascade(ex)
+        mcm.check_cascade_once()
+        self.assertEqual([e for e, _ in self.sent], ["mieru_exit_down"])
+        self.assertIn("nl1 · node-nl.example.com [203.0.113.40]:2012",
+                      self.sent[0][1])
+
+    def test_no_exits_composition_labels(self):
+        """Все down: состав «nl1 · домен [IP]:порт, de1 · IP:порт»."""
+        self._seed_dns()
+        ex = self._dom_exits()
+        self._write_cascade(ex)
+        mcm.check_cascade_once()
+        for e in ex:
+            e["healthy"] = False
+            e["fail_streak"] = 3
+        self._write_cascade(ex)
+        mcm.check_cascade_once()
+        no_ex = next(t for ev, t in self.sent if ev == "mieru_no_exits")
+        self.assertIn(
+            "nl1 · node-nl.example.com [203.0.113.40]:2012, "
+            "de1 · 10.0.0.2:2012", no_ex)
 
 
 class TestNoExitsCritical(_TmpBase):

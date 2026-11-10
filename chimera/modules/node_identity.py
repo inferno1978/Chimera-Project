@@ -26,6 +26,23 @@ node_identity.py — единая точка человекочитаемых и
     (ручное имя, напр. «RU1») + state.json → domain + telegram.json →
     server_ip: «RU1 · node-ru1.example.com · 203.0.113.10».
 
+Точки применения (все TG-пути, все каскады; продолжение cc00f25):
+  • tg_bot — заголовок всех событий + меню [8];
+  • exit_traffic_watcher — все уведы, дайджест секциями с составом,
+    метки источников VLESS/AWG/Mieru/Naive (в т.ч. naive_upstream_*);
+  • exit_switch_watcher — set-change/switch/ip-change/снапшот;
+  • smart_balancer — карантин/relay_failover/node_connect + метки
+    релей-хопов (_sb_hop_label: «тег · домен [IP]»);
+  • node_health_monitor — down/up/degraded + заголовок сервера;
+  • chain_nodes — cascade_lb_change («все (N): метка, метка»);
+  • awg_cascade — авто-failover «from → to» + all-dead составом;
+  • awg_cascade_lb — _exit_label: здоровье/activate/set_exits/
+    deactivate («de · домен [IP]» / «de · IP:порт»);
+  • mieru_cascade_monitor — exit down/up, no_exits составом;
+  • mieru_cascade — set_lb_exits: состав балансировки Exit-ов с
+    метками + счётчик exits_word + {H}-заголовок;
+  • dpi_detector — pinned-fallback/restore (key_label chain-ноды).
+
 Модуль — лист дерева импортов (никаких chimera-импортов), безопасен
 для вызова из cron-скриптов и TUI. Все функции не бросают исключений
 и быстро деградируют (нет кэша/нет DNS → метка без IP).

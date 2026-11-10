@@ -106,6 +106,23 @@ def _tg_notify_event(event: str, detail: str = "") -> None:
     except Exception:
         pass
 
+
+def _dpi_node_label(host: str, port=443) -> str:
+    """Человекочитаемая метка chain-ноды для pinned-увед: «NL ·
+    node-nl.example.com [203.0.113.40]» (node_identity.key_label по
+    «host:port»: алиас наблюдателя трафика + DNS-резолв с файловым
+    кэшем; дефолтный :443 не пишется). Фолбэк — голый host.
+    Не бросает."""
+    try:
+        from chimera.modules.node_identity import key_label
+        try:
+            p = int(port or 443)
+        except (TypeError, ValueError):
+            p = 443
+        return key_label(f"{host}:{p}") or str(host or "")
+    except Exception:
+        return str(host or "")
+
 def _get_chain_pinned_node_index() -> int:
     import importlib
     _core = importlib.import_module("chimera._core")
@@ -258,6 +275,7 @@ def _pinned_node_check_and_fallback() -> bool:
 
             cur_nd   = nodes[pinned]
             cur_host = cur_nd.get("host", "")
+            cur_port = int(cur_nd.get("port", 443))
             _fallback_log(
                 f"PINNED-RESTORE: оригинальная нода #{orig+1} ({orig_host}) снова UP → "
                 f"возврат с #{pinned+1} ({cur_host})"
@@ -265,8 +283,10 @@ def _pinned_node_check_and_fallback() -> bool:
             log_to_file("INFO",
                 f"pinned-restore: #{pinned+1} ({cur_host}) → #{orig+1} ({orig_host})")
             _tg_notify_event("xray_up",
-                f"✅ Pinned-нода <b>#{orig+1} ({orig_host})</b> восстановлена.\n"
-                f"Возврат с fallback-ноды #{pinned+1} ({cur_host}).")
+                f"✅ Pinned-нода <b>{_dpi_node_label(orig_host, orig_port)}</b> "
+                f"восстановлена.\n"
+                f"Возврат с fallback-ноды <b>"
+                f"{_dpi_node_label(cur_host, cur_port)}</b>.")
             return True
         else:
             # Оригинальная нода ещё не поднялась — ничего не делаем
@@ -301,6 +321,7 @@ def _pinned_node_check_and_fallback() -> bool:
 
     fb_nd   = nodes[fallback_idx]
     fb_host = fb_nd.get("host", "")
+    fb_port = int(fb_nd.get("port", 443))
 
     # Сохраняем оригинальный pinned для фазы восстановления
     state["_pinned_original_index"]  = pinned
@@ -324,8 +345,10 @@ def _pinned_node_check_and_fallback() -> bool:
     log_to_file("INFO",
         f"pinned-fallback: #{pinned+1} ({pinned_host}) → #{fallback_idx+1} ({fb_host})")
     _tg_notify_event("xray_down",
-        f"⚠️ Pinned-нода <b>#{pinned+1} ({pinned_host})</b> недоступна.\n"
-        f"Автоматический fallback → нода <b>#{fallback_idx+1} ({fb_host})</b>.")
+        f"⚠️ Pinned-нода <b>"
+        f"{_dpi_node_label(pinned_host, pinned_port)}</b> недоступна.\n"
+        f"Автоматический fallback → нода <b>"
+        f"{_dpi_node_label(fb_host, fb_port)}</b>.")
 
     return True
 

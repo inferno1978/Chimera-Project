@@ -553,6 +553,92 @@ class TestFailoverCheck(_CascadeTestBase):
                 self.awg_cascade.awgs_cascade_failover_check(),
                 "failover:de")
 
+    # ── канон меток (node_identity, продолжение cc00f25) ──────────────
+
+    def _state_dom_exits(self):
+        """fi1 (IP) активен, de (домен) — кандидат; DNS-кэш предзаполнен
+        (без getent/сети — прод-файлы node_identity изолированы в tmp,
+        паттерн 652e692)."""
+        import time as _t
+        from chimera.modules import node_identity as _ni
+        _dns = self._tmpdir / "node_dns_cache.json"
+        _dns.write_text(json.dumps({
+            "node-de.example.com": {"ip": "203.0.113.106",
+                                    "ts": _t.time()}}))
+        state = dict(_STATE_31_ENTRY)
+        state["cascade_exits"] = [
+            _box("fi1", "198.51.100.5"),
+            _box("de", "node-de.example.com")]
+        state["cascade_active_exit"] = "fi1"
+        self._write_state(state)
+        _dns_patch = patch.object(_ni, "DNS_CACHE_FILE", _dns)
+        _dns_patch.start()
+        self.addCleanup(_dns_patch.stop)
+        self.addCleanup(_ni._MEM.clear)
+        _ni._MEM.clear()
+
+    def test_failover_notify_canon_labels(self):
+        """авто-failover: from→to обе ноды — node_label-метки
+        («fi1 · IP:порт» → «de · домен [IP]:порт»)."""
+        notified: list = []
+        self._state_dom_exits()
+        with patch.object(self.awg_cascade,
+                          "_awgs_cascade_failover_notify",
+                          side_effect=lambda d: notified.append(d)), \
+             patch.object(self.awg_cascade, "awgs_cascade_handshake_age",
+                          return_value=9999), \
+             patch.object(self.awg_cascade, "_awgs_cascade_probe_alive",
+                          return_value=False), \
+             patch.object(self.awg_cascade, "awgs_cascade_activate_exit",
+                          return_value=True):
+            result = self.awg_cascade.awgs_cascade_failover_check()
+        self.assertEqual(result, "failover:de")
+        self.assertEqual(len(notified), 1)
+        self.assertEqual(
+            notified[0],
+            "AWG-каскад: авто-failover <b>fi1 · 198.51.100.5:52831</b> → "
+            "<b>de · node-de.example.com [203.0.113.106]:52831</b>")
+
+    def test_all_dead_notify_canon_composition(self):
+        """all-dead: состав каскада — все метки node_label-видом +
+        восстановленный исходный с адресом."""
+        notified: list = []
+        self._state_dom_exits()
+        with patch.object(self.awg_cascade,
+                          "_awgs_cascade_failover_notify",
+                          side_effect=lambda d: notified.append(d)), \
+             patch.object(self.awg_cascade, "awgs_cascade_handshake_age",
+                          return_value=9999), \
+             patch.object(self.awg_cascade, "_awgs_cascade_probe_alive",
+                          return_value=False), \
+             patch.object(self.awg_cascade, "awgs_cascade_activate_exit",
+                          return_value=False):
+            result = self.awg_cascade.awgs_cascade_failover_check()
+        self.assertEqual(result, "all-dead")
+        self.assertEqual(len(notified), 1)
+        self.assertEqual(
+            notified[0],
+            "AWG-каскад: failover не удался — все exit-ноды недоступны "
+            "(fi1 · 198.51.100.5:52831, "
+            "de · node-de.example.com [203.0.113.106]:52831), "
+            "восстановлен исходный <b>fi1 · 198.51.100.5:52831</b>")
+
+    def test_exit_label_helper_fallbacks(self):
+        """_awgs_exit_label: без endpoint — голое имя (защитный фолбэк
+        для активного без бокса в exits); домен/IP — node_label-вид."""
+        self._state_dom_exits()      # DNS-кэш + патч node_identity
+        from chimera.modules.awg_cascade import _awgs_exit_label
+        self.assertEqual(_awgs_exit_label("ghost", "", 0), "ghost")
+        self.assertEqual(_awgs_exit_label("ghost", None), "ghost")
+        self.assertEqual(_awgs_exit_label("", "node-de.example.com", 443),
+                         "node-de.example.com [203.0.113.106]")
+        self.assertEqual(
+            _awgs_exit_label("de", "node-de.example.com", 52831),
+            "de · node-de.example.com [203.0.113.106]:52831")
+        self.assertEqual(
+            _awgs_exit_label("fi1", "198.51.100.5", 52831),
+            "fi1 · 198.51.100.5:52831")
+
 
 # ── 7. failover_setup / teardown ────────────────────────────────────────────
 

@@ -106,15 +106,25 @@ def _sb_node_label(key: str) -> str:
 
 
 def _sb_hop_label(via_tag: str, hops: list) -> str:
-    """Метка релей-хопа по тегу via: «тег · host:port» (host:port
-    берётся из relay_hops; без данных — просто тег)."""
+    """Метка релей-хопа по тегу via: «тег · домен [IP]» / «тег ·
+    1.2.3.4:443» (host:port берётся из relay_hops; node_identity.
+    node_label — DNS-резолв с файловым кэшем best-effort, дефолтный
+    :443 не пишется). Без данных — просто тег. Не бросает."""
     try:
         for h in hops or []:
             if isinstance(h, dict) and str(h.get("tag") or "") == via_tag:
                 host = str(h.get("host") or "").strip()
-                port = int(h.get("port") or 0)
                 if host:
-                    return f"{via_tag} · {host}:{port}" if port else f"{via_tag} · {host}"
+                    try:
+                        port = int(h.get("port") or 0)
+                    except (TypeError, ValueError):
+                        port = 0
+                    try:
+                        from chimera.modules.node_identity import node_label
+                        return node_label(via_tag, host, port) or via_tag
+                    except Exception:
+                        return f"{via_tag} · {host}:{port}" if port \
+                            else f"{via_tag} · {host}"
     except Exception:
         pass
     return via_tag

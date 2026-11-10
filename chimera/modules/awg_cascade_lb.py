@@ -1103,16 +1103,24 @@ def _notify(detail: str) -> None:
 
 
 def _exit_label(state: dict, name: str) -> str:
-    """Человекочитаемая метка exit-ноды AWG: «name · host:port»
-    (endpoint берётся из cascade_exits; без данных — просто имя).
+    """Человекочитаемая метка exit-ноды AWG: «de · домен [IP]» /
+    «de · 1.2.3.4:52831» (node_identity.node_label: DNS-резолв с
+    файловым кэшем best-effort, дефолтный :443 не пишется;
+    endpoint — из cascade_exits; без данных — просто имя).
     Состав каскада в уведах читается целиком (запрос владельца
-    10.11.2026). Чистая функция."""
+    10.11.2026). Чистая функция, не бросает."""
     for e in (state or {}).get("cascade_exits") or []:
         if isinstance(e, dict) and e.get("name") == name:
             host = str(e.get("endpoint") or "").strip()
             port = e.get("port")
             if host:
-                return f"{name} · {host}:{port}" if port else f"{name} · {host}"
+                try:
+                    from .node_identity import node_label
+                    return node_label(name, host, port) \
+                        or str(name or "")
+                except Exception:
+                    return f"{name} · {host}:{port}" if port \
+                        else f"{name} · {host}"
     return str(name or "")
 
 

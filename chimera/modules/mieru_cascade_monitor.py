@@ -153,6 +153,22 @@ def _tg_send(msg: str, event: str = "") -> bool:
         return False
 
 
+def _exit_label(alias: str, host, port=0) -> str:
+    """Человекочитаемая метка Exit-ноды: «de1 · домен [IP]» /
+    «de1 · 1.2.3.4:2012» (node_identity.node_label: DNS-резолв с
+    файловым кэшем best-effort, дефолтный :443 не пишется; alias —
+    метка из mieru_cascade.json). Без host — голая метка.
+    Чистая функция, не бросает."""
+    h = str(host or "").strip()
+    if not h or h == "?":
+        return str(alias or "")
+    try:
+        from chimera.modules.node_identity import node_label
+        return node_label(alias, h, port) or str(alias or "")
+    except Exception:
+        return f"{alias} · {h}:{port}" if port else f"{alias} · {h}"
+
+
 def _load_monitor_state() -> dict:
     try:
         if MONITOR_STATE.exists():
@@ -292,12 +308,13 @@ def check_cascade_once() -> list[dict]:
         })
 
         if changed and not first_seen:
-            # метка с портом: «de1 · 203.0.113.20:2012» — адрес виден
-            ep = f"{host}:{e.get('port') or ''}".rstrip(":")
+            # метка ноды — человекочитаемый вид node_identity:
+            # «de1 · домен [IP]» / «de1 · 203.0.113.20:2012»
+            _lbl = _exit_label(label, host, e.get("port"))
             if not healthy:
                 alerts.append(("mieru_exit_down",
                     "🔴 <b>{H}</b> Mieru Exit недоступен\n"
-                    f"✗ <code>{label} · {ep}</code> — "
+                    f"✗ <code>{_lbl}</code> — "
                     f"fail_streak {streak}\n"
                     f"<i>{ts}</i>"))
                 _log(f"EXIT DOWN: {eid} (streak {streak})")
@@ -305,7 +322,7 @@ def check_cascade_once() -> list[dict]:
                 ms = f" — {latency:.0f} мс" if isinstance(latency, (int, float)) else ""
                 alerts.append(("mieru_exit_up",
                     "🟢 <b>{H}</b> Mieru Exit восстановлен\n"
-                    f"✓ <code>{label} · {ep}</code>{ms}\n"
+                    f"✓ <code>{_lbl}</code>{ms}\n"
                     f"<i>{ts}</i>"))
                 _log(f"EXIT UP: {eid}")
 
@@ -313,9 +330,11 @@ def check_cascade_once() -> list[dict]:
     no_exits_now = bool(exits) and not any(x["healthy"] for x in exits)
     prev_no = bool(prev.get("no_exits"))
     if no_exits_now and not prev_no:
-        # состав каскада с адресами — читается из самой уведы
+        # состав каскада с адресами («метка · домен [IP]») — читается
+        # из самой уведы
         _comp = ", ".join(
-            f"{e.get('label') or e.get('id')} · {e.get('host')}:{e.get('port')}"
+            _exit_label(e.get("label") or e.get("id"), e.get("host"),
+                        e.get("port"))
             for e in exits)
         alerts.append(("mieru_no_exits",
             "🚨 <b>{H}</b> Mieru каскад: все Exit-ы недоступны\n"
