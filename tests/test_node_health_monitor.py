@@ -375,5 +375,258 @@ class TestDegradedReasons(unittest.TestCase):
         self.assertFalse(nhm._is_degraded_reason(None))
 
 
+class TestProbeNode(unittest.TestCase):
+    """probe_node (волна-5): выбор зонда зеркалит check_nodes_once.
+
+    Мокание — прямой подстановой атрибутов модуля chain_relay (паттерн
+    TestDegradedReasons._run_check): probe_node импортирует функции
+    chain_relay локально внутри тела — подмена атрибутов модуля
+    подхватывается при каждом вызове."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import chimera.modules.chain_relay as cr
+        from chimera.modules import node_health_monitor as nhm
+        self.cr = cr
+        self.nhm = nhm
+        # оригиналы атрибутов chain_relay + nhm._tcp_ping — восстановить всё
+        self._orig = (cr.check_via_node_full_path, cr.check_node_full_path,
+                      cr.load_relay_hops, cr.hop_via_tag_for,
+                      cr.node_has_reality_creds, nhm._tcp_ping)
+
+    def tearDown(self):
+        (self.cr.check_via_node_full_path, self.cr.check_node_full_path,
+         self.cr.load_relay_hops, self.cr.hop_via_tag_for,
+         self.cr.node_has_reality_creds, self.nhm._tcp_ping) = self._orig
+
+    def test_via_active_hop_full_path(self):
+        # via-нода с активным хопом → check_via_node_full_path (цепочка)
+        calls = []
+        self.cr.load_relay_hops = lambda: [{"tag": "hop1", "enabled": True}]
+        self.cr.hop_via_tag_for = lambda nd, hops: "hop1"
+        self.cr.check_via_node_full_path = (
+            lambda nd, hops, **kw: calls.append(kw) or
+            {"ok": True, "ms": 120.0, "infra": False})
+        r = self.nhm.probe_node({"host": "nl.example.com", "port": 443,
+                                 "via": "hop1"})
+        self.assertEqual(r, {"up": True, "ms": 120.0, "reason": "",
+                             "method": "via-full-path"})
+        # HM-интересует только ok/не-ok — глубокая диагностика не нужна
+        self.assertEqual(calls, [{"deep_diag": False, "curl_timeout": 8}])
+
+    def test_via_active_hop_down_reason(self):
+        # via-отказ с причиной → up=False, reason доезжает до вызывающего
+        self.cr.load_relay_hops = lambda: [{"tag": "hop1", "enabled": True}]
+        self.cr.hop_via_tag_for = lambda nd, hops: "hop1"
+        self.cr.check_via_node_full_path = lambda nd, hops, **kw: (
+            {"ok": False, "ms": 0.0, "infra": False,
+             "reason": "нода не отвечает"})
+        r = self.nhm.probe_node({"host": "nl.example.com", "port": 443,
+                                 "via": "hop1"})
+        self.assertFalse(r["up"])
+        self.assertEqual(r["reason"], "нода не отвечает")
+        self.assertEqual(r["method"], "via-full-path")
+
+    def test_via_infra_falls_to_tcp(self):
+        # сбой МЕХАНИЗМА зонда о ноде ничего не говорит — честный TCP;
+        # прямая ветка не зовётся (via-infra → сразу TCP, зеркалит HM)
+        self.cr.load_relay_hops = lambda: [{"tag": "hop1", "enabled": True}]
+        self.cr.hop_via_tag_for = lambda nd, hops: "hop1"
+        self.cr.check_via_node_full_path = lambda nd, hops, **kw: (
+            {"ok": False, "ms": 0.0, "infra": True, "reason": "нет xray"})
+        direct_calls = []
+        self.cr.check_node_full_path = lambda nd, **kw: direct_calls.append(1)
+        self.nhm._tcp_ping = lambda host, port, timeout=5: (True, 5.0)
+        r = self.nhm.probe_node({"host": "nl.example.com", "port": 443,
+                                 "via": "hop1"})
+        self.assertTrue(r["up"])
+        self.assertEqual(r["method"], "tcp")
+        self.assertEqual(direct_calls, [])
+
+    def test_via_hop_disabled_uses_direct_probe(self):
+        # хоп выключен/удалён → нода ходит напрямую → прямой полный зонд
+        self.cr.load_relay_hops = lambda: []
+        self.cr.hop_via_tag_for = lambda nd, hops: ""
+        self.cr.node_has_reality_creds = lambda nd: True
+        self.cr.check_node_full_path = lambda nd, **kw: (
+            {"ok": True, "ms": 50.0, "infra": False})
+        r = self.nhm.probe_node({"host": "nl.example.com", "port": 443,
+                                 "via": "hop1"})
+        self.assertTrue(r["up"])
+        self.assertEqual(r["method"], "direct-full-path")
+
+    def test_via_import_error_falls_to_tcp(self):
+        # chain_relay недоступен (None в sys.modules) → TCP без вердикта
+        self.nhm._tcp_ping = lambda host, port, timeout=5: (False, 0.0)
+        with patch.dict(sys.modules,
+                        {"chimera.modules.chain_relay": None}):
+            r = self.nhm.probe_node({"host": "nl.example.com", "port": 443,
+                                     "via": "hop1"})
+        self.assertFalse(r["up"])
+        self.assertEqual(r["method"], "tcp")
+
+    def test_direct_node_with_creds(self):
+        # прямая нода с REALITY-ключами → check_node_full_path (не TCP)
+        calls = []
+        self.cr.node_has_reality_creds = lambda nd: True
+        self.cr.check_node_full_path = (
+            lambda nd, **kw: calls.append(kw) or
+            {"ok": True, "ms": 77.0, "infra": False})
+        r = self.nhm.probe_node({"host": "nl.example.com", "port": 443})
+        self.assertTrue(r["up"])
+        self.assertEqual(r["method"], "direct-full-path")
+        # curl_timeout=8: мост поминутный, бюджет раунда ограничен
+        self.assertEqual(calls, [{"curl_timeout": 8, "deep_diag": False}])
+
+    def test_direct_node_degraded_reason(self):
+        # деградированный отказ (кейс №9) — up=False с причиной
+        self.cr.node_has_reality_creds = lambda nd: True
+        self.cr.check_node_full_path = lambda nd, **kw: (
+            {"ok": False, "ms": 0.0, "infra": False, "reason": "DNS на exit"})
+        r = self.nhm.probe_node({"host": "nl.example.com", "port": 443})
+        self.assertFalse(r["up"])
+        self.assertEqual(r["reason"], "DNS на exit")
+        self.assertEqual(r["method"], "direct-full-path")
+
+    def test_direct_infra_falls_to_tcp(self):
+        # сбой механизма прямого зонда → честный TCP-fallback
+        self.cr.node_has_reality_creds = lambda nd: True
+        self.cr.check_node_full_path = lambda nd, **kw: (
+            {"ok": False, "ms": 0.0, "infra": True, "reason": "нет xray"})
+        self.nhm._tcp_ping = lambda host, port, timeout=5: (True, 7.0)
+        r = self.nhm.probe_node({"host": "nl.example.com", "port": 443})
+        self.assertTrue(r["up"])
+        self.assertEqual(r["method"], "tcp")
+
+    def test_no_creds_tcp(self):
+        # нода без клиентских REALITY-ключей → честная TCP-проба
+        direct_calls = []
+        self.cr.node_has_reality_creds = lambda nd: False
+        self.cr.check_node_full_path = lambda nd, **kw: direct_calls.append(1)
+        self.nhm._tcp_ping = lambda host, port, timeout=5: (True, 9.0)
+        r = self.nhm.probe_node({"host": "nl.example.com", "port": 443})
+        self.assertTrue(r["up"])
+        self.assertEqual(r["method"], "tcp")
+        self.assertEqual(direct_calls, [])
+
+    def test_no_host(self):
+        # нода без host — вердикта нет (method "none")
+        r = self.nhm.probe_node({"host": ""})
+        self.assertEqual(r, {"up": False, "ms": 0.0, "reason": "нет host",
+                             "method": "none"})
+
+
+class TestHmCheckCli(unittest.TestCase):
+    """hm_check_cli (мост --hm-check, волна-5): stdout ровно "up"/"down",
+    exit 0/1/2, stderr с причиной."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import signal as _signal
+        from chimera.modules import node_health_monitor as nhm
+        self.nhm = nhm
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "state.json"
+        self._orig = (nhm.STATE_FILE, nhm.probe_node, nhm._tcp_ping)
+        nhm.STATE_FILE = self._state
+        self._orig_sigterm = _signal.getsignal(_signal.SIGTERM)
+
+    def tearDown(self):
+        import signal as _signal
+        import shutil
+        self.nhm.STATE_FILE, self.nhm.probe_node, self.nhm._tcp_ping = (
+            self._orig)
+        _signal.signal(_signal.SIGTERM, self._orig_sigterm)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write_nodes(self, nodes):
+        self._state.write_text(json.dumps({"chain_nodes": nodes}))
+
+    def _run(self, target):
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.nhm.hm_check_cli(target)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_up_prints_word_returns_zero(self):
+        # нода найдена → probe_node; stdout — ровно "up", exit 0
+        self._write_nodes([{"host": "n.example.com", "port": 443,
+                            "uuid": "u", "pubkey": "p"}])
+        seen = []
+        self.nhm.probe_node = (
+            lambda nd: seen.append(nd) or
+            {"up": True, "ms": 90.0, "reason": "",
+             "method": "direct-full-path"})
+        rc, out, err = self._run("n.example.com:443")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "up")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["host"], "n.example.com")
+
+    def test_down_stderr_reason(self):
+        # down → stdout "down", exit 1, причина — на stderr
+        self._write_nodes([{"host": "n.example.com", "port": 443,
+                            "uuid": "u", "pubkey": "p"}])
+        self.nhm.probe_node = lambda nd: (
+            {"up": False, "ms": 0.0, "reason": "DNS на exit",
+             "method": "direct-full-path"})
+        rc, out, err = self._run("n.example.com:443")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out.strip(), "down")
+        self.assertIn("DNS на exit", err)
+
+    def test_empty_target_usage(self):
+        # пустой target (в т.ч. пробелы) → exit 2 (usage)
+        rc, out, err = self._run("")
+        self.assertEqual(rc, 2)
+        rc, out, err = self._run("   ")
+        self.assertEqual(rc, 2)
+
+    def test_host_without_port_found(self):
+        # host без :port — нода найдена по хосту (порт любой)
+        self._write_nodes([{"host": "n.example.com", "port": 443,
+                            "uuid": "u", "pubkey": "p"}])
+        seen = []
+        self.nhm.probe_node = (
+            lambda nd: seen.append(nd) or
+            {"up": True, "ms": 1.0, "reason": "",
+             "method": "direct-full-path"})
+        rc, out, err = self._run("n.example.com")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(seen), 1)
+
+    def test_port_mismatch_tcp_fallback(self):
+        # host найден, порт другой → нода не в chain_nodes → TCP-проба
+        self._write_nodes([{"host": "n.example.com", "port": 443,
+                            "uuid": "u", "pubkey": "p"}])
+        self.nhm._tcp_ping = lambda host, port, timeout=5: (True, 3.0)
+        rc, out, err = self._run("n.example.com:8443")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "up")
+
+    def test_unknown_node_tcp_down(self):
+        # ноды нет в chain_nodes, TCP молчит → down + причина на stderr
+        self._write_nodes([])
+        self.nhm._tcp_ping = lambda host, port, timeout=5: (False, 0.0)
+        rc, out, err = self._run("gone.example.com")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out.strip(), "down")
+        self.assertIn("chain_nodes", err)
+
+    def test_sigterm_handler_installed(self):
+        # bash `timeout` шлёт SIGTERM — гард ставится (не SIG_DFL)
+        import signal as _signal
+        self._write_nodes([{"host": "n.example.com", "port": 443,
+                            "uuid": "u", "pubkey": "p"}])
+        self.nhm.probe_node = lambda nd: (
+            {"up": True, "ms": 1.0, "reason": "",
+             "method": "direct-full-path"})
+        self._run("n.example.com:443")
+        self.assertIsNot(_signal.getsignal(_signal.SIGTERM),
+                         _signal.SIG_DFL)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

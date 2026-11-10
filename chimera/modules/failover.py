@@ -5,13 +5,15 @@ Failover-мониторинг exit-нод + авто-фолбэк (Режим B 
 
 Две логические части (объединены, т.к. обе работают с состоянием exit-нод):
 
-1. **Failover watchdog** (cron каждую минуту): проверяет TCP-доступность
-   exit-нод, пишет результаты в /var/lib/xray-installer/failover.json и
+1. **Failover watchdog** (cron каждую минуту): проверяет exit-ноды полным
+   REALITY-зондом (мост main.py --hm-check, волна-5; TCP — последний
+   рубеж), пишет результаты в /var/lib/xray-installer/failover.json и
    алертит в Telegram при падении ноды. Экран статуса — do_failover_status.
 
-2. **Auto-fallback** (cron каждую минуту): если все exit-ноды недоступны —
-   переключает Xray в Режим A (прямой выход); при восстановлении хотя бы
-   одной ноды — возвращает Режим B. Экран управления —
+2. **Auto-fallback** (cron каждую минуту): если все exit-ноды недоступны
+   (полный REALITY-зонд через мост --hm-check, волна-5; TCP — последний
+   рубеж) — переключает Xray в Режим A (прямой выход); при восстановлении
+   хотя бы одной ноды — возвращает Режим B. Экран управления —
    do_manage_auto_fallback (пункт [~] в главном меню).
 
 Точки входа из _core.py:
@@ -135,7 +137,7 @@ def _fo_ask_telegram() -> tuple:
     NC          = core.NC
 
     _box_top("TELEGRAM-АЛЕРТЫ WATCHDOG")
-    _box_desc("Watchdog проверяет exit-ноды каждую минуту (cron) и присылает "
+    _box_desc("Watchdog проверяет exit-ноды полным REALITY-зондом каждую минуту (cron) и присылает "
               "в Telegram сообщение при падении/восстановлении ноды.")
     _box_kv("Bot Token", "пусто = без алертов (молчаливый режим)")
     _box_kv("Chat ID", "нужен, только если введён token")
@@ -215,14 +217,68 @@ def _fo_hdr_prefix() -> str:
         return ""
 
 
+def _fo_installer_paths() -> tuple:
+    """(installer_path, main_py) для моста --hm-check в генератах
+    (паттерн install_health_monitor / nginx_watchdog._installer_path:
+    find_spec("chimera") → родитель пакета, фолбэк /opt/chimera)."""
+    try:
+        import importlib.util
+        try:
+            spec = importlib.util.find_spec("chimera")
+        except (ValueError, ModuleNotFoundError):
+            spec = None
+        if spec and spec.submodule_search_locations:
+            installer_path = str(Path(list(spec.submodule_search_locations)[0]).parent)
+        else:
+            installer_path = "/opt/chimera"
+    except Exception:
+        installer_path = "/opt/chimera"
+    return installer_path, f"{installer_path}/main.py"
+
+
+# Отступ шаблонов генератов внутри textwrap-литералов (пробелов)
+_TMPL_INDENT = " " * 8
+
+
+def _fo_dedent_fixed(src: str) -> str:
+    """dedent генератов, стойкий к колонке-0 внутри шаблона.
+
+    textwrap.dedent здесь НЕ работает: python-хердоки (update_state,
+    чтения state.json) и tg_block стоят на колонке 0 → общий префикс
+    пуст → dedent не срезает ничего, shebang остаётся с 8-пробельным
+    отступом. При установке cron делает execve, интерпретатор по
+    смещённому «#!» не распознаётся (ENOEXEC) → /bin/sh откатывается на
+    dash, а в dash нет bash-массивов NODE_LABELS — скрипт мёртв при
+    живом bash -n (байт-0 ловится только исполнитель). Срезаем РОВНО
+    отступ шаблона со строк, где он есть; хердоки (<8 пробелов) и
+    dedent-нутый tg_block не трогаем — их разметка самоценна.
+    """
+    tail = "\n" if src.endswith("\n") else ""
+    lines = [ln[len(_TMPL_INDENT):] if ln.startswith(_TMPL_INDENT) else ln
+             for ln in src.splitlines()]
+    # хвостовой мусор шаблона (отступ перед закрывающими кавычками
+    # textwrap-литерала) — в дело не играет, cron-логи не засоряем
+    return ("\n".join(lines) + tail).rstrip() + "\n"
+
+
 def _failover_install(nodes: list, tg_token: str = "", tg_chat: str = "") -> None:
     """Устанавливает watchdog-скрипт для exit-нод с Telegram-алертом.
 
     Метки нод и заголовок сервера вшиваются генератором (волна-3,
     канон node_identity): bash-скрипт не умеет DNS/алиасы, а конфиги
-    токена уже запечены в текст — метки готовятся здесь же."""
+    токена уже запечены в текст — метки готовятся здесь же.
+
+    Волна-5: генерат зондирует exit-ноды полным REALITY-зондом через
+    мост main.py --hm-check (голый TCP к REALITY-порту — бан-фуд
+    fail2ban xray-reality + DPI-detector на ноде-цели, живой кейс
+    окт.2026 №3); голый TCP — только последний рубеж при поломке
+    моста. flock -n гарнит от нахлёста раундов: полный зонд мёртвой
+    ноды может идти >60 c, а cron поминутно стартует новый раунд —
+    гонка над failover.json (read-modify-write) и дубль DOWN-уведы.
+    """
     core = _core_module()
     success = core.success
+    _installer_path, _main_py = _fo_installer_paths()
 
     # Метки нод + заголовок сервера (вшивка при генерации — см. докстринг).
     # Мёртвый блок nodes_str ("STATUS=$(check_node …" с незакрытой подстановкой)
@@ -251,29 +307,62 @@ def _failover_install(nodes: list, tg_token: str = "", tg_chat: str = "") -> Non
     else:
         tg_block = "send_tg() { : ; }"  # no-op
 
-    script = textwrap.dedent(f"""\
+    script = _fo_dedent_fixed(f"""\
         #!/bin/bash
         # Xray Failover Watchdog (VLESS Installer)
         LOG="{_FAILOVER_LOG}"
         STATE="{_FAILOVER_STATE}"
         DATE=$(date '+%Y-%m-%d %H:%M:%S')
 
+        # Волна-5: полный REALITY-зонд через мост main.py --hm-check (паттерн
+        # HM/chain_relay: via-цепочка → прямой REALITY full-path → TCP-fallback
+        # при сбое механизма). Голый TCP к REALITY-порту — бан-фуд fail2ban
+        # xray-reality + DPI-detector на ноде-цели (живой кейс окт. 2026 №3:
+        # u1nl забанила entry за поминутные TCP-зонды) — поминутный watchdog
+        # сам себя банит. Валидный REALITY-хендшейк легитимен (invalid-логов
+        # не пишет, банами не считается) и проверяет реальную работу ноды.
+        MAIN_PY="{_main_py}"
+        export PYTHONPATH="{_installer_path}:$PYTHONPATH"
+
+        # Гард нахлёста раундов: полный зонд мёртвой ноды может идти >60 c
+        # (лестница проб с таймаутами) — cron поминутно стартует новый раунд,
+        # пока старый жив; flock -n пропускает раунд вместо гонки над
+        # failover.json (read-modify-write) и дубля DOWN-уведы. Нет flock —
+        # как прежде, без гарда.
+        if command -v flock >/dev/null 2>&1; then
+            exec 9>/var/run/xray-failover-watch.lock
+            flock -n 9 || exit 0
+        fi
+
         {tg_block}
 
         check_node() {{
             local HOST=$1
             local PORT=$2
-            if timeout 5 bash -c ">/dev/tcp/$HOST/$PORT" 2>/dev/null; then
+            local OUT RC
+            OUT=$(timeout -k 5 60 python3 "$MAIN_PY" --hm-check "$HOST:$PORT" 2>/dev/null)
+            RC=$?
+            if [ "$RC" = "0" ] && [ "$OUT" = "up" ]; then
                 echo "up"
-            else
+            elif [ "$RC" = "1" ] && [ "$OUT" = "down" ]; then
                 echo "down"
+            else
+                # Мост не дал честного вердикта (пустой stdout/краш/таймаут,
+                # код 2+): прежний TCP-путь — последний рубеж, мониторинг живёт,
+                # пока мост чинится (в норме сюда не попадаем: мост сам
+                # фолбэкнится на TCP при сбое механизма зонда)
+                if timeout 5 bash -c ">/dev/tcp/$HOST/$PORT" 2>/dev/null; then
+                    echo "up"
+                else
+                    echo "down"
+                fi
             fi
         }}
 
         update_state() {{
             local HOST=$1 STATUS=$2
             python3 -c "
-import json, os, time
+import json, os, sys, time
 p = '$STATE'
 d = {{}}
 if os.path.exists(p):
@@ -476,6 +565,13 @@ def _auto_fallback_install(nodes: list, tg_token: str = "", tg_chat: str = "") -
     Заголовок сервера и метки нод вшиты генератором (волна-3, канон
     node_identity) — единый стиль с _failover_install: токен/chat уже
     запечены в текст, bash не умеет DNS/алиасы.
+
+    Волна-5: генерат зондирует exit-ноды полным REALITY-зондом через
+    мост main.py --hm-check (голый TCP к REALITY-порту — бан-фуд
+    fail2ban/DPI-detector на ноде-цели, живой кейс окт.2026 №3); голый
+    TCP — только последний рубеж при поломке моста. flock -n гарнит
+    от нахлёста раундов (полный зонд мёртвой ноды >60 c при поминутном
+    cron — гонка над state.json/_fallback_active и дубль увед).
     """
     core = _core_module()
     success           = core.success
@@ -483,6 +579,7 @@ def _auto_fallback_install(nodes: list, tg_token: str = "", tg_chat: str = "") -
     _AUTO_FALLBACK_LOGFILE = core._AUTO_FALLBACK_LOGFILE
     _AUTO_FALLBACK_SCRIPT  = core._AUTO_FALLBACK_SCRIPT
     _AUTO_FALLBACK_CRON    = core._AUTO_FALLBACK_CRON
+    _installer_path, _main_py = _fo_installer_paths()
 
     nodes_list = " ".join(
         f'{nd["host"]}:{nd.get("port", 443)}' for nd in nodes
@@ -504,7 +601,7 @@ def _auto_fallback_install(nodes: list, tg_token: str = "", tg_chat: str = "") -
     else:
         tg_block = "send_tg() { : ; }"
 
-    script = textwrap.dedent(f"""\
+    script = _fo_dedent_fixed(f"""\
         #!/bin/bash
         # Xray Auto-Fallback: Mode B → A при отказе всех exit-нод
         # Установлен Chimera Project
@@ -517,11 +614,34 @@ def _auto_fallback_install(nodes: list, tg_token: str = "", tg_chat: str = "") -
         # node_identity — состав каскада читается в уведе целиком)
         ALL_LABELS={_labels_bash}
         HDR_PREFIX={_hdr_prefix_bash}
-        SCRIPT="{sys.argv[0]}"
+        # Волна-5: АБСОЛЮТНЫЙ путь main.py. Прежний sys.argv[0] генератора —
+        # относительный (меню: «python3 main.py» из /opt/chimera) — cron
+        # исполняет скрипт с cwd=/ → «python3 main.py --switch-mode-a»
+        # падал бы «can't open file '/main.py'» — режимный переключатель
+        # никогда не срабатывал. Абсолютный путь работает из любого cwd
+        # (тот же _fo_installer_paths, что и мост --hm-check).
+        SCRIPT="{_main_py}"
 
         {tg_block}
 
         log() {{ echo "[$DATE] $1" >> "$LOG"; }}
+
+        # Волна-5: полный REALITY-зонд через мост main.py --hm-check —
+        # голый TCP к REALITY-порту банится на ноде-цели (живой кейс
+        # окт.2026 №3), валидный REALITY-хендшейк легитимен; TCP остаётся
+        # последним рубежом при поломке моста.
+        MAIN_PY="{_main_py}"
+        export PYTHONPATH="{_installer_path}:$PYTHONPATH"
+
+        # Гард нахлёста раундов: полный зонд мёртвой ноды может идти >60 c
+        # (лестница проб с таймаутами), а cron стартует раунд каждую минуту
+        # — без flock -n новый раунд гонится со старым над state.json
+        # (read-modify-write _fallback_active) и дублирует режимные уведы.
+        # Нет flock — как прежде, без гарда.
+        if command -v flock >/dev/null 2>&1; then
+            exec 9>/var/run/xray-auto-fallback.lock
+            flock -n 9 || exit 0
+        fi
 
         # Читаем флаг auto_fallback_to_direct из state.json
         ENABLED=$(python3 -c "
@@ -551,14 +671,25 @@ try:
 except: print('0')
 ")
 
-        # Проверяем каждую ноду
+        # Проверяем каждую ноду — полный REALITY-зонд (мост --hm-check, волна-5;
+        # голый TCP к REALITY-порту банится на цели — живой кейс окт.2026 №3),
+        # TCP — только последний рубеж при поломке моста
         ANY_UP=0
         for ITEM in $NODES; do
             HOST=${{ITEM%%:*}}
             PORT=${{ITEM##*:}}
-            if timeout 5 bash -c ">/dev/tcp/$HOST/$PORT" 2>/dev/null; then
+            OUT=$(timeout -k 5 60 python3 "$MAIN_PY" --hm-check "$HOST:$PORT" 2>/dev/null)
+            RC=$?
+            if [ "$RC" = "0" ] && [ "$OUT" = "up" ]; then
                 ANY_UP=1
                 break
+            fi
+            if [ "$RC" != "1" ] || [ "$OUT" != "down" ]; then
+                # мост не дал честного вердикта — прежний TCP-рубеж
+                if timeout 5 bash -c ">/dev/tcp/$HOST/$PORT" 2>/dev/null; then
+                    ANY_UP=1
+                    break
+                fi
             fi
         done
 

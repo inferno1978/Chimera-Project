@@ -70,6 +70,17 @@ if "--switch-mode-a" in sys.argv or "--switch-mode-b" in sys.argv:
         _builtins.input = _orig_input
     sys.exit(0)
 
+# --- Полный REALITY-зонд одной exit-ноды (мост failover-watchdog, волна-5) ---
+# Голый TCP к REALITY-порту — бан-фуд fail2ban/DPI-detector на ноде-цели
+# (живой кейс окт.2026 №3): watchdog зондирует exit-ноды полным
+# REALITY-зондом (паттерн HM), TCP — только последний рубеж.
+# stdout: "up"/"down"; exit 0/1/2. root не нужен (зонд безпривилегирован).
+if "--hm-check" in sys.argv:
+    _idx = sys.argv.index("--hm-check")
+    _tgt = sys.argv[_idx + 1].strip() if _idx + 1 < len(sys.argv) else ""
+    from chimera.modules.node_health_monitor import hm_check_cli
+    sys.exit(hm_check_cli(_tgt))
+
 # --- Режим ежесуточного обновления РФ подсетей ---
 if "--update-ru-subnets" in sys.argv:
     if os.geteuid() != 0:

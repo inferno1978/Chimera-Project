@@ -9,6 +9,8 @@ node_health_monitor.py — периодический health check exit-нод �
 
 Публичный API:
     check_nodes_once()              → list[dict]   — разовая проверка всех нод
+    probe_node(nd)                  → dict         — полный зонд ОДНОЙ ноды (волна-5)
+    hm_check_cli(target)            → int          — CLI-мост --hm-check (failover-watchdog)
     install_health_monitor(interval)→ (bool, str)  — установить cron
     uninstall_health_monitor()      → (bool, str)  — удалить cron
     is_monitor_installed()          → bool
@@ -19,8 +21,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -194,6 +198,155 @@ def _server_header(tg_cfg: dict | None = None) -> str:
 
 # ── Публичный API ─────────────────────────────────────────────────────────────
 
+def probe_node(nd: dict, curl_timeout: int = 8) -> dict:
+    """Полный зонд ОДНОЙ exit-ноды — вердикт без записи состояния/уведомлений.
+
+    Выбор зонда зеркалит ветвление check_nodes_once (держать синхронно!):
+    via-нода с активным хопом → check_via_node_full_path (цепочка
+    hop→exit); сбой МЕХАНИЗМА зонда (infra=True) и ноды без клиентских
+    REALITY-ключей → честная TCP-проба (_tcp_ping). Голый TCP к
+    REALITY-порту — бан-фуд fail2ban xray-reality + DPI-detector на
+    ноде-цели (живой кейс окт.2026 №3), поэтому TCP — только fallback.
+
+    В отличие от check_nodes_once: НЕ пишет node-health-state.json, НЕ
+    шлёт TG и НЕ пишет в xray-node-health.log — вызывающий код (мост
+    hm_check_cli → failover-watchdog со своим логом/дедупом) сам решает,
+    что делать с вердиктом.
+
+    curl_timeout=8 (меньше HM-дефолта 20): мост зовётся поминутно из
+    bash-генерата под `timeout 60` — лестница проб обязана укладываться
+    в бюджет раунда.
+
+    Возвращает {"up": bool, "ms": float, "reason": str, "method": str};
+    method: "via-full-path" | "direct-full-path" | "tcp" | "none".
+    Деградированный отказ (DNS/v6-egress на exit — «туннель жив, домены
+    не ходят», кейс №9) — up=False с reason: для клиентского трафика
+    такая нода не годится (семантика check_nodes_once).
+    """
+    host = str((nd or {}).get("host") or "").strip()
+    try:
+        port = int((nd or {}).get("port") or 443)
+    except (TypeError, ValueError):
+        port = 443
+    if not host:
+        return {"up": False, "ms": 0.0, "reason": "нет host", "method": "none"}
+
+    via = str((nd or {}).get("via") or "").strip()
+    if via:
+        # via-нода: активный хоп → full-path по цепочке; выключен/удалён —
+        # нода ходит напрямую, прямая ветка ниже (зеркалит check_nodes_once)
+        try:
+            from chimera.modules.chain_relay import (
+                check_via_node_full_path, load_relay_hops, hop_via_tag_for)
+            hops = load_relay_hops()
+            if hop_via_tag_for(nd, hops):
+                r = check_via_node_full_path(nd, hops, deep_diag=False,
+                                             curl_timeout=curl_timeout)
+                if not r.get("infra"):
+                    ok = bool(r.get("ok"))
+                    return {"up": ok,
+                            "ms": float(r.get("ms", 0.0) or 0.0),
+                            "reason": "" if ok else str(r.get("reason") or "").strip(),
+                            "method": "via-full-path"}
+                # сбой МЕХАНИЗМА зонда о ноде ничего не говорит — честный
+                # TCP (зеркалит check_nodes_once: via-infra → сразу TCP)
+                up, ms = _tcp_ping(host, port)
+                return {"up": up, "ms": ms,
+                        "reason": "" if up else "TCP-проба не прошла",
+                        "method": "tcp"}
+        except Exception:
+            up, ms = _tcp_ping(host, port)
+            return {"up": up, "ms": ms,
+                    "reason": "" if up else "TCP-проба не прошла",
+                    "method": "tcp"}
+
+    # Прямая нода (без via ИЛИ via-нода с выключенным хопом): с клиентскими
+    # REALITY-ключами — полный зонд; infra/без ключей — TCP
+    try:
+        from chimera.modules.chain_relay import (
+            check_node_full_path, node_has_reality_creds)
+        if node_has_reality_creds(nd):
+            r = check_node_full_path(nd, curl_timeout=curl_timeout,
+                                     deep_diag=False)
+            if not r.get("infra"):
+                ok = bool(r.get("ok"))
+                return {"up": ok,
+                        "ms": float(r.get("ms", 0.0) or 0.0),
+                        "reason": "" if ok else str(r.get("reason") or "").strip(),
+                        "method": "direct-full-path"}
+    except Exception:
+        pass
+    up, ms = _tcp_ping(host, port)
+    return {"up": up, "ms": ms,
+            "reason": "" if up else "TCP-проба не прошла",
+            "method": "tcp"}
+
+
+def hm_check_cli(target: str) -> int:
+    """CLI-мост --hm-check: полный зонд ОДНОЙ ноды (failover-watchdog).
+
+    main.py: `python3 main.py --hm-check <host[:port]>`. stdout — ровно
+    одно слово "up"/"down" (bash-генерат парсит слово; ПУСТОЙ stdout =
+    мост не дал вердикта → генерат фолбэкнется на свой TCP-рубеж),
+    причина отказа — на stderr. Exit-коды: 0 = up, 1 = down, 2 = usage.
+
+    Нода ищется в chain_nodes (state.json) по host[:port]: полному зонду
+    нужны клиентские REALITY-ключи ноды. Ноды нет в chain_nodes (убрана
+    из цепочки, но watchdog её ещё проверяет) — честная TCP-проба.
+
+    SIGTERM (bash `timeout`) → SystemExit: контекст-менеджер зонда
+    успевает убить временный xray и снести temp-файлы (relaycheck_*),
+    иначе таймаут сиротит xray-процесс.
+    """
+    try:
+        signal.signal(
+            signal.SIGTERM,
+            lambda signum, _frame: sys.exit(128 + signum))
+    except (ValueError, OSError):
+        pass  # не главный поток — работаем без гарда
+
+    tgt = str(target or "").strip()
+    if not tgt:
+        print("ERROR: укажите host[:port]", file=sys.stderr)
+        return 2
+
+    host, port = tgt, None
+    if ":" in tgt:
+        _h, _, _p = tgt.rpartition(":")
+        try:
+            port = int(_p)
+            host = _h
+        except ValueError:
+            pass  # не порт — считаем целиком host
+
+    nd = None
+    for cand in _load_nodes() or []:
+        _h = str((cand or {}).get("host") or "").strip()
+        try:
+            _p = int((cand or {}).get("port") or 443)
+        except (TypeError, ValueError):
+            _p = 443
+        if _h == host and (port is None or _p == port):
+            nd = cand
+            break
+
+    if nd is not None:
+        r = probe_node(nd)
+    else:
+        up, ms = _tcp_ping(host, port if port is not None else 443)
+        r = {"up": up, "ms": ms,
+             "reason": "" if up else "TCP-проба не прошла (нода не в chain_nodes)",
+             "method": "tcp"}
+
+    if r.get("up"):
+        print("up")
+        return 0
+    print("down")
+    _reason = str(r.get("reason") or "").strip() or "?"
+    print(f"hm-check: DOWN — {_reason} ({r.get('method')})", file=sys.stderr)
+    return 1
+
+
 def check_nodes_once() -> list[dict]:
     """
     Разовая проверка всех exit-нод.
@@ -210,6 +363,7 @@ def check_nodes_once() -> list[dict]:
     results    = []
     ts         = time.strftime("%d.%m.%Y %H:%M")
 
+    # Ветвление зонда зеркалится в probe_node (волна-5, мост --hm-check) — держать синхронно.
     for nd in nodes:
         host = nd.get("host", "")
         port = int(nd.get("port", 443))

@@ -283,5 +283,160 @@ class TestAutoFallbackScriptLabels(_GeneratorBase):
         self.assertEqual(r.returncode, 0, f"bash -n: {r.stderr}")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Волна-5 (живой кейс окт.2026 №3): генераты зондируют exit-ноды полным
+#  REALITY-зондом через мост main.py --hm-check; голый TCP к REALITY-порту —
+#  бан-фуд fail2ban xray-reality + DPI-detector на ноде-цели — остаётся
+#  только последним рубежом при поломке моста. Проверяется ТЕКСТ
+#  генерата (+ bash -n); скрипт не запускается.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestWatchdogWave5(_GeneratorBase):
+    """Волна-5: watchdog зондирует полным REALITY-зондом через мост
+    main.py --hm-check; голый TCP — только последний рубеж (живой кейс №3)."""
+
+    def test_check_node_uses_hm_check_bridge(self):
+        # зонд — мост main.py --hm-check под timeout; MAIN_PY/PYTHONPATH
+        # вшиты генератором; контракт цикла (волна-4) не тронут
+        script = self._install_watchdog()
+        self.assertIn('--hm-check "$HOST:$PORT"', script)
+        self.assertIn('timeout -k 5 60 python3 "$MAIN_PY"', script)
+        self.assertIn('MAIN_PY=', script)
+        self.assertNotIn('MAIN_PY=""', script)
+        self.assertIn('export PYTHONPATH=', script)
+        self.assertIn('STATUS=$(check_node "$HOST" "$PORT")', script)
+
+    def test_bare_tcp_only_last_resort(self):
+        # голый TCP — ровно ОДНО место (fallback check_node) и ПОСЛЕ моста
+        script = self._install_watchdog()
+        self.assertEqual(script.count("/dev/tcp/"), 1)
+        self.assertLess(script.index("--hm-check"),
+                        script.index("/dev/tcp/"))
+
+    def test_flock_guard_present(self):
+        # гард нахлёста раундов (полный зонд мёртвой ноды >60 c при
+        # поминутном cron — гонка над failover.json и дубль DOWN-уведы)
+        script = self._install_watchdog()
+        self.assertIn("command -v flock", script)
+        self.assertIn("flock -n 9 || exit 0", script)
+        self.assertIn("/var/run/xray-failover-watch.lock", script)
+
+    def test_bash_syntax_ok_wave5(self):
+        import subprocess as _sp
+        self._install_watchdog()
+        r = _sp.run(["bash", "-n", str(self.tmp / "wd.sh")],
+                    capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, f"bash -n: {r.stderr}")
+
+    def test_labels_and_notify_unchanged(self):
+        # волна-3/4 функционал не потерян: метки + заголовок в DOWN-уведе
+        script = self._install_watchdog()
+        self.assertIn(
+            "NODE_LABELS=('NL · node-nl.example.com [203.0.113.40]' "
+            "203.0.113.99:8443)", script)
+        self.assertIn(
+            'send_tg "⚠️ ${HDR_PREFIX}VLESS Exit Node DOWN: $LABEL"', script)
+
+    def test_shebang_at_byte0(self):
+        """Shebang на байте 0 (регресс волны-5): python-хердоки и tg_block
+        на колонке 0 обнуляли общий префикс textwrap.dedent → shebang с
+        отступом → cron-execve не видит интерпретатор (ENOEXEC) → dash,
+        а в dash нет bash-массивов NODE_LABELS — скрипт мёртв при живом
+        bash -n. Проверяем с TG (многострочный tg_block) и без."""
+        script = self._install_watchdog()
+        self.assertTrue(script.startswith("#!/bin/bash"),
+                        f"shebang не на байте 0: {script[:16]!r}")
+        # хердок update_state — python-разметка (<8 пробелов) не тронута
+        self.assertIn("\n    with open(p) as f: d = json.load(f)", script)
+        # без TG (tg_block = no-op на колонке 0) — тот же гарант
+        with patch.object(self.fo, "_FAILOVER_SCRIPT",
+                          self.tmp / "wd-notg.sh"), \
+             patch.object(self.fo, "_FAILOVER_CRON",
+                          self.tmp / "wd-notg.cron"):
+            self.fo._failover_install(_NODES, "", "")
+        self.assertTrue((self.tmp / "wd-notg.sh").read_text()
+                        .startswith("#!/bin/bash"))
+
+    def test_update_state_heredoc_imports_sys(self):
+        """Регресс волны-5 (латент баг волны-4): хердок update_state звал
+        sys.exit без import sys → NameError → exit 1 ВСЕГДА → RET≠0 при
+        любом статусе → DOWN-уведа улетала бы КАЖДУЮ минуту (спам),
+        дедуп по смене статуса не работал (state при этом писался —
+        до sys.exit). sys в импортах = честный 0/1 дедупа."""
+        script = self._install_watchdog()
+        self.assertIn("import json, os, sys, time", script)
+        # контракт дедупа не тронут: 0 = статусы равны (молчим), 1 = смена
+        self.assertIn("sys.exit(0 if prev.get('status') == '$STATUS' else 1)",
+                      script)
+
+
+class TestAutoFallbackWave5(_GeneratorBase):
+    """Волна-5: ANY_UP-цикл auto-fallback — полный зонд через мост
+    --hm-check, голый TCP — последний рубеж; режимные ветки не тронуты."""
+
+    def test_any_up_loop_uses_hm_check(self):
+        script = self._install_autofallback()
+        self.assertIn('--hm-check "$HOST:$PORT"', script)
+        # голый TCP — ровно одно место (fallback цикла)
+        self.assertEqual(script.count("/dev/tcp/"), 1)
+        # гард нахлёста (лок — отдельный от watchdog)
+        self.assertIn("flock -n 9 || exit 0", script)
+        self.assertIn("/var/run/xray-auto-fallback.lock", script)
+        # режимные вызовы/уведы (волны-3/4) не тронуты
+        self.assertIn('--switch-mode-a', script)
+        self.assertIn('--switch-mode-b', script)
+        self.assertIn('--pinned-fallback-check', script)
+        self.assertIn('все exit-ноды DOWN (${ALL_LABELS})', script)
+        self.assertIn('exit-нода восстановлена', script)
+
+    def test_bash_syntax_ok_wave5(self):
+        import subprocess as _sp
+        self._install_autofallback()
+        r = _sp.run(["bash", "-n", str(self.tmp / "auto-fallback.sh")],
+                    capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, f"bash -n: {r.stderr}")
+
+    def test_shebang_at_byte0(self):
+        """Shebang на байте 0 (регресс волны-5, см. TestWatchdogWave5):
+        колонка-0 хердоков/tg_block убивала textwrap.dedent → cron-execve
+        не видел интерпретатор → dash → скрипт мёртв. С TG и без."""
+        script = self._install_autofallback()
+        self.assertTrue(script.startswith("#!/bin/bash"),
+                        f"shebang не на байте 0: {script[:16]!r}")
+        # хердок чтения state.json — python-разметка не тронута
+        self.assertIn("\n    d = json.load(open('$STATE_FILE'))", script)
+        self.fo._auto_fallback_install(_NODES, "", "")
+        self.assertTrue((self.tmp / "auto-fallback.sh").read_text()
+                        .startswith("#!/bin/bash"))
+
+    def test_script_var_absolute_main_py(self):
+        """Регресс волны-5 (латент баг волны-3/4): SCRIPT был sys.argv[0]
+        генератора — относительный «main.py» при установке из меню → cron
+        (cwd=/) не находил файл → --switch-mode-a/b и
+        --pinned-fallback-check никогда не срабатывали. Теперь —
+        абсолютный путь (тот же _fo_installer_paths, что и мост)."""
+        import re as _re
+        script = self._install_autofallback()
+        m = _re.search(r'SCRIPT="([^"]+)"', script)
+        self.assertIsNotNone(m, "SCRIPT= не найден в генерате")
+        self.assertTrue(m.group(1).startswith("/"),
+                        f"SCRIPT не абсолютный: {m.group(1)!r}")
+        self.assertTrue(m.group(1).endswith("/main.py"),
+                        f"SCRIPT не main.py: {m.group(1)!r}")
+
+
+class TestMainPyHmCheckFlag(unittest.TestCase):
+    """main.py несёт мост --hm-check (конвенция test_user_lifecycle:
+    проверка флага в исходнике main.py, без exec точек входа)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_flag_present(self):
+        src = (_PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn('"--hm-check" in sys.argv', src)
+        self.assertIn("hm_check_cli", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
