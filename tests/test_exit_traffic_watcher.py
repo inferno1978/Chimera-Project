@@ -591,8 +591,10 @@ class TestProbeTexts(unittest.TestCase):
               "info": {TAG_B: {"err": "Connection refused", "fails": 3}}}
         txt = _tw_probe_event_text(ev, self.NAMES, self.KEYS, {}, 0.0,
                                    {KEY_B: {"up": True}}, "relay")
+        # алиас == host:port (алиаса нет) → ключ не дублируется в скобках
+        # (человекочитаемые метки: без «key (key)»)
         self.assertIn(
-            f"Нода <b><code>{KEY_B}</code></b> ({KEY_B}) недоступна: "
+            f"Нода <b><code>{KEY_B}</code></b> недоступна: "
             f"TCP-проба не проходит 3 прогонов подряд "
             f"(Connection refused).", txt)
         self.assertIn("Трафика через ноду в этом окне не было.", txt)
@@ -1073,7 +1075,11 @@ class TestRunOnce(unittest.TestCase):
 
         # Прогон 3: трафик переехал на B (16 МБ против 10 МБ A в окне —
         # доля 61% ≥ порога) → смена доминирующей: человекочитаемый
-        # заголовок «Режим: активная нода B» + «Переключение ноды: A → B»
+        # заголовок «Режим: активная нода B» + «Переключение ноды: A → B».
+        # Метки нод — node_identity-вид: без алиаса домен без дефолтного
+        # порта (:443 опускается; IP в тестах не резолвится)
+        LBL_A = "node-a.example.com"
+        LBL_B = "node-b.example.com"
         with self._patch_all(stats=self._stats(100 + 5 * MB, 100 + 5 * MB,
                                                9 * MB, 7 * MB)):
             res = tw.run_once()
@@ -1081,15 +1087,15 @@ class TestRunOnce(unittest.TestCase):
         det = next(d for ev, d, _ in self._details
                    if ev == "traffic_dominant_change")
         self.assertIn(
-            f"RoundRobin: активная нода <b><code>{KEY_B}</code></b>", det)
+            f"RoundRobin: активная нода <b><code>{LBL_B}</code></b>", det)
         self.assertIn(
-            f"Переключение ноды: <code>{KEY_A}</code> → "
-            f"<b><code>{KEY_B}</code></b>", det)
+            f"Переключение ноды: <code>{LBL_A}</code> → "
+            f"<b><code>{LBL_B}</code></b>", det)
         extra = next(x for ev, _, x in self._details
                      if ev == "traffic_dominant_change")
         self.assertEqual(extra["strategy"], "RoundRobin")
-        self.assertEqual(extra["node_from"], KEY_A)
-        self.assertEqual(extra["node_to"], KEY_B)
+        self.assertEqual(extra["node_from"], LBL_A)
+        self.assertEqual(extra["node_to"], LBL_B)
         st = json.loads(self._cfg.read_text())["__state__"]
         self.assertEqual(st["dominant_tag"], TAG_B)
 
@@ -1265,12 +1271,15 @@ class TestRunOnceProbe(unittest.TestCase):
         self.assertIn("traffic_node_down", res["events"])
         det = next(d for ev, d, _ in self._details
                    if ev == "traffic_node_down")
-        self.assertIn(f"Нода <b><code>RU1</code></b> ({KEY_A}) недоступна",
-                      det)
+        # метка ноды обогащена: «RU1 · node-a.example.com» (алиас +
+        # домен; IP в тестах не резолвится) — адрес в скобках не дублируется
+        self.assertIn(
+            f"Нода <b><code>RU1 · node-a.example.com</code></b> недоступна",
+            det)
         self.assertIn("2 прогонов подряд (timeout)", det)
         extra = next(x for ev, _, x in self._details
                      if ev == "traffic_node_down")
-        self.assertEqual(extra, {"node": "RU1"})
+        self.assertEqual(extra, {"node": "RU1 · node-a.example.com"})
         st = self._state_of()
         self.assertEqual(st["probe_fails"][TAG_A], 2)
         self.assertEqual(st["probe_status"][TAG_A], "down")
@@ -1355,8 +1364,8 @@ class TestRunOnceProbe(unittest.TestCase):
         det = next(d for ev, d, _ in self._details
                    if ev == "traffic_node_up")
         self.assertIn(
-            f"Нода <b><code>RU1</code></b> ({KEY_A}) восстановлена: "
-            f"RTT 40 мс (после отказа).", det)
+            f"Нода <b><code>RU1 · node-a.example.com</code></b> "
+            f"восстановлена: RTT 40 мс (после отказа).", det)
         st = self._state_of()
         self.assertEqual(st["probe_status"][TAG_A], "ok")
         self.assertEqual(st["probe_fails"][TAG_A], 0)
@@ -2232,11 +2241,11 @@ class TestRunOnceMultiCascade(unittest.TestCase):
         det = next(d for ev, d, _ in self._details
                    if ev == "traffic_dominant_change")
         # первая строка — НОВАЯ нода (формат уведы vless: «активная нода X»
-        # где X — куда переехал трафик)
+        # где X — куда переехал трафик); метка — «имя · IP:порт»
         self.assertIn("AWG Smart: активная нода "
-                      "<b><code>pl1</code></b>", det)
-        self.assertIn("Переключение ноды: <code>nl1</code> → "
-                      "<b><code>pl1</code></b>", det)
+                      "<b><code>pl1 · 10.0.0.1:52831</code></b>", det)
+        self.assertIn("Переключение ноды: <code>nl1 · 10.0.0.3:52831</code> → "
+                      "<b><code>pl1 · 10.0.0.1:52831</code></b>", det)
 
     def test_awg_failover_dominance_and_no_phantoms(self):
         """Failover-AWG (RU2-кейс): счётчики только активному exit —
@@ -2276,9 +2285,9 @@ class TestRunOnceMultiCascade(unittest.TestCase):
         det = next(d for ev, d, _ in self._details
                    if ev == "traffic_dominant_change")
         self.assertIn("AWG-каскад (failover): активная нода "
-                      "<b><code>nl1</code></b>", det)
-        self.assertIn("Переключение ноды: <code>de</code> → "
-                      "<b><code>nl1</code></b>", det)
+                      "<b><code>nl1 · 10.0.0.3:52831</code></b>", det)
+        self.assertIn("Переключение ноды: <code>de · 10.0.0.2:52831</code> → "
+                      "<b><code>nl1 · 10.0.0.3:52831</code></b>", det)
 
     def test_naive_upstream_events(self):
         """Naive upstream: падение после probe_fails прогонов →

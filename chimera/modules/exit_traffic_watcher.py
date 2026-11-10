@@ -884,16 +884,19 @@ def _tw_fmt_bytes(n: int) -> str:
 
 def _tw_distribution_rows(acc: dict, names: dict, include_percent=True,
                           include_bytes=True, metric="bytes",
-                          dead_nodes=None) -> list:
+                          dead_nodes=None, all_tags=None) -> list:
     """Строки распределения (для дайджеста и меню): ноды по убыванию
     объёма, формат «• имя — 1.2 ГБ (63%)» (при metric='conn' —
     «• имя — 3 456 соед. (63%)»; dead_nodes — {tag: true} дописок «·
     недоступна (health)» для нод, исключённых из ротации каскада).
-    Чистая функция."""
+    all_tags — состав каскада: ноды БЕЗ трафика за окно тоже видны
+    («• имя — нет трафика»), состав каскада читается прямо из
+    дайджеста (запрос владельца 10.11.2026). Чистая функция."""
     total = _tw_total(acc)
     rows: list[str] = []
     items = sorted((acc or {}).items(),
                    key=lambda kv: -_tw_bytes_of(kv[1]))
+    seen: set = set()
     for tag, v in items:
         s = _tw_bytes_of(v)
         name = (names or {}).get(tag) or tag
@@ -908,6 +911,18 @@ def _tw_distribution_rows(acc: dict, names: dict, include_percent=True,
         if (dead_nodes or {}).get(tag):
             body += " · недоступна (health)"
         rows.append(f"• <code>{name}</code>{body}")
+        seen.add(tag)
+    if all_tags is not None:
+        empty_body = " — нет соединений" if metric == "conn" \
+            else " — нет трафика"
+        for tag in all_tags:
+            if tag in seen:
+                continue
+            name = (names or {}).get(tag) or tag
+            body = empty_body
+            if (dead_nodes or {}).get(tag):
+                body += " · недоступна (health)"
+            rows.append(f"• <code>{name}</code>{body}")
     return rows
 
 
@@ -968,8 +983,11 @@ def _tw_per_user_rows(counts: dict, names: dict, top_n=5) -> list:
 def _tw_snapshot_text(acc: dict, names: dict, strategy: str,
                       window_str: str, per_user_rows: list,
                       include_percent=True, include_bytes=True,
-                      metric="bytes", dead_nodes=None) -> str:
-    """Текст дайджеста распределения. Чистая функция."""
+                      metric="bytes", dead_nodes=None,
+                      composition=None) -> str:
+    """Текст дайджеста распределения. composition — список тегов
+    состава каскада: ноды без трафика тоже показываются («нет
+    трафика») — состав каскада виден целиком. Чистая функция."""
     lines = []
     st = str(strategy or "").strip()
     lines.append(f"Стратегия: <b>{st or 'нет'}</b>")
@@ -979,7 +997,8 @@ def _tw_snapshot_text(acc: dict, names: dict, strategy: str,
     else:
         lines.append(f"Всего за окно: <b>{total_str}</b>")
     rows = _tw_distribution_rows(acc, names, include_percent,
-                                  include_bytes, metric, dead_nodes)
+                                  include_bytes, metric, dead_nodes,
+                                  composition)
     if rows:
         lines.extend(rows)
     else:
@@ -1050,6 +1069,78 @@ def _tw_tag_names(chain_nodes: list, aliases: dict | None = None) -> tuple:
     return names, keys
 
 
+def _tw_node_label(alias: str, host: str, port=0) -> str:
+    """Метка ноды для увед/меню: «алиас · домен [IP](:порт)» —
+    единый человекочитаемый вид во всех каскадах (node_identity;
+    запро владельца 10.11.2026: в уведах должен быть виден состав
+    каскадов — IP, названия нод по доменам). Тонкая обёртка —
+    патчится в тестах; фолбэк при недоступности модуля — старый вид."""
+    try:
+        from chimera.modules.node_identity import node_label
+        return node_label(alias, host, port)
+    except Exception:
+        al = str(alias or "").strip()
+        hp = str(host or "").strip()
+        if hp and int(port or 0):
+            hp = f"{hp}:{int(port)}"
+        return f"{al} · {hp}" if al and hp and al != hp else (al or hp)
+
+
+def _tw_nodes_word(n: int) -> str:
+    """«нода»/«ноды»/«нод» — для заголовков секций дайджеста."""
+    try:
+        from chimera.modules.node_identity import nodes_word
+        return nodes_word(n)
+    except Exception:
+        return "нод"
+
+
+def _tw_exits_word(n: int) -> str:
+    """«exit»/«exit-ноды»/«exit-нод» — для секций AWG/Mieru."""
+    try:
+        from chimera.modules.node_identity import exits_word
+        return exits_word(n)
+    except Exception:
+        return "exit-нод"
+
+
+def _tw_label_names(names: dict, chain_nodes: list, aliases: dict,
+                    sources: list) -> None:
+    """Обогащает карту имён in-place: каждое имя ноды становится
+    «алиас · домен [IP](:порт)» (VLESS-ноды — по chain_nodes + алиасам;
+    AWG/Mieru/Naive — по нодам источников). Единый вид состава
+    каскадов в уведах и меню. Никогда не бросает."""
+    # VLESS: chain-exit-N → алиас (если задан) + домен [IP]
+    for i, nd in enumerate(chain_nodes or []):
+        host = str((nd or {}).get("host") or "").strip()
+        if not host:
+            continue
+        tag = f"chain-exit-{i + 1}"
+        if tag not in names:
+            continue
+        try:
+            port = int((nd or {}).get("port") or 443)
+        except (TypeError, ValueError):
+            port = 443
+        alias = str((aliases or {}).get(f"{host}:{port}") or "").strip()
+        lbl = _tw_node_label(alias, host, port)
+        if lbl:
+            names[tag] = lbl
+    # AWG / Mieru / Naive: имя источника + endpoint
+    for src in sources:
+        for tag, nd in ((src or {}).get("nodes") or {}).items():
+            if not isinstance(nd, dict):
+                continue
+            nm = str((aliases or {}).get(tag)
+                      or (aliases or {}).get(nd.get("key"))
+                      or nd.get("name") or "").strip()
+            lbl = _tw_node_label("" if nm == tag else nm,
+                                 str(nd.get("host") or ""),
+                                 nd.get("port") or 0)
+            if lbl:
+                names[tag] = lbl
+
+
 def _tw_probe_ago_str(last_ts, now_ts: float) -> str:
     """«N мин назад» / «N ч назад» для метки последнего трафика ноды
     (пусто, если метки нет). Чистая функция."""
@@ -1062,13 +1153,27 @@ def _tw_probe_ago_str(last_ts, now_ts: float) -> str:
     return f"{int(delta // 3600)} ч назад"
 
 
+def _tw_probe_key_suffix(alias: str, key: str) -> str:
+    """Суффикс « (host:port)» для строк проб: не дублируется, если хост
+    уже входит в метку ноды («NL · домен [IP]» — адрес уже виден;
+    чистая функция."""
+    if not key:
+        return ""
+    host = key.rsplit(":", 1)[0] if ":" in key else key
+    if host and host in (alias or ""):
+        return ""
+    return f" ({key})"
+
+
 def _tw_probe_down_line(alias: str, key: str, fails: int, err: str,
                         last_ts, now_ts: float, hm_down: bool) -> str:
     """Строка уведы traffic_node_down (одна нода): недоступна N
     прогонов подряд + контекст — когда нода последний раз несла
     трафик; вердикт HM (если уже DOWN) — доп. строка-довесок.
+    host:port не дублируется, если уже входит в метку ноды.
     Чистая функция."""
-    txt = (f"Нода <b><code>{alias}</code></b> ({key}) недоступна: "
+    kp = _tw_probe_key_suffix(alias, key)
+    txt = (f"Нода <b><code>{alias}</code></b>{kp} недоступна: "
            f"TCP-проба не проходит {fails} прогонов подряд ({err}).")
     if hm_down:
         txt += " (Health Monitor: DOWN)"
@@ -1084,7 +1189,8 @@ def _tw_probe_degraded_line(alias: str, key: str, ms, threshold,
                             fails: int) -> str:
     """Строка уведы traffic_node_degraded (одна нода). Чистая
     функция."""
-    return (f"Нода <b><code>{alias}</code></b> ({key}) тупит: "
+    kp = _tw_probe_key_suffix(alias, key)
+    return (f"Нода <b><code>{alias}</code></b>{kp} тупит: "
             f"TCP-проба проходит, но RTT {ms} мс выше порога "
             f"{threshold} мс ({fails} прогонов подряд).")
 
@@ -1092,9 +1198,10 @@ def _tw_probe_degraded_line(alias: str, key: str, ms, threshold,
 def _tw_probe_up_line(alias: str, key: str, ms, prev: str) -> str:
     """Строка уведы traffic_node_up (одна нода): восстановление после
     отказа ('down') либо деградации. Чистая функция."""
+    kp = _tw_probe_key_suffix(alias, key)
     why = "после деградации" if str(prev or "") == "degraded" \
         else "после отказа"
-    return (f"Нода <b><code>{alias}</code></b> ({key}) восстановлена: "
+    return (f"Нода <b><code>{alias}</code></b>{kp} восстановлена: "
             f"RTT {ms} мс ({why}).")
 
 
@@ -1576,6 +1683,16 @@ def _hostname() -> str:
         return "server"
 
 
+def _tw_server_header() -> str:
+    """Заголовок сервера для шаблонов ({host}): «RU1 · домен · IP»
+    (node_identity.server_header; фолбэк — короткое имя хоста)."""
+    try:
+        from chimera.modules.node_identity import server_header
+        return server_header(hostname=_hostname()) or _hostname()
+    except Exception:
+        return _hostname()
+
+
 def _now_str() -> str:
     return time.strftime("%d.%m.%Y %H:%M")
 
@@ -1602,7 +1719,8 @@ def _tw_notify_event(event: str, detail: str, cfg: dict,
         if chat_override:
             tpl = (cfg.get("templates") or {}).get(event) \
                 or DEFAULT_TEMPLATES.get(event, "{detail}")
-            kw = {"host": _hostname(), "ts": _now_str(), "detail": detail}
+            kw = {"host": _tw_server_header(), "ts": _now_str(),
+                  "detail": detail}
             if extra:
                 kw.update(extra)
             text = _tw_render(tpl, **kw)
@@ -1624,7 +1742,8 @@ def _tw_notify_event(event: str, detail: str, cfg: dict,
     try:
         tpl = (cfg.get("templates") or {}).get(event) \
             or DEFAULT_TEMPLATES.get(event, "{detail}")
-        kw = {"host": _hostname(), "ts": _now_str(), "detail": detail}
+        kw = {"host": _tw_server_header(), "ts": _now_str(),
+              "detail": detail}
         if extra:
             kw.update(extra)
         text = _tw_render(tpl, **kw)
@@ -1712,6 +1831,9 @@ def run_once(force: bool = False) -> dict:
                      nd.get("name") or tag).strip()
             names[tag] = nm or tag
             keys[tag] = nd.get("key") or tag
+    # Человекочитаемый вид состава каскадов: «алиас · домен [IP](:порт)»
+    _tw_label_names(names, chain_nodes, aliases,
+                    [awg_src, mieru_src, naive_src])
 
     now = time.time()
     now_hhmm = time.strftime("%H:%M")
@@ -1952,14 +2074,20 @@ def run_once(force: bool = False) -> dict:
                     counts, names, cfg.get("per_user_top") or 5)
             incl_pct = bool(cfg.get("include_percent", True))
             incl_bytes = bool(cfg.get("include_bytes", True))
-            multi = bool(awg_src or mieru_src)
+            multi = bool(awg_src or mieru_src or naive_src)
+            # Состав каскадов для дайджеста: все ноды видны целиком —
+            # «алиас · домен [IP](:порт)», включая ноды без трафика
+            vless_tags = [f"chain-exit-{i + 1}"
+                          for i in range(len(chain_nodes or []))
+                          if f"chain-exit-{i + 1}" in names]
             if not multi:
                 live = _tw_live_balancer()
                 strategy = live.get("strategy") or ""
                 sb_line = _tw_smart_balancer_line(names, keys)
                 text = _tw_snapshot_text(
                     acc, names, strategy, window_str, per_user_rows,
-                    incl_pct, incl_bytes)
+                    incl_pct, incl_bytes, "bytes", None,
+                    vless_tags or None)
                 if sb_line:
                     text += "\n" + sb_line
             else:
@@ -1970,25 +2098,44 @@ def run_once(force: bool = False) -> dict:
                     sb_line = _tw_smart_balancer_line(names, keys)
                     sec = _tw_snapshot_text(
                         _tw_cascade_acc(acc, ""), names, strategy,
-                        window_str, per_user_rows, incl_pct, incl_bytes)
+                        window_str, per_user_rows, incl_pct, incl_bytes,
+                        "bytes", None, vless_tags or None)
                     if sb_line:
                         sec += "\n" + sb_line
-                    sections.append("VLESS-каскад\n" + sec)
+                    sections.append(
+                        f"VLESS-каскад · {len(vless_tags)} "
+                        f"{_tw_nodes_word(len(vless_tags))}\n" + sec)
                 if awg_src:
+                    a_tags = list((awg_src.get("nodes") or {}).keys())
                     sec = _tw_snapshot_text(
                         _tw_cascade_acc(acc, TAG_PREFIX_AWG), names,
                         str(awg_src.get("strategy") or ""),
                         window_str, [], incl_pct, incl_bytes,
-                        "bytes", awg_src.get("dead") or None)
-                    sections.append("AWG-каскад\n" + sec)
+                        "bytes", awg_src.get("dead") or None, a_tags)
+                    sections.append(
+                        f"AWG-каскад · {len(a_tags)} "
+                        f"{_tw_exits_word(len(a_tags))}\n" + sec)
                 if mieru_src:
+                    m_tags = list((mieru_src.get("nodes") or {}).keys())
                     sec = _tw_snapshot_text(
                         _tw_cascade_acc(acc, TAG_PREFIX_MIERU), names,
                         str(mieru_src.get("strategy") or ""),
                         window_str, [], incl_pct, incl_bytes,
                         mieru_src.get("metric") or "bytes",
-                        mieru_src.get("dead") or None)
-                    sections.append("Mieru-каскад\n" + sec)
+                        mieru_src.get("dead") or None, m_tags)
+                    sections.append(
+                        f"Mieru-каскад · {len(m_tags)} "
+                        f"{_tw_exits_word(len(m_tags))}\n" + sec)
+                if naive_src:
+                    nd = naive_src["nodes"][TAG_PREFIX_NAIVE + "upstream"]
+                    lbl = names.get(TAG_PREFIX_NAIVE + "upstream") \
+                        or nd["key"]
+                    nstat = {"ok": "проба ОК",
+                             "down": "проба НЕ проходит"}.get(
+                        str(prev.get("naive_status") or ""), "нет данных")
+                    sections.append(
+                        "Naive-каскад · upstream (счётчиков нет)\n"
+                        f"Upstream: <code>{lbl}</code> — {nstat}")
                 text = "\n────────────\n".join(sections)
             _emit("traffic_snapshot", text)
             # окно дайджеста закрыто: накопитель и доминирование сброшены
@@ -2133,6 +2280,9 @@ def _tw_menu_status_block() -> tuple:
                      or nd.get("name") or tag).strip()
             names[tag] = nm or tag
             keys[tag] = nd.get("key") or tag
+    # единый человекочитаемый вид состава (как в уведах)
+    _tw_label_names(names, chain_nodes, aliases,
+                    [awg_src, mieru_src, naive_src])
     live = _tw_live_balancer()
     stats = _tw_query_stats()
     state = _read_json(TW_CFG_FILE).get("__state__") or {}
@@ -2140,17 +2290,22 @@ def _tw_menu_status_block() -> tuple:
     # если Stats API жив, но накопитель пуст (первый прогон) — покажем
     # мгновенные счётчики как справку «сколько всего прошло через ноды»
     vless_acc = _tw_cascade_acc(acc, "")
+    vless_tags = [f"chain-exit-{i + 1}"
+                  for i in range(len(chain_nodes or []))
+                  if f"chain-exit-{i + 1}" in names]
     rows = _tw_distribution_rows(
         vless_acc if vless_acc else {
             t: v for t, v in (stats or {}).items() if t in names},
-        names, True, True) if chain_nodes else []
+        names, True, True, "bytes", None,
+        vless_tags or None) if chain_nodes else []
     # секции остальных каскадов поверх накопителя (или счётчиков)
     if awg_src:
         a_acc = _tw_cascade_acc(acc, TAG_PREFIX_AWG) \
             or (awg_src.get("counters") or {})
+        a_tags = list((awg_src.get("nodes") or {}).keys())
         a_rows = _tw_distribution_rows(
             a_acc, names, True, True, "bytes",
-            awg_src.get("dead") or None)
+            awg_src.get("dead") or None, a_tags)
         if a_rows:
             rows.append("AWG-каскад ({0}):".format(
                 awg_src.get("strategy") or "—"))
@@ -2158,10 +2313,11 @@ def _tw_menu_status_block() -> tuple:
     if mieru_src:
         m_acc = _tw_cascade_acc(acc, TAG_PREFIX_MIERU) \
             or (mieru_src.get("counters") or {})
+        m_tags = list((mieru_src.get("nodes") or {}).keys())
         m_rows = _tw_distribution_rows(
             m_acc, names, True, True,
             mieru_src.get("metric") or "bytes",
-            mieru_src.get("dead") or None)
+            mieru_src.get("dead") or None, m_tags)
         if m_rows:
             metric_lbl = "соединения" if mieru_src.get("metric") == "conn" \
                 else "байты (IPAccounting)"

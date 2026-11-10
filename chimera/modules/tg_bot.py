@@ -214,11 +214,13 @@ def tg_notify_event(event: str, detail: str = "") -> None:
     Совместим с _tg_notify_event() из _core.py.
 
     Формат сообщения:
-      {icon} [<hostname> | <server_ip>] {detail}
+      {icon} [<server_header>] {detail}
       <ts>
 
-    IP берётся из telegram.json → 'server_ip' (если задан).
-    Если server_ip пустой — показывается только hostname (обратная
+    server_header — «server_name · домен · IP» (node_identity):
+    имя из telegram.json → server_name (напр. «RU1»), домен установки
+    из state.json → domain, IP из telegram.json → server_ip. Части
+    опциональны; без них — фолбэк на hostname (обратная
     совместимость со старыми конфигами).
     """
     cfg = tg_load()
@@ -227,19 +229,17 @@ def tg_notify_event(event: str, detail: str = "") -> None:
     events = cfg.get("events", {})
     if not events.get(event, True):
         return
+    # Заголовок сервера: server_name · домен · IP (фолбэк — hostname)
     hostname = ""
     try:
         hostname = _run(["hostname", "-s"], capture=True).stdout.strip()
     except Exception:
         pass
-    # IP-адрес сервера — берётся из telegram.json (поле server_ip,
-    # задаётся администратором при настройке). Если пусто — не показываем.
-    server_ip = cfg.get("server_ip", "")
-    # Заголовок сервера: [hostname] или [hostname | ip] если есть IP
-    if server_ip:
-        header = f"[{hostname} | {server_ip}]"
-    else:
-        header = f"[{hostname}]"
+    try:
+        from chimera.modules.node_identity import server_header
+        header = server_header(cfg, hostname=hostname) or hostname
+    except Exception:
+        header = hostname
     ts = datetime.now().strftime("%d.%m.%Y %H:%M")
     icons = {
         "xray_down":     "🔴",
@@ -299,7 +299,7 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "v6_strategy_switch": "📶",  # v6-adaptive: стратегия v6↔v4 переключена
     }
     icon = icons.get(event, "ℹ️")
-    text = f"{icon} <b>{header}</b> {detail}\n<i>{ts}</i>"
+    text = f"{icon} <b>[{header}]</b> {detail}\n<i>{ts}</i>"
     tg_send(text)
     _log("INFO", f"TG notify: {event} — {detail}")
 
@@ -334,7 +334,7 @@ def _install_monitor_cron() -> None:
         "# запуске; каждый алерт проверяет events.<event>; cert — 1 алерт/сутки.\n"
         "STAMP_CERT=/var/lib/xray-installer/tg-cert-alert.stamp\n"
         "\n"
-        "# send <event> <message> — плейсхолдер {H} заменяется на [host | ip]\n"
+        "# send <event> <message> — плейсхолдер {H} заменяется на [имя · домен · IP]\n"
         "send() {\n"
         "  python3 -c '\n"
         "import json, socket, subprocess, sys\n"
@@ -347,9 +347,18 @@ def _install_monitor_cron() -> None:
         "        sys.exit(0)\n"
         "    if event and not cfg.get(\"events\", {}).get(event, True):\n"
         "        sys.exit(0)\n"
-        "    host = socket.gethostname().split(\".\")[0]\n"
+        "    name = cfg.get(\"server_name\") or socket.gethostname().split(\".\")[0]\n"
+        "    try:\n"
+        "        domain = json.loads(Path(\"/var/lib/xray-installer/state.json\").read_text()).get(\"domain\") or \"\"\n"
+        "    except Exception:\n"
+        "        domain = \"\"\n"
         "    ip = cfg.get(\"server_ip\", \"\")\n"
-        "    header = \"[{} | {}]\".format(host, ip) if ip else \"[{}]\".format(host)\n"
+        "    parts = [name]\n"
+        "    if domain and domain != name:\n"
+        "        parts.append(domain)\n"
+        "    if ip:\n"
+        "        parts.append(ip)\n"
+        "    header = \"[\" + \" \u00b7 \".join(parts) + \"]\"\n"
         "    proxy = (cfg.get(\"proxy\") or \"\").strip()\n"
         "    cmd = [\"curl\", \"-s\", \"-o\", \"/dev/null\", \"-m\", \"10\"]\n"
         "    if proxy:\n"
@@ -2438,6 +2447,13 @@ def do_manage_telegram() -> None:
         if configured:
             _box_row(f"  Токен:   {DIM}{token[:10]}...{NC}")
             _box_row(f"  Chat ID: {CYAN}{chat_id}{NC}")
+            try:
+                from chimera.modules.node_identity import server_header
+                _hdr = server_header(cfg)
+            except Exception:
+                _hdr = ""
+            if _hdr:
+                _box_row(f"  Сервер в уведах: {BOLD}{_hdr}{NC}")
             _box_row(f"  {BOLD}Включённые события:{NC}")
             for ev, label in event_labels.items():
                 en = events.get(ev, True)
@@ -2448,6 +2464,8 @@ def do_manage_telegram() -> None:
         _box_item("2", "Тест — отправить тестовое сообщение")
         _box_item("3", "Включить/выключить отдельные события")
         _box_item("4", "Установить cron-мониторинг Xray")
+        _box_item("8", "Имя/IP этого сервера в уведомлениях  "
+                     f"{DIM}(server_name / server_ip){NC}")
         _box_item("6", "🔀 Наблюдатель переключений exit-нод  "
                      f"{DIM}(состав ротации / стратегии / IP){NC}")
         _box_item("7", "🧭 Наблюдатель трафика exit-нод  "
@@ -2487,6 +2505,35 @@ def do_manage_telegram() -> None:
                     cfg["token"], cfg["chat_id"]
                 )
                 _ok("Сообщение отправлено!") if ok else _warn("Ошибка — проверьте токен и chat_id")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+
+        elif ch == "8":
+            print()
+            _info("Как этот сервер подписывает уведомления "
+                  "(заголовок [имя · домен · IP])")
+            cur_name = cfg.get("server_name", "")
+            cur_ip = cfg.get("server_ip", "")
+            try:
+                from chimera.modules.node_identity import server_header
+                _info(f"Текущий заголовок: [{server_header(cfg)}]")
+            except Exception:
+                pass
+            new_name = input(f"  Имя сервера (напр. RU1; Enter = "
+                             f"{'оставить ' + cur_name if cur_name else 'не задавать'}): ").strip()
+            if new_name:
+                cfg["server_name"] = new_name
+            elif new_name == "" and cur_name:
+                pass
+            new_ip = input(f"  IP сервера (Enter = "
+                           f"{'оставить ' + cur_ip if cur_ip else 'авто'}): ").strip()
+            if new_ip:
+                cfg["server_ip"] = new_ip
+            tg_save(cfg)
+            try:
+                from chimera.modules.node_identity import server_header
+                _ok(f"Заголовок увед: [{server_header(cfg)}]")
+            except Exception:
+                _ok("Конфиг сохранён")
             input(f"{BLUE}Нажмите Enter...{NC}")
 
         elif ch == "3":

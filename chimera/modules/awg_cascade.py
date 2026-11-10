@@ -1459,8 +1459,8 @@ def awgs_cascade_failover_check() -> str:
                 "INFO",
                 f"awg-cascade-failover: переключение на '{_name}' успешно")
             _awgs_cascade_failover_notify(
-                f"AWG-каскад: авто-failover → <b>{_name}</b> "
-                f"({cand.get('endpoint')}:{cand.get('port')})")
+                f"AWG-каскад: авто-failover <b>{active or '—'}</b> → "
+                f"<b>{_name} · {cand.get('endpoint')}:{cand.get('port')}</b>")
             return f"failover:{_name}"
 
     # Все кандидаты молчат — возвращаем исходный (стабильность приоритетов)
@@ -1469,9 +1469,13 @@ def awgs_cascade_failover_check() -> str:
         "ERROR",
         "awg-cascade-failover: все exit-ноды недоступны — восстановлен "
         "исходный exit, ждём восстановления сети")
+    # состав каскада с адресами — читается без открытия state
+    _comp = ", ".join(
+        f"{e.get('name')} · {e.get('endpoint')}:{e.get('port')}"
+        for e in exits if isinstance(e, dict))
     _awgs_cascade_failover_notify(
-        "AWG-каскад: failover не удался — все exit-ноды недоступны, "
-        "восстановлен исходный")
+        "AWG-каскад: failover не удался — все exit-ноды недоступны "
+        f"({_comp}), восстановлен исходный <b>{active or '—'}</b>")
     return "all-dead"
 
 

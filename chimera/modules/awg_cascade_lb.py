@@ -1102,6 +1102,20 @@ def _notify(detail: str) -> None:
         pass
 
 
+def _exit_label(state: dict, name: str) -> str:
+    """Человекочитаемая метка exit-ноды AWG: «name · host:port»
+    (endpoint берётся из cascade_exits; без данных — просто имя).
+    Состав каскада в уведах читается целиком (запрос владельца
+    10.11.2026). Чистая функция."""
+    for e in (state or {}).get("cascade_exits") or []:
+        if isinstance(e, dict) and e.get("name") == name:
+            host = str(e.get("endpoint") or "").strip()
+            port = e.get("port")
+            if host:
+                return f"{name} · {host}:{port}" if port else f"{name} · {host}"
+    return str(name or "")
+
+
 def _sync_norm(line: str) -> str:
     """Нормализация строки iptables -S к форме applied-спеков.
 
@@ -1175,8 +1189,9 @@ def lb_health_tick() -> str:
     if not alive:
         _err("health: все слоты мертвы — диспетчер НЕ снимаю (трафик "
              "стоит; прямой выход = deanon). Ждём восстановления.")
-        _notify("AWG-балансировка: все exit-ноды недоступны — туннели "
-                "стоят, ждём восстановления")
+        _comp = ", ".join(_exit_label(state, nm) for nm in slots)
+        _notify("AWG-балансировка: все exit-ноды недоступны "
+                f"({_comp}) — туннели стоят, ждём восстановления")
         # FIX 09.11: merge-save (не затирать чужие правки снапшком T0)
         _lb_merge_save(state)
         return "all-dead"
@@ -1190,15 +1205,18 @@ def lb_health_tick() -> str:
                 status = "pinned-return"
                 _info(f"health: закреплённый '{pinned}' восстановлен")
                 _notify(f"AWG-балансировка: закреплённый exit "
-                        f"<b>{pinned}</b> восстановлен — возврат")
+                        f"<b>{_exit_label(state, pinned)}</b> восстановлен — "
+                        f"возврат")
         else:
             if not lb.get("pinned_fallback"):
                 lb["pinned_fallback"] = True
                 status = "pinned-fallback"
                 _warn(f"health: закреплённый '{pinned}' мёртв — временно "
                       f"первый живой ({alive[0]})")
-                _notify(f"AWG-балансировка: закреплённый exit <b>{pinned}</b> "
-                        f"недоступен — временно через <b>{alive[0]}</b>")
+                _notify(f"AWG-балансировка: закреплённый exit "
+                        f"<b>{_exit_label(state, pinned)}</b> "
+                        f"недоступен — временно через "
+                        f"<b>{_exit_label(state, alive[0])}</b>")
 
     # 3. доли (взвешенные) + ребаланс-решение
     need_rewrite = False
@@ -1325,7 +1343,8 @@ def lb_activate(strategy: str, pinned: str = "",
           + (f", состав: {', '.join(sel)}" if sel else ""))
     _notify(f"AWG-балансировка включена: <b>{strategy}</b>, "
             f"туннелей {len(eff_boxes)}"
-            + (f", состав: {', '.join(sel)}" if sel else ""))
+            + (f", состав: {', '.join(_exit_label(state, nm) for nm in sel)}"
+               if sel else ""))
     return True
 
 
@@ -1395,7 +1414,11 @@ def lb_set_exits(exits: Optional[list]) -> bool:
         _warn(f"состав: b4 reapply: {e}")
     names = ", ".join(sel) if sel else "все"
     _info(f"состав LB: {names}")
-    _notify(f"AWG-балансировка: состав exit'ов — {names}")
+    _notify(f"AWG-балансировка: состав exit'ов — "
+            + (", ".join(_exit_label(state, nm) for nm in sel) if sel
+               else "все: " + ", ".join(
+                   _exit_label(state, e.get("name"))
+                   for e in all_exits if isinstance(e, dict))))
     return ok
 
 
@@ -1449,7 +1472,8 @@ def lb_deactivate() -> bool:
         _awgs_cascade_create_routing_script(subnet, subnet_v6=v6)
     # 5. b4-форма вернётся тиком сплита (blanket awg0/awg1)
     _info(f"LB выключен, активный exit: {active or '—'}")
-    _notify(f"AWG-балансировка выключена — активный exit: {active or '—'}")
+    _notify(f"AWG-балансировка выключена — активный exit: "
+            f"<b>{_exit_label(state, active) if active else '—'}</b>")
     return ok
 
 

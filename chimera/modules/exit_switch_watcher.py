@@ -278,9 +278,13 @@ def _ew_switch_kind(prev: dict, cur: dict) -> str:
 
 
 def _ew_snapshot_text(eff_set: dict, mode: dict, metrics: dict,
-                      include_metrics: bool) -> str:
+                      include_metrics: bool, labels: dict | None = None) -> str:
     """Текст дайджеста: состав ротации + статусы нод + латентности.
-    Чистая функция."""
+    labels — {host:port → человекочитаемая метка ноды}
+    («NL · total-shadows.ru [IP]»; node_identity) — без карты метка
+    деградирует до голого host:port. Чистая функция."""
+    def _lbl(k: str) -> str:
+        return (labels or {}).get(k) or k
     lines = []
     st = mode.get("strategy") or "нет"
     lines.append(f"Режим: стратегия <b>{st}</b>"
@@ -293,14 +297,14 @@ def _ew_snapshot_text(eff_set: dict, mode: dict, metrics: dict,
             lat = ""
             if include_metrics and m.get("lat_ms"):
                 lat = f" — {m['lat_ms']:.0f} мс"
-            lines.append(f"  ✅ <code>{k}</code>{lat}")
+            lines.append(f"  ✅ <code>{_lbl(k)}</code>{lat}")
     excl = [(k, v) for k, v in sorted((eff_set or {}).items())
             if not v.get("in_set")]
     if excl:
         lines.append("Вне ротации:")
         for k, v in excl:
             why = ", ".join(v.get("reasons") or ["?"])
-            lines.append(f"  ⛔ <code>{k}</code> — {why}")
+            lines.append(f"  ⛔ <code>{_lbl(k)}</code> — {why}")
     return "\n".join(lines)
 
 
@@ -387,6 +391,41 @@ def _hostname() -> str:
         return "server"
 
 
+def _ew_node_label(key: str) -> str:
+    """Человекочитаемая метка chain-ноды по ключу host:port:
+    «NL · total-shadows.ru [132.243.221.181]» — алиас из конфига
+    наблюдателя трафика + DNS-резолв (node_identity; кэш 6 ч).
+    Фолбэк — исходный ключ."""
+    try:
+        from chimera.modules.node_identity import key_label
+        return key_label(key)
+    except Exception:
+        return key
+
+
+def _ew_labels(chain_nodes: list) -> dict:
+    """Карта {host:port → метка} для всех chain-нод (состав каскада
+    в уведах читается целиком). Никогда не бросает."""
+    out: dict = {}
+    for nd in chain_nodes or []:
+        host = str((nd or {}).get("host") or "").strip()
+        if not host:
+            continue
+        port = int((nd or {}).get("port") or 443)
+        out[f"{host}:{port}"] = _ew_node_label(f"{host}:{port}")
+    return out
+
+
+def _ew_server_header() -> str:
+    """Заголовок сервера для шаблонов ({host}): «RU1 · домен · IP»
+    (node_identity.server_header; фолбэк — короткое имя хоста)."""
+    try:
+        from chimera.modules.node_identity import server_header
+        return server_header(hostname=_hostname()) or _hostname()
+    except Exception:
+        return _hostname()
+
+
 # ── Уведомления ───────────────────────────────────────────────────────────────
 
 def _notify_event(event: str, detail: str, cfg: dict) -> bool:
@@ -406,7 +445,7 @@ def _notify_event(event: str, detail: str, cfg: dict) -> bool:
             # Рендерим сами и шлём напрямую в отдельный чат
             tpl = (cfg.get("templates") or {}).get(event) \
                 or DEFAULT_TEMPLATES.get(event, "{detail}")
-            text = _ew_render(tpl, host=_hostname(), ts=_now_str(),
+            text = _ew_render(tpl, host=_ew_server_header(), ts=_now_str(),
                               detail=detail, node="", old="", new="")
             ok = tg_bot.tg_send(text, chat_id=chat_override)
             _ew_log(f"TG[{event}] direct-override -> {chat_override}: "
@@ -427,7 +466,7 @@ def _notify_event(event: str, detail: str, cfg: dict) -> bool:
     try:
         tpl = (cfg.get("templates") or {}).get(event) \
             or DEFAULT_TEMPLATES.get(event, "{detail}")
-        text = _ew_render(tpl, host=_hostname(), ts=_now_str(),
+        text = _ew_render(tpl, host=_ew_server_header(), ts=_now_str(),
                           detail=detail, node="", old="", new="")
         cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
                "-m", "10"]
@@ -494,6 +533,9 @@ def run_once(force: bool = False) -> dict:
 
     prev = _read_json(EW_CFG_FILE).get("__state__") or {}
     eff_set, mode, metrics = _ew_collect_snapshot()
+    # Человекочитаемые метки нод («NL · домен [IP]») — единый вид
+    # состава каскада во всех уведах наблюдателя
+    labels = _ew_labels(_load_state().get("chain_nodes") or [])
     events_sent: list[str] = []
 
     now = time.time()
@@ -522,17 +564,30 @@ def run_once(force: bool = False) -> dict:
             for ch in changes:
                 if ch["kind"] == "removed":
                     why = ", ".join(ch["reasons"]) or "причина неизвестна"
-                    lines.append(f"⛔ <code>{ch['key']}</code> выпала ({why})")
+                    lines.append(f"⛔ <code>{labels.get(ch['key']) or ch['key']}"
+                                 f"</code> выпала ({why})")
                 else:
-                    lines.append(f"✅ <code>{ch['key']}</code> вернулась в ротацию")
+                    lines.append(f"✅ <code>{labels.get(ch['key']) or ch['key']}"
+                                 f"</code> вернулась в ротацию")
             _emit("exit_set_change", "\n".join(lines))
 
     # 2) Режимное переключение (стратегия / pin / активная нода single-pick)
     if prev.get("mode") is not None:
         kind = _ew_switch_kind(prev.get("mode") or {}, mode)
         if kind:
-            labels = {
-                "active": "сменилась активная нода (single-pick)",
+            # активная нода — меткой («NL · домен [IP]»), по idx из SB
+            _act_lbl = ""
+            _idx = mode.get("active_node_idx")
+            if isinstance(_idx, int) and not isinstance(_idx, bool) \
+                    and _idx >= 0:
+                for k, v in (eff_set or {}).items():
+                    if v.get("idx") == _idx:
+                        _act_lbl = labels.get(k) or k
+                        break
+            labels_map = {
+                "active": ("сменилась активная нода (single-pick)"
+                           + (f" → <b><code>{_act_lbl}</code></b>"
+                              if _act_lbl else "")),
                 "strategy": (f"стратегия балансировки: "
                              f"<b>{(prev.get('mode') or {}).get('strategy') or '?'}</b> → "
                              f"<b>{mode.get('strategy') or '?'}</b>"),
@@ -540,11 +595,11 @@ def run_once(force: bool = False) -> dict:
                         ("включён" if mode.get("pinned") else "снят")),
                 "selector": "изменился состав selector балансировщика",
             }
-            _emit("exit_switch", labels.get(kind, kind))
+            _emit("exit_switch", labels_map.get(kind, kind))
 
     # 3) Смена exit-IP (опционально, активные full-path зонды)
     if cfg.get("probe_exits") and cfg.get("notify", {}).get("exit_ip_change", True):
-        _probe_exit_ips(eff_set, prev, cfg, _emit)
+        _probe_exit_ips(eff_set, prev, cfg, _emit, labels)
 
     # 4) Периодический дайджест
     snap_h = cfg.get("snapshot_hours") or 0
@@ -556,7 +611,8 @@ def run_once(force: bool = False) -> dict:
         last_snap = float(prev.get("last_snapshot_ts") or 0)
         if now - last_snap >= snap_h * 3600 or force and not last_snap:
             text = _ew_snapshot_text(eff_set, mode, metrics,
-                                     bool(cfg.get("include_metrics", True)))
+                                     bool(cfg.get("include_metrics", True)),
+                                     labels)
             _emit("exit_snapshot", text)
             prev["last_snapshot_ts"] = now
 
@@ -584,10 +640,12 @@ def run_once(force: bool = False) -> dict:
     return {"set": eff_set, "mode": mode, "events": events_sent}
 
 
-def _probe_exit_ips(eff_set: dict, prev: dict, cfg: dict, emit) -> None:
+def _probe_exit_ips(eff_set: dict, prev: dict, cfg: dict, emit,
+                   labels: dict | None = None) -> None:
     """Активные full-path зонды всех chain-нод: exit_ip + живость.
     Использует обкатанный механизм chain_relay (честный REALITY-хендшейк,
-    не бан-фуд — живой кейс окт.2026 №3). Смена IP ноды → exit_ip_change."""
+    не бан-фуд — живой кейс окт.2026 №3). Смена IP ноды → exit_ip_change.
+    labels — {host:port → метка} для человекочитаемых увед."""
     try:
         from chimera.modules.chain_relay import (
             check_node_full_path, check_via_node_full_path,
@@ -626,7 +684,7 @@ def _probe_exit_ips(eff_set: dict, prev: dict, cfg: dict, emit) -> None:
         prev.setdefault("exit_ips", {})[key] = ip
         if old_ip and old_ip != ip:
             emit("exit_ip_change",
-                 f"Нода <code>{key}</code>: exit-IP "
+                 f"Нода <code>{labels.get(key) or key}</code>: exit-IP "
                  f"<b>{old_ip}</b> → <b>{ip}</b>")
 
 
@@ -726,6 +784,7 @@ def do_exit_watcher_menu() -> None:
         interval = _installed_interval() if installed else cfg.get("interval_min",
                                                                    DEFAULT_INTERVAL)
         eff_set, mode, _metrics = _ew_collect_snapshot()
+        menu_labels = _ew_labels(_load_state().get("chain_nodes") or [])
         in_set = [k for k, v in eff_set.items() if v.get("in_set")]
         excl = [(k, v) for k, v in eff_set.items() if not v.get("in_set")]
         status = f"{C['GREEN']}активен{C['NC']}" if installed else f"{C['YELLOW']}не активен{C['NC']}"
@@ -748,10 +807,10 @@ def do_exit_watcher_menu() -> None:
         _box_sep()
         if eff_set:
             for k in in_set:
-                _box_row(f"  {C['GREEN']}✓{C['NC']} <code>{k}")
+                _box_row(f"  {C['GREEN']}✓{C['NC']} <code>{menu_labels.get(k) or k}")
             for k, v in excl:
                 why = ", ".join(v.get("reasons") or ["?"])
-                _box_row(f"  {C['DIM']}✗ {k} — {why}{C['NC']}")
+                _box_row(f"  {C['DIM']}✗ {menu_labels.get(k) or k} — {why}{C['NC']}")
         else:
             _box_row(f"  {C['DIM']}Exit-ноды не настроены (только Режим B){C['NC']}")
         _box_sep()

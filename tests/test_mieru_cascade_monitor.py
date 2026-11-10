@@ -325,7 +325,9 @@ class TestNewestExitCheck(unittest.TestCase):
 
 class TestHeaderSubstitution(_TmpBase):
     def test_header_placeholder(self):
-        """{H} подставляется как [testhost | 203.0.113.10] (паттерн v2).
+        """{H} подставляется как [testhost · 203.0.113.10] — единый
+        человекочитаемый вид заголовка (имя · IP; домен state.json в
+        тестовой среде отсутствует).
 
         2 Exit-а, падает один → ровно 1 алерт (no_exits не срабатывает:
         остаётся живой Exit).
@@ -338,7 +340,7 @@ class TestHeaderSubstitution(_TmpBase):
         mcm.check_cascade_once()
         self.assertEqual([e for e, _ in self.sent], ["mieru_exit_down"])
         text = self.sent[0][1]
-        self.assertIn("[testhost | 203.0.113.10]", text)
+        self.assertIn("[testhost · 203.0.113.10]", text)
         self.assertNotIn("{H}", text)
 
 

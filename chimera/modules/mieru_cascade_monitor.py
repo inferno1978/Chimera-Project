@@ -126,10 +126,15 @@ def _tg_send(msg: str, event: str = "") -> bool:
             return False
         if event and not cfg.get("events", {}).get(event, True):
             return False
-        # {H}-заголовок как в xray-tg-monitor v2: [host | ip]
-        host = _hostname()
-        ip = cfg.get("server_ip", "")
-        header = f"[{host} | {ip}]" if ip else f"[{host}]"
+        # {H}-заголовок: [имя · домен · IP] (node_identity.server_header;
+        # фолбэк — hostname/ip как раньше)
+        try:
+            from chimera.modules.node_identity import server_header
+            header = f"[{server_header(cfg, hostname=_hostname())}]"
+        except Exception:
+            host = _hostname()
+            ip = cfg.get("server_ip", "")
+            header = f"[{host} | {ip}]" if ip else f"[{host}]"
         text = msg.replace("{H}", header)
         _cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
                 "-m", str(TG_TIMEOUT)]
@@ -287,10 +292,12 @@ def check_cascade_once() -> list[dict]:
         })
 
         if changed and not first_seen:
+            # метка с портом: «de1 · 31.77.168.49:2012» — адрес виден
+            ep = f"{host}:{e.get('port') or ''}".rstrip(":")
             if not healthy:
                 alerts.append(("mieru_exit_down",
                     "🔴 <b>{H}</b> Mieru Exit недоступен\n"
-                    f"✗ <code>{label}</code> ({host}) — "
+                    f"✗ <code>{label} · {ep}</code> — "
                     f"fail_streak {streak}\n"
                     f"<i>{ts}</i>"))
                 _log(f"EXIT DOWN: {eid} (streak {streak})")
@@ -298,7 +305,7 @@ def check_cascade_once() -> list[dict]:
                 ms = f" — {latency:.0f} мс" if isinstance(latency, (int, float)) else ""
                 alerts.append(("mieru_exit_up",
                     "🟢 <b>{H}</b> Mieru Exit восстановлен\n"
-                    f"✓ <code>{label}</code> ({host}){ms}\n"
+                    f"✓ <code>{label} · {ep}</code>{ms}\n"
                     f"<i>{ts}</i>"))
                 _log(f"EXIT UP: {eid}")
 
@@ -306,9 +313,13 @@ def check_cascade_once() -> list[dict]:
     no_exits_now = bool(exits) and not any(x["healthy"] for x in exits)
     prev_no = bool(prev.get("no_exits"))
     if no_exits_now and not prev_no:
+        # состав каскада с адресами — читается из самой уведы
+        _comp = ", ".join(
+            f"{e.get('label') or e.get('id')} · {e.get('host')}:{e.get('port')}"
+            for e in exits)
         alerts.append(("mieru_no_exits",
             "🚨 <b>{H}</b> Mieru каскад: все Exit-ы недоступны\n"
-            f"Трафик каскада мёртв ({len(exits)} шт. unhealthy)\n"
+            f"Трафик каскада мёртв ({len(exits)} шт. unhealthy): {_comp}\n"
             f"<i>{ts}</i>"))
         _log("NO EXITS: все unhealthy")
     elif not no_exits_now and prev_no:

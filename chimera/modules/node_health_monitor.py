@@ -171,6 +171,27 @@ def _hostname() -> str:
         return "server"
 
 
+def _node_label(key: str) -> str:
+    """Человекочитаемая метка ноды по ключу host:port — «NL ·
+    total-shadows.ru [132.243.221.181]» (node_identity: алиас из
+    наблюдателя трафика + DNS-резолв с кэшем). Фолбэк — сам ключ."""
+    try:
+        from chimera.modules.node_identity import key_label
+        return key_label(key)
+    except Exception:
+        return key
+
+
+def _server_header(tg_cfg: dict | None = None) -> str:
+    """Заголовок сервера «RU1 · домен · IP» (node_identity; фолбэк —
+    короткое имя хоста). tg_cfg — уже загруженный telegram.json."""
+    try:
+        from chimera.modules.node_identity import server_header
+        return server_header(tg_cfg, hostname=_hostname())
+    except Exception:
+        return _hostname()
+
+
 # ── Публичный API ─────────────────────────────────────────────────────────────
 
 def check_nodes_once() -> list[dict]:
@@ -187,7 +208,6 @@ def check_nodes_once() -> list[dict]:
     prev_state = _load_health_state()
     new_state  = {}
     results    = []
-    host_name  = _hostname()
     ts         = time.strftime("%d.%m.%Y %H:%M")
 
     for nd in nodes:
@@ -326,6 +346,7 @@ def check_nodes_once() -> list[dict]:
 
         # Telegram уведомление только при изменении статуса (не при первой проверке)
         if changed and not first_seen:
+            node_lbl = _node_label(key)
             if not up:
                 # Формулировка по причине (кейс №9): деградированные
                 # вердикты (DNS/v6-egress на exit) — нода ЖИВА (ICMP/
@@ -333,20 +354,20 @@ def check_nodes_once() -> list[dict]:
                 # жёлтое «деградировала» с причиной. Жёсткий отказ —
                 # прежний красный текст.
                 if _is_degraded_reason(down_reason):
-                    msg = (f"📡 <b>[{host_name}]</b> Exit-нода деградирована\n"
-                           f"🟠 <code>{host}:{port}</code> — туннель жив, "
+                    msg = (f"📡 <b>[{_server_header()}]</b> Exit-нода деградирована\n"
+                           f"🟠 <code>{node_lbl}</code> — туннель жив, "
                            f"домены не ходят ({down_reason})\n"
                            f"<i>{ts}</i>")
                 else:
-                    msg = (f"📡 <b>[{host_name}]</b> Exit-нода недоступна\n"
-                           f"🔴 <code>{host}:{port}</code>\n"
+                    msg = (f"📡 <b>[{_server_header()}]</b> Exit-нода недоступна\n"
+                           f"🔴 <code>{node_lbl}</code>\n"
                            f"<i>{ts}</i>")
                 _tg_send(msg)
                 _log(f"TG: уведомление об отказе ноды {key}")
             else:
                 _rtt_t = f", RTT {rtt:.0f} мс" if rtt else ""
-                msg = (f"📡 <b>[{host_name}]</b> Exit-нода восстановлена\n"
-                       f"🟢 <code>{host}:{port}</code> — {ms:.0f} мс (full-path){_rtt_t}\n"
+                msg = (f"📡 <b>[{_server_header()}]</b> Exit-нода восстановлена\n"
+                       f"🟢 <code>{node_lbl}</code> — {ms:.0f} мс (full-path){_rtt_t}\n"
                        f"<i>{ts}</i>")
                 _tg_send(msg)
                 _log(f"TG: уведомление о восстановлении ноды {key}")

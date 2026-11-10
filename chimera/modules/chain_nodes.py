@@ -4739,16 +4739,27 @@ def _lb_selector_tags(outbound_tags: list, chain_nodes_list: list,
 
 
 def _lb_nodes_summary(chain_nodes_list: list,
-                      selection: Optional[list]) -> str:
+                      selection: Optional[list],
+                      labeler=None) -> str:
     """Человекочитаемый состав: 'host1, host2 (2 из 4)' / 'все (4)'.
-    Чистая функция."""
+    labeler — callable(host, port) → метка ноды (напр. node_identity:
+    «NL · домен [IP]»); без него — голый host (обратная
+    совместимость). Чистая функция."""
     total = len(chain_nodes_list)
     if not selection:
         return f"все ({total})" if total else "—"
     eff = _lb_effective_nodes(chain_nodes_list, selection)
     if len(eff) == total:
         return f"все ({total})"
-    return ", ".join((nd.get("host") or "?") for nd in eff) + \
+    def _name(nd):
+        host = nd.get("host") or "?"
+        if labeler is None:
+            return host
+        try:
+            return labeler(host, int(nd.get("port") or 443)) or host
+        except Exception:
+            return host
+    return ", ".join(_name(nd) for nd in eff) + \
            f" ({len(eff)} из {total})"
 
 
@@ -4893,13 +4904,31 @@ def set_lb_nodes(hosts: Optional[list], restart: bool = True) -> bool:
     if rn.stdout.strip() == "active":
         _sp.run(["systemctl", "restart", "nginx"],
                 capture_output=True, timeout=15)
-    # TG-уведомление (best effort, как set_lb_exits Mieru)
+    # TG-уведомление (best effort, как set_lb_exits Mieru);
+    # метки нод — «алиас · домен [IP]» (node_identity): состав
+    # каскада читается из уведы целиком (запрос владельца 10.11.2026)
     try:
         from chimera.modules.smart_balancer import _tg_notify_event
+        _labeler = None
+        try:
+            from chimera.modules.node_identity import node_label, alias_for
+            _labeler = lambda h, p: node_label(alias_for(h, p), h, p)
+        except Exception:
+            pass
+        if sel or not _labeler:
+            summary = _lb_nodes_summary(nodes, sel, _labeler) or "все"
+        else:
+            # «все» — раскрываем состав полностью, с адресами
+            _lbls = [(_labeler(nd.get("host") or "?",
+                               int(nd.get("port") or 443))
+                      or (nd.get("host") or "?"))
+                     for nd in nodes if isinstance(nd, dict)]
+            summary = (f"все ({len(_lbls)}): " + ", ".join(_lbls)) \
+                if _lbls else "все"
         _tg_notify_event(
             "cascade_lb_change",
             "⚖️ VLESS-каскад: состав балансировки → <b>" +
-            (_lb_nodes_summary(nodes, sel) or "все") + "</b>")
+            summary + "</b>")
     except Exception:
         pass
     return True

@@ -93,6 +93,32 @@ def _tg_notify_event(event: str, detail: str = "") -> None:
     except Exception:
         pass
 
+
+def _sb_node_label(key: str) -> str:
+    """Человекочитаемая метка chain-ноды по ключу host:port — «NL ·
+    total-shadows.ru [132.243.221.181]» (node_identity: алиас
+    наблюдателя трафика + DNS-резолв с кэшем). Фолбэк — сам ключ."""
+    try:
+        from chimera.modules.node_identity import key_label
+        return key_label(key)
+    except Exception:
+        return key
+
+
+def _sb_hop_label(via_tag: str, hops: list) -> str:
+    """Метка релей-хопа по тегу via: «тег · host:port» (host:port
+    берётся из relay_hops; без данных — просто тег)."""
+    try:
+        for h in hops or []:
+            if isinstance(h, dict) and str(h.get("tag") or "") == via_tag:
+                host = str(h.get("host") or "").strip()
+                port = int(h.get("port") or 0)
+                if host:
+                    return f"{via_tag} · {host}:{port}" if port else f"{via_tag} · {host}"
+    except Exception:
+        pass
+    return via_tag
+
 # ── Импорты из других модулей ─────────────────────────────────────────────────
 from chimera.modules.box_renderer import (
     _box_top, _box_sep, _box_bottom, _box_row, _box_item, _box_back,
@@ -787,8 +813,9 @@ def _sb_try_relay_failover(node: dict, hops: list,
         try:
             _tg_notify_event(  # type: ignore[name-defined]
                 "relay_failover",
-                f"🔄 SmartBalancer: релей <b>{via}</b> недоступен — нода "
-                f"<b>{key}</b> переключена на резервный релей <b>{cand}</b> "
+                f"🔄 SmartBalancer: релей <b>{_sb_hop_label(via, hops)}</b> недоступен — нода "
+                f"<b>{_sb_node_label(key)}</b> переключена на резервный релей "
+                f"<b>{_sb_hop_label(cand, hops)}</b> "
                 f"(full-path {_ms:.0f} мс)"
             )
         except Exception:
@@ -940,7 +967,7 @@ def _smart_balancer_run_once() -> None:
                     try:
                         _tg_notify_event(  # type: ignore[name-defined]
                             "xray_down",
-                            f"⚠️ SmartBalancer: нода <b>{host}:{port}</b> "
+                            f"⚠️ SmartBalancer: нода <b>{_sb_node_label(key)}</b> "
                             f"недоступна {meta['fails']}×, карантин {q_minutes} мин"
                             + (f" (зонд через релей {p_via})" if p_via else "")
                         )
@@ -1123,7 +1150,8 @@ def _smart_balancer_run_once() -> None:
         try:
             _tg_notify_event(  # type: ignore[name-defined]
                 "node_connect",
-                f"✅ SmartBalancer: переключение <b>{old_key}</b> → <b>{new_key}</b> "
+                f"✅ SmartBalancer: переключение <b>{_sb_node_label(old_key)}</b> → "
+                f"<b>{_sb_node_label(new_key)}</b> "
                 f"(score={best['score']:.3f}, lat={best.get('lat_ms')}ms)"
             )
         except Exception:
