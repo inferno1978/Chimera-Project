@@ -37,7 +37,7 @@ from chimera.modules.hysteria2_common import (
     RED, GREEN, YELLOW, CYAN, BLUE, BOLD, DIM, NC,
     info, success, warn, error, log_to_file,
     _run, _load_h2_state, _save_h2_state, _ensure_h2_state,
-    _tg_h2_event, _is_ipv6, _bracket,
+    _tg_h2_event, _is_ipv6, _bracket, h2_node_label,
     H2_BINARY,
 )
 from chimera.modules.box_renderer import (
@@ -392,7 +392,14 @@ def h2_transport_apply(
 
     success(f"Hysteria2 транспорт активирован: "
             f"Xray → SOCKS5:10809 → hysteria-client → {exit_ip}:{exit_port}")
-    _tg_h2_event("h2_switch", f"Транспорт → H2 native ({exit_ip}:{exit_port})")
+    # метка exit-ноды в уведе — канон node_identity (волна-2): имя из
+    # state-записи ноды (name если заполнен), вместо голого ip:port
+    _node = next((n for n in h2.get("exit_nodes", [])
+                  if n.get("ip") == exit_ip), {})
+    _tg_h2_event(
+        "h2_switch",
+        f"Транспорт → H2 native ({h2_node_label(exit_ip, exit_port, _node.get('name', ''))})",
+    )
     log_to_file("INFO", f"H2 native transport applied: {exit_ip}:{exit_port}")
     return True
 

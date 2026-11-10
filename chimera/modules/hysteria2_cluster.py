@@ -35,7 +35,7 @@ from chimera.modules.hysteria2_common import (
     RED, GREEN, YELLOW, CYAN, BLUE, BOLD, DIM, NC,
     info, success, warn, error, log_to_file,
     _run, _load_h2_state, _save_h2_state,
-    _tg_h2_event,
+    _tg_h2_event, h2_node_label,
     H2_SERVICE,
 )
 from chimera.modules.box_renderer import (
@@ -287,7 +287,23 @@ def do_h2_cluster_menu() -> None:
             results = h2_cluster_run(op, key=key, password=password)
             _print_results(results)
             if op == "restart":
-                _tg_h2_event("h2_up", f"Кластер: restart на {len(results)} нодах")
+                # состав нод метками — канон node_identity (волна-2):
+                # «alias · домен [IP](:порт)» вместо безликого счётчика
+                _by_host = {n.get("ip", ""): n for n in nodes}
+                _labels = ", ".join(
+                    h2_node_label(
+                        h,
+                        ((_by_host.get(h) or {}).get("ports") or [443])[0],
+                        (_by_host.get(h) or {}).get("name", ""),
+                    )
+                    for h in results
+                )
+                _tg_h2_event(
+                    "h2_up",
+                    f"Кластер: restart на {len(results)} нодах — {_labels}"
+                    if _labels
+                    else f"Кластер: restart на {len(results)} нодах",
+                )
             input(f"\n{BLUE}Нажмите Enter...{NC}")
         elif ch == "5":
             try:

@@ -33,7 +33,7 @@ from chimera.modules.hysteria2_common import (
     RED, GREEN, YELLOW, CYAN, BLUE, BOLD, DIM, NC,
     info, success, warn, error, log_to_file,
     _run, _load_h2_state, _save_h2_state,
-    _tg_h2_event, _is_ipv6, _bracket,
+    _tg_h2_event, _is_ipv6, _bracket, h2_node_label,
 )
 from chimera.modules.box_renderer import (
     _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
@@ -172,13 +172,16 @@ def h2_health_check_node(node: dict) -> dict:
     }
 
     prev_status = node.get("status", "unknown")
+    # метка ноды для увед — канон node_identity (волна-2): «alias · домен
+    # [IP](:порт)» вместо голого ip:port; name подхватывается если есть
+    label = h2_node_label(ip, port, node.get("name", ""))
     if up:
         node["status"] = "active"
         if prev_status != "active":
             msg = f"H2 нода {ip}:{port} UP (RTT {stats['rtt_avg']}ms)"
             success(msg)
             _log_health(msg)
-            _tg_h2_event("h2_up", f"Нода {ip}:{port} доступна")
+            _tg_h2_event("h2_up", f"Нода {label} доступна")
     else:
         node.setdefault("_fail_count", 0)
         node["_fail_count"] += 1
@@ -189,7 +192,7 @@ def h2_health_check_node(node: dict) -> dict:
                 msg = f"H2 нода {ip}:{port} DOWN (потерь {stats['loss_pct']}%)"
                 warn(msg)
                 _log_health(msg)
-                _tg_h2_event("h2_down", f"Нода {ip}:{port} недоступна")
+                _tg_h2_event("h2_down", f"Нода {label} недоступна")
         else:
             warn(f"H2 нода {ip}:{port} — ошибка #{node['_fail_count']} (порог {threshold})")
 

@@ -4,7 +4,8 @@ tests/test_hysteria2_balancer.py — _live_nodes, _weighted_random, _least_rtt,
 _round_robin, _auto_adjust_weights
 """
 from __future__ import annotations
-import sys, unittest
+import json
+import sys, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -89,6 +90,105 @@ class TestAutoAdjustWeights(unittest.TestCase):
             result = hysteria2_balancer._auto_adjust_weights(nodes)
         self.assertEqual(len(result), 2)
         self.assertGreater(result[0]["weight"], result[1]["weight"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Волна-2 (11.11.2026): метки нод в h2_switch/h2_weights — канон node_identity
+#  («alias · домен [IP](:порт)») вместо голого ip. Герметичность: state/DNS-кэш
+#  node_identity на tmp, транспорт/health подменены, _tg_h2_event перехвачен.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _BalancerTmpBase(unittest.TestCase):
+    def setUp(self):
+        _setup_core()
+        import time as _time
+        from chimera.modules import hysteria2_balancer as bal
+        from chimera.modules import node_identity as _ni
+        self._bal = bal
+        self._ni = _ni
+        self._now = _time.time()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(self._rmtree)
+        for p in (
+            patch.object(_ni, "STATE_FILE", self.tmp / "state.json"),
+            patch.object(_ni, "TG_FILE", self.tmp / "tg-absent.json"),
+            patch.object(_ni, "DNS_CACHE_FILE", self.tmp / "node_dns_cache.json"),
+            patch.object(_ni, "ALIASES_FILE", self.tmp / "aliases-absent.json"),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        _ni._MEM.clear()
+        self.addCleanup(_ni._MEM.clear)
+        self.events: list[tuple] = []
+        for p in (
+            patch.object(bal, "_tg_h2_event",
+                         lambda ev, detail="": self.events.append((ev, detail))),
+            patch.object(bal, "_save_h2_state", lambda h2: None),
+            patch.object(bal, "log_to_file", lambda *a, **k: None),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _rmtree(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fill_dns(self, host: str, ip: str):
+        (self.tmp / "node_dns_cache.json").write_text(json.dumps(
+            {host: {"ip": ip, "ts": self._now}}))
+        self._ni._MEM.clear()
+
+
+class TestSwitchEventLabel(_BalancerTmpBase):
+    """run_once: h2_switch «Балансировщик → метка ноды»."""
+
+    def test_switch_event_carries_label(self):
+        from chimera.modules import hysteria2_balancer as bal
+        self._fill_dns("node-h2b.example.com", "203.0.113.99")
+        state = {
+            "exit_nodes": [
+                {"ip": "203.0.113.10", "ports": [443], "auth": "a",
+                 "weight": 1.0, "status": "down",
+                 "metrics": {"rtt_ms": 200, "loss_pct": 100.0}},
+            ],
+            "_active_node_ip": "203.0.113.10",
+            "balancer": {"switch_threshold": 0.5},
+        }
+        best = {"ip": "node-h2b.example.com", "ports": [8443], "auth": "x",
+                "name": "H2-B", "status": "active",
+                "metrics": {"rtt_ms": 20, "loss_pct": 0.0}, "weight": 1.0}
+        with patch.object(bal, "_load_h2_state", lambda: dict(state)), \
+             patch("chimera.modules.hysteria2_health.h2_health_check_all",
+                   return_value=state["exit_nodes"]), \
+             patch.object(bal, "h2_balancer_select_node", return_value=best), \
+             patch("chimera.modules.hysteria2_transport.h2_transport_apply",
+                   return_value=True), \
+             patch.object(bal, "info", lambda *a, **k: None):
+            self.assertTrue(bal.h2_balancer_run_once())
+        self.assertEqual([e for e, _ in self.events], ["h2_switch"])
+        self.assertIn("Балансировщик → H2-B · node-h2b.example.com "
+                      "[203.0.113.99]:8443", self.events[0][1])
+        # голого ip в уведе больше нет
+        self.assertNotIn("→ node-h2b.example.com:", self.events[0][1])
+
+
+class TestWeightsEventLabel(_BalancerTmpBase):
+    """_set_node_weight: h2_weights «Вес метка → W» вместо голого ip."""
+
+    def test_manual_weight_event_carries_label(self):
+        from chimera.modules import hysteria2_balancer as bal
+        state = {"exit_nodes": [
+            {"ip": "203.0.113.10", "ports": [443], "auth": "a",
+             "weight": 1.0, "status": "active"},
+        ]}
+        inputs = iter(["1", "2.5", ""])
+        with patch.object(bal, "_load_h2_state", lambda: dict(state)), \
+             patch("builtins.input", side_effect=lambda p="": next(inputs)), \
+             patch.object(bal, "success", lambda *a, **k: None):
+            bal._set_node_weight()
+        self.assertEqual([e for e, _ in self.events], ["h2_weights"])
+        self.assertIn("Вес 203.0.113.10 → 2.5", self.events[0][1])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

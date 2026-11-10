@@ -36,7 +36,7 @@ from chimera.modules.hysteria2_common import (
     RED, GREEN, YELLOW, CYAN, BLUE, BOLD, DIM, NC,
     info, success, warn, error, log_to_file,
     _run, _load_h2_state, _save_h2_state,
-    _tg_h2_event, _is_ipv6,
+    _tg_h2_event, _is_ipv6, h2_node_label,
 )
 from chimera.modules.box_renderer import (
     _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
@@ -194,7 +194,11 @@ def h2_balancer_run_once() -> bool:
                 auth_password=best.get("auth", ""),
             )
             h2["_active_node_ip"] = best["ip"]
-            _tg_h2_event("h2_switch", f"Балансировщик → {best['ip']}")
+            # метка ноды — канон node_identity (волна-2): вместо голого ip
+            _tg_h2_event(
+                "h2_switch",
+                f"Балансировщик → {h2_node_label(best['ip'], (best.get('ports') or [443])[0], best.get('name', ''))}",
+            )
 
     _save_h2_state(h2)
     log_to_file("INFO", "H2 balancer run_once complete")
@@ -251,7 +255,15 @@ def do_h2_balancer_menu() -> None:
             h2["exit_nodes"] = _auto_adjust_weights(h2.get("exit_nodes", []))
             _save_h2_state(h2)
             success("Веса пересчитаны")
-            _tg_h2_event("h2_weights", "Веса нод обновлены")
+            # состав с адресами — канон node_identity (волна-2)
+            _weights = ", ".join(
+                f"{h2_node_label(n.get('ip', ''), (n.get('ports') or [443])[0], n.get('name', ''))}={n.get('weight', 1.0)}"
+                for n in h2.get("exit_nodes", [])
+            )
+            _tg_h2_event(
+                "h2_weights",
+                f"Веса нод обновлены: {_weights}" if _weights else "Веса нод обновлены",
+            )
             input(f"\n{BLUE}Нажмите Enter...{NC}")
         elif ch == "4":
             info("Запускаю балансировщик...")
@@ -307,8 +319,12 @@ def _set_node_weight() -> None:
         nodes[idx]["weight"] = round(max(0.01, min(wval, 100.0)), 3)
         h2["exit_nodes"] = nodes
         _save_h2_state(h2)
-        success(f"Вес ноды {nodes[idx]['ip']} → {nodes[idx]['weight']}")
-        _tg_h2_event("h2_weights", f"Вес {nodes[idx]['ip']} → {nodes[idx]['weight']}")
+        # метка ноды — канон node_identity (волна-2): вместо голого ip
+        _lbl = h2_node_label(nodes[idx]['ip'],
+                             (nodes[idx].get('ports') or [443])[0],
+                             nodes[idx].get('name', ''))
+        success(f"Вес ноды {_lbl} → {nodes[idx]['weight']}")
+        _tg_h2_event("h2_weights", f"Вес {_lbl} → {nodes[idx]['weight']}")
     input(f"\n{CYAN}Нажмите Enter...{NC}")
 
 

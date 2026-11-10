@@ -31,6 +31,7 @@ from chimera.modules.hysteria2_common import (
     info, success, warn, error, log_to_file,
     _run, _load_h2_state, _save_h2_state,
     _tg_h2_event, _service_active, _systemctl,
+    h2_node_label,
     H2_SERVICE,
 )
 from chimera.modules.box_renderer import (
@@ -81,9 +82,11 @@ def h2_watchdog_run() -> None:
     _tg_h2_event("h2_down", f"Сервис упал (рестарт #{fail_count})")
 
     if fail_count >= _RESTART_LIMIT:
-        # Слишком много падений подряд → пробуем fallback на другую ноду
+        # Слишком много падений подряд → пробуем fallback на другую ноду.
+        # Метка целевой ноды (канон node_identity, волна-2) — уходит и в
+        # лог, и в уведу: «Fallback → alias · домен [IP](:порт)».
         _wd_log(f"Достигнут лимит рестартов ({_RESTART_LIMIT}), пробую fallback")
-        _tg_h2_event("h2_switch", f"Превышен лимит рестартов, fallback")
+        fb_label = ""
         try:
             from chimera.modules.hysteria2_balancer import h2_balancer_select_node
             from chimera.modules.hysteria2_transport import h2_transport_apply
@@ -97,11 +100,21 @@ def h2_watchdog_run() -> None:
                 )
                 h2["_active_node_ip"] = node["ip"]
                 h2["_wd_fail_count"]  = 0
-                _wd_log(f"Fallback → {node['ip']}")
+                fb_label = h2_node_label(
+                    node.get("ip", ""),
+                    (node.get("ports") or [443])[0],
+                    node.get("name", ""),
+                )
+                _wd_log(f"Fallback → {fb_label}")
             else:
                 _wd_log("Нет альтернативных нод для fallback")
         except Exception as e:
             _wd_log(f"Fallback ошибка: {e}")
+        _tg_h2_event(
+            "h2_switch",
+            f"Превышен лимит рестартов, fallback → {fb_label}"
+            if fb_label else "Превышен лимит рестартов, fallback",
+        )
     else:
         # Обычный рестарт
         ok = _systemctl("restart", H2_SERVICE)

@@ -44,7 +44,7 @@ from chimera.modules.hysteria2_common import (
     open_udp_ports, close_udp_ports,
     _systemctl, _service_active, _h2_binary_exists, _h2_binary_version,
     H2_CONFIG_DIR, H2_CONFIG_FILE, H2_BINARY, H2_SERVICE, H2_LOG_FILE,
-    H2_CERT_FILE, H2_KEY_FILE, h2_cert_sha256_local,
+    H2_CERT_FILE, H2_KEY_FILE, h2_cert_sha256_local, h2_node_label,
 )
 from chimera.modules.box_renderer import (
     _box_top, _box_row, _box_item, _box_item_exit, _box_sep,
@@ -400,7 +400,13 @@ def h2_exit_install(
     _save_h2_state(h2)
 
     success(f"Hysteria2 установлен! Порты UDP: {ports}, пароль: {auth_password}")
-    _tg_h2_event("h2_up", f"Exit установлен. Порты: {ports}")
+    # метка локальной ноды — канон node_identity (волна-2): «alias · домен
+    # [IP](:порт)» вместо голого ip; name подхватывается если есть
+    _lbl = h2_node_label(local_ip, ports[0] if ports else 443,
+                          node_entry.get("name", ""))
+    _tg_h2_event("h2_up",
+                 f"Exit установлен: {_lbl}. Порты: {ports}" if _lbl
+                 else f"Exit установлен. Порты: {ports}")
     return True
 
 
@@ -408,6 +414,20 @@ def h2_exit_remove() -> None:
     """Останавливает и удаляет Hysteria2 с текущей ноды."""
     h2 = _load_h2_state()
     ports = h2.get("firewall", {}).get("udp_ports", [443])
+
+    # Метка локальной ноды для уведы (канон node_identity, волна-2):
+    # hostname -I + поиск своей записи в exit_nodes (name если заполнен)
+    _local_ip = ""
+    try:
+        _r = _run(["hostname", "-I"], capture=True, check=False)
+        if _r.returncode == 0 and _r.stdout.strip():
+            _local_ip = _r.stdout.strip().split()[0]
+    except Exception:
+        _local_ip = ""
+    _node = next((n for n in h2.get("exit_nodes", [])
+                  if n.get("ip") == _local_ip), {})
+    _lbl = h2_node_label(_local_ip, ports[0] if ports else 443,
+                         _node.get("name", ""))
 
     _systemctl("stop", H2_SERVICE)
     _systemctl("disable", H2_SERVICE)
@@ -425,7 +445,9 @@ def h2_exit_remove() -> None:
     h2["enabled"] = False
     _save_h2_state(h2)
     success("Hysteria2 удалён с Exit-ноды")
-    _tg_h2_event("h2_down", "Exit-нода остановлена")
+    _tg_h2_event("h2_down",
+                 f"Exit-нода остановлена: {_lbl}" if _lbl
+                 else "Exit-нода остановлена")
 
 
 def h2_exit_status() -> dict:
@@ -637,6 +659,8 @@ def h2_exit_remote_install(
     # Добавляем ноду в state
     h2 = _ensure_h2_state()
     existing = [n for n in h2.get("exit_nodes", []) if n.get("ip") != host]
+    # name из прежней записи этой ноды (если была) — для метки в уведе
+    _old = next((n for n in h2.get("exit_nodes", []) if n.get("ip") == host), {})
     existing.append({
         "ip": host,
         "ports": ports,
@@ -653,7 +677,12 @@ def h2_exit_remote_install(
     _save_h2_state(h2)
 
     success(f"H2 установлен на {host}, порты: {ports}, пароль: {auth_password}")
-    _tg_h2_event("h2_up", f"Удалённая Exit-нода {host} установлена")
+    # метка удалённой ноды — канон node_identity (волна-2): домен получает
+    # [IP]-резолв, IP — порт; вместо голого host в уведе
+    _tg_h2_event(
+        "h2_up",
+        f"Удалённая Exit-нода {h2_node_label(host, ports[0] if ports else 443, _old.get('name', ''))} установлена",
+    )
     return True
 
 

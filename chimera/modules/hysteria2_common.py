@@ -179,6 +179,21 @@ def _tg_send(msg: str) -> bool:
         return False
 
 def _tg_h2_event(event: str, detail: str = "") -> None:
+    """Событие Hysteria2 в TG — по канону единого конвейера tg_bot.
+
+    Волна-2 (11.11.2026): H2-стек раньше слал уведы МИМО конвейера —
+    свой заголовок «[hostname] Hysteria2» без events-фильтра (выключить
+    из меню [5]→[3] было невозможно). Теперь:
+
+      • заголовок — канонический server_header() из node_identity
+        («имя · домен · IP»; фолбэк — прежний hostname-формат при
+        недоступности node_identity), формат сообщения:
+        «{иконка} <b>[{header}] Hysteria2</b> {detail}»;
+      • events-фильтр — семантика tg_bot.tg_notify_event (см. :229-231):
+        событие с ключом events.{event} == false в telegram.json НЕ
+        отправляется; отсутствующий ключ = ВКЛ (видимость существующих
+        увед не меняется). Транспорт (_tg_send) не тронут.
+    """
     icons = {
         "h2_up":      "🟢",
         "h2_down":    "🔴",
@@ -187,16 +202,64 @@ def _tg_h2_event(event: str, detail: str = "") -> None:
         "h2_update":  "⬆️",
         "h2_weights": "⚖️",
         "h2_port_fb": "🔁",
+        "h2_traffic": "📊",
     }
     icon = icons.get(event, "ℹ️")
+    # telegram.json: events-фильтр + данные для заголовка сервера
+    cfg: dict = {}
+    try:
+        if TG_CONFIG_FILE.exists():
+            parsed = json.loads(TG_CONFIG_FILE.read_text())
+            if isinstance(parsed, dict):
+                cfg = parsed
+    except Exception:
+        cfg = {}
+    # events-фильтр (нет ключа → слать; как tg_bot.tg_notify_event)
+    if not (cfg.get("events") or {}).get(event, True):
+        _log("INFO", f"TG H2 event (выключено в events): {event} — {detail}")
+        return
     hostname = ""
     try:
         hostname = _run(["hostname", "-s"], capture=True).stdout.strip()
     except Exception:
         pass
+    header = hostname
+    try:
+        from chimera.modules.node_identity import server_header
+        header = server_header(cfg, hostname=hostname) or hostname
+    except Exception:
+        header = hostname
     ts = datetime.now().strftime("%d.%m.%Y %H:%M")
-    _tg_send(f"{icon} <b>[{hostname}] Hysteria2</b> {detail}\n<i>{ts}</i>")
+    _tg_send(f"{icon} <b>[{header}] Hysteria2</b> {detail}\n<i>{ts}</i>")
     _log("INFO", f"TG H2 event: {event} — {detail}")
+
+
+def h2_node_label(ip: str, port=0, name: str = "") -> str:
+    """Человекочитаемая метка H2 exit-ноды — канон node_identity.node_label.
+
+    «alias · домен [IP](:порт)» — вместо голого ip:port в уведах
+    Hysteria2-стека (волна-2 человекочитаемых увед, продолжение
+    71605f2). port может быть списком ports[] — берётся первый.
+    Ленивый импорт, не бросает; при недоступности node_identity —
+    фолбэк на прежний формат «ip:port» (уведы не пустеют).
+    """
+    ip = str(ip or "").strip()
+    if isinstance(port, (list, tuple)):
+        port = port[0] if port else 0
+    try:
+        p = int(port or 0)
+    except (TypeError, ValueError):
+        p = 0
+    if not ip:
+        return ""
+    try:
+        from chimera.modules.node_identity import node_label
+        lbl = node_label(str(name or ""), ip, p)
+        if lbl:
+            return lbl
+    except Exception:
+        pass
+    return f"{ip}:{p}" if p else ip
 
 # ── IPv6 helper ───────────────────────────────────────────────────────────────
 def h2_cert_sha256_local(cert_path: str) -> str:

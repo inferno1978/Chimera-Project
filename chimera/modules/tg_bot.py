@@ -297,6 +297,21 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         # (класс бага кейса окт.2026 №8; выявлено 03.11 при вопросе
         # владельца «а уведы в ТГ будут приходить?»)
         "v6_strategy_switch": "📶",  # v6-adaptive: стратегия v6↔v4 переключена
+        # Hysteria2-стек (hysteria2_common._tg_h2_event; волна-2 11.11.2026:
+        # события существовали всегда, но шли мимо конвейера — без иконок
+        # и пунктов меню (ℹ️ + невозможность выключить из [5]→[3]))
+        "h2_up":      "🟢",   # Hysteria2: нода поднялась
+        "h2_down":    "🔴",   # Hysteria2: нода упала
+        "h2_cert":    "🔒",   # Hysteria2: сертификат
+        "h2_switch":  "🔀",   # Hysteria2: переключение
+        "h2_update":  "⬆️",   # Hysteria2: обновление
+        "h2_weights": "⚖️",   # Hysteria2: веса
+        "h2_port_fb": "🔁",   # Hysteria2: port hopping fallback
+        "h2_traffic": "📊",   # Hysteria2: трафик-отчёт
+        # прочие события-«невидимки» (шли через конвейер, но без иконок/меню)
+        "dpi_response":   "📡",   # dpi_response: скоринг DPI-эпизода
+        "bandwidth_alert": "📶",  # bandwidth_monitor: алерт полосы канала
+        "icmp_gate":      "🚪",   # icmp_gate: инфраструктурный ICMP-гейт
     }
     icon = icons.get(event, "ℹ️")
     text = f"{icon} <b>[{header}]</b> {detail}\n<i>{ts}</i>"
@@ -2439,6 +2454,22 @@ def do_manage_telegram() -> None:
             # v6-adaptive (наблюдатель DNS/domain-стратегии; событие
             # существовало с релиза e04eba0, но не было видно в меню)
             "v6_strategy_switch": "V6-adaptive: переключение DNS-стратегии (v6↔v4)",
+            # Hysteria2-стек (hysteria2_common._tg_h2_event; волна-2 11.11:
+            # события шли мимо конвейера — без иконок/пунктов меню; до
+            # этого выключить h2-уведы из меню было невозможно)
+            "h2_up":      "Hysteria2: нода поднялась",
+            "h2_down":    "Hysteria2: нода упала",
+            "h2_cert":    "Hysteria2: сертификат",
+            "h2_switch":  "Hysteria2: переключение",
+            "h2_update":  "Hysteria2: обновление",
+            "h2_weights": "Hysteria2: веса",
+            "h2_port_fb": "Hysteria2: port hopping fallback",
+            "h2_traffic": "Hysteria2: трафик-отчёт",
+            # события-«невидимки» прочих модулей (шли через конвейер,
+            # но без иконок/пунктов меню — ℹ️ и неуправляемость)
+            "dpi_response":   "DPI-эпизод: скоринг",
+            "bandwidth_alert": "Полоса канала: алерт",
+            "icmp_gate":      "ICMP-гейт",
         }
 
         print()
@@ -2559,7 +2590,11 @@ def do_manage_telegram() -> None:
                        "users_drift","users_restored","users_restore_failed",
                        "users_watchdog_budget",
                        "doctor_alert","doctor_fixed","doctor_report",
-                       "v6_strategy_switch"]
+                       "v6_strategy_switch",
+                       # Hysteria2-стек + события-«невидимки» (волна-2 11.11)
+                       "h2_up","h2_down","h2_cert","h2_switch","h2_update",
+                       "h2_weights","h2_port_fb","h2_traffic",
+                       "dpi_response","bandwidth_alert","icmp_gate"]
             ev_labels = [
                 "Xray упал","Xray восстановился","Сертификат истекает",
                 "Лимит трафика","Daily health-отчёт","Exit-нода недоступна",
@@ -2601,6 +2636,17 @@ def do_manage_telegram() -> None:
                 "Doctor: авто-фиксы применены",
                 "Doctor: дайджест медосмотра",
                 "V6-adaptive: переключение стратегии",
+                "Hysteria2: нода поднялась",
+                "Hysteria2: нода упала",
+                "Hysteria2: сертификат",
+                "Hysteria2: переключение",
+                "Hysteria2: обновление",
+                "Hysteria2: веса",
+                "Hysteria2: port hopping fallback",
+                "Hysteria2: трафик-отчёт",
+                "DPI-эпизод: скоринг",
+                "Полоса канала: алерт",
+                "ICMP-гейт",
             ]
             events = cfg.get("events", {k: True for k in ev_keys})
             print()

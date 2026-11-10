@@ -1001,17 +1001,49 @@ def _split_tg_chunks(msg: str, limit: int = TG_CHUNK_LIMIT) -> list:
     return chunks or [msg]
 
 
+def _tg_event_enabled(event: str) -> bool:
+    """events-фильтр telegram.json — паттерн steal_monitor._tg_send.
+
+    Событие с ключом events.{event} == false НЕ отправляется;
+    отсутствующий ключ = ВКЛ (видимость существующих увед не меняется
+    — дефолт конвейера tg_bot.tg_notify_event). Ключи events живут
+    только в telegram.json (в tg_bot.json этого поля нет).
+    """
+    if not event:
+        return True
+    try:
+        if not TG_CONFIG.exists():
+            return True
+        cfg = json.loads(TG_CONFIG.read_text(encoding="utf-8"))
+        return bool((cfg.get("events") or {}).get(event, True))
+    except Exception:
+        return True
+
+
 def _tg_send(msg: str, event: str = "") -> bool:
     """Отправка в TG с ретраями + опциональным прокси.
 
     Прокси: ключ "proxy" в telegram.json (напр. http://127.0.0.1:25181 —
     локальный mieru-HTTP-прокси). Нужен на нодах, откуда api.telegram.org
     недоступен напрямую (TLS-ресет). Без ключа — прямое подключение.
+
+    events-фильтр (волна-2, 11.11.2026): аргумент event больше не мёртв —
+    каждый вызов проверяет telegram.json → events.{event} (образец
+    steal_monitor._tg_send: ключ false → глушим, отсутствующий ключ =
+    ВКЛ — видимость существующих увед не меняется). Из меню [5]→[3]
+    управляем только bandwidth_alert («Полоса канала: алерт» — раньше
+    уведу было невозможно выключить); отчёты (bandwidth_report/
+    bandwidth_daily) — плановые дайджесты, без ключа в telegram.json
+    шлются как раньше.
     """
     try:
         token, chat, proxy = _load_tg_config()
         if not token or not chat:
             _log("tg_send: нет token/chat в telegram.json или tg_bot.json")
+            return False
+        if not _tg_event_enabled(event):
+            _log(f"tg_send: событие {event} выключено в telegram.json "
+                 f"(events) — глушим")
             return False
         cfg = load_config()
         retries = max(1, min(5, int(cfg.get("tg_retries", TG_RETRIES))))

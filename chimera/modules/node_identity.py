@@ -41,7 +41,11 @@ node_identity.py — единая точка человекочитаемых и
   • mieru_cascade_monitor — exit down/up, no_exits составом;
   • mieru_cascade — set_lb_exits: состав балансировки Exit-ов с
     метками + счётчик exits_word + {H}-заголовок;
-  • dpi_detector — pinned-fallback/restore (key_label chain-ноды).
+  • dpi_detector — pinned-fallback/restore (key_label chain-ноды);
+  • hysteria2-стек (волна-2, 71605f2+): _tg_h2_event — заголовок
+    server_header + events-фильтр конвейера; h2_node_label
+    (обёртка node_label, фолбэк «ip:port») — метки exit-нод в
+    health/watchdog-fallback/balancer/exit_mgr/cluster/transport.
 
 Модуль — лист дерева импортов (никаких chimera-импортов), безопасен
 для вызова из cron-скриптов и TUI. Все функции не бросают исключений
