@@ -68,6 +68,18 @@ class _TmpBase(unittest.TestCase):
             patch.object(mcm, "MONITOR_STATE", self.tmp / "monitor-state.json"),
             patch.object(mcm, "MONITOR_LOG", self.tmp / "monitor.log"),
         ]
+        # node_identity (заголовок {H}): state.json/telegram.json прод-ноды
+        # НЕ должны протекать в тесты (герметичность на живых нодах —
+        # паттерн 40ed22f/c3c1803); резолв не нужен — IP в конфиге
+        try:
+            from chimera.modules import node_identity as _ni
+            patches += [
+                patch.object(_ni, "STATE_FILE", self.tmp / "state-absent.json"),
+                patch.object(_ni, "TG_FILE", self.tmp / "tg-absent.json"),
+            ]
+            _ni._MEM.clear()
+        except Exception:
+            pass
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
