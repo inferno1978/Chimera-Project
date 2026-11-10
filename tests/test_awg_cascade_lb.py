@@ -109,6 +109,13 @@ class _LbTestBase(unittest.TestCase):
             # create_routing_script делает mkdir /etc/awg-cascade — в tmp
             patch.object(awg_cascade, "AWGS_CASCADE_DIR", self._tmpdir),
             patch.object(awg_b4_split, "AWGS_CASCADE_DIR", self._tmpdir),
+            # FIX 11.11 (TG-герметичность): lb_activate/lb_set_exits/
+            # lb_deactivate шлют РЕАЛЬНЫЕ уведы через _notify →
+            # tg_notify_event — root-прогон на ноде с настроенным ботом
+            # отправлял юзеру боевые TG-сообщения из тестов. Ленивый
+            # импорт в момент вызова видит патч — один шов закрывает все
+            # notify-пути модуля (awg_failover и прочие)
+            patch("chimera.modules.tg_bot.tg_notify_event", MagicMock()),
         ]
         for p in self._patches:
             p.start()

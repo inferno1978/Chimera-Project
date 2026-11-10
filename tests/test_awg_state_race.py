@@ -261,6 +261,10 @@ class _CascadeBase(unittest.TestCase):
             # production dispatcher during root test runs
             patch.object(awg_cascade_lb, "lb_dispatcher_remove",
                          MagicMock()),
+            # FIX 11.11 (TG-герметичность): notify-пути каскада/LB шлют
+            # РЕАЛЬНЫЕ уведы (tg_notify_event) — патчим единый шов,
+            # ленивый импорт в момент вызова видит его
+            patch("chimera.modules.tg_bot.tg_notify_event", MagicMock()),
         ]
         for p in self._patches:
             p.start()
