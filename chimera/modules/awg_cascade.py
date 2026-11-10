@@ -43,7 +43,7 @@ from .awg_constants import (
     AWGS_FAILOVER_SCRIPT, AWGS_SYSTEMD_FAILOVER_SVC,
     AWGS_SYSTEMD_FAILOVER_TIMER, AWGS_FAILOVER_STALE_SEC,
     AWGS_FAILOVER_PROBE_SEC, AWGS_FAILOVER_MAX_EXITS,
-    AWGS_AWG1_CONF,
+    AWGS_AWG1_CONF, AWGS_LB_CHAIN,
 )
 from .awg_state import (
     awgs_state_load, awgs_state_save, awgs_state_set_cascade_role,
@@ -1219,6 +1219,31 @@ def awgs_cascade_activate_exit(name: str, probe_timeout: int = 0) -> bool:
     if box is None:
         warn(f"Exit-нода '{name}' не найдена в списке каскада")
         return False
+
+    # FIX 11.11 (дрейф после утери state, живой кейс RU2 — эхо инцидента
+    # 08.11): LB в state ВЫКЛ (state перестроен recovery-ом), но живая
+    # система несёт leftover LB-диспетчер — mangle-цепочка awg_lb всё
+    # ещё маркирует слоты 0x8201..N, а таблицы слотов уже не
+    # обслуживаются: помеченный трафик уходит в main → WAN напрямую
+    # (деанон) либо в чёрную дыру. Активация exit в failover-режиме —
+    # явное утверждение «работаем через ОДИН туннель awg1»: снимаем
+    # leftover ЦЕЛИКОМ (хук/хвосты/цепочки/пер-exit правила/таблицы
+    # слотов); штатный каскадный MARK-путь ниже (routing-скрипт)
+    # перестроит маршрутизацию 0x8200 → table 2000 → awg1.
+    try:
+        from . import awg_cascade_lb as _lbm
+        _r = _lbm._run(["iptables", "-t", "mangle", "-L", AWGS_LB_CHAIN],
+                       capture=True)
+        if _r.returncode == 0:
+            _lbm.lb_dispatcher_remove()
+            core.log_to_file(
+                "WARN",
+                "awg-cascade: найден leftover LB-диспетчер (цепочка "
+                f"{AWGS_LB_CHAIN}) при выключенном LB — утерянный state? "
+                "Снят при активации exit; система приведена к "
+                "failover-консистентности")
+    except Exception:
+        pass
 
     subnet = box.get("subnet", AWGS_DEFAULT_SUBNET)
 

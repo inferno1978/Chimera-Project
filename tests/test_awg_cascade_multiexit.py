@@ -123,6 +123,7 @@ class _CascadeTestBase(unittest.TestCase):
         self._state_file = self._tmpdir / "awg_standalone_state.json"
         self._awg1_conf = self._tmpdir / "awg1.conf"
         from chimera.modules import awg_cascade
+        from chimera.modules import awg_cascade_lb
         self.awg_cascade = awg_cascade
         self.mock_core = _mock_core_for_cascade()
         self._patches = [
@@ -133,6 +134,12 @@ class _CascadeTestBase(unittest.TestCase):
             # awg1.conf → tmp (тесты не под root, /etc/amnezia недоступен)
             patch("chimera.modules.awg_cascade.AWGS_AWG1_CONF",
                   self._awg1_conf),
+            # hermetic on live nodes (FIX 11.11): activate_exit removes
+            # a leftover awg_lb dispatcher when LB is off in state —
+            # unpatched lb_dispatcher_remove would tear down a REAL
+            # production dispatcher during root test runs
+            patch.object(awg_cascade_lb, "lb_dispatcher_remove",
+                         MagicMock()),
         ]
         for p in self._patches:
             p.start()

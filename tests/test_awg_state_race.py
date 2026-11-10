@@ -245,6 +245,7 @@ class _CascadeBase(unittest.TestCase):
         self._state_file = self._tmpdir / "awg_standalone_state.json"
         self._awg1_conf = self._tmpdir / "awg1.conf"
         from chimera.modules import awg_cascade
+        from chimera.modules import awg_cascade_lb
         self.awg_cascade = awg_cascade
         self.mock_core = _mock_core()
         self._patches = [
@@ -254,6 +255,12 @@ class _CascadeBase(unittest.TestCase):
                   self._state_file),
             patch("chimera.modules.awg_cascade.AWGS_AWG1_CONF",
                   self._awg1_conf),
+            # hermetic on live nodes (FIX 11.11): activate_exit removes
+            # a leftover awg_lb dispatcher when LB is off in state —
+            # unpatched lb_dispatcher_remove would tear down a REAL
+            # production dispatcher during root test runs
+            patch.object(awg_cascade_lb, "lb_dispatcher_remove",
+                         MagicMock()),
         ]
         for p in self._patches:
             p.start()
@@ -365,6 +372,56 @@ class TestActivateNoClobber(_CascadeBase):
         # pl1 (добавлен «параллельно») НЕ затёрт устаревшим списком
         self.assertEqual(names, ["de", "pl1"])
         self.assertEqual(saved["cascade_active_exit"], "de")
+
+
+class TestActivateLeftoverCleanup(_CascadeBase):
+    """FIX 11.11: активация exit при выключенном LB, но живой цепочке
+    awg_lb (утерянный state — эхо инцидента 08.11 на RU2) обязана снять
+    leftover-диспетчер: метки слотов указывали на опустевшие таблицы,
+    трафик уходил в main → WAN (деанон). Нет цепочки — ничего не трогаем."""
+
+    def _state(self):
+        st = {
+            "installed": True, "protocol_version": "3.1",
+            "port": 51831, "subnet": "172.16.81.0/24",
+            "params": dict(_PARAMS_31), "cascade_role": "entry",
+            "cascade_exits": [self._box("de", "203.0.113.106"),
+                              self._box("pl1", "203.0.113.115")],
+            "cascade_active_exit": "de",
+        }
+        self._write_state(st)
+
+    def test_leftover_dispatcher_removed(self):
+        from chimera.modules import awg_cascade_lb
+        self._state()
+        chain_exists = MagicMock()
+        chain_exists.returncode = 0        # iptables -L awg_lb → rc=0
+        with patch.object(awg_cascade_lb, "_run",
+                          return_value=chain_exists), \
+             patch.object(awg_cascade_lb, "lb_dispatcher_remove") as m_rm, \
+             patch.object(self.awg_cascade,
+                          "_awgs_cascade_create_routing_script"):
+            ok = self.awg_cascade.awgs_cascade_activate_exit("de")
+        self.assertTrue(ok)
+        m_rm.assert_called_once()
+        # WARN в лог ведёт оператора к причине
+        warned = [str(c) for c in
+                  self.mock_core.log_to_file.call_args_list]
+        self.assertTrue(any("leftover" in w for w in warned))
+
+    def test_no_chain_no_removal(self):
+        from chimera.modules import awg_cascade_lb
+        self._state()
+        no_chain = MagicMock()
+        no_chain.returncode = 1        # цепочки нет → чистка не нужна
+        with patch.object(awg_cascade_lb, "_run",
+                          return_value=no_chain), \
+             patch.object(awg_cascade_lb, "lb_dispatcher_remove") as m_rm, \
+             patch.object(self.awg_cascade,
+                          "_awgs_cascade_create_routing_script"):
+            ok = self.awg_cascade.awgs_cascade_activate_exit("de")
+        self.assertTrue(ok)
+        m_rm.assert_not_called()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -507,6 +564,10 @@ class TestRecover(unittest.TestCase):
         self._patches = [
             patch.object(awg_recover, "AWGS_SERVER_CONF", self._awg0),
             patch.object(awg_recover, "AWGS_AWG1_CONF", self._awg1),
+            # FIX 11.11: слоты каскада сканируются по AWGS_CONF_DIR —
+            # патчим в tmp, иначе recovery на живой ноде увидит БОЕВЫЕ
+            # awg1..awgN.conf и соберёт state из прод-конфигов
+            patch.object(awg_recover, "AWGS_CONF_DIR", self._tmpdir),
             patch.object(awg_recover, "AWGS_KEYS_DIR", self._keys),
             patch.object(awg_recover, "AWGS_STATE_FILE", self._state),
             patch("chimera.modules.awg_state.AWGS_STATE_FILE", self._state),
@@ -603,6 +664,60 @@ class TestRecover(unittest.TestCase):
         self.assertEqual(res["state"]["cascade_role"], "exit")
         # спец-пир не попал в клиенты
         self.assertEqual(len(res["state"]["peers"]), 2)
+
+    # ── FIX 11.11: мульти-exit восстановление по слотам awg1..awgN ──────
+
+    _AWGN_CONF_TMPL = """[Interface]
+PrivateKey = {priv}
+Address = 172.16.91.3/32
+Jc = 4
+S1 = 32
+HeaderProtectionKey = {_HPKEY}
+RandomTrailers = on
+
+[Peer]
+PublicKey = {pub}
+Endpoint = {endpoint}:52831
+AllowedIPs = 0.0.0.0/0
+"""
+
+    def test_rebuild_multi_slot_dedup_and_lb_snapshot(self):
+        """Живой кейс RU2 после инцидента 08.11: awg1=de, awg2=de
+        (дубль — failover переключал awg1 на чужой endpoint), awg3=nl1.
+        Recovery обязан: дедупить по endpoint:port, восстановить ОБА
+        exit'а, записать lb.slots_snapshot с ФИЗИЧЕСКИМИ слотами и НЕ
+        включать lb_mode (решение за оператором)."""
+        # awg2 — ДУБЛЬ awg1 по endpoint (failover переключал awg1 на
+        # уже существующий exit; ключи другие, endpoint тот же)
+        (self._tmpdir / "awg2.conf").write_text(self._AWGN_CONF_TMPL.format(
+            priv="M" * 43 + "=", pub="Y" * 42 + "=",
+            endpoint="203.0.113.99", _HPKEY=_HPKEY))
+        (self._tmpdir / "awg3.conf").write_text(self._AWGN_CONF_TMPL.format(
+            priv="N" * 43 + "=", pub="Z" * 42 + "=",
+            endpoint="132.243.221.181", _HPKEY=_HPKEY))
+        res = self.rec.awgs_recover_state(apply=True)
+        self.assertTrue(res["ok"], res["report"])
+        st = res["state"]
+        # дедуп: awg1 (203.0.113.99) + дубль awg2 (203.0.113.99 из _AWG1_CONF
+        # не дублируется) + awg3 → РОВНО два бокса с разными endpoint'ами
+        endpoints = [b["endpoint"] for b in st["cascade_exits"]]
+        self.assertEqual(endpoints, ["203.0.113.99", "132.243.221.181"])
+        self.assertEqual(st["cascade_active_exit"], "203.0.113.99")
+        # lb-поддерево: физические слоты, lb_mode не включён
+        self.assertEqual(st["lb"]["slots_snapshot"],
+                         {"203.0.113.99": 1, "132.243.221.181": 3})
+        self.assertNotIn("lb_mode", st)
+        # отчёт ведёт оператора к реактивации LB
+        self.assertTrue(any("по слотам" in r for r in res["report"]))
+        self.assertTrue(any("slots_snapshot" in r for r in res["report"]))
+
+    def test_rebuild_single_exit_writes_no_lb_tree(self):
+        """Один exit (только awg1.conf) — lb-поддерево не пишем вовсе
+        (прежнее поведение одиночного каскада)."""
+        res = self.rec.awgs_recover_state(apply=True)
+        self.assertTrue(res["ok"], res["report"])
+        self.assertNotIn("lb", res["state"])
+        self.assertNotIn("lb_mode", res["state"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════

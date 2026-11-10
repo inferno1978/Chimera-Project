@@ -953,6 +953,12 @@ def _probe_slot(info: dict, lb: dict) -> dict:
 
     alive = handshake свежий (≤300с, keepalive 25с + RejectAfterTime) ИЛИ
     ping ок — двухступенчатая защита от ложных (как failover_check).
+    alive_via — ПОЧЕМУ слот считается живым (самодокументация
+    телеметрии, живой кейс RU1 11.11: все три слота alive=true при
+    loss_pct=100/ping_ok=false — exit-сторона режет ICMP в туннеле,
+    свежий handshake честно говорит «туннель жив», но без alive_via
+    запись lb.probes выглядела противоречивой): 'handshake+ping' |
+    'handshake' | 'ping' | None (мёртв).
     tx_rate: дельта tx_bytes интерфейса за окно тика (для leastload).
     """
     iface = info["iface"]
@@ -969,7 +975,12 @@ def _probe_slot(info: dict, lb: dict) -> dict:
              capture=True)
     rtt, loss = _parse_ping(r.stdout or "")
     ping_ok = r.returncode == 0
-    alive = (age is not None and age <= 300) or ping_ok
+    hs_ok = age is not None and age <= 300
+    alive = hs_ok or ping_ok
+    alive_via = ("handshake+ping" if hs_ok and ping_ok
+                 else "handshake" if hs_ok
+                 else "ping" if ping_ok
+                 else None)
 
     tx_now = None
     try:
@@ -985,7 +996,7 @@ def _probe_slot(info: dict, lb: dict) -> dict:
         lb.setdefault("tx_prev", {})[info.get("name") or iface] = tx_now
     return {"name": info.get("name"), "alive": alive, "age": age,
             "rtt_ms": rtt, "loss_pct": loss, "tx_rate_bps": tx_rate,
-            "ping_ok": ping_ok}
+            "ping_ok": ping_ok, "alive_via": alive_via}
 
 
 def lb_balance_shares(lb: dict, strategy: str,
@@ -1497,6 +1508,7 @@ def lb_status_info(state: Optional[dict] = None) -> dict:
                          + str(info["box"].get("port") or ""),
             "mark": info["mark"], "table": info["table"],
             "alive": bool(pr.get("alive")),
+            "alive_via": pr.get("alive_via"),
             "rtt_ms": pr.get("rtt_ms"),
             "tx_kbps": pr.get("tx_rate_bps"),
             "share": round(((bal.get("shares") or {}).get(name) or 0.0), 4),
@@ -1662,8 +1674,13 @@ def lb_menu() -> None:
                 alive = (GREEN + "✓" if s["alive"] else RED + "✗") + NC if on else DIM + "–" + NC
                 share = f"{s['share']*100:.1f}%" if (on and s["share"]) else "  —"
                 rtt_s = f"{s['rtt_ms']:.0f}ms" if s.get("rtt_ms") else ""
+                # alive_via='handshake' (ping не отвечает, туннель жив по
+                # свежему handshake) — помечаем: телеметрия объясняет себя
+                via_s = ""
+                if on and s["alive"] and s.get("alive_via") == "handshake":
+                    via_s = f" {DIM}· handshake{NC}"
                 box_row(f"  {alive} awg{s['slot']} {s['name']:<14} {s['endpoint']:<22}"
-                        f" {share:>6}  {rtt_s}")
+                        f" {share:>6}  {rtt_s}{via_s}")
         box_row()
         box_item("1", "Включить (стратегия + состав нод)")
         box_item("2", "Сменить стратегию на лету")

@@ -344,9 +344,13 @@ def _load_users() -> list:
     return state.get("users", [])
 
 def _save_users(users: list) -> None:
+    # FIX 11.11: была опечатка protoproto_save_state(...) — NameError
+    # при вызове (латентно: вызовов у функции нет, но любой будущий
+    # вызов падал бы вместо сохранения). Канон: proto_save_state(path,
+    # data) — name выводится из state_path.name.
     state = proto_load_state(_MODULE_STATE)
     state["users"] = users
-    protoproto_save_state(_MODULE_STATE, _MODULE_STATE, state)
+    proto_save_state(_MODULE_STATE, state)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  БИНАРНИК

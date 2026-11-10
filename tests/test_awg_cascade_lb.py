@@ -635,6 +635,78 @@ class TestHealthTick(_LbTestBase):
 
 
 # ── 7. Activate / deactivate ─────────────────────────────────────────────────
+# ── 6b. Пробы: alive_via (самодокументация телеметрии, FIX 11.11) ────────────
+
+class TestProbeAliveVia(_LbTestBase):
+    """Живой кейс RU1 11.11: все слоты alive=true при loss_pct=100 /
+    ping_ok=false — exit-сторона режет ICMP, свежий handshake честно
+    говорит «туннель жив». alive_via объясняет ПОЧЕМУ слот жив:
+    'handshake' | 'ping' | 'handshake+ping' | None (мёртв)."""
+
+    _PING_OK_OUT = ("3 packets transmitted, 3 received, 0% packet loss\n"
+                    "rtt min/avg/max/mdev = 40.1/41.2/42.3/1.1 ms")
+    _PING_LOSS_OUT = "3 packets transmitted, 0 received, 100% packet loss"
+
+    def _probe(self, hs_age, ping_ok):
+        """hs_age: int (свежий handshake, сек) | None (нет/несвежий)."""
+        def fake_run(argv, capture=False, **kw):
+            r = MagicMock()
+            if argv[:2] == ["awg", "show"]:
+                r.returncode = 0 if hs_age is not None else 1
+                r.stdout = (f"latest handshake: {hs_age} seconds ago"
+                            if hs_age is not None else "")
+            else:
+                r.returncode = 0 if ping_ok else 1
+                r.stdout = (self._PING_OK_OUT if ping_ok
+                            else self._PING_LOSS_OUT)
+            r.stderr = ""
+            return r
+        with patch.object(self.lb, "_run", side_effect=fake_run):
+            return self.lb._probe_slot(
+                {"name": "de", "iface": "awg1",
+                 "subnet": "172.16.91.0/24"}, {})
+
+    def test_handshake_only_ru1_case(self):
+        p = self._probe(hs_age=60, ping_ok=False)
+        self.assertTrue(p["alive"])
+        self.assertEqual(p["alive_via"], "handshake")
+        self.assertFalse(p["ping_ok"])
+        self.assertEqual(p["loss_pct"], 100.0)
+
+    def test_ping_only(self):
+        p = self._probe(hs_age=None, ping_ok=True)
+        self.assertTrue(p["alive"])
+        self.assertEqual(p["alive_via"], "ping")
+        self.assertAlmostEqual(p["rtt_ms"], 41.2)
+
+    def test_both(self):
+        p = self._probe(hs_age=25, ping_ok=True)
+        self.assertTrue(p["alive"])
+        self.assertEqual(p["alive_via"], "handshake+ping")
+
+    def test_dead(self):
+        p = self._probe(hs_age=None, ping_ok=False)
+        self.assertFalse(p["alive"])
+        self.assertIsNone(p["alive_via"])
+
+    def test_stale_handshake_dead(self):
+        # handshake был 400с назад (>300) + ping fail → мёртв
+        p = self._probe(hs_age=400, ping_ok=False)
+        self.assertFalse(p["alive"])
+        self.assertIsNone(p["alive_via"])
+
+    def test_status_info_carries_alive_via(self):
+        st = self._lb_state(n=2, strategy="smart")
+        st["lb"] = {"probes": {
+            "de": {"alive": True, "alive_via": "handshake",
+                   "rtt_ms": None, "loss_pct": 100.0, "ping_ok": False},
+            "fi1": {"alive": True, "alive_via": "handshake+ping",
+                     "rtt_ms": 41.2, "loss_pct": 0.0, "ping_ok": True}}}
+        info = self.lb.lb_status_info(st)
+        by = {s["name"]: s for s in info["slots"]}
+        self.assertEqual(by["de"]["alive_via"], "handshake")
+        self.assertEqual(by["fi1"]["alive_via"], "handshake+ping")
+
 
 class TestActivateDeactivate(_LbTestBase):
     def test_activate_minimal(self):

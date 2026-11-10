@@ -22,14 +22,19 @@ install/peer_add, удаляет только uninstall):
     (client_privkey) — иначе конфиги клиентов невосстановимы
   • /etc/amnezia/amneziawg/awg1.conf  — каскад entry: активный exit
     (Endpoint/PublicKey/подсеть линка + peer_privkey) → cascade_exits[0]
+  • /etc/amnezia/amneziawg/awg{2..N}.conf — прочие слоты мульти-exit
+    каскада / LB (FIX 11.11: раньше восстанавливался только awg1 —
+    мульти-exit топология и lb-поддерево терялись; теперь все слоты
+    с дедупом по endpoint:port → cascade_exits + lb.slots_snapshot,
+    lb_mode остаётся ВЫКЛ — решение за оператором)
   • exit-сторона: спец-пир «cascade_entry» в awg0.conf → cascade_role
     = "exit"
 
 ЧЕГО НЕТ в живой системе (честно помечаем в результате):
   • owner_email пиров, added_at, expires_at — хранились только в state
     (expires_at="" = бессрочный — НЕ выкидываем чужих клиентов);
-  • полный список мульти-exit каскада — восстанавливается только
-    АКТИВНЫЙ exit из awg1.conf (остальные нужно добавить заново);
+  • имена exit'ов (восстанавливаются по endpoint — raw IP) и lb-режим
+    (lb_mode/strategy/pinned) — реактивация LB в меню каскада;
   • endpoint_host — берём текущий публичный IP сервера.
 
 КОНТРАКТ: rebuild НЕ трогает awg0.conf/awg1.conf/keys/ — только строит
@@ -49,7 +54,7 @@ from .awg_constants import (
     AWGS_STATE_FILE, AWGS_INTERFACE, AWGS_SERVER_CONF, AWGS_AWG1_CONF,
     AWGS_KEYS_DIR, AWGS_DEFAULT_PARAMS, AWGS_DEFAULT_MTU,
     AWGS_DEFAULT_SUBNET, AWGS_DEFAULT_SUBNET_V6,
-    AWGS_CASCADE_ENTRY_PEER,
+    AWGS_CASCADE_ENTRY_PEER, AWGS_CONF_DIR, AWGS_LB_MAX_SLOTS,
 )
 from .awg_state import awgs_state_load, awgs_state_save, awgs_state_integrity
 from .awg_protocol import AWG31_DIRECTIVE_NAMES
@@ -330,51 +335,75 @@ def awgs_recover_state(apply: bool = False) -> dict:
         })
 
     # ── каскад ──────────────────────────────────────────────────────────────
+    # FIX 11.11 (эхо инцидента 08.11 «AWG 3.1 пропал»): раньше читался
+    # ТОЛЬКО awg1.conf — восстановление теряло мульти-exit топологию
+    # (остальные exit'ы «добавьте заново») и lb-поддерево целиком
+    # (slots_snapshot). Живая система при этом несла все туннели
+    # awg1..awgN и LB-диспетчер — state расходился с реальностью
+    # (наблюдатель честно-неверно атрибутировал слоты активному exit).
+    # Теперь: читаем ВСЕ слоты awg1..awgN (существующие конфиги),
+    # дедуп по endpoint:port (держим низший слот — повторный endpoint
+    # бывает после переключения failover-ом awg1 на уже существующий
+    # exit, живой кейс RU2: awg1=de, awg2=de, awg3=nl1), каждому
+    # восстановленному exit'у — его ФИЗИЧЕСКИЙ слот в lb.slots_snapshot.
     cascade_role = ""
     cascade_exits: list = []
     active_exit = ""
-    if AWGS_AWG1_CONF.exists():
-        a1iface, a1peers = _parse_awg_conf(AWGS_AWG1_CONF)
+    lb_slots: dict = {}
+    for slot in range(1, AWGS_LB_MAX_SLOTS + 1):
+        slot_conf = AWGS_CONF_DIR / f"awg{slot}.conf"
+        if not slot_conf.exists():
+            continue
+        a1iface, a1peers = _parse_awg_conf(slot_conf)
         a1peer = a1peers[0] if a1peers else {}
         endpoint = a1peer.get("Endpoint", "")
-        if endpoint and a1iface.get("PrivateKey"):
-            host, _, port_s = endpoint.rpartition(":")
-            try:
-                exit_port = int(port_s)
-            except ValueError:
-                exit_port = 51820
-            link_net, peer_ip = _net_from_addr(a1iface.get("Address", ""))
-            # параметры обфускации линка — из awg1.conf (обе стороны
-            # каскада обязаны совпадать; awg1.conf несёт полный набор)
-            exit_params = dict(AWGS_DEFAULT_PARAMS)
-            for pkey, conf_name in _PARAMS_20_CONF.items():
-                if conf_name in a1iface:
-                    raw = a1iface[conf_name]
-                    try:
-                        exit_params[pkey] = int(raw)
-                    except ValueError:
-                        exit_params[pkey] = raw
-            for conf_name, pkey in _AW31_CONF_TO_PARAM.items():
-                if conf_name in a1iface and str(a1iface[conf_name]).strip():
-                    exit_params[pkey] = a1iface[conf_name]
+        if not (endpoint and a1iface.get("PrivateKey")):
+            continue
+        host, _, port_s = endpoint.rpartition(":")
+        try:
+            exit_port = int(port_s)
+        except ValueError:
+            exit_port = 51820
+        # дедуп по endpoint:port — туннель к одному exit'у в нескольких
+        # слотах (failover переключал awg1 на чужой endpoint)
+        if any(b.get("endpoint") == host and int(b.get("port") or 0)
+               == exit_port for b in cascade_exits):
+            continue
+        link_net, peer_ip = _net_from_addr(a1iface.get("Address", ""))
+        # параметры обфускации линка — из awg{N}.conf (обе стороны
+        # каскада обязаны совпадать; конфиг слота несёт полный набор)
+        exit_params = dict(AWGS_DEFAULT_PARAMS)
+        for pkey, conf_name in _PARAMS_20_CONF.items():
+            if conf_name in a1iface:
+                raw = a1iface[conf_name]
+                try:
+                    exit_params[pkey] = int(raw)
+                except ValueError:
+                    exit_params[pkey] = raw
+        for conf_name, pkey in _AW31_CONF_TO_PARAM.items():
+            if conf_name in a1iface and str(a1iface[conf_name]).strip():
+                exit_params[pkey] = a1iface[conf_name]
+        if not cascade_role:
             cascade_role = "entry"
-            exit_name = host or "recovered-exit"
-            box = {
-                "name": exit_name,
-                "endpoint": host,
-                "port": exit_port,
-                "server_pubkey": a1peer.get("PublicKey", ""),
-                "peer_privkey": a1iface["PrivateKey"],
-                "peer_psk": a1peer.get("PresharedKey", ""),
-                "peer_ip": peer_ip,
-                "subnet": link_net,
-                "protocol_version": protocol_version,
-                "params": exit_params,
-                "mtu": mtu,
-                "added_at": now_iso,
-            }
-            cascade_exits = [box]
-            active_exit = exit_name
+        exit_name = host or "recovered-exit"
+        box = {
+            "name": exit_name,
+            "endpoint": host,
+            "port": exit_port,
+            "server_pubkey": a1peer.get("PublicKey", ""),
+            "peer_privkey": a1iface["PrivateKey"],
+            "peer_psk": a1peer.get("PresharedKey", ""),
+            "peer_ip": peer_ip,
+            "subnet": link_net,
+            "protocol_version": protocol_version,
+            "params": exit_params,
+            "mtu": mtu,
+            "added_at": now_iso,
+        }
+        cascade_exits.append(box)
+        lb_slots[exit_name] = slot
+        if not active_exit:
+            active_exit = exit_name      # слот 1 = активный (failover-форма)
 
     # exit-сторона (мы — зарубежный AWG1): спец-пир в awg0.conf
     if not cascade_role:
@@ -423,6 +452,13 @@ def awgs_recover_state(apply: bool = False) -> dict:
         )
         state[AWGS_CASCADE_EXITS_KEY] = cascade_exits
         state[AWGS_CASCADE_ACTIVE_KEY] = active_exit
+        # lb-поддерево: физические слоты туннелей (FIX 11.11 — раньше
+        # восстановление теряло его целиком). lb_mode намеренно НЕ
+        # включаем: режим работы — операторское решение (failover —
+        # безопасный дефолт после утери state; для возврата LB — меню
+        # каскада → Балансировка, диспетчер пересоберётся сам)
+        if len(cascade_exits) >= 2:
+            state["lb"] = {"slots_snapshot": lb_slots}
 
     # ── самопроверка ────────────────────────────────────────────────────────
     n_conf = len([p for p in peers
@@ -450,10 +486,19 @@ def awgs_recover_state(apply: bool = False) -> dict:
                       "вместе со state — при необходимости перепривяжите "
                       "владельцев в панели")
     if cascade_role == "entry":
-        report.append(f"NOTE: каскад entry восстановлен частично — только "
-                      f"АКТИВНЫЙ exit '{active_exit}' из awg1.conf; "
-                      f"остальные выходы мульти-exit добавьте заново "
-                      f"(меню каскада → мульти-exit → добавить)")
+        if len(cascade_exits) >= 2:
+            slots_s = ", ".join(f"{n}→awg{s}" for n, s in lb_slots.items())
+            report.append(f"NOTE: каскад entry восстановлен по слотам "
+                          f"конфигов: {len(cascade_exits)} exit'а "
+                          f"({slots_s}); lb.slots_snapshot записан, "
+                          f"lb_mode оставлен ВЫКЛ — если до утери state "
+                          f"работала балансировка, реактивируйте её "
+                          f"(меню каскада → Балансировка; если живая "
+                          f"система несёт leftover-диспетчер awg_lb — "
+                          f"он будет снят при первой активации exit)")
+        else:
+            report.append(f"NOTE: каскад entry восстановлен: активный "
+                          f"exit '{active_exit}' из awg1.conf")
     if cascade_role == "exit":
         report.append("NOTE: роль каскада exit (спец-пир "
                       f"'{AWGS_CASCADE_ENTRY_PEER}' в awg0.conf)")
