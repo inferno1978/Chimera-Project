@@ -1259,17 +1259,20 @@ def _tw_query_stats(timeout: int = 8) -> dict | None:
 
 
 def _tw_ip_link_stats(ifaces: list) -> dict:
-    """Счётчики интерфейсов `ip -s link show <if...>` (одним вызовом):
-    {iface: {'rx': int, 'tx': int}}. Отказ/пустой вывод → {}.
-    Никогда не бросает."""
+    """Счётчики интерфейсов `ip -s link show` (одним вызовом — iproute2
+    НЕ принимает несколько устройств в одном show: «Error: either "dev"
+    is duplicate, or "awg2" is a garbage»): снимок всех ссылок, из него —
+    только запрошенные {iface: {'rx': int, 'tx': int}}. Отказ/пустой
+    вывод / отсутствующий интерфейс → пропущен. Никогда не бросает."""
     try:
-        ifaces = [str(i) for i in (ifaces or []) if str(i).strip()]
-        if not ifaces:
+        wanted = [str(i).strip() for i in (ifaces or []) if str(i).strip()]
+        if not wanted:
             return {}
-        r = subprocess.run(["ip", "-s", "link", "show", *ifaces],
+        r = subprocess.run(["ip", "-s", "link", "show"],
                            capture_output=True, text=True, timeout=10,
                            check=False)
-        return _tw_parse_ip_link(r.stdout or "")
+        parsed = _tw_parse_ip_link(r.stdout or "")
+        return {i: parsed[i] for i in wanted if parsed.get(i)}
     except Exception:
         return {}
 

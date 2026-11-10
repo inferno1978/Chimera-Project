@@ -1520,6 +1520,38 @@ class TestParsersMultitransport(unittest.TestCase):
         self.assertEqual(tw._tw_parse_ip_link(""), {})
         self.assertEqual(tw._tw_parse_ip_link("мусор\nбез интерфейсов"), {})
 
+    def test_ip_link_stats_multiple_ifaces_argv(self):
+        """Регрессия живого прогона RU1 (LB, 3 слота): iproute2 НЕ
+        принимает несколько устройств в одном show — `ip -s link show
+        awg1 awg2 awg3` падает («either "dev" is duplicate, or "awg2"
+        is a garbage», rc=1, пустой stdout) → счётчики AWG терялись.
+        Фейковый ip эмулирует реальную семантику argv: без устройств —
+        все ссылки; два+ голых имён — ошибка (ловит старый вызов)."""
+        import types
+        import chimera.modules.exit_traffic_watcher as tw
+
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            devs = [a for a in argv[4:] if a != "dev"]
+            if len(devs) > 1:
+                return types.SimpleNamespace(
+                    returncode=1, stdout="",
+                    stderr='Error: either "dev" is duplicate, '
+                           'or "%s" is a garbage.\n' % devs[1])
+            return types.SimpleNamespace(returncode=0, stdout=IP_LINK_LIVE,
+                                         stderr="")
+
+        with patch.object(tw.subprocess, "run", fake_run):
+            got = tw._tw_ip_link_stats(["awg1", "awg2", "awg3"])
+        # один вызов, БЕЗ списка устройств в argv
+        self.assertEqual(calls, [["ip", "-s", "link", "show"]])
+        self.assertEqual(got.get("awg1"), {"rx": 1214453, "tx": 12199154})
+        self.assertEqual(got.get("awg2"), {"rx": 1086570, "tx": 12160378})
+        # awg3 нет в выводе (нет такого интерфейса) → пропущен
+        self.assertNotIn("awg3", got)
+
     def test_parse_systemctl_show(self):
         import chimera.modules.exit_traffic_watcher as tw
         off = tw._tw_parse_systemctl_show(SYSTEMCTL_IPACC_OFF)
