@@ -82,6 +82,40 @@ class TestAwgCascadeMirrors(unittest.TestCase):
         self.assertEqual(recommended_manual_path(), Path("/root"))
 
 
+class TestRuZoneFallbackUpstreamTag(unittest.TestCase):
+    """Тег fallback-снимка ru.zone согласован с апстримом (автор
+    amneziawg-installer, issue 10.11.2026): v6.2.2 — снимок ipdeny от
+    09.11.2026 (8664 подсети); прежний v5.18.4 — снимок от 06.07.2026
+    (8626). Старые теги апстрим не удаляет, но fallback обязан указывать
+    на СВЕЖИЙ снимок: при недоступности ipdeny (primary, ежедневно)
+    каскад иначе неделями работает по устаревшим РФ-подсетям. База порта
+    AWG-стека (v5.18.4, PROJECT_MAP.md) — ИСТОРИЧЕСКИЙ факт о коде и
+    меняется НЕ ЗАВИСИМО от тега снимка ru.zone."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_fallback_tag_is_upstream_current(self):
+        from chimera.modules.awg_constants import AWGS_RU_ZONE_FALLBACK_GH
+        self.assertIn(
+            "bivlked/amneziawg-installer/v6.2.2/cascade/ru.zone",
+            AWGS_RU_ZONE_FALLBACK_GH)
+        # структура: raw GitHub + путь снимка в репо апстрима
+        self.assertTrue(AWGS_RU_ZONE_FALLBACK_GH.startswith(
+            "https://raw.githubusercontent.com/bivlked/amneziawg-installer/"))
+        self.assertTrue(AWGS_RU_ZONE_FALLBACK_GH.endswith("/cascade/ru.zone"))
+
+    def test_fallback_is_second_mirror(self):
+        from chimera.modules.awg_cascade_mirrors import get_ru_zone_mirrors
+        urls = get_ru_zone_mirrors()
+        self.assertIn(
+            "bivlked/amneziawg-installer/v6.2.2/cascade/ru.zone",
+            urls[1])
+        # прокси оборачивают полный raw-URL с тем же тегом
+        for proxy_url in urls[2:]:
+            self.assertIn("v6.2.2", proxy_url)
+
+
 class TestRuZoneSpecSanity(unittest.TestCase):
     """Sanity-проверки RU_ZONE_SPEC."""
 

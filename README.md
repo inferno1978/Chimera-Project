@@ -415,6 +415,7 @@ sudo python3 /opt/chimera/main.py --scheduled-backup
 
 ## 🔗 Связанные проекты
 
+- [amneziawg-installer](https://github.com/bivlked/amneziawg-installer) (bivlked) — апстрим нашего standalone-стека AmneziaWG 2.0: полный порт инсталлятора автора (13 модулей `awg_*.py`, carrier-пресеты, QR/`vpn://`, каскад RU→зарубеж); его `cascade/ru.zone` — fallback-источник РФ-подсетей для AWG-каскада (`AWGS_RU_ZONE_FALLBACK_GH`, тег снимка согласован с автором). Отдельное спасибо автору за актуальные теги снимков.
 - [HYDRA-ULTIMATE](https://github.com/gr33nimax/HYDRA-ULTIMATE) — форк на базе Sing-Box как единого оркестратора трафика, с плагинной архитектурой и собственным набором транспортов.
 
 ## 📄 Лицензия

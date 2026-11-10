@@ -24,8 +24,9 @@ IP-сетей (CIDR) для ipset в AWG-cascade.
 Особенность ru.zone:
   • Primary источник: ipdeny.com (не GitHub). Это data feed, обновляется
     ежедневно.
-  • Fallback: GitHub raw bivlked/amneziawg-installer@v5.18.4/cascade/ru.zone
-    — статический снимок, может быть устаревшим.
+  • Fallback: GitHub raw bivlked/amneziawg-installer@v6.2.2/cascade/ru.zone
+    — статический снимок (тег согласован с апстримом, issue автора
+    10.11.2026; снимок ipdeny от 09.11.2026).
   • Файл — простой текстовый список CIDR (по одной сети на строку).
   • min_size проверка: lines_count > 100 ( sanity check на количество сетей).
 
@@ -65,8 +66,8 @@ def get_ru_zone_mirrors() -> list[str]:
 
     Порядок:
       1. Прямой ipdeny.com (primary — обновляется ежедневно)
-      2. GitHub raw bivlked/amneziawg-installer@v5.18.4/cascade/ru.zone
-         (fallback — статический снимок)
+      2. GitHub raw bivlked/amneziawg-installer@v6.2.2/cascade/ru.zone
+         (fallback — статический снимок, тег согласован с апстримом)
       3. 3 GitHub-прокси (ghproxy.net, gh-proxy.com, gh.llkk.cc) оборачивают
          GitHub raw URL (для РФ где raw.githubusercontent.com
          заблокирован)
@@ -85,7 +86,7 @@ def get_ru_zone_mirrors() -> list[str]:
         urls.append(AWGS_RU_ZONE_FALLBACK_GH)
 
         # 3. GitHub-прокси для raw URL
-        # raw.githubusercontent.com/bivlked/amneziawg-installer/v5.18.4/cascade/ru.zone
+        # raw.githubusercontent.com/bivlked/amneziawg-installer/v6.2.2/cascade/ru.zone
         # Прокси оборачивают полный https://raw.githubusercontent.com/... URL
         for proxy_host in GITHUB_PROXY_HOSTS:
             if not proxy_host:

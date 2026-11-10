@@ -239,9 +239,17 @@ AWGS_CASCADE_FWMARK: int = 0x8200  # 33280 = 0x8000 (b4-exempt) | 0x0200 (тег
 
 # ── Источники ru.zone для каскада ───────────────────────────────────────────
 AWGS_RU_ZONE_URL: str = "https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone"
+# Fallback — статический снимок ru.zone из репозитория АВТОРА amneziawg-installer
+# (bivlked). Тег согласован с апстримом (issue автора, 10.11.2026): v6.2.2 —
+# снимок ipdeny от 09.11.2026 (8664 подсети); прежний v5.18.4 — снимок от
+# 06.07.2026 (8626 подсети). Старые теги автором не удаляются, но fallback
+# обязан указывать на свежий снимок: при недоступности ipdeny (primary,
+# обновляется ежедневно) каскад иначе неделями маршрутизирует по устаревшим
+# РФ-подсетям. База нашего AWG-стека — порт его v5.18.4 (историческая запись,
+# PROJECT_MAP.md); тег СНИМКА ru.zone меняется независимо от базы порта.
 AWGS_RU_ZONE_FALLBACK_GH: str = (
     "https://raw.githubusercontent.com/bivlked/amneziawg-installer/"
-    "v5.18.4/cascade/ru.zone"
+    "v6.2.2/cascade/ru.zone"
 )
 
 # ── Имена спец-пиров ────────────────────────────────────────────────────────
