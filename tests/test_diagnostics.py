@@ -12,6 +12,12 @@ Unit-тесты для chimera/modules/diagnostics.py.
   5. _diag_resolve_config — поиск и чтение config.json
   6. _diag_dropin_danger_keys — разбор опасных директив drop-in'а
   7. _diag_check_xray_service — ветка drop-in'ов (штатный/безобидный/опасный)
+  8. Волна-4 (заголовки конвейерных отправителей): отправка отчёта из
+     меню — _tg_send_report_from_menu: конвейер tg_bot.tg_notify_event
+     (НОВОЕ событие diag_report; шапка/фильтр/иконка от конвейера),
+     фолбэк — прежний прямой curl (+ events-фильтр + шапка
+     node_identity.server_header, фолбэк hostname); muted → молчит;
+     длинный отчёт → sendDocument; суть (пункты диагностики) не меняется
 """
 from __future__ import annotations
 
@@ -969,6 +975,244 @@ class TestDiagCheckXrayServiceDropins(unittest.TestCase):
     def test_empty_dropin_dir_no_conflicts(self):
         counters = self._run_check({})
         self.assertEqual(counters, [2, 2, 0, 0])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  8. Волна-4: _tg_send_report_from_menu — конвейер diag_report + фолбэк
+#  (паттерн герметичности test_hysteria2_common._H2TmpBase: node_identity и
+#  telegram.json на tmp, транспорт (_diag_tg_run) подменён, боевой TG молчит)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestTgSendReportWave4(unittest.TestCase):
+    """_tg_send_report_from_menu (волна-4): основной путь — конвейер
+    tg_bot.tg_notify_event с НОВЫМ событием diag_report (шапка/фильтр/
+    иконка от конвейера); фолбэк — прежний прямой curl с events-фильтром
+    (false → молчит) и шапкой server_header «имя · домен · IP» (фолбэк
+    hostname). Суть отчёта (пункты диагностики) не меняется."""
+
+    def setUp(self):
+        import subprocess
+        from chimera.modules import node_identity as _ni
+        import chimera.modules.diagnostics as d_
+        self.diag = d_
+        self._ni = _ni
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(self._rmtree)
+        self.calls: list = []
+        self._cp = subprocess.CompletedProcess
+        patches = [
+            patch.object(d_, "DIAG_TG_CFG_FILE", self.tmp / "telegram.json"),
+            # node_identity: прод-файлы НЕ протекают в тесты (герметичность
+            # живых нод — паттерн 652e692/71605f2)
+            patch.object(_ni, "STATE_FILE", self.tmp / "state.json"),
+            patch.object(_ni, "TG_FILE", self.tmp / "telegram.json"),
+            patch.object(_ni, "DNS_CACHE_FILE",
+                         self.tmp / "node_dns_cache.json"),
+            patch.object(_ni, "ALIASES_FILE", self.tmp / "aliases-absent.json"),
+            # транспорт фолбэка (curl/hostname) — мок: боевых запросов нет
+            patch.object(d_, "_diag_tg_run", side_effect=self._fake_run),
+        ]
+        _ni._MEM.clear()
+        self.addCleanup(_ni._MEM.clear)
+        (self.tmp / "node_dns_cache.json").write_text(json.dumps({}))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.report = self.tmp / "xray-diagnostic-test.txt"
+        self.report.write_text("Шаг 1: unit tests ✔ PASS\n"
+                               "Шаг 2: сервисы ✔ PASS\n", encoding="utf-8")
+
+    def _rmtree(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fake_run(self, args, timeout=20):
+        self.calls.append(list(args))
+        if list(args)[:1] == ["hostname"]:
+            return self._cp(args, 0, stdout="testhost\n", stderr="")
+        return self._cp(args, 0, stdout="200", stderr="")
+
+    def _write_state(self, domain="node-ru1.example.com"):
+        (self.tmp / "state.json").write_text(json.dumps({"domain": domain}))
+        self._ni._MEM.clear()
+
+    def _cfg(self, events=None, domain=None):
+        if domain:
+            self._write_state(domain)
+        cfg = {"token": "TESTTOKEN", "chat_id": "12345",
+               "server_name": "RU1", "server_ip": "203.0.113.10"}
+        if events is not None:
+            cfg["events"] = events
+        return cfg
+
+    def _force_fallback(self):
+        """chimera.modules.tg_bot недоступен → curl-фолбэк (два рычага:
+        sys.modules-None + атрибут пакета — attr побеждает, если tg_bot
+        уже импортировался раньше в этом процессе)."""
+        import chimera.modules as pkg
+        for m in (patch.dict(sys.modules,
+                             {"chimera.modules.tg_bot": None}),
+                  patch.object(pkg, "tg_bot", None, create=True)):
+            m.start()
+            self.addCleanup(m.stop)
+
+    def _curl_cmds(self):
+        return [c for c in self.calls if c[:1] == ["curl"]]
+
+    def _tg_text(self) -> str:
+        cmds = [c for c in self._curl_cmds() if "sendMessage" in " ".join(c)]
+        self.assertEqual(len(cmds), 1, f"ожидался один sendMessage: {cmds}")
+        return next(a for a in cmds[0]
+                    if str(a).startswith("text="))[len("text="):]
+
+    # ── конвейерный путь (НОВОЕ событие diag_report) ───────────────
+
+    def test_pipeline_sends_diag_report_event(self):
+        """Основной путь — tg_bot.tg_notify_event("diag_report", суть):
+        шапку/events-фильтр/иконку ставит конвейер; curl не тронут."""
+        with patch("chimera.modules.tg_bot.tg_notify_event") as m_notify:
+            res = self.diag._tg_send_report_from_menu(self.report,
+                                                      self._cfg())
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["via"], "pipeline")
+        m_notify.assert_called_once()
+        ev, detail = m_notify.call_args[0]
+        self.assertEqual(ev, "diag_report")
+        self.assertEqual(ev, self.diag.DIAG_REPORT_EVENT)
+        self.assertIn("Диагностический отчёт", detail)
+        self.assertIn("unit tests", detail)   # суть (пункты диагностики)
+        self.assertEqual(self._curl_cmds(), [])
+        self.assertEqual(res["file"], "")       # короткий отчёт — без файла
+
+    def test_pipeline_report_body_html_escaped(self):
+        """Тело отчёта экранируется под parse_mode=HTML (визуально идентично,
+        суть не меняется) — иначе сырой <tag> ломал бы sendMessage (400)."""
+        self.report.write_text("лог: <script>boom</script> & порт", encoding="utf-8")
+        with patch("chimera.modules.tg_bot.tg_notify_event") as m_notify:
+            self.diag._tg_send_report_from_menu(self.report, self._cfg())
+        detail = m_notify.call_args[0][1]
+        self.assertIn("&lt;script&gt;", detail)
+        self.assertNotIn("<script>", detail)
+        self.assertIn("&amp;", detail)
+
+    def test_muted_when_event_disabled(self):
+        """events.diag_report == false → молчит в ОБОИХ путях (конвейер
+        вызывается нуле раз; меню честно покажет «заглушено»)."""
+        with patch("chimera.modules.tg_bot.tg_notify_event") as m_notify:
+            res = self.diag._tg_send_report_from_menu(
+                self.report, self._cfg(events={"diag_report": False}))
+        self.assertTrue(res["muted"])
+        self.assertFalse(res["ok"])
+        m_notify.assert_not_called()
+        self.assertEqual(self._curl_cmds(), [])
+
+    def test_no_config_http_status(self):
+        cfg = self._cfg()
+        cfg.pop("token")
+        res = self.diag._tg_send_report_from_menu(self.report, cfg)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["http"], "no-config")
+
+    def test_long_report_sends_full_file(self):
+        """Отчёт >3800 символов → конвейер шлёт дайджест, полный файл —
+        sendDocument'ом (как раньше; конвейер документы не шлёт)."""
+        self.report.write_text("д" * 5000, encoding="utf-8")
+        with patch("chimera.modules.tg_bot.tg_notify_event") as m_notify:
+            res = self.diag._tg_send_report_from_menu(self.report,
+                                                      self._cfg())
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["file"], "sent")
+        self.assertEqual(m_notify.call_args[0][0], "diag_report")
+        send_doc = [c for c in self._curl_cmds()
+                    if "sendDocument" in " ".join(c)]
+        self.assertEqual(len(send_doc), 1)
+        self.assertIn(f"document=@{self.report}", send_doc[0])
+        self.assertLessEqual(len(m_notify.call_args[0][1]), 3860)
+
+    # ── фолбэк (прежний прямой curl + каноничная шапка) ─────────────
+
+    def test_fallback_header_canonical_server_header(self):
+        """Фолбэк собирает канон «имя · домен · IP» + иконку + ts;
+        parse_mode=HTML (формат как у конвейера)."""
+        cfg = self._cfg(domain="node-ru1.example.com")
+        self._force_fallback()
+        res = self.diag._tg_send_report_from_menu(self.report, cfg)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["via"], "curl")
+        self.assertEqual(res["http"], "200")
+        text = self._tg_text()
+        self.assertIn(
+            "🩺 <b>[RU1 · node-ru1.example.com · 203.0.113.10]</b> "
+            "Диагностический отчёт", text)
+        self.assertIn("unit tests", text)
+        self.assertIn("<i>", text)   # ts — как у конвейера
+        self.assertIn("parse_mode=HTML", " ".join(self._curl_cmds()[0]))
+
+    def test_fallback_header_hostname_when_node_identity_unavailable(self):
+        """node_identity недоступен → фолбэк hostname, не бросает."""
+        cfg = self._cfg(domain="node-ru1.example.com")
+        self._force_fallback()
+        with patch.dict(sys.modules,
+                        {"chimera.modules.node_identity": None}):
+            res = self.diag._tg_send_report_from_menu(self.report, cfg)
+        self.assertTrue(res["ok"])
+        self.assertIn("<b>[testhost]</b>", self._tg_text())
+
+    def test_fallback_http_error_reported(self):
+        """HTTP != 200 → честный статус для меню (ok=False, http=код)."""
+        import subprocess
+        cfg = self._cfg()
+        self._force_fallback()
+        with patch.object(self.diag, "_diag_tg_run",
+                          return_value=subprocess.CompletedProcess(
+                              [], 1, stdout="404", stderr="")):
+            res = self.diag._tg_send_report_from_menu(self.report, cfg)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["http"], "404")
+
+    # ── events-фильтр (чистый хелпер) и проводка меню ───────────────
+
+    def test_event_enabled_matrix(self):
+        """_diag_tg_event_enabled: нет файла/ключа → ВКЛ; false → выкл;
+        битый json → ВКЛ (паттерн bandwidth_monitor._tg_event_enabled)."""
+        f = self.tmp / "telegram.json"
+        # нет файла → ВКЛ
+        self.assertTrue(self.diag._diag_tg_event_enabled("diag_report"))
+        f.write_text(json.dumps({}))
+        self.assertTrue(self.diag._diag_tg_event_enabled("diag_report"))
+        f.write_text(json.dumps({"events": {"diag_report": False}}))
+        self.assertFalse(self.diag._diag_tg_event_enabled("diag_report"))
+        self.assertTrue(self.diag._diag_tg_event_enabled("cert_expire"))
+        f.write_text("{это не json")
+        self.assertTrue(self.diag._diag_tg_event_enabled("diag_report"))
+        # явный конфиг в аргументе важнее файла
+        self.assertFalse(self.diag._diag_tg_event_enabled(
+            "diag_report", {"events": {"diag_report": False}}))
+        self.assertTrue(self.diag._diag_tg_event_enabled(""))
+
+    def test_menu_block_wired_to_helper(self):
+        """do_full_diagnostic шлёт отчёт только через хелпер (старый
+        сырой curl-bot{token}/sendMessage из меню исчез)."""
+        import inspect
+        src = inspect.getsource(self.diag.do_full_diagnostic)
+        self.assertIn("_tg_send_report_from_menu", src)
+        self.assertNotIn("api.telegram.org", src)
+
+    def test_menu_tg_config_file_survives_core_migration(self):
+        """getattr(core, TG_CONFIG_FILE) исчез из _core при миграции —
+        привязка падает на модульную копию DIAG_TG_CFG_FILE (фикс сироты
+        миграции: пункт «Отправить в Telegram» навсегда показывал
+        «не настроен»)."""
+        import inspect
+        src = inspect.getsource(self.diag.do_full_diagnostic)
+        self.assertIn('getattr(core, "TG_CONFIG_FILE", None)', src)
+        self.assertIn("DIAG_TG_CFG_FILE", src)
+
+    def test_diag_report_key_and_icon_documented(self):
+        """НОВЫЙ ключ волны-4: diag_report / иконка 🩺 (предложение для
+        регистрации в tg_bot: icons + ev_keys/ev_labels меню [5]→[3])."""
+        self.assertEqual(self.diag.DIAG_REPORT_EVENT, "diag_report")
+        self.assertEqual(self.diag.DIAG_REPORT_ICON, "🩺")
 
 
 if __name__ == "__main__":

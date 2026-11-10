@@ -312,6 +312,12 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "dpi_response":   "📡",   # dpi_response: скоринг DPI-эпизода
         "bandwidth_alert": "📶",  # bandwidth_monitor: алерт полосы канала
         "icmp_gate":      "🚪",   # icmp_gate: инфраструктурный ICMP-гейт
+        # волна-4 (доп. покрытие): новые события
+        "h2_quality": "📊",   # Hysteria2: отчёт качества нод (с метками)
+        "bandwidth_report": "📈",   # bandwidth_monitor: полный замер полосы
+        "bandwidth_daily":  "🗓️",   # bandwidth_monitor: дневной отчёт
+        "diag_report": "🩺",   # diagnostics: ручной отчёт из меню
+        "fw_guard": "🧯",   # fw_guard: восстановление firewall-правил
     }
     icon = icons.get(event, "ℹ️")
     text = f"{icon} <b>[{header}]</b> {detail}\n<i>{ts}</i>"
@@ -2513,6 +2519,12 @@ def do_manage_telegram() -> None:
             "dpi_response":   "DPI-эпизод: скоринг",
             "bandwidth_alert": "Полоса канала: алерт",
             "icmp_gate":      "ICMP-гейт",
+            # волна-4 (доп. покрытие): новые события
+            "h2_quality": "Hysteria2: отчёт качества нод",
+            "bandwidth_report": "Полоса канала: полный замер",
+            "bandwidth_daily":  "Полоса канала: дневной отчёт",
+            "diag_report": "Диагностический отчёт (из меню)",
+            "fw_guard": "FW Guard: восстановление firewall-правил",
         }
 
         print()
@@ -2637,7 +2649,10 @@ def do_manage_telegram() -> None:
                        # Hysteria2-стек + события-«невидимки» (волна-2 11.11)
                        "h2_up","h2_down","h2_cert","h2_switch","h2_update",
                        "h2_weights","h2_port_fb","h2_traffic",
-                       "dpi_response","bandwidth_alert","icmp_gate"]
+                       "dpi_response","bandwidth_alert","icmp_gate",
+                       # волна-4 (доп. покрытие): новые события
+                       "h2_quality","bandwidth_report","bandwidth_daily",
+                       "diag_report","fw_guard"]
             ev_labels = [
                 "Xray упал","Xray восстановился","Сертификат истекает",
                 "Лимит трафика","Daily health-отчёт","Exit-нода недоступна",
@@ -2690,6 +2705,11 @@ def do_manage_telegram() -> None:
                 "DPI-эпизод: скоринг",
                 "Полоса канала: алерт",
                 "ICMP-гейт",
+                "Hysteria2: отчёт качества нод",
+                "Полоса канала: полный замер",
+                "Полоса канала: дневной отчёт",
+                "Диагностический отчёт (из меню)",
+                "FW Guard: восстановление firewall-правил",
             ]
             events = cfg.get("events", {k: True for k in ev_keys})
             print()

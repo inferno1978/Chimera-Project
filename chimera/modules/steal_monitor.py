@@ -17,15 +17,22 @@ TCP-relay (Mieru) терпит. Отчёт классифицирует ноду
        • peers (каскад, tg_bot.json→cascade_peers + extra_peers из конфига):
          тот же замер по SSH (BatchMode, ключ) + hostname peer'а, ошибки
          пишутся как err-сэмпл;
-       • идентичность ноды (label · IP · hostname) пишется в каждый сэмпл
-         и показывается в отчёте — видно, КТО именно, а не «local (vmNNN)»;
+       • идентичность ноды пишется в каждый сэмпл и показывается в отчёте
+         (волна-4, канон node_identity): локальная нода — заголовок
+         server_header «имя · домен · IP» (telegram.json server_name +
+         state.json domain + server_ip; фолбэк node_label/hostname),
+         peer-нода — метка node_label «alias · домен [IP]» (алиас из
+         exit_traffic_watcher.json + DNS-резолв с кэшем) — видно, КТО
+         именно, а не «local (vmNNN)»;
        • мгновенный алерт в TG при N сэмплах подряд ≥ crit_peak (anti-spam
          cooldown), событие "steal_alert".
   2. send_daily_report()  — дневной отчёт (cron H:M, по умолчанию 23:50):
-       • шапка: монитор-нода (label · IP · hostname) + сводка флота с
-         ярлыками нод: «Флот: 🔴 1 (NL) | 🟢 5 (RU-1, RU-2, ...)»;
-       • per-node: «NL · 203.0.113.30 · vm134610 — КРИТИЧНО — есть
-         проблемы», avg/p95/пик, busy, per-core разброс (SMT-сосед),
+       • шапка: монитор-нода — канонический заголовок server_header
+         («имя · домен · IP», node_identity) + сводка флота с ярлыками
+         нод: «Флот: 🔴 1 (NL) | 🟢 5 (RU-1, RU-2, ...)»;
+       • per-node: «NL · node-nl.example.com [203.0.113.40] — КРИТИЧНО —
+         есть проблемы» (метка node_label; IP/hostname не дублируются,
+         если уже входят в метку), avg/p95/пик, busy, per-core разброс
          boot-avg, украденная доля желаемого CPU (oversubscription),
          часовая динамика;
        • классификация НОРМА/ВНИМАНИЕ/КРИТИЧНО по порогам (настраиваются);
@@ -62,7 +69,10 @@ TCP-relay (Mieru) терпит. Отчёт классифицирует ноду
     is_monitor_installed()        → bool
     load_config() / save_config() → dict / None
     classify_day(stats, thr)      → (str, list)  — ok|warn|crit|data
-    _local_identity(cfg)          → dict         — label/ip/hostname ноды
+    _local_identity(cfg)          → dict — label (канон server_header
+                                    «имя · домен · IP»)/ip/hostname ноды
+    _peer_identity(peer, host)    → dict — label (канон node_label
+                                    «alias · домен [IP]»)/ip/hostname
     do_steal_monitor_menu()       → None         — TUI
 
 Модуль standalone (без _core на уровне импорта — паттерн node_health_monitor):
@@ -214,23 +224,99 @@ def _detect_local_ip() -> str:
 def _local_identity(cfg: Optional[dict] = None) -> dict:
     """Идентичность локальной ноды для отчётов/алертов.
 
-    {"label", "ip", "hostname"}: label из конфига (node_label, напр. "RU-1")
-    или hostname; ip из конфига (node_ip) или автодетект. Именно эти три
-    значения показываются в шапке отчёта и заголовке блока каждой ноды —
+    {"label", "ip", "hostname"}: label — канонический заголовок сервера
+    server_header из node_identity («имя · домен · IP»: telegram.json →
+    server_name + state.json → domain + telegram.json → server_ip);
+    фолбэк — прежний формат (node_label из конфига или hostname).
+    ip — из конфига (node_ip) или автодетект, hostname — hostname -s
+    (оба поля сохранены для совместимости сэмплов/меню). Именно эта
+    тройка показывается в шапке отчёта и заголовке блока каждой ноды —
     чтобы по отчёту было сразу видно, КТО это (а не «local (vm134610)»).
+    Не бросает (канон недоступен → прежний label).
     """
     cfg = cfg or load_config()
     hostname = _hostname()
     label = str(cfg.get("node_label") or "").strip() or hostname
     ip = str(cfg.get("node_ip") or "").strip() or _detect_local_ip()
+    canon = _server_header_canon(hostname)
+    # канон осмыслен, когда принёс больше голого hostname (server_name/
+    # домен/IP); выродился в hostname — прежний label (node_label/hostname)
+    if canon and canon != hostname:
+        label = canon
     return {"label": label, "ip": ip, "hostname": hostname}
 
 
+def _server_header_canon(hostname: str = "",
+                         tg_cfg: Optional[dict] = None) -> str:
+    """Канонический заголовок сервера «имя · домен · IP» (node_identity).
+
+    server_header читает server_name/server_ip из telegram.json (здесь —
+    TG_CONFIG, прочитанный заранее) и domain из state.json; hostname —
+    фолбэк имени. Ленивый импорт (cron-путь не тянет дерево наверху),
+    при любой ошибке → '' (вызывающий держит свой фолбэк).
+    """
+    try:
+        from chimera.modules.node_identity import server_header
+        if tg_cfg is None:
+            try:
+                if TG_CONFIG.exists():
+                    tg_cfg = json.loads(TG_CONFIG.read_text(encoding="utf-8"))
+            except Exception:
+                tg_cfg = {}
+        if not isinstance(tg_cfg, dict):
+            tg_cfg = {}
+        return str(server_header(tg_cfg, hostname=hostname) or "").strip()
+    except Exception:
+        return ""
+
+
 def _peer_identity(peer: dict, ssh_hostname: Optional[str] = None) -> dict:
-    """Идентичность peer-ноды: label = имя из конфига, ip = host."""
+    """Идентичность peer-ноды: label — канон node_label «alias · домен [IP]».
+
+    Алиас — из exit_traffic_watcher.json (node_identity.alias_for,
+    host:port → имя); нет алиаса — имя peer'а из конфига (name).
+    Домен резолвится с файловым DNS-кэшем (node_identity.node_label);
+    IP-хост → «alias · IP:порт». Фолбэк (канон недоступен) — прежний
+    label: name/host. Поле ip = host (совместимость), hostname — из SSH.
+    Не бросает.
+    """
     name = str(peer.get("name") or peer.get("host") or "?")
     host = str(peer.get("host") or "")
-    return {"label": name, "ip": host, "hostname": ssh_hostname or ""}
+    try:
+        port = int(peer.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    label = ""
+    try:
+        from chimera.modules.node_identity import alias_for, node_label
+        alias = str(alias_for(host, port or 0) or "").strip() or name
+        label = str(node_label(alias, host, port or 0) or "").strip()
+    except Exception:
+        label = ""
+    if not label:
+        label = name
+    return {"label": label, "ip": host, "hostname": ssh_hostname or ""}
+
+
+def _ident_extra_parts(label: str, ip: str, hostname: str) -> list:
+    """Доп-части (ip, hostname) к метке ноды — без дублей (волна-4).
+
+    Каноническая метка («имя · домен · IP» / «alias · домен [IP]»,
+    разделитель « · ») уже несёт адрес ноды — голые IP/hostname рядом
+    были бы дублем; hostname к канону не добавляем вовсе (имя ноды уже
+    человекочитаемое). Старые/простые метки дополняются как раньше.
+    """
+    label = str(label or "").strip()
+    ip = str(ip or "").strip()
+    hostname = str(hostname or "").strip()
+    canon = " · " in label
+    parts: list = []
+    if ip and ip != label and ip not in label:
+        parts.append(ip)
+    if hostname and not canon and hostname != label and hostname != ip \
+            and hostname not in label:
+        parts.append(hostname)
+    return parts
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -661,13 +747,16 @@ def _save_tg_state(st: dict) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _alert_check(node: str, host: str, steal: Optional[float],
-                 cfg: dict, tgst: dict, ip: Optional[str] = None) -> Optional[str]:
+                 cfg: dict, tgst: dict, ip: Optional[str] = None,
+                 label: Optional[str] = None) -> Optional[str]:
     """Обновляет стрик; возвращает текст алерта или None.
 
     steal=None (ошибка замера) сбрасывает стрик — данные с дыркой не считаем
     серией. Алерт: streak >= alert_consecutive и прошёл cooldown.
-    ip — публичный IP ноды (если известен), показывается в алерте вместо
-    криптичного hostname.
+    ip — публичный IP ноды (если известен); label — каноническая метка
+    (волна-4): шапка [server_header] идентифицирует ноду-монитор, строка
+    ноды — метку «alias · домен [IP]» / «имя · домен · IP»; голый адрес
+    добавляется только если его ещё нет в метке (без дублей).
     """
     thr = cfg.get("thresholds", {})
     nodes = tgst.setdefault("nodes", {})
@@ -697,9 +786,15 @@ def _alert_check(node: str, host: str, steal: Optional[float],
     ns["crit_streak"] = 0  # после алерта — заново копить серию
     nodes[node] = ns
     ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+    # кто: каноническая метка ноды (alias · домен [IP] / имя · домен · IP);
+    # адрес добавляем только если его ещё нет в метке (волна-4, без дублей)
+    who = str(label or "").strip() or node
+    addr = str(ip or "").strip() or str(host or "").strip()
+    if addr and addr not in who:
+        who = f"{who} (<code>{addr}</code>)"
     return (
         f"🚨 <b>[{_local_identity(cfg)['label']}] CPU Steal критический</b>\n"
-        f"🔴 <b>{node}</b> (<code>{ip or host}</code>): "
+        f"🔴 <b>{who}</b>: "
         f"steal <b>{steal:.1f}%</b> — {consec} замера подряд ≥ {crit_peak:.0f}%\n"
         f"<i>{ts}</i>\n\n"
         f"Дневной отчёт и доказательства: Диагностика → CPU Steal монитор.\n"
@@ -717,8 +812,10 @@ def _record_node_sample(node: str, host: str, cur: dict, load1: Optional[float],
                         ident: Optional[dict] = None) -> Optional[dict]:
     """Дельта против prev → сэмпл в JSONL (+алерт-проверка). Возвращает сэмпл.
 
-    ident ("label"/"ip"/"hostname") пишется в сэмпл — отчёт показывает ноду
-    как «RU-1 · 203.0.113.10 · srv-ru1», а не «local (vm134610)».
+    ident ("label"/"ip"/"hostname"; label — канон node_identity, волна-4)
+    пишется в сэмпл — отчёт показывает ноду как «NL · node-nl.example.com
+    [203.0.113.40]» (peer) или «RU1 · node-ru1.example.com · 203.0.113.10»
+    (локальная), а не «local (vm134610)».
     """
     prev = prev_store.get(node)
     d = compute_deltas(prev, cur)
@@ -760,7 +857,8 @@ def _record_node_sample(node: str, host: str, cur: dict, load1: Optional[float],
 
     if cfg.get("alerts_enabled", True):
         msg = _alert_check(node, host, d["steal"], cfg, tgst,
-                           ip=(ident or {}).get("ip"))
+                           ip=(ident or {}).get("ip"),
+                           label=(ident or {}).get("label"))
         if msg:
             alerts.append(msg)
     return rec
@@ -1010,10 +1108,13 @@ _LEVEL_DESC = {
 
 
 def _display_title(ident: Optional[dict], node: str, host: str) -> str:
-    """Заголовок блока ноды: label · IP · hostname (без дублей).
+    """Заголовок блока ноды (волна-4: без дублей адреса).
 
-    Примеры: «NL · 203.0.113.30 · vm134610», «RU-2 · 203.0.113.20».
-    Старые сэмплы без ident → «local (srv45)» как раньше.
+    Каноническая метка («имя · домен · IP» для локальной, «alias ·
+    домен [IP]» для peer) уже несёт адрес — IP/hostname рядом не
+    дублируются (паттерн _ident_extra_parts). Простые/старые метки →
+    «label · IP · hostname» как раньше: «NL · 203.0.113.30 · vm134610»,
+    «RU-2 · 203.0.113.20». Старые сэмплы без ident → «local (srv45)».
     """
     ident = ident or {}
     label = str(ident.get("label") or "").strip() or node
@@ -1022,10 +1123,11 @@ def _display_title(ident: Optional[dict], node: str, host: str) -> str:
     if not ip and not hostname:
         return f"<b>{label}</b>" + (f" ({host})" if host and host != label else "")
     parts = [f"<b>{label}</b>"]
-    if ip and ip != label:
-        parts.append(f"<code>{ip}</code>")
-    if hostname and hostname != label and hostname != ip:
-        parts.append(hostname)
+    for extra in _ident_extra_parts(label, ip, hostname):
+        if extra == ip:
+            parts.append(f"<code>{ip}</code>")
+        else:
+            parts.append(extra)
     return " · ".join(parts)
 
 
@@ -1115,7 +1217,9 @@ def _ticket_block(node: str, host: str, stats: dict, level: str,
     худшие часы, per-core разброс (SMT), ошибки замера.
 
     Текст без символов «меньше/больше/амперсанд» — блок уходит в TG-HTML
-    внутри <code>.
+    внутри <code>. Метка ноды — канон (волна-4): «alias · домен [IP]» /
+    «имя · домен · IP»; голый IP в теме не дублируется, если уже в метке
+    (полный идентифатор VM — в строке «IP …, hostname …» ниже).
     """
     if not stats.get("n_ok"):
         return ""
@@ -1123,6 +1227,8 @@ def _ticket_block(node: str, host: str, stats: dict, level: str,
     label = str(ident.get("label") or "").strip() or node
     ip = str(ident.get("ip") or "").strip() or host
     hostname = str(ident.get("hostname") or "").strip()
+    # каноническая метка уже несёт адрес → без «(ip)»-дубля в теме
+    who = f"{label}" + (f" ({ip})" if ip and ip not in label else "")
     dstr = date_str or datetime.now().strftime("%Y-%m-%d")
     try:
         dhuman = datetime.strptime(dstr, "%Y-%m-%d").strftime("%d.%m.%Y")
@@ -1160,7 +1266,7 @@ def _ticket_block(node: str, host: str, stats: dict, level: str,
     L = []
     if level == "crit":
         L.append(f"Тема: Хронический CPU steal (оверселл физического хоста) "
-                 f"на VM {label} ({ip}) — требуется миграция на другой хост")
+                 f"на VM {who} — требуется миграция на другой хост")
         L.append("")
         L.append("Здравствуйте!")
         L.append("")
@@ -1187,7 +1293,7 @@ def _ticket_block(node: str, host: str, stats: dict, level: str,
                  "характер. Готовы приложить выгрузку sar -u и данные "
                  "мониторинга за другие дни.")
     else:  # warn — пограничное состояние
-        L.append(f"Тема: Повышенный CPU steal на VM {label} ({ip}) — "
+        L.append(f"Тема: Повышенный CPU steal на VM {who} — "
                  "просьба проверить загрузку физического хоста")
         L.append("")
         L.append("Здравствуйте!")
@@ -1220,7 +1326,9 @@ def _fleet_summary_line(node_data: list) -> str:
     """«Флот: 🔴 1 (NL) | 🟡 1 (RU-3) | 🟢 5 (RU-1, RU-2, DE, PL, EE)».
 
     Ярлыки problem-нод показываем всегда; для ok-нод — если строка не
-    разрастается (иначе только счётчик).
+    разрастается (иначе только счётчик). Канонические метки (волна-4,
+    «alias · домен [IP]») в ярлыке сокращаем до первого сегмента —
+    полный адрес ноды виден в её блоке ниже.
     """
     levels: dict = {}
     for _nd, _host, _stats, level, _r, _ident in node_data:
@@ -1231,8 +1339,10 @@ def _fleet_summary_line(node_data: list) -> str:
             continue
         entries = levels[level]
         base = f"{_LEVEL_ICON[level]} {len(entries)}"
-        labels = [str((ident or {}).get("label") or "").strip() or nd
-                  for nd, ident in entries]
+        labels = []
+        for nd, ident in entries:
+            lbl = str((ident or {}).get("label") or "").strip() or nd
+            labels.append(lbl.split(" · ")[0].strip() or nd)
         with_labels = base + f" ({', '.join(labels)})"
         if level in ("crit", "warn") or len(with_labels) <= 120:
             parts.append(with_labels)
@@ -1269,6 +1379,8 @@ def build_report(date: Optional[str] = None) -> str:
                      key=lambda n: (n != "local", n.lower()))
 
     ident_local = _local_identity(cfg)
+    # шапка: канонический заголовок сервера «имя · домен · IP» (волна-4;
+    # без telegram.json/state.json — прежний «label · IP · hostname»)
     lines = [f"🧟 <b>CPU Steal Report</b> — {dhuman}",
              f"Монитор: {_display_title(ident_local, 'local', _hostname())}"]
     if not ordered:
@@ -1303,8 +1415,10 @@ def build_report(date: Optional[str] = None) -> str:
                 continue
             short = (str((ident or {}).get("label") or "").strip() or nd)
             ip = str((ident or {}).get("ip") or "").strip()
-            lines.append(f"<b>{_LEVEL_ICON[level]} {short}"
-                         + (f" ({ip})" if ip else "") + ":</b>")
+            # IP рядом с меткой — только если его нет в самой метке
+            # (канон «alias · домен [IP]» уже несёт адрес; волна-4)
+            short += f" ({ip})" if ip and ip not in short else ""
+            lines.append(f"<b>{_LEVEL_ICON[level]} {short}:</b>")
             for r in recommendations(level, stats):
                 lines.append(f"  {r}")
             lines.append("")
@@ -1319,8 +1433,11 @@ def build_report(date: Optional[str] = None) -> str:
             for nd, host, stats, level, ident in tb:
                 short = (str((ident or {}).get("label") or "").strip() or nd)
                 ip = str((ident or {}).get("ip") or "").strip() or host
-                lines.append(f"— <b>{short}</b> (<code>{ip}</code>) — "
-                             f"{_LEVEL_NAME[level]}")
+                # без дубля адреса, если он уже в метке (волна-4)
+                head = f"— <b>{short}</b>"
+                if ip and ip not in short:
+                    head += f" (<code>{ip}</code>)"
+                lines.append(head + f" — {_LEVEL_NAME[level]}")
                 lines.append(f"<code>{_ticket_block(nd, host, stats, level, ident=ident, date_str=dstr)}</code>")
                 lines.append("")
 
@@ -1694,13 +1811,16 @@ def _nodes_menu(cfg: dict) -> None:
         os.system("clear")
         peers = _load_peers(cfg)
         ident = _local_identity(cfg)
+        ident_extra = " · ".join(_ident_extra_parts(
+            ident["label"], ident.get("ip") or "", ident.get("hostname") or ""))
         print()
         _box_top("🧟  STEAL-МОНИТОР — НАБЛЮДАЕМЫЕ НОДЫ")
         _box_row(f"  Локальная нода: "
                  + (GREEN + " мониторится" + NC if cfg.get("monitor_local", True)
                     else YELLOW + " ВЫКЛЮЧЕНА" + NC))
-        _box_row(f"  В отчётах:      {BOLD}{ident['label']}{NC} · "
-                 f"{ident['ip'] or 'IP не определён'} · {ident['hostname']}")
+        _box_row(f"  В отчётах:      {BOLD}{ident['label']}{NC}"
+                 + (f" · {ident_extra}" if ident_extra
+                    else " · IP не определён"))
         _box_row(f"  Peers по SSH:   "
                  + (GREEN + f" включено ({len(peers)})" + NC
                     if cfg.get("monitor_peers", False) and peers
@@ -1781,8 +1901,12 @@ def _nodes_menu(cfg: dict) -> None:
             _box_ok("Фильтр сохранён")
         elif ch == "6":
             ident = _local_identity(cfg)
-            print(f"\n  Текущее: label={ident['label']} ip={ident['ip'] or '-'} "
-                  f"hostname={ident['hostname']}")
+            ident_extra = " · ".join(_ident_extra_parts(
+                ident["label"], ident.get("ip") or "", ident.get("hostname") or ""))
+            print(f"\n  Текущее: {ident['label']}"
+                  + (f" · {ident_extra}" if ident_extra else ""))
+            print(f"  {DIM}Имя ноды: telegram.json → server_name (канон) имеет"
+                  f"\n  приоритет; здесь — фолбэк, если server_name не задан.{NC}")
             raw = input(f"  короткое имя для отчётов, напр. RU-1 "
                         f"[пусто = {cfg.get('node_label') or 'hostname'}]: ").strip()
             if raw == "-":
@@ -1797,8 +1921,10 @@ def _nodes_menu(cfg: dict) -> None:
                 cfg["node_ip"] = raw
             save_config(cfg)
             ident = _local_identity(cfg)
-            _box_ok(f"Отчёты покажут: {ident['label']} · "
-                    f"{ident['ip'] or 'IP?'} · {ident['hostname']}")
+            ident_extra = " · ".join(_ident_extra_parts(
+                ident["label"], ident.get("ip") or "", ident.get("hostname") or ""))
+            _box_ok(f"Отчёты покажут: {ident['label']}"
+                    + (f" · {ident_extra}" if ident_extra else " · IP?"))
 
 
 def do_steal_monitor_menu() -> None:
@@ -1822,8 +1948,11 @@ def do_steal_monitor_menu() -> None:
         _box_row("  душатся, TCP-relay (Mieru) терпит. Отчёт — в конце суток.")
         _box_sep()
         ident = _local_identity(cfg)
-        _box_row(f"  Нода в отчётах: {ident['label']} · "
-                 f"{ident['ip'] or 'IP не определён'} · {ident['hostname']}")
+        ident_extra = " · ".join(_ident_extra_parts(
+            ident["label"], ident.get("ip") or "", ident.get("hostname") or ""))
+        _box_row(f"  Нода в отчётах: {ident['label']}"
+                 + (f" · {ident_extra}" if ident_extra
+                    else " · IP не определён"))
         _box_row(f"  Мониторинг:    "
                  + (GREEN + f"АКТИВЕН (cron */{interval} мин)" + NC if installed
                     else YELLOW + "не установлен" + NC)

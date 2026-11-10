@@ -224,12 +224,10 @@ def _failover_install(nodes: list, tg_token: str = "", tg_chat: str = "") -> Non
     core = _core_module()
     success = core.success
 
-    # Строим список "host port" для bash
-    nodes_str = "\n".join(
-        f'  check_node "{nd["host"]}" "{nd.get("port", 443)}"'
-        for nd in nodes
-    )
-    # Метки нод + заголовок сервера (вшивка при генерации — см. докстринг)
+    # Метки нод + заголовок сервера (вшивка при генерации — см. докстринг).
+    # Мёртвый блок nodes_str ("STATUS=$(check_node …" с незакрытой подстановкой)
+    # удалён волной-4: генерат не проходил bash -n — скрипт никогда не
+    # работал, per-node DOWN уведы не уходили; рабочий цикл проверки ниже.
     _labels_bash = " ".join(shlex.quote(l) for l in _fo_node_labels(nodes))
     _hdr_prefix_bash = shlex.quote(_fo_hdr_prefix())
     tg_block = ""
@@ -290,8 +288,6 @@ sys.exit(0 if prev.get('status') == '$STATUS' else 1)
 " 2>/dev/null
             return $?
         }}
-
-{nodes_str.replace('check_node', 'STATUS=$(check_node') }
 
         # Метки нод (вшиты генератором — bash не умеет DNS/алиасы) и
         # заголовок сервера «[RU1 · домен · IP] » (node_identity; пусто —

@@ -230,6 +230,23 @@ class TestWatchdogScriptLabels(_GeneratorBase):
         # заголовка нет — уведа в прежнем виде
         self.assertIn("HDR_PREFIX=''", script)
 
+    def test_bash_syntax_ok_per_node_watchdog(self):
+        """Сгенерированный per-node watchdog валиден для bash -n (волна-4).
+
+        Мёртвый блок nodes_str («STATUS=$(check_node …» с незакрытой
+        подстановкой) удалён: до фикса генерат не парсился ВООБЩЕ — скрипт
+        никогда не работал, per-node DOWN уведы не уходили (эмпирически
+        bash -n: «unexpected EOF while looking for matching ')'»)."""
+        import subprocess as _sp
+        script = self._install_watchdog()
+        r = _sp.run(["bash", "-n", str(self.tmp / "wd.sh")],
+                    capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, f"bash -n: {r.stderr}")
+        # мёртвые строки (check_node с голым host в аргументе) исчезли из
+        # генерата; рабочий цикл — с переменными $HOST/$PORT — на месте
+        self.assertNotIn('check_node "node-nl.example.com"', script)
+        self.assertIn('STATUS=$(check_node "$HOST" "$PORT")', script)
+
 
 class TestAutoFallbackScriptLabels(_GeneratorBase):
     """_auto_fallback_install: all-dead составом + заголовок в режимных уведах."""
@@ -256,9 +273,9 @@ class TestAutoFallbackScriptLabels(_GeneratorBase):
     def test_bash_syntax_ok(self):
         """Сгенерированный auto-fallback скрипт валиден для bash -n.
 
-        (per-node watchdog намеренно НЕ проверяем bash -n: там историческая
-        строка STATUS=$(check_node без закрывающей скобки — не трогаем
-        логику watchdog'а.)"""
+        (per-node watchdog теперь тоже валиден — мёртвый блок nodes_str
+        удалён волной-4, см. TestWatchdogScriptLabels.
+        test_bash_syntax_ok_per_node_watchdog.)"""
         import subprocess as _sp
         self._install_autofallback()
         r = _sp.run(["bash", "-n", str(self.tmp / "auto-fallback.sh")],

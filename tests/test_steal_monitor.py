@@ -22,12 +22,17 @@ Unit-тесты для chimera/modules/steal_monitor.py — CPU Steal монит
   15. _tg_send               — events-гейтинг (отключённое событие)
   16. _ssh_proc_stat         — парсинг вывода SSH / мок отказа
   17. Интеграция: _core.py (импорт, пункт ST, диспетчер), tg_bot.py (events)
+  18. Канон node_identity (волна-4): _local_identity (server_header
+      «имя · домен · IP»), _peer_identity (node_label «alias · домен
+      [IP]», DNS из предзаполненного кэша без getent), тексты увед без
+      дублей «label (ip)», шапка отчёта, ярлыки флота
 """
 from __future__ import annotations
 
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -759,6 +764,306 @@ class TestIdentity(StealMonitorTestBase):
         self.assertIn("🟢 1 (RU-1)", line)
         # crit идёт первым — проблемы видны сразу
         self.assertLess(line.index("🔴"), line.index("🟢"))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  18. Канон node_identity (волна-4): server_header / node_label в уведах
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestIdentityCanon(StealMonitorTestBase):
+    """Канонические метки нод (волна-4, node_identity):
+
+      • локальная нода — server_header «имя · домен · IP» (telegram.json →
+        server_name + state.json → domain + telegram.json → server_ip);
+        фолбэк — прежний node_label/hostname (нет telegram.json);
+      • peer-нода — node_label «alias · домен [IP]» (алиас из
+        exit_traffic_watcher.json; DNS — из предзаполненного файлового
+        кэша, без getent/сети — паттерн test_smart_balancer:
+        прод-файлы node_identity изолируются в tmp);
+      • тексты увед без дублей «label (ip)» — адрес уже в метке/шапке.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from chimera.modules import node_identity as _ni
+        self._ni = _ni
+        self._nitmp = Path(tempfile.mkdtemp())
+        # предзаполненный DNS-кэш (свежий ts → getent не зовётся)
+        self._dns = self._nitmp / "node_dns_cache.json"
+        self._dns.write_text(json.dumps({
+            "node-nl.example.com": {"ip": "203.0.113.40",
+                                    "ts": time.time()},
+            "node-de.example.com": {"ip": "198.51.100.7",
+                                    "ts": time.time()},
+        }), encoding="utf-8")
+        self._aliases = self._nitmp / "exit_traffic_watcher.json"
+        self._aliases.write_text("{}", encoding="utf-8")
+        self._state = self._nitmp / "state.json"
+        self._state.write_text("{}", encoding="utf-8")
+        _ni._MEM.clear()
+        for p in (patch.object(_ni, "DNS_CACHE_FILE", self._dns),
+                  patch.object(_ni, "ALIASES_FILE", self._aliases),
+                  patch.object(_ni, "STATE_FILE", self._state),
+                  patch.object(_ni, "TG_FILE", self._nitmp / "telegram.json")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(_ni._MEM.clear)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._nitmp, ignore_errors=True)
+
+    # ── хелперы фикстур ──────────────────────────────────────────────────
+    def _tg_json(self, **extra):
+        sm.TG_CONFIG.write_text(json.dumps(extra), encoding="utf-8")
+
+    def _state_json(self, **extra):
+        self._state.write_text(json.dumps(extra), encoding="utf-8")
+
+    def _aliases_json(self, aliases):
+        self._aliases.write_text(json.dumps({"aliases": aliases}),
+                                 encoding="utf-8")
+        self._ni._MEM.clear()
+
+    # ── _local_identity: server_header «имя · домен · IP» ───────────────
+    def test_local_identity_canon_server_header(self):
+        """telegram.json (server_name+server_ip) + state.json (domain) →
+        label = «RU1 · node-ru1.example.com · 203.0.113.10»."""
+        self._tg_json(server_name="RU1", server_ip="203.0.113.10")
+        self._state_json(domain="node-ru1.example.com")
+        cfg = {"node_label": "RU-1", "node_ip": "203.0.113.10"}
+        with patch.object(sm, "_hostname", return_value="srv-ru1"):
+            ident = sm._local_identity(cfg)
+        self.assertEqual(ident["label"],
+                         "RU1 · node-ru1.example.com · 203.0.113.10")
+        # совместимость: ip/hostname на месте
+        self.assertEqual(ident["ip"], "203.0.113.10")
+        self.assertEqual(ident["hostname"], "srv-ru1")
+
+    def test_local_identity_canon_without_domain(self):
+        """Нет state.json/domain → канон из имени и IP: «RU1 · 203.0.113.10»."""
+        self._tg_json(server_name="RU1", server_ip="203.0.113.10")
+        with patch.object(sm, "_hostname", return_value="srv-ru1"):
+            ident = sm._local_identity({})
+        self.assertEqual(ident["label"], "RU1 · 203.0.113.10")
+
+    def test_local_identity_fallback_no_telegram(self):
+        """Нет telegram.json → прежний формат: node_label или hostname
+        (обратная совместимость деплоев без server_name)."""
+        with patch.object(sm, "_hostname", return_value="srv-ru1"), \
+             patch.object(sm, "_detect_local_ip", return_value="203.0.113.10"):
+            ident = sm._local_identity({"node_label": "RU-2"})
+            self.assertEqual(ident["label"], "RU-2")
+            ident = sm._local_identity({})
+            self.assertEqual(ident["label"], "srv-ru1")
+
+    def test_local_identity_fallback_tg_without_server_name(self):
+        """telegram.json есть, но server_name не задан (только token) →
+        канон вырождается в hostname → прежний node_label."""
+        self._tg_json(token="T", chat_id="C")
+        with patch.object(sm, "_hostname", return_value="srv-ru1"), \
+             patch.object(sm, "_detect_local_ip", return_value=""):
+            ident = sm._local_identity({"node_label": "RU-3"})
+        self.assertEqual(ident["label"], "RU-3")
+
+    # ── _peer_identity: node_label «alias · домен [IP]» ─────────────────
+    def test_peer_identity_canon_alias_from_watcher(self):
+        """Алиас из exit_traffic_watcher.json: «NL · node-nl.example.com
+        [203.0.113.40]» (порт 443 не пишется — канон node_label)."""
+        self._aliases_json({"node-nl.example.com:443": "NL"})
+        peer = {"host": "node-nl.example.com", "port": 443, "name": "nl1"}
+        ident = sm._peer_identity(peer, "vm134610")
+        self.assertEqual(ident["label"],
+                         "NL · node-nl.example.com [203.0.113.40]")
+        self.assertEqual(ident["ip"], "node-nl.example.com")
+        self.assertEqual(ident["hostname"], "vm134610")
+
+    def test_peer_identity_canon_peer_name_as_alias(self):
+        """Нет алиаса в наблюдателе → имя peer'а из конфига как алиас:
+        «nl1 · node-nl.example.com [203.0.113.40]»."""
+        peer = {"host": "node-nl.example.com", "port": 443, "name": "nl1"}
+        ident = sm._peer_identity(peer)
+        self.assertEqual(ident["label"],
+                         "nl1 · node-nl.example.com [203.0.113.40]")
+
+    def test_peer_identity_ip_host_with_port(self):
+        """IP-хост с нестандартным (SSH) портом: «de · 198.51.100.7:22»."""
+        peer = {"host": "198.51.100.7", "port": 22, "name": "de"}
+        ident = sm._peer_identity(peer, "vmde")
+        self.assertEqual(ident["label"], "de · 198.51.100.7:22")
+
+    def test_peer_identity_fallback_on_canon_error(self):
+        """Канон недоступен (node_label бросает) → прежний label (name)."""
+        def _boom(*a, **kw):
+            raise RuntimeError("node_identity broken")
+        with patch.object(self._ni, "node_label", _boom), \
+             patch.object(self._ni, "alias_for", _boom):
+            peer = {"host": "node-nl.example.com", "port": 443, "name": "nl1"}
+            ident = sm._peer_identity(peer)
+        self.assertEqual(ident["label"], "nl1")
+        self.assertEqual(ident["ip"], "node-nl.example.com")
+
+    def test_peer_identity_domain_without_dns_entry(self):
+        """Домен без записи в DNS-кэше → метка без [IP] (деградация канона)."""
+        peer = {"host": "node-fi.example.com", "port": 443, "name": "fi1"}
+        with patch.object(self._ni, "_getent_ipv4", return_value=""):
+            ident = sm._peer_identity(peer)
+        self.assertEqual(ident["label"], "fi1 · node-fi.example.com")
+
+    # ── тексты увед: без дублей «label (ip)» ─────────────────────────────
+    def test_alert_local_canon_header_no_ip_dup(self):
+        """Локальный алерт: шапка [имя · домен · IP], строка ноды —
+        канон-метка; IP рядом не дублируется (уже в метке)."""
+        self._tg_json(server_name="RU1", server_ip="203.0.113.10")
+        self._state_json(domain="node-ru1.example.com")
+        cfg = dict(sm.DEFAULT_CONFIG)
+        tgst = {"nodes": {"local": {"crit_streak": 2}}}
+        with patch.object(sm, "_hostname", return_value="srv-ru1"), \
+             patch.object(sm, "_detect_local_ip", return_value="203.0.113.10"):
+            msg = sm._alert_check(
+                "local", "srv-ru1", 22.0, cfg, tgst,
+                ip="203.0.113.10",
+                label="RU1 · node-ru1.example.com · 203.0.113.10")
+        self.assertIsNotNone(msg)
+        self.assertIn("[RU1 · node-ru1.example.com · 203.0.113.10]", msg)
+        self.assertIn("🔴 <b>RU1 · node-ru1.example.com · 203.0.113.10</b>: "
+                      "steal <b>22.0%</b>", msg)
+        self.assertNotIn("(<code>203.0.113.10</code>)", msg)
+
+    def test_alert_peer_canon_label_no_host_dup(self):
+        """Peer-алерт: строка ноды — «alias · домен [IP]»; голый host
+        (поле ip) рядом не дублируется."""
+        cfg = dict(sm.DEFAULT_CONFIG)
+        tgst = {"nodes": {"nl1": {"crit_streak": 2}}}
+        with patch.object(sm, "_hostname", return_value="srv-ru1"), \
+             patch.object(sm, "_detect_local_ip", return_value=""):
+            msg = sm._alert_check(
+                "nl1", "node-nl.example.com", 22.0, cfg, tgst,
+                ip="node-nl.example.com",
+                label="NL · node-nl.example.com [203.0.113.40]")
+        self.assertIsNotNone(msg)
+        self.assertIn("NL · node-nl.example.com [203.0.113.40]", msg)
+        self.assertNotIn("(<code>node-nl.example.com</code>)", msg)
+
+    def test_alert_addr_appended_when_not_in_label(self):
+        """Старый формат (голый label без адреса) → адрес добавляется,
+        как раньше: «nl1 (<code>host</code>)»."""
+        cfg = dict(sm.DEFAULT_CONFIG)
+        tgst = {"nodes": {"nl1": {"crit_streak": 2}}}
+        with patch.object(sm, "_hostname", return_value="srv"), \
+             patch.object(sm, "_detect_local_ip", return_value=""):
+            msg = sm._alert_check("nl1", "vm134610", 22.0, cfg, tgst,
+                                  ip="vm134610")
+        self.assertIsNotNone(msg)
+        self.assertIn("nl1 (<code>vm134610</code>)", msg)
+
+    def test_display_title_canon_no_dup(self):
+        """Канон-метка в заголовке блока — IP/hostname рядом не дублируются."""
+        ident = {"label": "NL · node-nl.example.com [203.0.113.40]",
+                 "ip": "node-nl.example.com", "hostname": "vm134610"}
+        self.assertEqual(
+            sm._display_title(ident, "nl1", "node-nl.example.com"),
+            "<b>NL · node-nl.example.com [203.0.113.40]</b>")
+
+    def test_display_title_canon_appends_ip_if_missing(self):
+        """Канон без IP (нет резолва) → IP из ident добавляется."""
+        ident = {"label": "NL · node-nl.example.com",
+                 "ip": "node-nl.example.com", "hostname": "vm134610"}
+        title = sm._display_title(ident, "nl1", "node-nl.example.com")
+        self.assertEqual(title, "<b>NL · node-nl.example.com</b>")
+
+    def test_ident_extra_parts_matrix(self):
+        """Дедуп-хелпер: канон глотает ip/hostname; простая метка — нет."""
+        canon = "NL · node-nl.example.com [203.0.113.40]"
+        self.assertEqual(sm._ident_extra_parts(canon, "node-nl.example.com",
+                                               "vm134610"), [])
+        self.assertEqual(sm._ident_extra_parts("NL", "203.0.113.40",
+                                               "vm134610"),
+                         ["203.0.113.40", "vm134610"])
+        self.assertEqual(sm._ident_extra_parts("NL", "203.0.113.40", "NL"),
+                         ["203.0.113.40"])
+
+    # ── дневной отчёт: шапка сервера + канон-метки peer ─────────────────
+    def _seed_canon_day(self):
+        self._tg_json(server_name="RU1", server_ip="203.0.113.10")
+        self._state_json(domain="node-ru1.example.com")
+        self._aliases_json({"node-nl.example.com:443": "NL"})
+        rows = []
+        for i in range(30):        # чистая локальная
+            rows.append(_mk_sample(0.2, hour=10 + i % 5, node="local",
+                                   host="srv-ru1"))
+        # больная nl1: ident как пишет _peer_identity (канон node_label)
+        ident = sm._peer_identity(
+            {"host": "node-nl.example.com", "port": 443, "name": "nl1"},
+            "vm134610")
+        for i in range(30):
+            rows.append(_mk_sample(12.0 + (i % 5), hour=18 + i % 4,
+                                   node="nl1", host="node-nl.example.com",
+                                   steal_t=1500, busy_t=5000,
+                                   core_max=40.0, core_min=2.0, **ident))
+        p = sm._samples_path()
+        with p.open("w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    def test_report_canon_monitor_header(self):
+        """Шапка отчёта: «Монитор: RU1 · node-ru1.example.com · 203.0.113.10»
+        (server_header; hostname/ip рядом не дублируются)."""
+        for i in range(15):
+            sm._append_sample(_mk_sample(0.3, hour=12))
+        self._seed_canon_day()
+        with patch.object(sm, "_hostname", return_value="srv-ru1"), \
+             patch.object(sm, "_detect_local_ip", return_value="203.0.113.10"):
+            text = sm.build_report()
+        self.assertIn("Монитор: <b>RU1 · node-ru1.example.com · "
+                      "203.0.113.10</b>", text)
+
+    def test_report_canon_peer_block_no_dup(self):
+        """Блок peer-ноды: «NL · node-nl.example.com [203.0.113.40] —
+        КРИТИЧНО»; хост-дубля « · <code>node-nl.example.com</code>» нет."""
+        self._seed_canon_day()
+        with patch.object(sm, "_hostname", return_value="srv-ru1"), \
+             patch.object(sm, "_detect_local_ip", return_value="203.0.113.10"):
+            text = sm.build_report()
+        self.assertIn("· node-nl.example.com [", text)
+        self.assertIn("КРИТИЧНО — есть проблемы", text)
+        self.assertNotIn("<code>node-nl.example.com</code>", text)
+        self.assertNotIn(" · vm134610", text)
+
+    def test_report_canon_fleet_summary_short_label(self):
+        """Сводка флота: канон-метка сокращается до ярлыка — «🔴 1 (NL)»."""
+        self._seed_canon_day()
+        with patch.object(sm, "_hostname", return_value="srv-ru1"), \
+             patch.object(sm, "_detect_local_ip", return_value="203.0.113.10"):
+            text = sm.build_report()
+        self.assertIn("Флот: 🔴 1 (NL)", text)
+        self.assertIn("🟢 1 (RU1)", text)
+
+    def test_report_canon_recommendations_and_ticket_no_dup(self):
+        """Рекомендации/тикет-блок: метка без «(ip)»-дубля; тема тикета —
+        «на VM NL · node-nl.example.com [203.0.113.40]»."""
+        self._seed_canon_day()
+        with patch.object(sm, "_hostname", return_value="srv-ru1"), \
+             patch.object(sm, "_detect_local_ip", return_value="203.0.113.10"):
+            text = sm.build_report()
+        self.assertIn("🔴 NL · node-nl.example.com [203.0.113.40]:", text)
+        self.assertNotIn("NL · node-nl.example.com [203.0.113.40] "
+                         "(node-nl.example.com)", text)
+        self.assertIn("на VM NL · node-nl.example.com [203.0.113.40] — "
+                      "требуется миграция", text)
+        # полный идентифатор VM — в теле тикета (IP, hostname)
+        self.assertIn("IP node-nl.example.com, hostname vm134610", text)
+
+    def test_ticket_subject_old_label_keeps_ip(self):
+        """Старый ident (голый label) → IP в теме тикета как раньше."""
+        ident = {"label": "NL", "ip": "203.0.113.30", "hostname": "vm134610"}
+        stats = {"n_ok": 50, "avg": 12.0, "p95": 14.0, "peak": 16.0,
+                 "peak_ts": time.time(), "busy_avg": 10.0,
+                 "boot_steal": 9.0, "boot_busy": 12.0, "uptime_s": 864000,
+                 "stolen_share": 55.0, "hourly": {"18": (12.0, 10)},
+                 "smt_spread": False, "load_max": 2.0}
+        txt = sm._ticket_block("nl1", "vm134610", stats, "crit", ident=ident)
+        self.assertIn("на VM NL (203.0.113.30) — требуется миграция", txt)
 
 
 class TestTgChunks(StealMonitorTestBase):

@@ -345,6 +345,13 @@ class TestTgH2Event(_H2TmpBase):
         self.assertIn("TG H2 event", self._log_text())
         self.assertIn("h2_down", self._log_text())
 
+    def test_h2_quality_muted_when_disabled(self):
+        """events.h2_quality == false (волна-4) → отчёт качества не шлётся."""
+        self._write_tg(events={"h2_quality": False})
+        self._hc._tg_h2_event("h2_quality", "H2-78 · 203.0.113.78  🟢 отлично")
+        self.assertEqual(self.sent, [])
+        self.assertIn("h2_quality", self._log_text())
+
     def test_other_events_not_affected(self):
         """Выключенный h2_down не глушит h2_up (ключи независимы)."""
         self._write_tg(events={"h2_down": False})
@@ -384,10 +391,12 @@ class TestTgH2Event(_H2TmpBase):
         self.assertIn("[testhost] Hysteria2", self.sent[0])
 
     def test_icons(self):
-        """Иконки событий h2_* в тексте (🔴 h2_down / 🔁 h2_port_fb / 📊 h2_traffic)."""
+        """Иконки событий h2_* в тексте (🔴 h2_down / 🔁 h2_port_fb / 📊 h2_traffic
+        / 📊 h2_quality (волна-4) / 🔀 h2_switch)."""
         self._write_tg()
         for ev, icon in (("h2_down", "🔴"), ("h2_port_fb", "🔁"),
-                         ("h2_traffic", "📊"), ("h2_switch", "🔀")):
+                         ("h2_traffic", "📊"), ("h2_switch", "🔀"),
+                         ("h2_quality", "📊")):
             self.sent.clear()
             self._hc._tg_h2_event(ev, "детали")
             self.assertTrue(self.sent[0].startswith(icon), ev)

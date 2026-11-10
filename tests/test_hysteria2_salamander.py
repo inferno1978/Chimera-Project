@@ -14,6 +14,9 @@ Unit-тесты для chimera/modules/hysteria2_salamander.py.
   7. h2_salamander_status — структура возвращаемого dict
   8. _apply_obfs_to_client — запись/чтение client.yaml
   9. Семантика YAML (если установлен PyYAML)
+ 10. (волна-4) h2_salamander_enable — состав applied/failed в уведе
+     метками h2_node_label (канон node_identity) вместо безликого
+     счётчика «nodes: N»; helpers _short_fail_reason / _sal_nodes_word_pp
 """
 from __future__ import annotations
 
@@ -651,6 +654,197 @@ class TestEnsureStateHook(unittest.TestCase):
         out = self._client_yaml.read_text()
         self.assertTrue(_has_obfs_block(out))
         self.assertIn("password: reapplypw", out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. (волна-4) Уведа h2_switch — состав applied/failed метками + helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestShortFailReason(unittest.TestCase):
+    """_short_fail_reason — краткая причина: без host и без stderr."""
+
+    def setUp(self):
+        _setup_core()
+
+    def test_strips_stderr_and_host(self):
+        from chimera.modules.hysteria2_salamander import _short_fail_reason
+        msg = ("Не удалось прочитать config.yaml на 203.0.113.50: "
+               "ssh: connect timed out")
+        self.assertEqual(
+            _short_fail_reason(msg, "203.0.113.50"),
+            "Не удалось прочитать config.yaml")
+
+    def test_host_only_no_colon(self):
+        from chimera.modules.hysteria2_salamander import _short_fail_reason
+        self.assertEqual(
+            _short_fail_reason("hysteria-server упал после рестарта на 1.2.3.4",
+                               "1.2.3.4"),
+            "hysteria-server упал после рестарта")
+
+    def test_no_host_kept_as_is(self):
+        from chimera.modules.hysteria2_salamander import _short_fail_reason
+        self.assertEqual(_short_fail_reason("Нет IP-адреса ноды", ""),
+                         "Нет IP-адреса ноды")
+
+    def test_truncates_long(self):
+        from chimera.modules.hysteria2_salamander import _short_fail_reason
+        out = _short_fail_reason("д" * 100)
+        self.assertLessEqual(len(out), 48)
+        self.assertTrue(out.endswith("…"))
+
+    def test_empty_msg(self):
+        from chimera.modules.hysteria2_salamander import _short_fail_reason
+        self.assertEqual(_short_fail_reason("", ""), "ошибка применения")
+
+
+class TestSalNodesWordPp(unittest.TestCase):
+    """_sal_nodes_word_pp — «ноде»/«нодах» (паттерн nodes_word) + фолбэк."""
+
+    def setUp(self):
+        _setup_core()
+
+    def test_forms(self):
+        from chimera.modules.hysteria2_salamander import _sal_nodes_word_pp
+        self.assertEqual(_sal_nodes_word_pp(1), "ноде")
+        self.assertEqual(_sal_nodes_word_pp(2), "нодах")
+        self.assertEqual(_sal_nodes_word_pp(5), "нодах")
+        self.assertEqual(_sal_nodes_word_pp(11), "нодах")
+        self.assertEqual(_sal_nodes_word_pp(21), "ноде")
+
+    def test_fallback_when_node_identity_unavailable(self):
+        """node_identity недоступен → фолбэк «нод(ах)», не бросает."""
+        import sys as _sys
+        from chimera.modules.hysteria2_salamander import _sal_nodes_word_pp
+        with patch.dict(_sys.modules, {"chimera.modules.node_identity": None}):
+            self.assertEqual(_sal_nodes_word_pp(2), "нод(ах)")
+
+
+class _SalamanderTmpBase(unittest.TestCase):
+    """state/DNS-кэш node_identity — tmp; SSH-применение, рестарты и
+    _tg_h2_event перехвачены (боевой TG и SSH из тестов не зовутся).
+    Паттерн герметичности: test_hysteria2_balancer._BalancerTmpBase
+    (волна-2) + канон-тесты с предзаполненным DNS-кэшем без getent."""
+
+    def setUp(self):
+        _setup_core()
+        import time as _time
+        from chimera.modules import hysteria2_common as hc
+        from chimera.modules import hysteria2_salamander as sal
+        from chimera.modules import node_identity as _ni
+        self._hc = hc
+        self._sal = sal
+        self._ni = _ni
+        self._now = _time.time()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(self._rmtree)
+        for p in (
+            patch.object(hc, "STATE_FILE", self.tmp / "state.json"),
+            patch.object(hc, "LOG_FILE", self.tmp / "chimera.log"),
+            patch.object(_ni, "STATE_FILE", self.tmp / "ni_state.json"),
+            patch.object(_ni, "TG_FILE", self.tmp / "tg-absent.json"),
+            patch.object(_ni, "DNS_CACHE_FILE", self.tmp / "node_dns_cache.json"),
+            patch.object(_ni, "ALIASES_FILE", self.tmp / "aliases-absent.json"),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        _ni._MEM.clear()
+        self.addCleanup(_ni._MEM.clear)
+        self.events: list[tuple] = []
+        for p in (
+            patch.object(sal, "_tg_h2_event",
+                         lambda ev, detail="": self.events.append((ev, detail))),
+            patch.object(sal, "_apply_obfs_to_client", return_value=True),
+            patch.object(sal, "_restart_hysteria_client", return_value=True),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _rmtree(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fill_dns(self, host: str, ip: str):
+        """Предзаполненный DNS-кэш node_identity (без getent)."""
+        (self.tmp / "node_dns_cache.json").write_text(json.dumps(
+            {host: {"ip": ip, "ts": self._now}}))
+        self._ni._MEM.clear()
+
+    def _write_state(self, nodes: list[dict]):
+        (self.tmp / "state.json").write_text(json.dumps(
+            {"hysteria2": {"exit_nodes": nodes}}))
+
+    def _sal_state(self) -> dict:
+        st = json.loads((self.tmp / "state.json").read_text())
+        return st["hysteria2"]["salamander"]
+
+
+class TestEnableEventComposition(_SalamanderTmpBase):
+    """h2_salamander_enable: уведа h2_switch — состав applied/failed
+    метками h2_node_label (канон node_identity, волна-4)."""
+
+    def _run_enable(self, nodes, apply_results):
+        self._write_state(nodes)
+        results = iter(apply_results)
+        with patch.object(self._sal, "_apply_obfs_to_remote_node",
+                          side_effect=lambda node, pw: next(results)):
+            return self._sal.h2_salamander_enable(password="pw123",
+                                                  apply_to_remote=True)
+
+    def test_applied_labels_in_event(self):
+        """Метка применённых нод в уведе вместо безликого счётчика «nodes: N»."""
+        self._fill_dns("node-sal.example.com", "203.0.113.60")
+        nodes = [
+            {"ip": "203.0.113.50", "ports": [8443], "name": "H2-50",
+             "status": "active"},
+            {"ip": "node-sal.example.com", "ports": [443], "name": "H2-SAL",
+             "status": "active"},
+        ]
+        ok = self._run_enable(nodes, [(True, "Salamander применён"),
+                                      (True, "Salamander применён")])
+        self.assertTrue(ok)
+        self.assertEqual([e for e, _ in self.events], ["h2_switch"])
+        detail = self.events[0][1]
+        self.assertIn("Salamander obfs включён — применён на 2 нодах", detail)
+        self.assertIn("H2-50 · 203.0.113.50:8443", detail)
+        self.assertIn("H2-SAL · node-sal.example.com [203.0.113.60]", detail)
+        # прежний безликий формат не возвращается
+        self.assertNotIn("nodes:", detail)
+        # state: applied_to_nodes — по-прежнему голые IP (их ждёт
+        # _show_detailed_status, сравнивая с all_nodes)
+        self.assertEqual(self._sal_state()["applied_to_nodes"],
+                         ["203.0.113.50", "node-sal.example.com"])
+
+    def test_failed_nodes_labels_and_reason(self):
+        """Сбойная нода — «НЕ применён: метка (краткая причина)»."""
+        nodes = [
+            {"ip": "203.0.113.51", "ports": [443], "name": "H2-51",
+             "status": "active"},
+            {"ip": "203.0.113.52", "ports": [443], "name": "H2-52",
+             "status": "active"},
+        ]
+        ok = self._run_enable(nodes, [
+            (False, "Не удалось прочитать config.yaml на 203.0.113.51: "
+                    "ssh: connect timed out"),
+            (True, "Salamander применён"),
+        ])
+        self.assertTrue(ok)
+        detail = self.events[0][1]
+        self.assertIn("применён на 1 ноде: H2-52 · 203.0.113.52", detail)
+        self.assertIn(
+            "НЕ применён: H2-51 · 203.0.113.51 "
+            "(Не удалось прочитать config.yaml)", detail)
+        # в state — только успешно применённые
+        self.assertEqual(self._sal_state()["applied_to_nodes"],
+                         ["203.0.113.52"])
+
+    def test_zero_applied_when_no_active_nodes(self):
+        """Нет активных Exit-нод → «применён на 0 нодах» без списка."""
+        nodes = [{"ip": "203.0.113.53", "ports": [443], "status": "down"}]
+        ok = self._run_enable(nodes, [])
+        self.assertTrue(ok)
+        detail = self.events[0][1]
+        self.assertIn("применён на 0 нодах", detail)
+        self.assertEqual(self._sal_state()["applied_to_nodes"], [])
 
 
 if __name__ == "__main__":

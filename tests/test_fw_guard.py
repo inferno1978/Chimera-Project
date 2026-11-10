@@ -278,7 +278,10 @@ class TestFwGuardHeal(_FwGuardBase):
 class TestFwGuardRun(_FwGuardBase):
     def test_run_heals_and_logs(self):
         self.env.ufw_status = _UFW_MISSING_3128
+        # волна-4: notify идёт через _tg_fw_event — конвейер первым;
+        # для проверки уведомления гасим конвейер → фолбэк _notify_tg
         with patch.object(fw_guard, "_registry_open", return_value=(True, "ok")), \
+             patch.dict(sys.modules, {"chimera.modules.tg_bot": None}), \
              patch.object(fw_guard, "_notify_tg") as notify:
             res = fw_guard.fw_guard_run()
         self.assertTrue(res["actions"])
@@ -341,6 +344,12 @@ class TestNotifyHeaderCanon(_FwGuardBase):
             self.addCleanup(p.stop)
         _ni._MEM.clear()
         self.addCleanup(_ni._MEM.clear)
+        # волна-4: _tg_fw_event идёт в конвейер ПЕРВЫМ — эти тесты
+        # проверяют фолбэк-шапку _notify_tg, поэтому гасим конвейер
+        self._tgbot_off = patch.dict(sys.modules,
+                                     {"chimera.modules.tg_bot": None})
+        self._tgbot_off.start()
+        self.addCleanup(self._tgbot_off.stop)
 
     def test_problems_notify_carries_canon_header(self):
         # проблема БЕЗ авто-лечения (heal не дал действий) → «🚨 FW Guard
@@ -369,10 +378,109 @@ class TestNotifyHeaderCanon(_FwGuardBase):
             "восстановлено", msg)
 
     def test_srv_header_fallback_hostname(self):
-        """node_identity недоступен → hostname (прежний вид «(host)»)."""
+        """node_identity недоступен → hostname (прежний вид «[host]»)."""
         with patch.dict(sys.modules,
                         {"chimera.modules.node_identity": None}):
             self.assertEqual(fw_guard._srv_header(), "testhost")
+
+
+class TestTgCanon(_FwGuardBase):
+    """Волна-4 (канон уведомлений): _tg_fw_event — мост первым
+    tg_bot.tg_notify_event("fw_guard", ...) (иконка + шапка server_header +
+    events-фильтр конвейера); фолбэк (конвейер недоступен) — прежний
+    прямой curl с канон-шапкой «FW Guard [host]». Нет token/chat_id →
+    молчим (как и раньше)."""
+
+    def _fake_tgbot(self, recorded: list):
+        import types
+        m = types.ModuleType("chimera.modules.tg_bot")
+        m.tg_notify_event = lambda ev, detail="": recorded.append((ev, detail))
+        return m
+
+    def test_pipeline_event_fw_guard(self):
+        """Конвейер доступен → событие fw_guard, «FW Guard: <detail>»;
+        raw-curl фолбэк не зовётся."""
+        self.env.ufw_status = _UFW_MISSING_3128
+        piped: list = []
+        raw: list = []
+        with patch.object(fw_guard, "_registry_open", return_value=(True, "ok")), \
+             patch.dict(sys.modules,
+                        {"chimera.modules.tg_bot": self._fake_tgbot(piped)}), \
+             patch.object(fw_guard, "_notify_tg",
+                          side_effect=lambda m: raw.append(m)):
+            fw_guard.fw_guard_run()
+        self.assertEqual(len(piped), 1)
+        self.assertEqual(piped[0][0], "fw_guard")
+        self.assertTrue(piped[0][1].startswith("FW Guard: восстановлено "),
+                        piped[0][1])
+        self.assertEqual(raw, [], "при живом конвейере curl-фолбэк не зовётся")
+
+    def test_pipeline_problems_without_heal(self):
+        """Проблемы без авто-лечения → тот же ключ fw_guard, деталь про
+        проблемы; icon для фолбэка — 🚨."""
+        self.env.ipt_ok.discard(("chimera-clients-wl", "ACCEPT"))
+        piped: list = []
+        raw: list = []
+        with patch.object(fw_guard, "fw_guard_heal", return_value=[]), \
+             patch.dict(sys.modules,
+                        {"chimera.modules.tg_bot": self._fake_tgbot(piped)}), \
+             patch.object(fw_guard, "_notify_tg",
+                          side_effect=lambda m: raw.append(m)):
+            fw_guard.fw_guard_run()
+        self.assertEqual(piped[0][0], "fw_guard")
+        self.assertIn("проблемы без авто-лечения", piped[0][1])
+        self.assertIn("clients_wl", piped[0][1])
+        self.assertEqual(raw, [])
+
+    def test_fallback_when_pipeline_unavailable(self):
+        """Конвейер недоступен (import падает) → прежний curl с шапкой
+        «FW Guard [host]» и иконкой лечения (node_identity тоже недоступен
+        → hostname через патченный _run)."""
+        self.env.ufw_status = _UFW_MISSING_3128
+        (self.tmp / "telegram.json").write_text(
+            json.dumps({"token": "T", "chat_id": "C"}))
+        with patch.object(fw_guard, "_registry_open", return_value=(True, "ok")), \
+             patch.dict(sys.modules, {"chimera.modules.tg_bot": None,
+                                     "chimera.modules.node_identity": None}), \
+             patch.object(fw_guard, "TG_CONFIG", self.tmp / "telegram.json"):
+            fw_guard.fw_guard_run()
+        curl_calls = [c for c in self.env.calls if c and c[0] == "curl"]
+        self.assertEqual(len(curl_calls), 1,
+                         "фолбэк должен звать curl sendMessage")
+        text = next(a for a in curl_calls[0] if a.startswith("text="))
+        self.assertIn("🧯 FW Guard [testhost]: восстановлено", text)
+
+    def test_fallback_icons_heal_and_problems(self):
+        """Фолбэк _tg_fw_event: иконки лечения 🧯 / проблем 🚨, шапка
+        «FW Guard [host]» — текст сути прежний."""
+        (self.tmp / "telegram.json").write_text(
+            json.dumps({"token": "T", "chat_id": "C"}))
+        texts: list = []
+        with patch.dict(sys.modules, {"chimera.modules.tg_bot": None,
+                                      "chimera.modules.node_identity": None}), \
+             patch.object(fw_guard, "TG_CONFIG", self.tmp / "telegram.json"), \
+             patch.object(fw_guard, "_notify_tg",
+                         side_effect=lambda m: texts.append(m)):
+            fw_guard._tg_fw_event("восстановлено 1 — clients_wl: ok", "🧯")
+            fw_guard._tg_fw_event("проблемы без авто-лечения: X", "🚨")
+        self.assertIn("🧯 FW Guard [testhost]: восстановлено 1 — clients_wl: ok",
+                      texts[0])
+        self.assertIn("🚨 FW Guard [testhost]: проблемы без авто-лечения: X",
+                      texts[1])
+
+    def test_fallback_silent_without_token(self):
+        """Фолбэк-семантика: нет token/chat_id → молчим (как раньше)."""
+        (self.tmp / "telegram.json").write_text(json.dumps({}))
+        self.env.ufw_status = _UFW_MISSING_3128
+        calls_before = len(self.env.calls)
+        with patch.object(fw_guard, "_registry_open", return_value=(True, "ok")), \
+             patch.dict(sys.modules, {"chimera.modules.tg_bot": None,
+                                     "chimera.modules.node_identity": None}), \
+             patch.object(fw_guard, "TG_CONFIG", self.tmp / "telegram.json"):
+            fw_guard.fw_guard_run()
+        curl_calls = [c for c in self.env.calls[calls_before:]
+                      if c and c[0] == "curl"]
+        self.assertEqual(curl_calls, [], "без токена фолбэк молчит")
 
 
 class TestFwGuardInstall(_FwGuardBase):

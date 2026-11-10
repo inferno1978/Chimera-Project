@@ -197,6 +197,26 @@ def _notify_tg(msg: str) -> None:
         pass
 
 
+def _tg_fw_event(detail: str, icon: str = "🧯") -> None:
+    """TG-уведомление FW Guard по канону волн 1–4.
+
+    Мост первым — центральный конвейер tg_bot.tg_notify_event("fw_guard", ...):
+    иконка события + шапка «server_name · домен · IP» (node_identity.
+    server_header) + events-фильтр из telegram.json (нет ключа = включено,
+    false = глушим — управляемо из меню [5]→[3]). Фолбэк (конвейер
+    недоступен) — прежний прямой curl через _notify_tg с канон-шапкой
+    «FW Guard [имя · домен · IP]» (фолбэк hostname, как раньше).
+    Нет token/chat_id → молчим (как и раньше). Не бросает.
+    """
+    try:
+        from chimera.modules.tg_bot import tg_notify_event
+        tg_notify_event("fw_guard", f"FW Guard: {detail}")
+        return
+    except Exception:
+        pass
+    _notify_tg(f"{icon} FW Guard [{_srv_header()}]: {detail}")
+
+
 # ── Разбор состояния фаервола ─────────────────────────────────────────────────
 def _ufw_status_parse() -> "tuple[bool, list[dict]]":
     """ОДИН вызов `ufw status numbered` → (active, наши/все ALLOW-правила).
@@ -572,13 +592,12 @@ def fw_guard_run(full: bool = False, notify: bool = True) -> dict:
         sig_changed = sig != st.get("last_signature")
         timeout_passed = now - (st.get("last_notify_ts") or 0) > NOTIFY_REPEAT_SEC
         if sig_changed or timeout_passed:
-            hdr = _srv_header()
             if actions:
-                _notify_tg(f"🧯 FW Guard [{hdr}]: восстановлено {len(actions)} — " +
-                           "; ".join(actions[:5]))
+                _tg_fw_event("восстановлено " + str(len(actions)) + " — " +
+                             "; ".join(actions[:5]), "🧯")
             else:
-                _notify_tg(f"🚨 FW Guard [{hdr}]: проблемы без авто-лечения: " +
-                           "; ".join(after["problems"][:5]))
+                _tg_fw_event("проблемы без авто-лечения: " +
+                             "; ".join(after["problems"][:5]), "🚨")
             st["last_notify_ts"] = now
     st["last_signature"] = sig
     st["last_run"] = datetime.now().isoformat(timespec="seconds")

@@ -45,6 +45,14 @@ Block C — мастер полной диагностики (1 функция):
     связь, порт, TLS/REALITY, конфиг, Stats API, split tunnel, домен, exit-ноды,
     скорость, TTFB, DNS Leak + итоговый отчёт с рекомендациями.
 
+Отправка отчёта в поддержку из мастера (волна-4, заголовки конвейерных
+отправителей): через единый TG-конвейер tg_bot.tg_notify_event — событие
+.diag_report (НОВЫЙ ключ волны-4), шапка «[имя · домен · IP]» +
+events-фильтр + иконка от конвейера; фолбэк — прежний прямой curl, но с той
+же семантикой (events-фильтр telegram.json + шапка node_identity
+.server_header, фолбэк hostname). Суть отчёта (пункты диагностики) не
+меняется; длинный отчёт дополняется полным файлом через sendDocument.
+
 Точки входа из _core.py:
     from chimera.modules.diagnostics import (
         _DIAG_BLOCKED_DOMAINS, _DIAG_RUSSIAN_DOMAINS, _DIAG_STATS_API_ADDR,
@@ -71,6 +79,7 @@ standalone_screens.py, split_tunnel.py и т.д.).
 """
 from __future__ import annotations
 
+import html
 import io
 import json
 import os
@@ -1854,6 +1863,171 @@ def do_live_traffic_dashboard() -> None:
         success("Dashboard завершён")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Отправка отчёта в поддержку из мастера (волна-4: единый TG-конвейер)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# telegram.json — уведомления (канон tg_bot._NOTIF_FILE; атрибут
+# TG_CONFIG_FILE из _core.py удалён при миграции в модули — модульная
+# копия для меню «Отправить отчёт в поддержку»)
+DIAG_TG_CFG_FILE = Path("/var/lib/xray-installer/telegram.json")
+
+# Событие диагностического отчёта, отправленного вручную из меню.
+# НОВЫЙ ключ волны-4 — зарегистрировать в tg_bot (иконка в icons
+# tg_notify_event + подпись/тумблер в ev_keys/ev_labels меню [5]→[3]).
+DIAG_REPORT_EVENT = "diag_report"
+DIAG_REPORT_ICON = "🩺"     # прежняя иконка ручной отправки отчёта
+
+
+def _diag_tg_event_enabled(event: str, tg_cfg: dict | None = None) -> bool:
+    """events-фильтр telegram.json — паттерн bandwidth_monitor
+    _tg_event_enabled (:1004-1010, скопирован в волну-4).
+
+    Событие с ключом events.{event} == false НЕ отправляется;
+    отсутствующий ключ = ВКЛ (дефолт конвейера tg_bot.tg_notify_event —
+    видимость существующих увед не меняется). Не бросает.
+    """
+    if not event:
+        return True
+    cfg = tg_cfg
+    if cfg is None:
+        try:
+            if DIAG_TG_CFG_FILE.exists():
+                cfg = json.loads(DIAG_TG_CFG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            cfg = {}
+    if not isinstance(cfg, dict):
+        return True
+    try:
+        return bool((cfg.get("events") or {}).get(event, True))
+    except Exception:
+        return True
+
+
+def _diag_tg_run(args, timeout: int = 20):
+    """Запуск команды для TG-хелперов (шов для тестов; не бросает)."""
+    try:
+        return subprocess.run(args, capture_output=True, text=True,
+                              timeout=timeout)
+    except Exception as e:
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr=str(e))
+
+
+def _diag_tg_http(args) -> str:
+    """curl через _diag_tg_run → HTTP-код ('' → '000')."""
+    r = _diag_tg_run(args, timeout=25)
+    return (getattr(r, "stdout", "") or "").strip() or "000"
+
+
+def _diag_tg_server_header(tg_cfg: dict | None = None) -> str:
+    """Каноничная шапка «имя · домен · IP» — node_identity.server_header
+    (ленивый импорт, не бросает; фолбэк — hostname; паттерн
+    hysteria2_common._tg_h2_event :221-233)."""
+    hostname = ""
+    try:
+        hostname = (_diag_tg_run(["hostname", "-s"], timeout=6).stdout
+                    or "").strip()
+    except Exception:
+        pass
+    try:
+        from chimera.modules.node_identity import server_header
+        return server_header(tg_cfg, hostname=hostname) or hostname or "server"
+    except Exception:
+        return hostname or "server"
+
+
+def _tg_send_report_from_menu(report_path, tg_cfg: dict,
+                              send_full_file: bool = True) -> dict:
+    """Отправка диагностического отчёта в TG из меню «Диагностика»
+    («Отправить отчёт в поддержку», волна-4 заголовков конвейерных
+    отправителей).
+
+    Основной путь — единый конвейер tg_bot.tg_notify_event (ленивый
+    импорт, фолбэк — прежний прямой curl): шапку «[имя · домен · IP]»,
+    events-фильтр и иконку ставит конвейер (событие diag_report —
+    НОВЫЙ ключ волны-4). Фолбэк повторяет ту же семантику сам:
+    events-фильтр telegram.json (паттерн bandwidth_monitor
+    _tg_event_enabled) + шапка node_identity.server_header (фолбэк
+    hostname). Формат фолбэка — как у конвейера:
+    «{icon} <b>[{header}]</b> {detail}\\n<i>{ts}</i>».
+
+    СУТЬ отчёта не меняется: пункты диагностики уходят как есть (тело
+    экранируется под parse_mode=HTML — визуально идентично; отчёт 02a
+    E12 «ГАП-част.» — раньше голый curl без шапки/фильтра). Длинный
+    отчёт (>3800 симв.) дополняется полным файлом через sendDocument —
+    как раньше (конвейер документы не шлёт).
+
+    Возвращает словарь для меню (не бросает):
+      {"ok": bool, "via": "pipeline"|"curl"|"", "muted": bool,
+       "http": str, "file": ""|"sent"|"failed", "file_http": str}
+    """
+    out = {"ok": False, "via": "", "muted": False, "http": "",
+           "file": "", "file_http": ""}
+    try:
+        _txt = Path(report_path).read_text(encoding="utf-8",
+                                           errors="replace")
+    except Exception as e:
+        out["http"] = f"read-error: {e}"
+        return out
+    tg_cfg = tg_cfg if isinstance(tg_cfg, dict) else {}
+    token = str(tg_cfg.get("token") or "")
+    chat = str(tg_cfg.get("chat_id") or "")
+    px = str(tg_cfg.get("proxy") or "").strip()
+    if not token or not chat:
+        out["http"] = "no-config"
+        return out
+    # events-фильтр: выключенное в [5]→[3] событие молчит в ОБОИХ путях
+    # (отсутствующий ключ = ВКЛ — как у конвейера; конвейер проверит это
+    # же ещё раз внутри tg_notify_event — дешёвая двойная проверка даёт
+    # меню честный статус «заглушено»)
+    if not _diag_tg_event_enabled(DIAG_REPORT_EVENT, tg_cfg):
+        out["muted"] = True
+        return out
+    detail = ("Диагностический отчёт\n\n"
+              + html.escape(_txt[:3800]))
+    # 1) основной путь — конвейер
+    try:
+        from chimera.modules import tg_bot
+        tg_bot.tg_notify_event(DIAG_REPORT_EVENT, detail)
+        out.update(ok=True, via="pipeline")
+    except Exception:
+        # 2) фолбэк — прежний прямой curl (+ каноничная шапка)
+        header = _diag_tg_server_header(tg_cfg)
+        ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+        msg = f"{DIAG_REPORT_ICON} <b>[{header}]</b> {detail}\n<i>{ts}</i>"
+        cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+               "-m", "15"]
+        if px:
+            cmd += ["-x", px]
+        cmd += [
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            "-d", f"chat_id={chat}",
+            "--data-urlencode", f"text={msg}",
+            "--data-urlencode", "parse_mode=HTML",
+        ]
+        code = _diag_tg_http(cmd)
+        out["http"] = code
+        if code != "200":
+            return out
+        out.update(ok=True, via="curl")
+    # 3) полный файл, если отчёт длиннее лимита одного сообщения
+    if send_full_file and len(_txt) > 3800:
+        cmdf = ["curl", "-s", "-o", "/dev/null",
+                "-w", "%{http_code}", "-m", "20"]
+        if px:
+            cmdf += ["-x", px]
+        cmdf += [
+            f"https://api.telegram.org/bot{token}/sendDocument",
+            "-F", f"chat_id={chat}",
+            "-F", f"document=@{report_path}",
+            "-F", "caption=Полный отчёт (файл)",
+        ]
+        fcode = _diag_tg_http(cmdf)
+        out["file"] = "sent" if fcode == "200" else "failed"
+        out["file_http"] = fcode
+    return out
+
+
 def do_full_diagnostic() -> None:
     """
     Объединённый пошаговый мастер диагностики.
@@ -1910,7 +2084,12 @@ def do_full_diagnostic() -> None:
     NC = core.NC
     RED = core.RED
     YELLOW = core.YELLOW
-    TG_CONFIG_FILE      = getattr(core, "TG_CONFIG_FILE", None)
+    # Волна-4: атрибут TG_CONFIG_FILE из _core.py удалён при миграции в
+    # модули (сирота миграции: getattr возвращал None и пункт «Отправить
+    # в Telegram» навсегда показывал «не настроен») — модульная копия
+    # DIAG_TG_CFG_FILE (канон tg_bot._NOTIF_FILE) как фолбэк.
+    TG_CONFIG_FILE      = getattr(core, "TG_CONFIG_FILE", None) \
+                          or DIAG_TG_CFG_FILE
     AWG_INTERFACE       = core.AWG_INTERFACE
     AWG_FWMARK          = core.AWG_FWMARK
     AWG_ROUTE_TABLE     = core.AWG_ROUTE_TABLE
@@ -2732,44 +2911,27 @@ def do_full_diagnostic() -> None:
         _sch = "Q"
 
     if _sch == "1" and _tg_ready:
-        _token   = _tg_cfg["token"]
-        _chat_id = _tg_cfg["chat_id"]
+        # Волна-4: отправка через единый TG-конвейер (событие diag_report;
+        # шапка/фильтр/иконка от tg_bot.tg_notify_event, фолбэк — прежний
+        # прямой curl). Механика — в тестируемом _tg_send_report_from_menu.
         try:
-            _txt = report_path.read_text()
-            _header = (f"🩺 Диагностический отчёт\n"
-                       f"Дата: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
-            _cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                    "-m", "15"]
-            _px = str(_tg_cfg.get("proxy") or "").strip()
-            if _px:
-                _cmd += ["-x", _px]
-            _cmd += [
-                f"https://api.telegram.org/bot{_token}/sendMessage",
-                "-d", f"chat_id={_chat_id}",
-                "--data-urlencode", f"text={_header + _txt[:3800]}",
-            ]
-            _r = _run(_cmd, capture=True, check=False)
+            _res = _tg_send_report_from_menu(report_path, _tg_cfg)
             _box_top("Telegram")
-            if _r.stdout.strip() == "200":
-                _box_ok("Сообщение отправлено ✓")
-                if len(_txt) > 3800:
-                    _cmdf = ["curl", "-s", "-o", "/dev/null",
-                             "-w", "%{http_code}", "-m", "20"]
-                    if _px:
-                        _cmdf += ["-x", _px]
-                    _cmdf += [
-                        f"https://api.telegram.org/bot{_token}/sendDocument",
-                        "-F", f"chat_id={_chat_id}",
-                        "-F", f"document=@{report_path}",
-                        "-F", "caption=Полный отчёт (файл)",
-                    ]
-                    _rf = _run(_cmdf, capture=True, check=False)
-                    if _rf.stdout.strip() == "200":
-                        _box_ok("Полный файл также отправлен ✓")
-                    else:
-                        _box_warn(f"Файл не отправился (HTTP {_rf.stdout.strip()})")
+            if _res.get("muted"):
+                _box_warn("Увед заглушён: событие diag_report выключено "
+                          "в меню [5]→[3] (telegram.json → events)")
+            elif _res.get("ok"):
+                _via = (" (конвейер chimera)"
+                        if _res.get("via") == "pipeline" else "")
+                _box_ok(f"Сообщение отправлено ✓{_via}")
+                if _res.get("file") == "sent":
+                    _box_ok("Полный файл также отправлен ✓")
+                elif _res.get("file") == "failed":
+                    _box_warn(f"Файл не отправился "
+                              f"(HTTP {_res.get('file_http') or '—'})")
             else:
-                _box_warn(f"Ошибка отправки (HTTP {_r.stdout.strip()})")
+                _box_warn(f"Ошибка отправки "
+                          f"(HTTP {_res.get('http') or '—'})")
                 _box_info(f"Отправьте вручную: cat {report_path}")
             _box_bottom()
         except Exception as _te:

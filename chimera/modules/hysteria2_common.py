@@ -203,6 +203,7 @@ def _tg_h2_event(event: str, detail: str = "") -> None:
         "h2_weights": "⚖️",
         "h2_port_fb": "🔁",
         "h2_traffic": "📊",
+        "h2_quality": "📊",   # волна-4: отчёт качества нод (с метками)
     }
     icon = icons.get(event, "ℹ️")
     # telegram.json: events-фильтр + данные для заголовка сервера

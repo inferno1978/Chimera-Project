@@ -16,7 +16,14 @@ Systemd timer каждые 2 минуты:
     содержит поле "socket")
   • Перезапускает nginx при падении
   • В Reality-режиме: systemctl reload xray (пересоздание unix-socket)
-  • Telegram-уведомление если настроен tg_bot_token в state.json
+  • TG-уведомление (канон волн 1–4): мост первым —
+    `python3 main.py --tg-event port_blocked|xray_up|xray_down "<текст>"`;
+    конвейер tg_bot.tg_notify_event даёт иконку + шапку
+    «server_name · домен · IP» (node_identity.server_header) и уважает
+    events-фильтр из telegram.json. Фолбэк _notify_tg (main.py недоступен)
+    — прямой curl: token/chat_id/proxy и events-фильтр читает из
+    telegram.json (НЕ легаси state.json), шапку собирает локально по
+    тому же канону (фолбэк hostname). Нет token/chat_id → молчим.
 
 Точки входа из _core.py:
     from chimera.modules.nginx_watchdog import (
@@ -277,8 +284,9 @@ def _nginx_watchdog_run() -> None:
 
     if _is_active("nginx"):
         _log("OK", "nginx перезапущен")
-        _tg_event("xray_up",
-                  f"🔄 nginx-watchdog: nginx перезапущен на {_hostname()}")
+        # Шапку/иконку даёт конвейер tg_notify_event ("🟢 [server_header]");
+        # hostname из текста убран — дублировал шапку конвейера (отчёт 02a)
+        _tg_event("xray_up", "nginx-watchdog: nginx перезапущен")
         if mode == "reality":
             # Reality: nginx перезапустился — пересоздаём unix-socket xray
             if _run(["systemctl", "reload", "xray"]) != 0:
@@ -287,8 +295,7 @@ def _nginx_watchdog_run() -> None:
                 _run(["systemctl", "restart", "xray"])
     else:
         _log("ERROR", "nginx не поднялся")
-        _tg_event("xray_down",
-                  f"🚨 nginx-watchdog: nginx НЕ запустился на {_hostname()}")
+        _tg_event("xray_down", "nginx-watchdog: nginx НЕ запустился")
         # Логируем последние строки journalctl для диагностики
         try:
             r = subprocess.run(
@@ -324,10 +331,14 @@ def _build_watchdog_script() -> str:
     main_py = f"{installer_path}/main.py"
     xray_reload = ''
     if mode == 'reality':
-        xray_reload = textwrap.dedent("""\
+        # Вложенный блок обязан идти с ≥8-пробельным отступом: textwrap.dedent
+        # срезает ОБЩИЙ префикс, и блок на колонке 0 обнулял его — shebang
+        # уезжал с байта 0 в Reality-режиме (класс бага «v2 деплоился с
+        # 8-пробельным сдвигом», см. test_ssl_certbot.test_shebang_at_byte_zero).
+        xray_reload = textwrap.indent(textwrap.dedent("""\
             # Reality: nginx перезапустился — пересоздаём unix-socket xray
             systemctl reload xray 2>/dev/null || systemctl restart xray 2>/dev/null
-        """)
+        """), " " * 8)
 
     return textwrap.dedent(f"""\
         #!/bin/bash
@@ -337,17 +348,31 @@ def _build_watchdog_script() -> str:
         DATE=$(date '+%Y-%m-%d %H:%M:%S')
 
         _notify_tg() {{
-            local MSG="$1"
-            local STATE="{_STATE}"
-            [[ ! -f "$STATE" ]] && return
-            BOT=$(python3 -c "import json; d=json.load(open('$STATE')); print(d.get('tg_bot_token',''))" 2>/dev/null)
-            CID=$(python3 -c "import json; d=json.load(open('$STATE')); print(d.get('tg_chat_id',''))"   2>/dev/null)
-            [[ -z "$BOT" || -z "$CID" ]] && return
-            PX=$(python3 -c "import json; d=json.load(open('/var/lib/xray-installer/telegram.json')); print(d.get('proxy',''))" 2>/dev/null)
+            # Канон-фолбэк (мост main.py --tg-event недоступен): creds и
+            # events-фильтр — из telegram.json (НЕ легаси state.json);
+            # шапка — server_name · domain · server_ip (фолбэк hostname),
+            # формат конвейера: «icon» <b>[«header»]</b> «detail».
+            local EV="$1" ICON="$2"; shift 2
+            local MSG="$*"
+            local TG="/var/lib/xray-installer/telegram.json"
+            [[ ! -f "$TG" ]] && return 0
+            # events-фильтр: ключ выключен → молчим (как конвейер tg_bot)
+            python3 -c "import json,sys; d=json.load(open('$TG')); sys.exit(0 if d.get('events',{{}}).get('$EV', True) else 1)" 2>/dev/null || return 0
+            BOT=$(python3 -c "import json; print(json.load(open('$TG')).get('token',''))" 2>/dev/null)
+            CID=$(python3 -c "import json; print(json.load(open('$TG')).get('chat_id',''))" 2>/dev/null)
+            [[ -z "$BOT" || -z "$CID" ]] && return 0
+            PX=$(python3 -c "import json; print(json.load(open('$TG')).get('proxy',''))" 2>/dev/null)
             PXA=(); [ -n "$PX" ] && PXA=(-x "$PX")
+            # Шапка сервера: server_name (tg.json) · domain (state.json) · server_ip
+            H=$(python3 -c "import json; print(json.load(open('$TG')).get('server_name',''))" 2>/dev/null)
+            DOM=$(python3 -c "import json; d=json.load(open('{_STATE}')); print(d.get('domain',''))" 2>/dev/null)
+            SIP=$(python3 -c "import json; print(json.load(open('$TG')).get('server_ip',''))" 2>/dev/null)
+            [[ -z "$H" ]] && H=$(hostname -s)
+            if [[ -n "$DOM" && "${{DOM,,}}" != "${{H,,}}" ]]; then H="$H · $DOM"; fi
+            [[ -n "$SIP" ]] && H="$H · $SIP"
             curl -s -X POST "${{PXA[@]}}" "https://api.telegram.org/bot${{BOT}}/sendMessage" \\
                 --data-urlencode "chat_id=${{CID}}" \\
-                --data-urlencode "text=${{MSG}}" \\
+                --data-urlencode "text=${{ICON}} <b>[${{H}}]</b> ${{MSG}}" \\
                 --data-urlencode "parse_mode=HTML" >/dev/null 2>&1
         }}
 
@@ -366,7 +391,7 @@ def _build_watchdog_script() -> str:
                 if [[ -x "{main_py}" ]]; then
                     PYTHONPATH="{installer_path}:$PYTHONPATH" python3 "{main_py}" --tg-event port_blocked "Port $PORT недоступен — возможно knocking/firewall блокирует. nginx активен но порт закрыт." 2>/dev/null
                 else
-                    _notify_tg "🚫 nginx-watchdog: порт $PORT недоступен — возможно firewall/knocking блокирует"
+                    _notify_tg port_blocked "🚫" "nginx-watchdog: порт $PORT недоступен — возможно firewall/knocking блокирует"
                 fi
                 # Пытаемся restart nginx на случай если он сам перестал слушать
                 systemctl restart nginx 2>&1 | tee -a "$LOG"
@@ -392,11 +417,20 @@ def _build_watchdog_script() -> str:
         STATUS2=$(systemctl is-active nginx 2>/dev/null)
         if [[ "$STATUS2" == "active" ]]; then
             echo "[$DATE] OK nginx перезапущен" >> "$LOG"
-            _notify_tg "🔄 nginx-watchdog: nginx перезапущен на $(hostname)"
+            # TG: мост первым (шапку/фильтр даёт конвейер), фолбэк — _notify_tg
+            if [[ -x "{main_py}" ]]; then
+                PYTHONPATH="{installer_path}:$PYTHONPATH" python3 "{main_py}" --tg-event xray_up "nginx-watchdog: nginx перезапущен" 2>/dev/null
+            else
+                _notify_tg xray_up "🟢" "nginx-watchdog: nginx перезапущен"
+            fi
             {xray_reload}
         else
             echo "[$DATE] ERROR nginx не поднялся" >> "$LOG"
-            _notify_tg "🚨 nginx-watchdog: nginx НЕ запустился на $(hostname)"
+            if [[ -x "{main_py}" ]]; then
+                PYTHONPATH="{installer_path}:$PYTHONPATH" python3 "{main_py}" --tg-event xray_down "nginx-watchdog: nginx НЕ запустился" 2>/dev/null
+            else
+                _notify_tg xray_down "🔴" "nginx-watchdog: nginx НЕ запустился"
+            fi
             journalctl -u nginx -n 20 --no-pager >> "$LOG" 2>/dev/null
         fi
     """)

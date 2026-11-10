@@ -35,6 +35,8 @@ Salamander obfuscation для Hysteria2 — XOR-обфускация QUIC-пак
 ТОЧКИ ВЫЗОВА:
   • h2_salamander_menu()          — TUI-меню (вызывается из hysteria2_menu.py)
   • h2_salamander_enable()        — включает Salamander на клиенте + серверах
+                                    (уведа h2_switch — состав нод метками
+                                    h2_node_label, канон node_identity, волна-4)
   • h2_salamander_disable()       — отключает Salamander
   • h2_salamander_status()        — dict {enabled, has_password, nodes[]}
   • h2_salamander_ensure_state()  — вызывается из h2_transport_apply()
@@ -326,6 +328,58 @@ def _strip_obfs_from_remote_node(node: dict) -> tuple[bool, str]:
 
 # ── Публичный API ─────────────────────────────────────────────────────────────
 
+def _sal_node_label(node: dict) -> str:
+    """Метка Exit-ноды для увед — «alias · домен [IP](:порт)».
+
+    Канон node_identity (волна-4): обёртка h2_node_label из
+    hysteria2_common (ленивый импорт, не бросает). При недоступности
+    обёртки — фолбэк на прежний голый ip.
+    """
+    try:
+        from chimera.modules.hysteria2_common import h2_node_label
+        lbl = h2_node_label(node.get("ip"),
+                            node.get("ports") or 0,
+                            node.get("name"))
+        if lbl:
+            return lbl
+    except Exception:
+        pass
+    return str(node.get("ip") or "")
+
+
+def _sal_nodes_word_pp(n: int) -> str:
+    """«ноде»/«нодах» (предложный падеж) для «применён на N …».
+
+    Паттерн node_identity.nodes_word (лениво; формы «нода»/«ноды»/
+    «нод»); при недоступности node_identity — фолбэк «нод(ах)».
+    """
+    try:
+        from chimera.modules.node_identity import nodes_word
+        return "ноде" if nodes_word(n) == "нода" else "нодах"
+    except Exception:
+        return "нод(ах)"
+
+
+def _short_fail_reason(msg: str, host: str = "", limit: int = 48) -> str:
+    """Краткая причина сбоя для уведы: без stderr и без повтора адреса.
+
+    Полные сообщения _apply_obfs_to_remote_node содержат host и обрезок
+    stderr («… на 1.2.3.4: ssh: connect timed out») — адрес уже в метке
+    ноды, stderr многострочный. Берём текст до первого «:», вырезаем host,
+    обрезаем до limit символов.
+    """
+    s = str(msg or "").split(":", 1)[0].strip()
+    if not s:
+        s = str(msg or "").strip()
+    h = str(host or "").strip()
+    if h and h in s:
+        s = s.replace(f" на {h}", " ").replace(h, " ")
+        s = " ".join(s.split())
+    if len(s) > limit:
+        s = s[: limit - 1].rstrip() + "…"
+    return s or "ошибка применения"
+
+
 def h2_salamander_enable(
     password: str = "",
     apply_to_remote: bool = True,
@@ -338,6 +392,13 @@ def h2_salamander_enable(
       4. (опционально) Патчит /etc/hysteria/config.yaml на всех Exit-нодах
       5. Сохраняет пароль в state.json
     Возвращает True при успехе.
+
+    Уведа _tg_h2_event("h2_switch") — с составом нод метками
+    h2_node_label («alias · домен [IP](:порт)», канон node_identity,
+    волна-4) вместо безликого счётчика «nodes: N»; сбойные ноды — «НЕ
+    применён: метка (краткая причина)». В state applied_to_nodes —
+    по-прежнему голые IP (их ждёт _show_detailed_status, сравнивая
+    с all_nodes).
     """
     sal = _ensure_salamander_state()
 
@@ -357,8 +418,9 @@ def h2_salamander_enable(
     if not _restart_hysteria_client():
         warn("hysteria-client не запущен после патча — проверьте journalctl")
 
-    applied_nodes = []
-    failed_nodes = []
+    applied_ips = []       # голые IP — в state (их ждёт _show_detailed_status)
+    applied_labels = []    # метки — в уведу (канон node_identity, волна-4)
+    failed_nodes = []      # {ip, label, error} — состав сбойных для уведы
 
     # 4. Патчим Exit-ноды
     if apply_to_remote:
@@ -373,22 +435,43 @@ def h2_salamander_enable(
                 ok, msg = _apply_obfs_to_remote_node(node, password)
                 if ok:
                     success(msg)
-                    applied_nodes.append(node.get("ip"))
+                    applied_ips.append(node.get("ip"))
+                    applied_labels.append(_sal_node_label(node))
                 else:
                     error(msg)
-                    failed_nodes.append({"ip": node.get("ip"), "error": msg})
+                    failed_nodes.append({
+                        "ip": node.get("ip"),
+                        "label": _sal_node_label(node),
+                        "error": msg,
+                    })
 
-    # 5. Сохраняем в state
+    # 5. Сохраняем в state (applied_to_nodes — голые IP: их сравнивает
+    #    с all_nodes _show_detailed_status; менять формат нельзя)
     sal["enabled"] = True
     sal["password"] = password
     sal["applied_to_client"] = True
-    sal["applied_to_nodes"] = applied_nodes
+    sal["applied_to_nodes"] = applied_ips
     sal["last_applied"] = time.strftime("%Y-%m-%d %H:%M:%S")
     _save_salamander_state(sal)
 
     success("Salamander obfuscation активирован")
-    _tg_h2_event("h2_switch", f"Salamander obfs включён (nodes: {len(applied_nodes)})")
-    log_to_file("INFO", f"Salamander enabled, password set, applied to {len(applied_nodes)} nodes")
+    # Уведа — состав применённых нод метками (канон node_identity,
+    # волна-4) вместо безликого счётчика «nodes: N»
+    _labels = [l for l in applied_labels if l]
+    detail = (
+        f"Salamander obfs включён — "
+        f"применён на {len(_labels)} {_sal_nodes_word_pp(len(_labels))}"
+    )
+    if _labels:
+        detail += f": {', '.join(_labels)}"
+    if failed_nodes:
+        _failed = ", ".join(
+            f"{fn['label']} ({_short_fail_reason(fn['error'], fn['ip'])})"
+            for fn in failed_nodes
+        )
+        detail += f"; НЕ применён: {_failed}"
+    _tg_h2_event("h2_switch", detail)
+    log_to_file("INFO", f"Salamander enabled, password set, applied to {len(applied_ips)} nodes")
 
     if failed_nodes:
         warn(f"На {len(failed_nodes)} нодах не удалось применить Salamander:")
@@ -406,6 +489,10 @@ def h2_salamander_disable(strip_from_remote: bool = True) -> bool:
       2. Перезапускает hysteria-client
       3. (опционально) Удаляет obfs: из server.yaml на всех Exit-нодах
       4. Обновляет state.json
+
+    Уведа _tg_h2_event("h2_switch", "Salamander obfs выключен") —
+    без состава (как и раньше; полный состав снятых нод показывает
+    TUI-статус [S]).
     """
     sal = _ensure_salamander_state()
 

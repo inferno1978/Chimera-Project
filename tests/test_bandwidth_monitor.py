@@ -1400,6 +1400,263 @@ class TestProbeHonesty(unittest.TestCase):
         self.assertEqual(made, [m.socket.AF_INET6])
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  ВОЛНА-4: канон node_identity — шапка server_header в уведах bandwidth_*
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestServerHeaderCanon(unittest.TestCase):
+    """_server_header — шапка увед «имя · домен · IP» (node_identity).
+
+    server_name/server_ip — telegram.json, domain — state.json, фолбэк
+    имени — hostname (паттерн tg_bot.tg_notify_event). Прод-файлы
+    node_identity изолируются в tmp (паттерн test_smart_balancer).
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+        self._tmp = Path(tempfile.mkdtemp())
+        from chimera.modules import node_identity as _ni
+        self._ni = _ni
+        self._ni._MEM.clear()
+        self._state = self._tmp / "state.json"
+        self._state.write_text("{}", encoding="utf-8")
+        for p in (patch.object(self._m, "TG_CONFIG",
+                               self._tmp / "telegram.json"),
+                  patch.object(self._m, "TG_BOT_CFG",
+                               self._tmp / "tg_bot.json"),
+                  patch.object(self._m, "CONFIG_FILE", self._tmp / "bw.json"),
+                  patch.object(_ni, "STATE_FILE", self._state),
+                  patch.object(_ni, "TG_FILE", self._tmp / "ni_tg.json"),
+                  patch.object(_ni, "DNS_CACHE_FILE", self._tmp / "dns.json"),
+                  patch.object(_ni, "ALIASES_FILE", self._tmp / "aliases.json")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self._ni._MEM.clear)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _tg_json(self, **extra):
+        (self._tmp / "telegram.json").write_text(json.dumps(extra),
+                                                 encoding="utf-8")
+
+    def _state_json(self, **extra):
+        self._state.write_text(json.dumps(extra), encoding="utf-8")
+
+    def test_canon_full_header(self):
+        """server_name + state.json domain + server_ip → полный канон."""
+        self._tg_json(token="T", chat_id="C", server_name="RU1",
+                      server_ip="203.0.113.10")
+        self._state_json(domain="node-ru1.example.com")
+        with patch.object(self._m, "_node_hostname", return_value="vm10"):
+            self.assertEqual(self._m._server_header(),
+                             "RU1 · node-ru1.example.com · 203.0.113.10")
+
+    def test_canon_without_domain(self):
+        """Нет state.json/domain → «RU1 · 203.0.113.10» (части опциональны)."""
+        self._tg_json(token="T", chat_id="C", server_name="RU1",
+                      server_ip="203.0.113.10")
+        with patch.object(self._m, "_node_hostname", return_value="vm10"):
+            self.assertEqual(self._m._server_header(), "RU1 · 203.0.113.10")
+
+    def test_fallback_hostname(self):
+        """Нет telegram.json → фолбэк на hostname (как tg_bot)."""
+        with patch.object(self._m, "_node_hostname", return_value="vm134610"):
+            self.assertEqual(self._m._server_header(), "vm134610")
+
+    def test_tg_without_server_name_falls_to_hostname(self):
+        """telegram.json есть, но server_name не задан → hostname."""
+        self._tg_json(token="T", chat_id="C")
+        with patch.object(self._m, "_node_hostname", return_value="vm10"):
+            self.assertEqual(self._m._server_header(), "vm10")
+
+
+class TestAlertCanonHeader(TestServerHeaderCanon):
+    """_check_alert (волна-4): шапка [server_header] вместо строки
+    «Нода: label (ip)» с голым IP — монитор следит за ЭТОЙ нодой."""
+
+    def _alert(self, sample, cfg, recent):
+        with patch.object(self._m, "read_samples", return_value=recent), \
+             patch.object(self._m, "_load_tg_state", return_value={}), \
+             patch.object(self._m, "_save_tg_state"), \
+             patch.object(self._m, "_node_hostname", return_value="vm10"):
+            return self._m._check_alert(sample, cfg)
+
+    def test_critical_alert_canon_header(self):
+        """Критический алерт: «🔴 <b>[RU1 · домен · IP]</b> Bandwidth
+        КРИТИЧНО»; строки «Нода: label (ip)» больше нет."""
+        self._tg_json(token="T", chat_id="C", server_name="RU1",
+                      server_ip="203.0.113.10")
+        self._state_json(domain="node-ru1.example.com")
+        cfg = {**self._m.DEFAULT_CONFIG, "alerts_enabled": True}
+        sample = {"level": "critical", "download_mbps": 30, "label": "test",
+                  "ip": "1.2.3.4", "ts": "2026-11-12T10:00:00",
+                  "latency_ms": 5.0, "latency_target": "1.1.1.1"}
+        recent = [{"download_mbps": 20, "level": "critical"},
+                  {"download_mbps": 25, "level": "critical"}]
+        result = self._alert(sample, cfg, recent)
+        self.assertIsNotNone(result)
+        self.assertIn("🔴 <b>[RU1 · node-ru1.example.com · 203.0.113.10]</b> "
+                      "Bandwidth КРИТИЧНО", result)
+        self.assertIn("30 Mbps", result)
+        # строка ноды с голым ip ушла — идентичность в шапке (волна-4)
+        self.assertNotIn("Нода:", result)
+        self.assertNotIn("(1.2.3.4)", result)
+        self.assertNotIn("(test)", result)
+
+    def test_degraded_alert_canon_header_opt_in(self):
+        """Жёлтый (opt-in alert_degraded): шапка та же, «ВНИМАНИЕ»."""
+        self._tg_json(token="T", chat_id="C", server_name="RU1")
+        cfg = {**self._m.DEFAULT_CONFIG, "alerts_enabled": True,
+               "alert_degraded": True}
+        sample = {"level": "degraded", "download_mbps": 700, "label": "test",
+                  "ip": "1.2.3.4", "ts": "2026-11-12T08:30:06",
+                  "latency_ms": 3.0, "latency_target": "1.1.1.1"}
+        recent = [{"download_mbps": 800, "level": "degraded"},
+                  {"download_mbps": 700, "level": "degraded"}]
+        result = self._alert(sample, cfg, recent)
+        self.assertIsNotNone(result)
+        self.assertIn("⚠️ <b>[RU1]</b> Bandwidth ВНИМАНИЕ", result)
+        self.assertNotIn("Нода:", result)
+
+
+class TestReportsCanonHeader(TestServerHeaderCanon):
+    """Периодический/дневной отчёты (волна-4): шапка [server_header],
+    без «— label» и строки «(ip)» с голым IP."""
+
+    def _big_sample(self):
+        return {"ts": "2026-11-12T12:00:00", "label": "TEST", "ip": "1.2.3.4",
+                "download_mbps": 4800, "download_source": "cloudflare",
+                "peak_mbps": 5200, "streams": 8, "probe_mb": 760.0,
+                "latency_ms": 4.0, "latency_target": "1.1.1.1",
+                "level": "normal", "big": True}
+
+    def _day_samples(self):
+        # один полный замер 1200 Mbps → день НОРМА (≥1000, absolute)
+        return [{"download_mbps": 1200, "level": "normal", "big": True,
+                 "label": "TEST", "ip": "1.2.3.4", "latency_ms": 4.0,
+                 "epoch": 1, "ts": "2026-11-12T10:00:00"}]
+
+    def test_periodic_report_canon_header(self):
+        """📊 <b>[RU1 · домен · IP]</b> Bandwidth отчёт — полоса канала."""
+        self._tg_json(token="T", chat_id="C", server_name="RU1",
+                      server_ip="203.0.113.10")
+        self._state_json(domain="node-ru1.example.com")
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "load_config", return_value=cfg), \
+             patch.object(self._m, "measure_once",
+                          return_value=self._big_sample()), \
+             patch.object(self._m, "read_samples", return_value=[]), \
+             patch.object(self._m, "_tg_send", return_value=True), \
+             patch.object(self._m, "REPORTS_DIR", self._tmp), \
+             patch.object(self._m, "_log"), \
+             patch.object(self._m, "save_sample"), \
+             patch.object(self._m, "_node_hostname", return_value="vm10"):
+            text = self._m.send_periodic_report()
+        self.assertIn("📊 <b>[RU1 · node-ru1.example.com · 203.0.113.10]</b> "
+                      "Bandwidth отчёт — полоса канала", text)
+        self.assertNotIn("Нода:", text)
+        self.assertNotIn("(1.2.3.4)", text)
+        self.assertNotIn("— TEST", text)
+
+    def test_daily_report_canon_header(self):
+        """🟢 <b>[RU1 · домен · IP]</b> Bandwidth дневной отчёт — дата."""
+        self._tg_json(token="T", chat_id="C", server_name="RU1",
+                      server_ip="203.0.113.10")
+        self._state_json(domain="node-ru1.example.com")
+        cfg = {**self._m.DEFAULT_CONFIG}
+        with patch.object(self._m, "load_config", return_value=cfg), \
+             patch.object(self._m, "read_samples",
+                          return_value=self._day_samples()), \
+             patch.object(self._m, "_tg_send", return_value=True), \
+             patch.object(self._m, "REPORTS_DIR", self._tmp), \
+             patch.object(self._m, "_log"), \
+             patch.object(self._m, "_node_hostname", return_value="vm10"):
+            text = self._m.send_daily_report(date_str="2026-11-12",
+                                             send_tg=False)
+        self.assertIn("🟢 <b>[RU1 · node-ru1.example.com · 203.0.113.10]</b> "
+                      "Bandwidth дневной отчёт — 2026-11-12", text)
+        self.assertNotIn("Нода:", text)
+        self.assertNotIn("(1.2.3.4)", text)
+        self.assertNotIn("— TEST", text)
+
+
+class TestTgEventFilter(unittest.TestCase):
+    """events-фильтр telegram.json (волна-3/4): bandwidth_report=false →
+    _tg_send молчит (без curl); отсутствующий ключ = ВКЛ."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        from chimera.modules import bandwidth_monitor
+        self._m = bandwidth_monitor
+        self._tmp = Path(tempfile.mkdtemp())
+        for p in (patch.object(self._m, "TG_CONFIG",
+                               self._tmp / "telegram.json"),
+                  patch.object(self._m, "TG_BOT_CFG",
+                               self._tmp / "tg_bot.json"),
+                  patch.object(self._m, "CONFIG_FILE", self._tmp / "bw.json")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _tg_json(self, events=None):
+        cfg = {"token": "T", "chat_id": "C"}
+        if events is not None:
+            cfg["events"] = events
+        (self._tmp / "telegram.json").write_text(json.dumps(cfg),
+                                                 encoding="utf-8")
+
+    def test_disabled_report_event_is_silent(self):
+        """bandwidth_report=false → отправки нет, curl не зовётся."""
+        self._tg_json({"bandwidth_report": False})
+        with patch.object(self._m, "_run") as m:
+            self.assertFalse(self._m._tg_send("msg", "bandwidth_report"))
+            m.assert_not_called()
+
+    def test_disabled_alert_event_is_silent(self):
+        """bandwidth_alert=false → алерт глушится."""
+        self._tg_json({"bandwidth_alert": False})
+        with patch.object(self._m, "_run") as m:
+            self.assertFalse(self._m._tg_send("msg", "bandwidth_alert"))
+            m.assert_not_called()
+
+    def test_disabled_daily_event_is_silent(self):
+        """bandwidth_daily=false → дневной отчёт глушится."""
+        self._tg_json({"bandwidth_daily": False})
+        with patch.object(self._m, "_run") as m:
+            self.assertFalse(self._m._tg_send("msg", "bandwidth_daily"))
+            m.assert_not_called()
+
+    def test_absent_key_means_enabled(self):
+        """Ключа events нет (или пустой) → событие ВКЛ — curl зовётся."""
+        self._tg_json({})
+        resp = MagicMock(stdout="200")
+        with patch.object(self._m, "_run", return_value=resp) as m:
+            self.assertTrue(self._m._tg_send("msg", "bandwidth_report"))
+            self.assertEqual(m.call_count, 1)
+
+    def test_other_event_key_not_confused(self):
+        """Чужой ключ выключен → наш всё равно отправляется."""
+        self._tg_json({"bandwidth_report": False, "steal_alert": False})
+        resp = MagicMock(stdout="200")
+        with patch.object(self._m, "_run", return_value=resp) as m:
+            self.assertTrue(self._m._tg_send("msg", "bandwidth_daily"))
+            self.assertEqual(m.call_count, 1)
+
+    def test_no_token_gates_everything(self):
+        """Нет token/chat → False ещё до events-фильтра."""
+        (self._tmp / "telegram.json").write_text("{}", encoding="utf-8")
+        with patch.object(self._m, "_run") as m:
+            self.assertFalse(self._m._tg_send("msg", "bandwidth_report"))
+            m.assert_not_called()
+
+
 if __name__ == "__main__":
     import time
     unittest.main()

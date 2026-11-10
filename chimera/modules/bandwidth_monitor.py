@@ -6,6 +6,14 @@ chimera/modules/bandwidth_monitor.py
 Bandwidth монитор — периодический замер пропускной способности канала ноды
 с алертами в Telegram при деградации и дневным отчётом.
 
+Уведы (волна-4, канон node_identity): монитор один и следит за ЭТОЙ
+нодой, поэтому все сообщения bandwidth_alert / bandwidth_report /
+bandwidth_daily несут канонический заголовок сервера
+«[имя · домен · IP]» (telegram.json → server_name + state.json →
+domain + telegram.json → server_ip; фолбэк — hostname) в формате
+конвейера tg_bot.tg_notify_event — ИКОНКА <b>[шапка]</b> текст, а не
+строку «Нода: label (ip)» с голым IP внутри.
+
 Зачем: хостеры могут silently урезать канал (кейс 91.x: договор позволяет
 50 Mbps вместо 1 Gbps). Без мониторинга это обнаруживается только когда
 клиенты начинают жаловаться. Монитор ловит обрез за 30 минут.
@@ -320,6 +328,32 @@ def _node_label_fallback() -> str:
     if label:
         return label
     return _node_hostname()
+
+
+def _server_header(tg_cfg: Optional[dict] = None) -> str:
+    """Канонический заголовок сервера «имя · домен · IP» (node_identity).
+
+    server_header читает server_name/server_ip из telegram.json (здесь —
+    TG_CONFIG, прочитанный заранее) и domain из state.json; фолбэк имени —
+    hostname. Это шапка увед bandwidth_* (волна-4, паттерн
+    tg_bot.tg_notify_event): монитор один и следит за ЭТОЙ нодой, поэтому
+    её идентичность — заголовок сообщения, а не строка «Нода: …» внутри.
+    Ленивый импорт; при любой ошибке → hostname (фолбэк).
+    """
+    try:
+        from chimera.modules.node_identity import server_header
+        if tg_cfg is None:
+            try:
+                if TG_CONFIG.exists():
+                    tg_cfg = json.loads(TG_CONFIG.read_text(encoding="utf-8"))
+            except Exception:
+                tg_cfg = {}
+        if not isinstance(tg_cfg, dict):
+            tg_cfg = {}
+        return str(server_header(tg_cfg, hostname=_node_hostname())
+                   or "").strip() or _node_hostname()
+    except Exception:
+        return _node_hostname()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1137,16 +1171,16 @@ def _check_alert(sample: dict, cfg: dict) -> Optional[str]:
     if not all_degraded:
         return None
 
-    # Формируем алерт
-    label = sample.get("label", "unknown")
-    ip = sample.get("ip", "unknown")
+    # Формируем алерт: шапка — канонический заголовок сервера
+    # «имя · домен · IP» (node_identity, волна-4): монитор следит за ЭТОЙ
+    # нодой, её идентичность — заголовок, а не строка «Нода: label (ip)»
+    # с голым IP (формат конвейера tg_bot.tg_notify_event).
     speed = sample.get("download_mbps", 0)
     latency = sample.get("latency_ms")
     level_emoji = "⚠️" if level == "degraded" else "🔴"
     level_text = "ВНИМАНИЕ" if level == "degraded" else "КРИТИЧНО"
 
-    text = f"{level_emoji} <b>Bandwidth {level_text}</b>\n\n"
-    text += f"Нода: <b>{label}</b> ({ip})\n"
+    text = f"{level_emoji} <b>[{_server_header()}]</b> Bandwidth {level_text}\n\n"
     text += f"Скорость: <b>{speed} Mbps</b>\n"
     if latency:
         text += f"Latency: {latency} ms ({sample.get('latency_target', '')})\n"
@@ -1215,7 +1249,11 @@ def sample_once(verbose: bool = False) -> dict:
 
 
 def send_periodic_report() -> str:
-    """Периодический отчёт (cron */6 часов): полный замер + сводка."""
+    """Периодический отчёт (cron */6 часов): полный замер + сводка.
+
+    Шапка — канонический заголовок сервера [имя · домен · IP]
+    (node_identity, волна-4); событие bandwidth_report.
+    """
     cfg = load_config()
     if not cfg.get("periodic_report_enabled", True):
         return "skipped"
@@ -1236,10 +1274,10 @@ def send_periodic_report() -> str:
     speeds = [s.get("download_mbps", 0) for s in recent if not s.get("big")]
     big_speeds = [s.get("download_mbps", 0) for s in recent if s.get("big")]
 
-    label = big_sample.get("label", "unknown")
-    ip = big_sample.get("ip", "unknown")
-    text = f"📊 <b>Bandwidth отчёт — {label}</b>\n"
-    text += f"({ip})\n\n"
+    # Шапка — канонический заголовок сервера «имя · домен · IP»
+    # (node_identity, волна-4): отчёт про ЭТУ ноду → её идентичность в
+    # заголовке (формат tg_bot.tg_notify_event), без строки «(ip)» с голым IP.
+    text = f"📊 <b>[{_server_header()}]</b> Bandwidth отчёт — полоса канала\n\n"
 
     port = _port_mbps(cfg)
     if port > 0:
@@ -1305,7 +1343,11 @@ def send_periodic_report() -> str:
 
 
 def send_daily_report(date_str: Optional[str] = None, send_tg: bool = True) -> str:
-    """Дневной отчёт (cron H:M): сводка за сутки."""
+    """Дневной отчёт (cron H:M): сводка за сутки.
+
+    Шапка — канонический заголовок сервера [имя · домен · IP]
+    (node_identity, волна-4); событие bandwidth_daily.
+    """
     cfg = load_config()
     if not cfg.get("daily_report_enabled", True):
         return "skipped"
@@ -1316,8 +1358,6 @@ def send_daily_report(date_str: Optional[str] = None, send_tg: bool = True) -> s
     if not samples:
         return f"нет сэмплов за {date_str}"
 
-    label = samples[-1].get("label", "unknown")
-    ip = samples[-1].get("ip", "unknown")
     speeds = [s.get("download_mbps", 0) for s in samples]
     big_speeds = [s.get("download_mbps", 0) for s in samples if s.get("big")]
     small_speeds = [s.get("download_mbps", 0) for s in samples if not s.get("big")]
@@ -1356,8 +1396,10 @@ def send_daily_report(date_str: Optional[str] = None, send_tg: bool = True) -> s
         day_level = "КРИТИЧНО"
         emoji = "🔴"
 
-    text = f"{emoji} <b>Bandwidth дневной отчёт — {label}</b>\n"
-    text += f"({ip}) — {date_str}\n\n"
+    # Шапка — канонический заголовок сервера «имя · домен · IP»
+    # (node_identity, волна-4): отчёт про ЭТУ ноду — идентичность в
+    # заголовке (формат tg_bot.tg_notify_event), а не «— label / (ip)».
+    text = f"{emoji} <b>[{_server_header()}]</b> Bandwidth дневной отчёт — {date_str}\n\n"
     text += f"<b>Классификация: {day_level}</b>\n\n"
     text += f"<b>За сутки ({len(samples)} замеров):</b>\n"
     text += f"  avg: <b>{avg:.1f} Mbps</b>\n"

@@ -7,7 +7,10 @@ chimera/modules/hysteria2_quality.py
   • Замер RTT/потерь через QUIC-ping (5 попыток на ноду)
   • Speedtest-like: UDP burst через H2-сокет (без внешних утилит)
   • Авто-оптимизация: udpIdleTimeout, MTU на основе замеров
-  • Отчёт в Telegram (--h2-quality-report)
+  • Отчёт в Telegram (--h2-quality-report) — через конвейер
+    _tg_h2_event("h2_quality", …) (волна-4): шапка server_header +
+    events-фильтр telegram.json + иконка 📊; ноды — метками
+    h2_node_label («alias · домен [IP](:порт)", канон node_identity)
   • Сохранение истории метрик в state.json
 
 Точка входа из _core.py:
@@ -135,11 +138,52 @@ def _append_history(ip: str, record: dict) -> None:
 
 
 # ── Основные публичные функции ────────────────────────────────────────────────
+def _node_label(node: dict) -> str:
+    """Метка H2-ноды для строк отчёта — «alias · домен [IP](:порт)».
+
+    Канон node_identity (волна-4): обёртка h2_node_label из
+    hysteria2_common (ленивый импорт, не бросает). При недоступности
+    обёртки — фолбэк на прежний формат «ip»/«ip:port» (отчёт не пустеет).
+    """
+    try:
+        from chimera.modules.hysteria2_common import h2_node_label
+        lbl = h2_node_label(
+            node.get("ip"),
+            node.get("ports") or node.get("port") or 0,
+            node.get("name"),
+        )
+        if lbl:
+            return lbl
+    except Exception:
+        pass
+    ip = str(node.get("ip") or "")
+    p = 0
+    try:
+        ports = node.get("ports")
+        if isinstance(ports, (list, tuple)):
+            p = int(ports[0]) if ports else 0
+        else:
+            p = int(node.get("port") or 0)
+    except (TypeError, ValueError):
+        p = 0
+    return f"{ip}:{p}" if p else ip
+
+
 def h2_quality_report(send_tg: bool = False) -> str:
     """
     Измеряет качество всех H2 нод и формирует отчёт.
-    Если send_tg=True — отправляет в Telegram.
-    Возвращает текст отчёта.
+
+    Ноды в отчёте — метками h2_node_label (канон node_identity,
+    волна-4): «alias · домен [IP](:порт)» вместо голого ip:port.
+
+    Если send_tg=True — отправляет отчёт в Telegram через конвейер
+    _tg_h2_event("h2_quality", …): шапка «[server_header] Hysteria2»,
+    events-фильтр telegram.json (выключается из меню [5]→[3]),
+    иконка 📊 и дата — их даёт конвейер, в payload только строки
+    отчёта без собственной шапки.
+
+    Возвращает ПОЛНЫЙ текст отчёта с шапкой «📊 Hysteria2 Quality
+    Report» + датой (TUI показывает его как раньше).
     """
     h2    = _load_h2_state()
     nodes = h2.get("exit_nodes", [])
@@ -147,15 +191,12 @@ def h2_quality_report(send_tg: bool = False) -> str:
     if not nodes:
         return "⚠️ Нет H2 exit-нод"
 
-    lines = [
-        f"📊 <b>Hysteria2 Quality Report</b>",
-        f"<i>{datetime.now().strftime('%d.%m.%Y %H:%M')}</i>",
-        "",
-    ]
+    body: list[str] = []   # строки отчёта — без шапки (её даёт конвейер)
 
     for node in nodes:
+        label = _node_label(node)
         if node.get("status") == "down":
-            lines.append(f"🔴 <b>{node.get('ip')}</b> — DOWN")
+            body.append(f"🔴 <b>{label}</b> — DOWN")
             continue
 
         q = _measure_node_quality(node)
@@ -177,8 +218,9 @@ def h2_quality_report(send_tg: bool = False) -> str:
             "🔴 плохо"
         )
 
-        lines += [
-            f"<b>{node.get('ip')}:{q['port']}</b>  {quality}",
+        # порт уже в метке (если нестандартный) — не дублируем :port
+        body += [
+            f"<b>{label}</b>  {quality}",
             f"  RTT: avg={q['rtt_avg']}ms  min={q['rtt_min']}ms  max={q['rtt_max']}ms",
             f"  Потери: {q['loss_pct']}%   Скорость UDP: {q['speed_mbps']} Мбит/с",
             "",
@@ -187,11 +229,22 @@ def h2_quality_report(send_tg: bool = False) -> str:
     h2["exit_nodes"] = nodes
     _save_h2_state(h2)
 
-    report = "\n".join(lines)
+    report_body = "\n".join(body)
 
     if send_tg:
-        _tg_send(report)
+        # конвейер _tg_h2_event (волна-4): шапка server_header +
+        # events-фильтр h2_quality + иконка 📊 + дата — вместо голого
+        # _tg_send, который не выключался из меню и слал без шапки
+        _tg_h2_event("h2_quality", report_body)
         log_to_file("INFO", "H2 quality report sent to TG")
+
+    # TUI (пункт [1] меню / --h2-quality-report): полный текст отчёта
+    # с шапкой и датой — как раньше
+    report = (
+        "📊 <b>Hysteria2 Quality Report</b>\n"
+        f"<i>{datetime.now().strftime('%d.%m.%Y %H:%M')}</i>\n"
+        + report_body
+    )
 
     return report
 
