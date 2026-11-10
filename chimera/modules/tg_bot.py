@@ -272,6 +272,10 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "traffic_node_down":       "📴",  # активная проба: нода недоступна
         "traffic_node_degraded":   "🐌",  # активная проба: нода тупит (RTT)
         "traffic_node_up":         "🔌",  # активная проба: нода восстановлена
+        # Naive-каскад: минимальный upstream-watcher (exit_traffic_watcher,
+        # мультитранспортность 11.11.2026 — проба upstream Entry→Exit)
+        "naive_upstream_down":     "📴",  # Naive: upstream недоступен
+        "naive_upstream_up":       "🔌",  # Naive: upstream восстановлен
         "ttl_expiring":    "⏳",   # TTL-пользователи: скоро истекает
         "ttl_expired":     "⌛",   # TTL-пользователи: истёк
         "port_knocking":   "🚪",   # port knocking: события
@@ -2404,6 +2408,9 @@ def do_manage_telegram() -> None:
             "traffic_node_down":       "Трафик-наблюдатель: нода недоступна (проба)",
             "traffic_node_degraded":   "Трафик-наблюдатель: нода тупит (RTT)",
             "traffic_node_up":         "Трафик-наблюдатель: нода восстановлена",
+            # Naive-каскад: upstream-watcher (мультитранспортность)
+            "naive_upstream_down":     "Naive: upstream недоступен (каскад без выхода)",
+            "naive_upstream_up":       "Naive: upstream восстановлен",
             # TTL-пользователи (user_lifecycle / ttl_users)
             "ttl_expiring":   "TTL-пользователь: срок истекает (<24ч)",
             "ttl_expired":    "TTL-пользователь: срок истёк (удалён)",
@@ -2499,6 +2506,7 @@ def do_manage_telegram() -> None:
                        "traffic_node_starved","traffic_stats_error",
                        "traffic_node_down","traffic_node_degraded",
                        "traffic_node_up",
+                       "naive_upstream_down","naive_upstream_up",
                        "ttl_expiring","ttl_expired","port_knocking",
                        "ingress_geoip","install_complete",
                        "users_drift","users_restored","users_restore_failed",
@@ -2533,6 +2541,8 @@ def do_manage_telegram() -> None:
                 "Трафик-наблюдатель: нода недоступна (проба)",
                 "Трафик-наблюдатель: нода тупит (RTT)",
                 "Трафик-наблюдатель: нода восстановлена",
+                "Naive: upstream недоступен (каскад без выхода)",
+                "Naive: upstream восстановлен",
                 "TTL: срок истекает","TTL: срок истёк",
                 "Port Knocking: события","Блокировка входящих: события",
                 "Установка завершена",

@@ -1465,5 +1465,904 @@ class TestCoreMenuIntegration(unittest.TestCase):
                       "обработчик пункта TW отсутствует в _core.py")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  МУЛЬТИТРАНСПОРТНОСТЬ (11.11.2026): AWG/Mieru/Naive каскады
+# ══════════════════════════════════════════════════════════════════════════════
+
+IP_LINK_LIVE = """14: awg1: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1280 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/none
+    RX:  bytes packets errors dropped  missed   mcast
+         1214453   16253      0       0       0       0
+    TX:  bytes packets errors dropped carrier collsns
+      12199154  106539     0       0       0       0
+15: awg2: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1280 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/none
+    RX:  bytes packets errors dropped  missed   mcast
+         1086570   16940      0       0       0       0
+    TX:  bytes packets errors dropped carrier collsns
+      12160378  104672     0       0       0       0
+"""
+
+IPTABLES_LIVE = """Chain OUTPUT (policy ACCEPT 9903556 packets, 752798568 bytes)
+    pkts      bytes target     prot opt in     out     source               destination
+   41692 36988152 RETURN     all  --  any    any     anywhere             anywhere             owner UID match dnscrypt
+       0        0 REDIRECT   tcp  --  any    any     anywhere             anywhere             cgroup system.slice/mita.service statistic mode random probability 0.36620000005 redir ports 23081
+       0        0 REDIRECT   tcp  --  any    any     anywhere             anywhere             cgroup system.slice/mita.service statistic mode random probability 0.50329999998 redir ports 23083
+     126     7603 REDIRECT   tcp  --  any    any     anywhere             anywhere             cgroup system.slice/mita.service redir ports 23082
+"""
+
+SYSTEMCTL_IPACC_OFF = """IPAccounting=no
+IPIngressBytes=[no data]
+IPEgressBytes=[no data]
+"""
+
+SYSTEMCTL_IPACC_ON = """IPAccounting=yes
+IPIngressBytes=987654321
+IPEgressBytes=12345678
+"""
+
+
+class TestParsersMultitransport(unittest.TestCase):
+    """Парсеры источников мультитранспортности (форматы сняты с живого
+    entry RU1 11.11.2026): ip -s link / systemctl show / iptables nat
+    / upstream-URL Naive."""
+
+    def test_parse_ip_link_live_format(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        out = tw._tw_parse_ip_link(IP_LINK_LIVE)
+        self.assertEqual(out["awg1"]["rx"], 1214453)
+        self.assertEqual(out["awg1"]["tx"], 12199154)
+        self.assertEqual(out["awg2"]["rx"], 1086570)
+        self.assertEqual(out["awg2"]["tx"], 12160378)
+
+    def test_parse_ip_link_empty_garbage(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        self.assertEqual(tw._tw_parse_ip_link(""), {})
+        self.assertEqual(tw._tw_parse_ip_link("мусор\nбез интерфейсов"), {})
+
+    def test_parse_systemctl_show(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        off = tw._tw_parse_systemctl_show(SYSTEMCTL_IPACC_OFF)
+        self.assertFalse(off["IPAccounting"])
+        self.assertIsNone(off["IPIngressBytes"])
+        self.assertIsNone(off["IPEgressBytes"])
+        on = tw._tw_parse_systemctl_show(SYSTEMCTL_IPACC_ON)
+        self.assertTrue(on["IPAccounting"])
+        self.assertEqual(on["IPIngressBytes"], 987654321)
+        self.assertEqual(on["IPEgressBytes"], 12345678)
+
+    def test_parse_iptables_redir(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        out = tw._tw_parse_iptables_redir(IPTABLES_LIVE)
+        self.assertEqual(set(out), {23081, 23083, 23082})
+        self.assertEqual(out[23081]["pkts"], 0)
+        self.assertEqual(out[23081]["bytes"], 0)
+        self.assertEqual(out[23082]["pkts"], 126)
+        self.assertEqual(out[23082]["bytes"], 7603)
+
+    def test_parse_iptables_redir_skips_non_redirect(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        self.assertEqual(tw._tw_parse_iptables_redir(""), {})
+        self.assertEqual(
+            tw._tw_parse_iptables_redir("  1  2 ACCEPT all -- any any\n"),
+            {})
+
+    def test_parse_naive_upstream(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        u = tw._tw_parse_naive_upstream(
+            "https://user:secret@exit.example.com:8443/")
+        self.assertEqual(u, {"host": "exit.example.com", "port": 8443})
+        # без порта → 443
+        u2 = tw._tw_parse_naive_upstream("https://a@b.example.org")
+        self.assertEqual(u2, {"host": "b.example.org", "port": 443})
+        # битые → None
+        self.assertIsNone(tw._tw_parse_naive_upstream(""))
+        self.assertIsNone(tw._tw_parse_naive_upstream("not a url"))
+        self.assertIsNone(tw._tw_parse_naive_upstream(None))
+
+    def test_cascades_cfg_defaults_and_garbage(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        # пустой cfg → дефолты
+        c = tw._tw_cascades_cfg({})
+        self.assertTrue(c["vless"]["traffic"])
+        self.assertTrue(c["vless"]["probe"])
+        self.assertTrue(c["awg"]["traffic"])
+        self.assertFalse(c["awg"]["probe"])
+        self.assertTrue(c["mieru"]["traffic"])
+        self.assertFalse(c["mieru"]["probe"])
+        self.assertEqual(c["mieru"]["bytes_source"], "auto")
+        self.assertFalse(c["naive"]["traffic"])
+        self.assertTrue(c["naive"]["probe"])
+        # битые значения нормализуются
+        bad = {"cascades": {"mieru": {"bytes_source": "?????"},
+                            "awg": {"traffic": None, "probe": 1},
+                            "vless": "не словарь"}}
+        c2 = tw._tw_cascades_cfg(bad)
+        self.assertEqual(c2["mieru"]["bytes_source"], "auto")
+        self.assertTrue(c2["awg"]["traffic"])   # None игнор → дефолт
+        self.assertTrue(c2["awg"]["probe"])     # 1 → истина
+        self.assertTrue(c2["vless"]["traffic"]) # не dict → дефолт
+
+    def test_cascade_acc_slices(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        acc = {"chain-exit-1": {"up": 1, "down": 1},
+               "chain-exit-2": {"up": 2, "down": 2},
+               "awg:pl1": {"up": 3, "down": 3},
+               "awg:de": {"up": 4, "down": 4},
+               "mieru:de1": {"up": 5, "down": 5},
+               "naive:upstream": {"up": 6, "down": 6}}
+        self.assertEqual(set(tw._tw_cascade_acc(acc, "")),
+                         {"chain-exit-1", "chain-exit-2"})
+        self.assertEqual(set(tw._tw_cascade_acc(acc, "awg:")),
+                         {"awg:pl1", "awg:de"})
+        self.assertEqual(set(tw._tw_cascade_acc(acc, "mieru:")),
+                         {"mieru:de1"})
+        self.assertEqual(set(tw._tw_cascade_acc(acc, "naive:")),
+                         {"naive:upstream"})
+        self.assertEqual(tw._tw_cascade_acc({}, ""), {})
+        self.assertEqual(tw._tw_cascade_acc(None, "awg:"), {})
+
+    def test_state_v2_migration(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        old = {"dominant_tag": "chain-exit-2", "stats_fails": 3,
+               "acc": {"chain-exit-2": {"up": 1, "down": 1}}}
+        st = tw._tw_state_v2(old)
+        self.assertEqual(st["dominant_tags"], {"vless": "chain-exit-2"})
+        self.assertEqual(st["stats_fails_map"], {"vless": 3})
+        # плоские ключи сохраняются (откат версии ниже git)
+        self.assertEqual(st["dominant_tag"], "chain-exit-2")
+        self.assertEqual(st["stats_fails"], 3)
+        # вход не мутирован
+        self.assertNotIn("dominant_tags", old)
+        # idempotent
+        st2 = tw._tw_state_v2(st)
+        self.assertEqual(st2["dominant_tags"], {"vless": "chain-exit-2"})
+        # новый формат не перетирается плоским
+        new = {"dominant_tags": {"vless": "a", "awg": "awg:pl1"},
+               "stats_fails_map": {"vless": 0, "awg": 1},
+               "dominant_tag": "a", "stats_fails": 0}
+        st3 = tw._tw_state_v2(new)
+        self.assertEqual(st3["dominant_tags"],
+                         {"vless": "a", "awg": "awg:pl1"})
+
+    def test_fmt_metric_and_noun(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        self.assertEqual(tw._tw_fmt_metric("bytes", 5 * 1024 * 1024),
+                         "5 МБ")
+        self.assertEqual(tw._tw_fmt_metric("conn", 3456), "3 456 соед.")
+        self.assertEqual(tw._tw_fmt_metric("conn", 0), "0 соед.")
+        self.assertEqual(tw._tw_metric_noun("bytes"), "окна")
+        self.assertEqual(tw._tw_metric_noun("conn"), "соединений окна")
+
+    def test_awg_strategy_label(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        self.assertEqual(tw._tw_awg_strategy_label(
+            {"lb_mode": True, "lb_strategy": "smart"}), "AWG Smart")
+        self.assertEqual(tw._tw_awg_strategy_label(
+            {"lb_mode": True, "lb_strategy": "rr"}), "AWG RoundRobin")
+        self.assertEqual(tw._tw_awg_strategy_label(
+            {"lb_mode": True, "lb_strategy": "prio"}),
+            "AWG Prio (active-backup)")
+        self.assertEqual(tw._tw_awg_strategy_label(
+            {"lb_mode": True, "lb_pinned": "pl1"}), "AWG Pinned (pl1)")
+        self.assertEqual(tw._tw_awg_strategy_label(
+            {"lb_mode": False}), "AWG-каскад (failover)")
+        self.assertEqual(tw._tw_awg_strategy_label({}), "AWG-каскад")
+
+
+class TestNaiveProbeMachine(unittest.TestCase):
+    """Машина состояний Naive upstream: первый прогон молчит, down после
+    probe_fails неудач, up при восстановлении, держит down при
+    недоборе порога, флап не порождает событий."""
+
+    def _cfg(self, **kw):
+        base = {"probe_fails": 2}
+        base.update(kw)
+        return base
+
+    def test_first_run_silent(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        st, ev = tw._tw_naive_probe_update(
+            {}, {"ok": False, "ms": None, "err": "timeout"},
+            self._cfg(), 1000.0)
+        self.assertEqual(ev, [])
+        self.assertEqual(st["naive_fails"], 1)
+        self.assertEqual(st["naive_status"], "ok")
+
+    def test_down_after_threshold_then_up(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        st, ev = tw._tw_naive_probe_update(
+            {"naive_fails": 1, "naive_status": "ok"},
+            {"ok": False, "ms": None, "err": "timeout"},
+            self._cfg(), 1000.0)
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["event"], "naive_upstream_down")
+        self.assertEqual(ev[0]["fails"], 2)
+        self.assertEqual(st["naive_status"], "down")
+        # восстановление
+        st2, ev2 = tw._tw_naive_probe_update(
+            {"naive_fails": 2, "naive_status": "down"},
+            {"ok": True, "ms": 120, "err": ""},
+            self._cfg(), 2000.0)
+        self.assertEqual(len(ev2), 1)
+        self.assertEqual(ev2[0]["event"], "naive_upstream_up")
+        self.assertEqual(ev2[0]["ms"], 120)
+        self.assertEqual(st2["naive_status"], "ok")
+        self.assertEqual(st2["naive_fails"], 0)
+
+    def test_hold_down_without_threshold_reached(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        # после down одиночный ok → up; затем not-ok → статус ok (1 < 2)
+        st, ev = tw._tw_naive_probe_update(
+            {"naive_fails": 2, "naive_status": "down"},
+            {"ok": True, "ms": 50, "err": ""},
+            self._cfg(), 1000.0)
+        self.assertEqual([e["event"] for e in ev], ["naive_upstream_up"])
+        st2, ev2 = tw._tw_naive_probe_update(
+            st, {"ok": False, "ms": None, "err": "refused"},
+            self._cfg(), 2000.0)
+        self.assertEqual(ev2, [])
+        self.assertEqual(st2["naive_status"], "ok")
+        self.assertEqual(st2["naive_fails"], 1)
+
+    def test_none_result_no_events(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        st, ev = tw._tw_naive_probe_update(
+            {"naive_fails": 1, "naive_status": "ok"}, None,
+            self._cfg(), 1000.0)
+        self.assertEqual(ev, [])
+        self.assertEqual(st["naive_fails"], 1)
+
+    def test_naive_event_text(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        d = tw._tw_naive_event_text(
+            {"event": "naive_upstream_down", "fails": 2,
+             "err": "timeout"}, "exit.example.com:443")
+        self.assertIn("exit.example.com:443", d)
+        self.assertIn("2 прогонов подряд", d)
+        self.assertIn("timeout", d)
+        u = tw._tw_naive_event_text(
+            {"event": "naive_upstream_up", "ms": 120},
+            "exit.example.com:443")
+        self.assertIn("восстановлен", u)
+        self.assertIn("RTT 120 мс", u)
+
+
+# ─── фикстуры источников (примерные, не прод-инфра) ───────────────────────────
+
+AWG_STATE_LB = {
+    "cascade_role": "entry",
+    "cascade_active_exit": "pl1",
+    "lb_mode": True,
+    "lb_strategy": "smart",
+    "lb_pinned": "",
+    "cascade_exits": [
+        {"name": "pl1", "endpoint": "10.0.0.1", "port": 52831},
+        {"name": "de", "endpoint": "10.0.0.2", "port": 52831},
+        {"name": "nl1", "endpoint": "10.0.0.3", "port": 52831},
+    ],
+    "lb": {
+        "slots_snapshot": {"pl1": 1, "de": 2, "nl1": 3},
+        "alive": ["pl1", "nl1"],
+        "probes": {
+            "pl1": {"alive": True, "rtt_ms": 55},
+            "de": {"alive": False, "rtt_ms": None},
+            "nl1": {"alive": True, "rtt_ms": 49},
+        },
+    },
+}
+
+MIERU_STATE = {
+    "role": "entry",
+    "strategy": "smart",
+    "exits": [
+        {"id": "exit-1-de1", "label": "de1", "host": "10.1.0.1",
+         "port": 2012, "enabled": True, "healthy": True,
+         "redsocks_port": 23081},
+        {"id": "exit-1-nl1", "label": "nl1", "host": "10.1.0.2",
+         "port": 2012, "enabled": True, "healthy": False,
+         "redsocks_port": 23082},
+        {"id": "exit-1-pl1", "label": "pl1", "host": "10.1.0.3",
+         "port": 2012, "enabled": False, "healthy": False,
+         "redsocks_port": 23083},
+    ],
+}
+
+
+class TestSourcesMultitransport(unittest.TestCase):
+    """Источники AWG/Mieru/Naive с патченными путями и IO-обёртками."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._awg = self._tmpdir / "awg_standalone_state.json"
+        self._mieru = self._tmpdir / "mieru_cascade.json"
+        self._naive = self._tmpdir / "naiveproxy.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_awg_source_lb(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        self._awg.write_text(json.dumps(AWG_STATE_LB), encoding="utf-8")
+        link = {"awg1": {"rx": 100, "tx": 200},
+                "awg3": {"rx": 300, "tx": 400}}
+        with patch.multiple(tw, AWG_STATE_FILE=self._awg,
+                            _tw_ip_link_stats=lambda ifaces: link):
+            src = tw._tw_awg_source()
+        self.assertIsNotNone(src)
+        self.assertEqual(set(src["nodes"]),
+                         {"awg:pl1", "awg:de", "awg:nl1"})
+        # счётчики: up=tx, down=rx
+        self.assertEqual(src["counters"]["awg:pl1"], {"up": 200, "down": 100})
+        self.assertEqual(src["counters"]["awg:nl1"], {"up": 400, "down": 300})
+        # слот 2 (de) не в link → без счётчиков (туннель упал)
+        self.assertNotIn("awg:de", src["counters"])
+        # ротация = живые; мёртвый de вне
+        self.assertEqual(src["selector"], ["awg:pl1", "awg:nl1"])
+        self.assertEqual(src["dead"], {"awg:de": True})
+        self.assertEqual(src["strategy"], "AWG Smart")
+        # probe_results из lb.probes
+        self.assertTrue(src["probe_results"]["awg:pl1"]["ok"])
+        self.assertFalse(src["probe_results"]["awg:de"]["ok"])
+        self.assertEqual(src["probe_results"]["awg:nl1"]["ms"], 49)
+
+    def test_awg_source_failover_mode(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        st = dict(AWG_STATE_LB)
+        st["lb_mode"] = False
+        self._awg.write_text(json.dumps(st), encoding="utf-8")
+        with patch.multiple(tw, AWG_STATE_FILE=self._awg,
+                            _tw_ip_link_stats=lambda ifaces: {}):
+            src = tw._tw_awg_source()
+        self.assertIsNotNone(src)
+        # failover: ротация = активный exit; awg1 по умолчанию (без слотов
+        # слоты_snapshot остаются — слоты есть и в failover после LB)
+        self.assertEqual(src["selector"], ["awg:pl1"])
+        self.assertEqual(src["dead"], {"awg:de": True, "awg:nl1": True})
+        self.assertEqual(src["strategy"], "AWG-каскад (failover)")
+
+    def test_awg_source_not_entry_or_missing(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        st = dict(AWG_STATE_LB)
+        st["cascade_role"] = "exit"
+        self._awg.write_text(json.dumps(st), encoding="utf-8")
+        with patch.multiple(tw, AWG_STATE_FILE=self._awg):
+            self.assertIsNone(tw._tw_awg_source())
+        with patch.multiple(tw, AWG_STATE_FILE=self._tmpdir / "nope.json"):
+            self.assertIsNone(tw._tw_awg_source())
+        # пустые exits
+        st2 = dict(AWG_STATE_LB)
+        st2["cascade_exits"] = []
+        self._awg.write_text(json.dumps(st2), encoding="utf-8")
+        with patch.multiple(tw, AWG_STATE_FILE=self._awg):
+            self.assertIsNone(tw._tw_awg_source())
+
+    def test_mieru_source_conn_mode(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        self._mieru.write_text(json.dumps(MIERU_STATE), encoding="utf-8")
+        redir = {23081: {"pkts": 100, "bytes": 6000},
+                 23082: {"pkts": 40, "bytes": 2400}}
+        with patch.multiple(
+                tw, MIERU_STATE_FILE=self._mieru,
+                _tw_iptables_nat_output=lambda: redir,
+                _tw_systemctl_show_ipacct=lambda unit: {
+                    "IPAccounting": False, "IPIngressBytes": None,
+                    "IPEgressBytes": None}):
+            src = tw._tw_mieru_source("auto")
+        self.assertIsNotNone(src)
+        # enabled=False (pl1) — вне нод
+        self.assertEqual(set(src["nodes"]), {"mieru:de1", "mieru:nl1"})
+        self.assertEqual(src["metric"], "conn")
+        # pkts правила = новые соединения
+        self.assertEqual(src["counters"]["mieru:de1"], {"up": 100, "down": 0})
+        self.assertEqual(src["counters"]["mieru:nl1"], {"up": 40, "down": 0})
+        # healthy=False у nl1 → вне ротации
+        self.assertEqual(src["selector"], ["mieru:de1"])
+        self.assertEqual(src["dead"], {"mieru:nl1": True})
+        self.assertEqual(src["strategy"], "Mieru Smart")
+        self.assertEqual(
+            src["probe_targets"],
+            [("10.1.0.1", 2012, "mieru:de1"),
+             ("10.1.0.2", 2012, "mieru:nl1")])
+
+    def test_mieru_source_ipaccounting_mode(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        self._mieru.write_text(json.dumps(MIERU_STATE), encoding="utf-8")
+        # MIERU_STATE содержит enabled=False у pl1 → юниты только для
+        # de1/nl1; ipacct включён у обоих → байты
+        def fake_show(unit):
+            if "de1" in unit:
+                return {"IPAccounting": True,
+                        "IPIngressBytes": 900, "IPEgressBytes": 100}
+            if "nl1" in unit:
+                return {"IPAccounting": True,
+                        "IPIngressBytes": 400, "IPEgressBytes": 40}
+            return {"IPAccounting": False, "IPIngressBytes": None,
+                    "IPEgressBytes": None}
+        with patch.multiple(
+                tw, MIERU_STATE_FILE=self._mieru,
+                _tw_systemctl_show_ipacct=fake_show,
+                _tw_iptables_nat_output=lambda: {}):
+            src = tw._tw_mieru_source("auto")
+        self.assertEqual(src["metric"], "bytes")
+        self.assertEqual(src["counters"]["mieru:de1"],
+                         {"up": 100, "down": 900})
+        self.assertEqual(src["counters"]["mieru:nl1"],
+                         {"up": 40, "down": 400})
+
+    def test_mieru_source_not_entry(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        st = dict(MIERU_STATE)
+        st["role"] = "exit"
+        self._mieru.write_text(json.dumps(st), encoding="utf-8")
+        with patch.multiple(tw, MIERU_STATE_FILE=self._mieru):
+            self.assertIsNone(tw._tw_mieru_source("auto"))
+        with patch.multiple(tw, MIERU_STATE_FILE=self._tmpdir / "no.json"):
+            self.assertIsNone(tw._tw_mieru_source("auto"))
+
+    def test_naive_source(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        self._naive.write_text(json.dumps(
+            {"upstream": "https://u:p@naive-exit.example.com:443/"}),
+            encoding="utf-8")
+        with patch.multiple(tw, NAIVE_STATE_FILE=self._naive):
+            src = tw._tw_naive_source()
+        self.assertIsNotNone(src)
+        nd = src["nodes"]["naive:upstream"]
+        self.assertEqual(nd["host"], "naive-exit.example.com")
+        self.assertEqual(nd["port"], 443)
+        self.assertEqual(nd["key"], "naive-exit.example.com:443")
+        # нет upstream → None
+        self._naive.write_text(json.dumps({"upstream": ""}), encoding="utf-8")
+        with patch.multiple(tw, NAIVE_STATE_FILE=self._naive):
+            self.assertIsNone(tw._tw_naive_source())
+        with patch.multiple(tw, NAIVE_STATE_FILE=self._tmpdir / "no.json"):
+            self.assertIsNone(tw._tw_naive_source())
+
+    def test_mieru_set_ipaccounting_calls(self):
+        import chimera.modules.exit_traffic_watcher as tw
+        self._mieru.write_text(json.dumps(MIERU_STATE), encoding="utf-8")
+        calls: list = []
+
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            return r
+        with patch.multiple(tw, MIERU_STATE_FILE=self._mieru), \
+             patch("subprocess.run", side_effect=fake_run):
+            ok, msg = tw._tw_mieru_set_ipaccounting(True)
+        self.assertTrue(ok)
+        # юниты строятся по ВСЕМ exits (enabled и выключенные — юнит
+        # mieru-hop@* у шаблона существует и для отключённого exit)
+        units = [c[2] for c in calls
+                 if len(c) > 2 and c[0] == "systemctl" and c[1] ==
+                 "set-property"]
+        self.assertEqual(units, ["mieru-hop@exit-1-de1.service",
+                                 "mieru-hop@exit-1-nl1.service",
+                                 "mieru-hop@exit-1-pl1.service"])
+        for c in calls:
+            if c[1] == "set-property":
+                self.assertIn("IPAccounting=yes", c)
+        # пустой каскад → отказ без вызовов
+        self._mieru.write_text(json.dumps({"role": "entry", "exits": []}),
+                               encoding="utf-8")
+        calls.clear()
+        with patch.multiple(tw, MIERU_STATE_FILE=self._mieru), \
+             patch("subprocess.run", side_effect=fake_run):
+            ok2, _ = tw._tw_mieru_set_ipaccounting(False)
+        self.assertFalse(ok2)
+
+
+class TestRunOnceMultiCascade(unittest.TestCase):
+    """run_once в мультитранспортном режиме: AWG + Mieru + Naive
+    источники (патченные), дельты/доминирование per-cascade, дайджест
+    секциями, события naive_upstream_*, миграция старого state."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._cfg = self._tmpdir / "exit_traffic_watcher.json"
+        self._state = self._tmpdir / "state.json"
+        self._sb = self._tmpdir / "smart_balancer.json"
+        self._xray_cfg = self._tmpdir / "config.json"
+        self._awg = self._tmpdir / "awg_standalone_state.json"
+        self._mieru = self._tmpdir / "mieru_cascade.json"
+        self._naive = self._tmpdir / "naiveproxy.json"
+        self._events: list[str] = []
+        self._details: list[tuple] = []
+        # VLESS-каскад тоже жив (мультикаскадная нода RU1-типа)
+        self._state.write_text(json.dumps(
+            {"chain_nodes": [ND_A, ND_B]}), encoding="utf-8")
+        self._xray_cfg.write_text(json.dumps(
+            {"routing": {"balancers": [{
+                "tag": "chain-balancer",
+                "selector": [TAG_A, TAG_B],
+                "strategy": {"type": "roundRobin"}}]}}),
+            encoding="utf-8")
+        self._awg.write_text(json.dumps(AWG_STATE_LB), encoding="utf-8")
+        self._mieru.write_text(json.dumps(MIERU_STATE), encoding="utf-8")
+        self._naive.write_text(json.dumps(
+            {"upstream": "https://u:p@naive-exit.example.com:443/"}),
+            encoding="utf-8")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _patch_all(self, stats=None, link=None, redir=None,
+                   naive_probe=None):
+        import chimera.modules.exit_traffic_watcher as tw
+
+        def fake_notify(event, detail, cfg, extra=None):
+            self._events.append(event)
+            self._details.append((event, detail, extra))
+            return True
+
+        link = link if link is not None else {
+            "awg1": {"rx": 1000, "tx": 2000},
+            "awg2": {"rx": 0, "tx": 0},
+            "awg3": {"rx": 0, "tx": 0}}
+        redir = redir if redir is not None else {
+            23081: {"pkts": 50, "bytes": 3000},
+            23082: {"pkts": 0, "bytes": 0}}
+        return patch.multiple(
+            tw, TW_CFG_FILE=self._cfg, STATE_FILE=self._state,
+            SB_STATE_FILE=self._sb, XRAY_CFG_CANDIDATES=(self._xray_cfg,),
+            AWG_STATE_FILE=self._awg, MIERU_STATE_FILE=self._mieru,
+            NAIVE_STATE_FILE=self._naive,
+            _tw_query_stats=lambda timeout=8: stats,
+            _tw_probe_nodes=lambda chain_nodes, cfg: None,
+            _tw_notify_event=fake_notify,
+            _tw_ip_link_stats=lambda ifaces: link,
+            _tw_iptables_nat_output=lambda: redir,
+            _tw_systemctl_show_ipacct=lambda unit: {
+                "IPAccounting": False, "IPIngressBytes": None,
+                "IPEgressBytes": None},
+            _tw_tcp_probe=lambda host, port, t: naive_probe
+            if host.startswith("naive-exit") else
+            {"ok": True, "ms": 10, "err": ""})
+
+    def _stats(self, a_up=0, a_dn=0, b_up=0, b_dn=0) -> dict:
+        return {TAG_A: {"up": a_up, "down": a_dn},
+                TAG_B: {"up": b_up, "down": b_dn}}
+
+    def _write_cfg(self, **kw):
+        cfg = {"enabled": True, "snapshot_hours": 12,
+               "dominant_min_share_pct": 60, "dominant_min_mb": 1,
+               "min_gap_min": 0, "starve_hours": 0, "probe": False}
+        cfg.update(kw)
+        self._cfg.write_text(json.dumps(cfg), encoding="utf-8")
+
+    def _bump_snapshot_ts(self):
+        """Дайджест-окно не должно закрываться между прогонами теста
+        (после базы окно отсчитывается заново — паттерн TestRunOnce)."""
+        import time as _t
+        st_now = json.loads(self._cfg.read_text())
+        st_now["__state__"]["last_snapshot_ts"] = _t.time()
+        self._cfg.write_text(json.dumps(st_now), encoding="utf-8")
+
+    def test_multi_deltas_and_snapshot_sections(self):
+        """Прогоны 1-2: дельты AWG/Mieru попадают в общий накопитель;
+        дайджест — секциями VLESS/AWG/Mieru; доминанты per-cascade."""
+        import chimera.modules.exit_traffic_watcher as tw
+        import time as _t
+        self._write_cfg()
+        # Прогон 1 — база (vless + awg + mieru)
+        with self._patch_all(stats=self._stats(100, 100, 0, 0)):
+            res = tw.run_once()
+        self.assertTrue(res["stats_ok"])
+        st = json.loads(self._cfg.read_text())["__state__"]
+        # общий счётчик-словарь: vless-теги + префиксные
+        self.assertEqual(st["counters"]["awg:pl1"]["up"], 2000)
+        self.assertEqual(st["counters"]["mieru:de1"]["up"], 50)
+        self.assertIn(TAG_A, st["counters"])
+        # мигрированный state: оба представления доминант
+        self.assertIn("dominant_tags", st)
+        # vless-доминанта нет (дельты 200 Б < порога МБ) — плоский ключ
+        # не пишется вовсе (прежняя семантика: ключ только при доминанте)
+        self.assertEqual(st["stats_fails"], 0)
+        self.assertEqual(st["stats_fails_map"]["vless"], 0)
+
+        # Прогон 2: awg-трафик вырос, mieru-коннекты выросли
+        self._bump_snapshot_ts()
+        with self._patch_all(
+                stats=self._stats(100, 100, 0, 0),
+                link={"awg1": {"rx": 1000 + 5 * MB, "tx": 2000 + 6 * MB},
+                      "awg2": {"rx": 0, "tx": 0},
+                      "awg3": {"rx": 300, "tx": 400}},
+                redir={23081: {"pkts": 150, "bytes": 9000},
+                       23082: {"pkts": 0, "bytes": 0}}):
+            res = tw.run_once()
+        st = json.loads(self._cfg.read_text())["__state__"]
+        # AWG-доминанта pl1 (11 МБ окна, 100%)
+        self.assertEqual(st["dominant_tags"].get("awg"), "awg:pl1")
+        # Mieru-доминанта de1 (100 коннектов)
+        self.assertEqual(st["dominant_tags"].get("mieru"), "mieru:de1")
+        # vless-доминанта нет (дельты нулевые) — плоский ключ пуст
+        self.assertEqual(st.get("dominant_tag") or "", "")
+
+        # Прогон 3: окно дайджеста истекло → snapshot секциями
+        st_now = json.loads(self._cfg.read_text())
+        st_now["__state__"]["last_snapshot_ts"] = 0
+        self._cfg.write_text(json.dumps(st_now), encoding="utf-8")
+        with self._patch_all(
+                stats=self._stats(100, 100, 0, 0),
+                link={"awg1": {"rx": 1000 + 5 * MB, "tx": 2000 + 6 * MB},
+                      "awg2": {"rx": 0, "tx": 0},
+                      "awg3": {"rx": 300, "tx": 400}},
+                redir={23081: {"pkts": 150, "bytes": 9000}}):
+            res = tw.run_once()
+        self.assertIn("traffic_snapshot", res["events"])
+        snap = next(d for ev, d, _ in self._details
+                    if ev == "traffic_snapshot")
+        self.assertIn("VLESS-каскад", snap)
+        self.assertIn("AWG-каскад", snap)
+        self.assertIn("Mieru-каскад", snap)
+        self.assertIn("Mieru Smart", snap)
+        # соединения, не байты
+        self.assertIn("соед.", snap)
+        # мёртвый awg:de с пометкой health
+        self.assertIn("недоступна (health)", snap)
+        # окно закрыто: всё сброшено
+        st = json.loads(self._cfg.read_text())["__state__"]
+        self.assertEqual(st["acc"], {})
+        self.assertEqual(st["dominant_tags"], {})
+
+    def test_awg_dominant_change_event(self):
+        """Смена AWG-доминанты → traffic_dominant_change с меткой
+        стратегии каскада («AWG Smart: активная нода ...»)."""
+        import chimera.modules.exit_traffic_watcher as tw
+        import time as _t
+        self._write_cfg()
+        link1 = {"awg1": {"rx": 0, "tx": 0}, "awg2": {"rx": 0, "tx": 0},
+                 "awg3": {"rx": 0, "tx": 0}}
+        # прогон 1: база
+        with self._patch_all(stats=self._stats(1, 1, 1, 1), link=link1):
+            tw.run_once()
+        self._bump_snapshot_ts()
+        # прогон 2: весь awg-трафик через nl1 (слот 3)
+        link2 = {"awg1": {"rx": 0, "tx": 0}, "awg2": {"rx": 0, "tx": 0},
+                 "awg3": {"rx": 2 * MB, "tx": 3 * MB}}
+        with self._patch_all(stats=self._stats(1, 1, 1, 1), link=link2):
+            tw.run_once()
+        st = json.loads(self._cfg.read_text())["__state__"]
+        self.assertEqual(st["dominant_tags"].get("awg"), "awg:nl1")
+        # прогон 3: трафик переезжает на pl1 → событие
+        link3 = {"awg1": {"rx": 5 * MB, "tx": 6 * MB},
+                 "awg2": {"rx": 0, "tx": 0},
+                 "awg3": {"rx": 2 * MB, "tx": 3 * MB}}
+        with self._patch_all(stats=self._stats(1, 1, 1, 1), link=link3):
+            res = tw.run_once()
+        self.assertIn("traffic_dominant_change", res["events"])
+        det = next(d for ev, d, _ in self._details
+                   if ev == "traffic_dominant_change")
+        # первая строка — НОВАЯ нода (формат уведы vless: «активная нода X»
+        # где X — куда переехал трафик)
+        self.assertIn("AWG Smart: активная нода "
+                      "<b><code>pl1</code></b>", det)
+        self.assertIn("Переключение ноды: <code>nl1</code> → "
+                      "<b><code>pl1</code></b>", det)
+
+    def test_naive_upstream_events(self):
+        """Naive upstream: падение после probe_fails прогонов →
+        naive_upstream_down; восстановление → naive_upstream_up."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._write_cfg(probe=True, probe_fails=2,
+                        probe_timeout_sec=2)
+        bad = {"ok": False, "ms": None, "err": "timeout"}
+        good = {"ok": True, "ms": 130, "err": ""}
+        # прогон 1: статус фиксируется молча
+        with self._patch_all(stats=self._stats(1, 1, 1, 1),
+                             naive_probe=bad):
+            res = tw.run_once()
+        self._bump_snapshot_ts()
+        self.assertEqual(res["events"], [])
+        # прогон 2: down
+        with self._patch_all(stats=self._stats(1, 1, 1, 1),
+                             naive_probe=bad):
+            res = tw.run_once()
+        self.assertIn("naive_upstream_down", res["events"])
+        det = next(d for ev, d, _ in self._details
+                   if ev == "naive_upstream_down")
+        self.assertIn("naive-exit.example.com:443", det)
+        self.assertIn("2 прогонов подряд", det)
+        st = json.loads(self._cfg.read_text())["__state__"]
+        self.assertEqual(st["naive_status"], "down")
+        # прогон 3: восстановление
+        with self._patch_all(stats=self._stats(1, 1, 1, 1),
+                             naive_probe=good):
+            res = tw.run_once()
+        self.assertIn("naive_upstream_up", res["events"])
+        det = next(d for ev, d, _ in self._details
+                   if ev == "naive_upstream_up")
+        self.assertIn("RTT 130 мс", det)
+
+    def test_naive_probe_disabled_by_cascades(self):
+        """cascades.naive.probe=false — проба не выполняется, событий
+        нет (vless-пробы тоже выключены probe=false)."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._write_cfg(probe=True, cascades={
+            "naive": {"traffic": False, "probe": False}})
+        bad = {"ok": False, "ms": None, "err": "timeout"}
+        for _ in range(3):
+            with self._patch_all(stats=self._stats(1, 1, 1, 1),
+                                 naive_probe=bad):
+                res = tw.run_once()
+        self.assertNotIn("naive_upstream_down", res["events"])
+
+    def test_stats_fail_with_other_sources_continues(self):
+        """Stats API упал, но есть AWG/Mieru — прогон НЕ прерывается:
+        awg-дельты копятся, stats_ok=True (другой источник жив)."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._write_cfg()
+        with self._patch_all(stats=None):
+            res = tw.run_once()
+        self.assertTrue(res["stats_ok"])
+        st = json.loads(self._cfg.read_text())["__state__"]
+        self.assertEqual(st["stats_fails_map"]["vless"], 1)
+        self.assertEqual(st["counters"]["awg:pl1"]["up"], 2000)
+        # vless-часть доминант не тронута
+        self.assertNotIn("vless", st["dominant_tags"])
+
+    def test_only_naive_cascade_skips_vless(self):
+        """Нода без VLESS/AWG/Mieru, только Naive — прогон работает:
+        пробы upstream + персист (не SKIP «каскады не развёрнуты»)."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._state.write_text(json.dumps({"chain_nodes": []}),
+                               encoding="utf-8")
+        self._awg.unlink()
+        self._mieru.unlink()
+        self._write_cfg(probe=True, probe_fails=2)
+        bad = {"ok": False, "ms": None, "err": "refused"}
+        with self._patch_all(stats=None, naive_probe=bad):
+            res = tw.run_once()
+        self.assertEqual(res["events"], [])   # первый прогон молча
+        with self._patch_all(stats=None, naive_probe=bad):
+            res = tw.run_once()
+        self.assertIn("naive_upstream_down", res["events"])
+
+    def test_no_cascades_at_all_skips(self):
+        """Ни одного каскада — прежний SKIP без событий."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._state.write_text(json.dumps({"chain_nodes": []}),
+                               encoding="utf-8")
+        self._awg.unlink()
+        self._mieru.unlink()
+        self._naive.unlink()
+        self._write_cfg()
+        with self._patch_all(stats=None):
+            res = tw.run_once()
+        self.assertEqual(res["events"], [])
+
+    def test_mieru_probe_tcp_targets(self):
+        """cascades.mieru.probe=true — TCP-пробы exit-нод в общем пуле
+        traffic_node_* (проба mita-порта)."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._write_cfg(probe=True, probe_fails=2, cascades={
+            "mieru": {"traffic": True, "probe": True}})
+        # все пробы мieru падают; vless-ноды (node-a/b) — живые
+        probe_map = {
+            ("10.1.0.1", 2012): {"ok": False, "ms": None, "err": "timeout"},
+            ("10.1.0.2", 2012): {"ok": False, "ms": None, "err": "timeout"},
+        }
+
+        def fake_probe(host, port, t):
+            if (host, port) in probe_map:
+                return probe_map[(host, port)]
+            return {"ok": True, "ms": 10, "err": ""}
+
+        def fake_probe_nodes(chain_nodes, cfg):
+            return {TAG_A: {"ok": True, "ms": 5, "err": ""},
+                    TAG_B: {"ok": True, "ms": 6, "err": ""}}
+
+        import chimera.modules.exit_traffic_watcher as tw2
+        with patch.multiple(
+                tw2, TW_CFG_FILE=self._cfg, STATE_FILE=self._state,
+                SB_STATE_FILE=self._sb, XRAY_CFG_CANDIDATES=(
+                    self._xray_cfg,),
+                AWG_STATE_FILE=self._awg, MIERU_STATE_FILE=self._mieru,
+                NAIVE_STATE_FILE=self._naive,
+                _tw_query_stats=lambda timeout=8: self._stats(1, 1, 1, 1),
+                _tw_probe_nodes=fake_probe_nodes,
+                _tw_notify_event=lambda ev, d, c, extra=None: (
+                    self._events.append(ev) or True),
+                _tw_ip_link_stats=lambda ifaces: {},
+                _tw_iptables_nat_output=lambda: {},
+                _tw_systemctl_show_ipacct=lambda unit: {
+                    "IPAccounting": False, "IPIngressBytes": None,
+                    "IPEgressBytes": None},
+                _tw_tcp_probe=fake_probe):
+            tw.run_once()
+            tw.run_once()
+        self.assertIn("traffic_node_down", self._events)
+        # тег ноды mieru:de1 в статусах
+        st = json.loads(self._cfg.read_text())["__state__"]
+        self.assertEqual(st["probe_status"].get("mieru:de1"), "down")
+
+    def test_awg_probe_from_health(self):
+        """cascades.awg.probe=true — переходы alive из lb.probes
+        становятся traffic_node_down/up (проба не TCP, вердикт
+        failover-тика)."""
+        import chimera.modules.exit_traffic_watcher as tw
+        self._write_cfg(probe=True, probe_fails=2, cascades={
+            "awg": {"traffic": True, "probe": True}})
+        # прогон 1: первая неудача — молчим (probe_fails=2)
+        with self._patch_all(stats=self._stats(1, 1, 1, 1)):
+            res = tw.run_once()
+        self.assertEqual(res["events"], [])
+        self._bump_snapshot_ts()
+        # прогон 2: de мёртв (probes.de.alive=false в AWG_STATE_LB) —
+        # вторая неудача подряд → traffic_node_down для awg:de
+        with self._patch_all(stats=self._stats(1, 1, 1, 1)):
+            res = tw.run_once()
+        self.assertIn("traffic_node_down", res["events"])
+        st = json.loads(self._cfg.read_text())["__state__"]
+        self.assertEqual(st["probe_status"].get("awg:de"), "down")
+        # pl1/nl1 живы (rtt из probes)
+        self.assertEqual(st["probe_status"].get("awg:pl1"), "ok")
+        self.assertEqual(st["probe_status"].get("awg:nl1"), "ok")
+        # прогон 3: de ожил → traffic_node_up
+        st_awg = json.loads(self._awg.read_text())
+        st_awg["lb"]["probes"]["de"] = {"alive": True, "rtt_ms": 34}
+        self._awg.write_text(json.dumps(st_awg), encoding="utf-8")
+        self._bump_snapshot_ts()
+        with self._patch_all(stats=self._stats(1, 1, 1, 1)):
+            res = tw.run_once()
+        self.assertIn("traffic_node_up", res["events"])
+        det = next(d for ev, d, _ in self._details
+                   if ev == "traffic_node_up")
+        self.assertIn("RTT 34 мс", det)
+
+
+class TestTgBotNaiveEvents(unittest.TestCase):
+    """Интеграция новых событий naive_upstream_* в tg_bot (иконки,
+    подписи, выровненные ev_keys/ev_labels меню «вкл/выкл события»)."""
+
+    def test_icons_and_labels(self):
+        from chimera.modules import tg_bot
+        import inspect, re
+        src = inspect.getsource(tg_bot)
+        # иконки
+        self.assertIn('"naive_upstream_down":     "📴"', src)
+        self.assertIn('"naive_upstream_up":       "🔌"', src)
+        # подписи (event_labels в tg_notify_event)
+        self.assertIn('"naive_upstream_down"', src)
+        self.assertIn('"naive_upstream_up"', src)
+
+    def test_ev_keys_labels_aligned_with_naive(self):
+        from chimera.modules import tg_bot
+        import inspect, re
+        src = inspect.getsource(tg_bot.do_manage_telegram)
+        keys = re.findall(r'"([a-z_0-9]+)"',
+                          re.search(r"ev_keys = \[(.*?)\]",
+                                    src, re.S).group(1))
+        labels = re.findall(r'"([^"]+)"',
+                            re.search(r"ev_labels = \[(.*?)\]\n\s+events",
+                                      src, re.S).group(1))
+        self.assertEqual(len(keys), len(labels),
+                         "ev_keys/ev_labels разъехались")
+        self.assertIn("naive_upstream_down", keys)
+        self.assertIn("naive_upstream_up", keys)
+        idx = keys.index("naive_upstream_down")
+        self.assertIn("Naive", labels[idx])
+        idx2 = keys.index("naive_upstream_up")
+        self.assertIn("Naive", labels[idx2])
+
+    def test_watcher_events_in_tg_bot_lists(self):
+        """Все события watcher-а (EVENTS) известны tg_bot: иконка есть
+        для каждого ключа (fallback ℹ️ не молчит)."""
+        import chimera.modules.exit_traffic_watcher as tw
+        from chimera.modules import tg_bot
+        import inspect
+        src = inspect.getsource(tg_bot)
+        for ev in tw.EVENTS:
+            self.assertIn(f'"{ev}"', src,
+                          f"{ev} отсутствует в tg_bot.py")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
