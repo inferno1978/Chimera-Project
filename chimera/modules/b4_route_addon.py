@@ -701,7 +701,10 @@ def b4_route_apply(target: Optional[str] = None, port: Optional[int] = None,
     # 4. Проба туннеля (не фатальна для apply — статус покажет).
     report["probe"] = _b4r_probe(port)
 
-    # 5. State.
+    # 5. Self-heal: поминутный контроль ip rule (баг b4 rebuild-гонки).
+    report["heal_cron"] = _b4r_install_heal_cron()
+
+    # 6. State.
     _b4r_save_state(b4_route_enabled=True, b4_route_target=target,
                     b4_route_port=port, b4_route_set=set_name,
                     b4_route_front_set=front_set_name)
@@ -725,6 +728,7 @@ def b4_route_remove() -> dict:
         return report
     report["xray_unpatched"] = True
     _b4r_save_state(b4_route_enabled=False)
+    _b4r_uninstall_heal_cron()
     _ok("B4 Route ВЫКЛЮЧЕН: патч Xray снят, сет выключен "
         "(эскалация во «сне» — включение Route оживит цепь)")
     return report
@@ -762,8 +766,141 @@ def b4_route_status() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  TUI (Настройки сети → BR)
+#  SELF-HEAL ip rule (обходной путь бага b4: rebuild-окно роняет правило)
 # ══════════════════════════════════════════════════════════════════════════
+#  БАГ b4 (воспроизведён в проде 11.11.2026, ~03:28 МСК): сохранение конфига
+#  (watchdog-эскалация / быстрый подряд config-save) → rebuild routing-правил
+#  → routeEnsureLocalDelivery() (src/tables/routing_proxy.go:695) делает
+#  routeDelRuleAllForms() (сносит ДЕЙСТВУЮЩЕЕ «ip rule add fwmark …/0x27fff
+#  lookup 252 priority 3») и тут же добавляет заново — между дел и add есть
+#  окно, и при гонке подряд идущих save (эскалация 5 URL Fat разом) re-add
+#  падает (EEXIST на priority 3) — правило теряется НАВСЕГДА до следующего
+#  чистого rebuild. Симптом: SYN на google-IP уходит через ens3 напрямую
+#  (ТСПУ-блэкхол), TPROXY-диверт мёртв. Сам b4 чинит это только полным
+#  reinstall (toggle сета off→on). Комментарий в самих исходниках b4
+#  (routeDelStaleRuleForms) признаёт паттерн «delete-then-add = окно» багом —
+#  но routeEnsureLocalDelivery его всё ещё делает.
+#
+#  ЛЕКАРСТВО (проектное, до фикса апстрима): heal — идемпотентная проверка
+#  раз в минуту (cron по образцу failover-watchdog): правило lookup 252
+#  пропало при живом source-check-правиле → пере-добавить ровно в том же
+#  виде (марку берём из живого source-check-правила — не хардкодим).
+
+B4R_HEAL_CRON_MARK = "# chimera: b4-route ip-rule heal (b4 rebuild-race bug)"
+B4R_HEAL_RULE_RE = re.compile(
+    r"^\d+:\s+from all fwmark (0x[0-9a-fA-F]+)/(0x[0-9a-fA-F]+)\s+iif lo lookup main\s*$",
+    re.MULTILINE)
+
+
+def _b4r_ip_rule_show() -> str:
+    """Вывод `ip rule show` (пустая строка при ошибке)."""
+    try:
+        p = subprocess.run(["ip", "rule", "show"], capture_output=True,
+                           text=True, timeout=10)
+        return (p.stdout or "") if p.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _b4r_heal_source_check_mark() -> "Optional[str]":
+    """Марка живого source-check-правила (rule 2: «fwmark M/M2 iif lo
+    lookup main») — из неё строится и пропавшее lookup-правило."""
+    m = B4R_HEAL_RULE_RE.search(_b4r_ip_rule_show())
+    return m.group(1) if m else None
+
+
+def b4_route_heal(quiet: bool = False) -> dict:
+    """Пере-добавляет ip rule «fwmark <mark>/0x27fff lookup 252», если
+    rebuild-гонка b4 его снесла. Возвращает отчёт."""
+    out = {"ok": True, "action": "none"}
+    rules = _b4r_ip_rule_show()
+    mark = _b4r_heal_source_check_mark()
+    if mark is None:
+        # Нет и source-check — routing сета снят целиком (не наш кейс:
+        # reinstall нужен, не heal). Молчим: состояние валидно при disable.
+        out["action"] = "routing-absent"
+        if not quiet:
+            _info("heal: routing-правила b4 отсутствуют (сет выключен?) — пропускаю")
+        return out
+    # Форма правила ровно как у b4: routeSetMarkRule() в b4 — это
+    # «0x%x/0x%x» % (mark, PerSetRouteMarkBits), где маска — КОНСТАНТА
+    # 0x27fff (config.PerSetRouteMarkBits), не mark&mask.
+    mask = "0x27fff"
+    want = f"fwmark {mark}/{mask} lookup 252"
+    if want in rules:
+        return out  # правило на месте — nothing to do
+    # Пропало при живом source-check → пере-добавляем ровно в форме b4.
+    try:
+        p = subprocess.run(
+            ["ip", "rule", "add", "fwmark", f"{mark}/{mask}", "lookup", "252",
+             "priority", "3"], capture_output=True, text=True, timeout=10)
+        if p.returncode != 0:
+            out.update(ok=False, action="failed", error=(p.stderr or "").strip())
+            _err(f"heal: ip rule add не удался: {(p.stderr or '').strip()}")
+            return out
+    except Exception as e:
+        out.update(ok=False, action="failed", error=str(e))
+        _err(f"heal: ip rule add не удался: {e}")
+        return out
+    out["action"] = "re-added"
+    _log("HEAL", f"ip rule '{want}' пере-добавлен (rebuild-гонка b4)")
+    if not quiet:
+        _ok(f"heal: ip rule '{want}' пере-добавлен (rebuild-гонка b4)")
+    return out
+
+
+def _b4r_install_heal_cron() -> bool:
+    """Поминутный heal-cron (по образцу failover-watchdog): идемпотентно."""
+    import os
+    try:
+        p = subprocess.run(["crontab", "-l"], capture_output=True, text=True,
+                           timeout=10)
+        cur = (p.stdout or "") if p.returncode == 0 else ""
+        if B4R_HEAL_CRON_MARK in cur:
+            return True
+        line = (f"{B4R_HEAL_CRON_MARK}\n"
+                "* * * * * cd /opt/chimera && python3 -m chimera.modules.b4_route_addon"
+                " heal --quiet >> /var/log/chimera.log 2>&1\n")
+        new = (cur.rstrip("\n") + "\n" if cur.strip() else "") + line
+        r = subprocess.run(["crontab", "-"], input=new, capture_output=True,
+                           text=True, timeout=10)
+        if r.returncode != 0:
+            _warn(f"heal-cron: crontab не обновлён: {(r.stderr or '').strip()}")
+            return False
+        _ok("heal-cron: поминутная проверка ip rule установлена")
+        return True
+    except Exception as e:
+        _warn(f"heal-cron: {e}")
+        return False
+
+
+def _b4r_uninstall_heal_cron() -> None:
+    """Снимает heal-cron (при полном remove модуля)."""
+    try:
+        p = subprocess.run(["crontab", "-l"], capture_output=True, text=True,
+                           timeout=10)
+        cur = (p.stdout or "") if p.returncode == 0 else ""
+        if B4R_HEAL_CRON_MARK not in cur:
+            return
+        lines, drop = [], False
+        for ln in cur.splitlines():
+            if ln.strip() == B4R_HEAL_CRON_MARK:
+                drop = True
+                continue
+            if drop and "b4_route_addon heal" in ln:
+                drop = False
+                continue
+            drop = False
+            lines.append(ln)
+        new = "\n".join(lines).strip("\n") + ("\n" if lines else "")
+        subprocess.run(["crontab", "-"], input=new, capture_output=True,
+                       text=True, timeout=10)
+        _ok("heal-cron: снят")
+    except Exception as e:
+        _warn(f"heal-cron remove: {e}")
+
+
+
 
 def _b4r_target_label(target: str) -> str:
     if target == B4R_TARGET_BALANCER:
@@ -950,9 +1087,10 @@ def _cli() -> int:
     p = argparse.ArgumentParser(
         prog="b4_route_addon",
         description="B4 Route — терминатор эскалации YouTube (туннель в VLESS-exit)")
-    p.add_argument("cmd", choices=["apply", "remove", "status", "menu"],
+    p.add_argument("cmd", choices=["apply", "remove", "status", "heal", "menu"],
                    help="apply — включить; remove — выключить; "
-                        "status — JSON-снимок; menu — TUI")
+                        "status — JSON-снимок; heal — проверка/починка ip rule "
+                        "(баг b4 rebuild-гонки); menu — TUI")
     p.add_argument("--target", default=None,
                    help="balancer | chain-exit-N | warp (default: из state)")
     p.add_argument("--port", type=int, default=None,
@@ -961,6 +1099,8 @@ def _cli() -> int:
     p.add_argument("--front-set-name", default=None, help="имя front-сета")
     p.add_argument("--ensure-youtube-ru", action="store_true",
                    help="если YouTube не через RU — переключить на RU")
+    p.add_argument("--quiet", action="store_true",
+                   help="heal: без stdout (для cron)")
     args = p.parse_args()
     if args.cmd == "apply":
         rep = b4_route_apply(target=args.target, port=args.port,
@@ -976,6 +1116,11 @@ def _cli() -> int:
     if args.cmd == "status":
         print(json.dumps(b4_route_status(), ensure_ascii=False, indent=2))
         return 0
+    if args.cmd == "heal":
+        rep = b4_route_heal(quiet=args.quiet)
+        if not args.quiet:
+            print(json.dumps(rep, ensure_ascii=False, indent=2))
+        return 0 if rep.get("ok") else 1
     do_manage_b4_route()
     return 0
 

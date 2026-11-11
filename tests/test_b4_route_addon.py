@@ -448,5 +448,109 @@ class TestAvailableTargets(_XrayPatchMixin, unittest.TestCase):
         self.assertEqual(t["extra"], ["warp"])
 
 
+class TestHeal(_XrayPatchMixin, unittest.TestCase):
+    """b4_route_heal: починка ip rule после rebuild-гонки b4
+    (баг воспроизведён в проде 11.11: снесён lookup-252 при живом
+    source-check — SYN на google-IP уходил напрямую в ТСПУ)."""
+
+    RULES_OK = (
+        "0:\tfrom all lookup local\n"
+        "2:\tfrom all fwmark 0x25efe/0x1027fff iif lo lookup main\n"
+        "3:\tfrom all fwmark 0x25efe/0x27fff lookup 252\n"
+        "32766:\tfrom all lookup main\n"
+    )
+    RULES_BROKEN = (
+        "0:\tfrom all lookup local\n"
+        "2:\tfrom all fwmark 0x25efe/0x1027fff iif lo lookup main\n"
+        "32766:\tfrom all lookup main\n"
+    )
+
+    def test_heal_noop_when_rule_present(self):
+        with patch.object(self.mod, "_b4r_ip_rule_show",
+                          return_value=self.RULES_OK), \
+             patch("subprocess.run", return_value=MagicMock(returncode=0)) as spy:
+            rep = self.mod.b4_route_heal()
+        self.assertTrue(rep["ok"])
+        self.assertEqual(rep["action"], "none")
+        # ни одного мутирующего вызова ip rule add
+        for c in spy.call_args_list:
+            args = c.args[0] if c.args else c.kwargs.get("args")
+            self.assertNotIn("add", args)
+
+    def test_heal_readds_missing_rule_in_b4_form(self):
+        ok_run = MagicMock(returncode=0, stdout="", stderr="")
+        with patch.object(self.mod, "_b4r_ip_rule_show",
+                          return_value=self.RULES_BROKEN), \
+             patch("subprocess.run", return_value=ok_run) as spy:
+            rep = self.mod.b4_route_heal()
+        self.assertTrue(rep["ok"])
+        self.assertEqual(rep["action"], "re-added")
+        # форма ровно как у b4: fwmark 0x25efe/0x27fff lookup 252 priority 3
+        # (марка взята из живого source-check, не хардкодом)
+        add_calls = [c.args[0] for c in spy.call_args_list
+                     if c.args and isinstance(c.args[0], list)
+                     and c.args[0][:1] == ["ip"]]
+        self.assertTrue(any(
+            "add" in a and "0x25efe/0x27fff" in a and "252" in a
+            and "3" in a for a in add_calls), add_calls)
+
+    def test_heal_noop_when_routing_absent(self):
+        # сет снят целиком: ни source-check, ни lookup — валидное состояние
+        with patch.object(self.mod, "_b4r_ip_rule_show",
+                          return_value="0:\tfrom all lookup local\n"), \
+             patch("subprocess.run") as spy:
+            rep = self.mod.b4_route_heal()
+        self.assertTrue(rep["ok"])
+        self.assertEqual(rep["action"], "routing-absent")
+        spy.assert_not_called()
+
+    def test_heal_cron_install_and_remove_idempotent(self):
+        crontab = {"cur": "0 3 * * * old-job\n"}
+        def fake_run(cmd, **kw):
+            class R:
+                returncode = 0
+                stdout = crontab["cur"]
+                stderr = ""
+            if cmd[:2] == ["crontab", "-l"]:
+                return R()
+            if cmd[:1] == ["crontab"]:
+                crontab["cur"] = kw.get("input", "")
+                return R()
+            return R()
+            return R()
+        with patch("subprocess.run", side_effect=fake_run):
+            self.assertTrue(self.mod._b4r_install_heal_cron())
+            first = crontab["cur"]
+            self.assertIn(self.mod.B4R_HEAL_CRON_MARK, first)
+            self.assertIn("b4_route_addon heal --quiet", first)
+            self.assertIn("old-job", first)  # чужие записи не тронуты
+            # идемпотентность: повторная установка не дублирует
+            self.assertTrue(self.mod._b4r_install_heal_cron())
+            self.assertEqual(crontab["cur"], first)
+            # снятие: маркер и строка уходят, чужие остаются
+            self.mod._b4r_uninstall_heal_cron()
+            self.assertNotIn(self.mod.B4R_HEAL_CRON_MARK, crontab["cur"])
+            self.assertNotIn("b4_route_addon heal", crontab["cur"])
+            self.assertIn("old-job", crontab["cur"])
+
+    def test_apply_installs_heal_cron(self):
+        """apply ставит heal-cron (баг-обход), remove — снимает."""
+        self._write_cfg()
+        with patch.object(self.mod, "_b4r_ip_rule_show",
+                          return_value=self.RULES_OK), \
+             patch.object(self.mod, "_b4r_youtube_ru_ok", return_value=True), \
+             patch.object(self.mod, "_b4r_ensure_b4_set",
+                          return_value={"id": "x", "routing": {}}), \
+             patch.object(self.mod, "_b4r_ensure_escalation", return_value=True), \
+             patch.object(self.mod, "_b4r_set_enabled", return_value=True), \
+             patch.object(self.mod, "_b4r_probe", return_value={"ok": True}), \
+             patch.object(self.mod, "_b4r_install_heal_cron",
+                          return_value=True) as inst:
+            rep = self.mod.b4_route_apply(target="balancer")
+        self.assertTrue(rep["ok"])
+        self.assertTrue(rep["heal_cron"])
+        inst.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
