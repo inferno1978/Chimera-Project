@@ -2,7 +2,7 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **325** (гейт-манифест: **325**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **326** (гейт-манифест: **326**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
 ## AmneziaWG (transport Mode B + standalone 2.0) (31)
@@ -408,6 +408,17 @@
 | [`test_warp_subnet_table.py`](../tests/test_warp_subnet_table.py) | Unit-тесты «таблицы подсетей» — warpscout-дашборда Chimera | ✓ |
 | [`test_warp_telegram_probe.py`](../tests/test_warp_telegram_probe.py) | Unit-тесты интеграции идей warpscout / warpscout-tg в WARP-модуль Chimera. | ✓ |
 
+## AdGuard Home (6)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_agh_aware_and_start_limit.py`](../tests/test_agh_aware_and_start_limit.py) | Unit-тесты для | ✓ |
+| [`test_agh_le_cert_order.py`](../tests/test_agh_le_cert_order.py) | : «Fresh-сервер: AGH поставился, LE-сертификат НЕ выпустился | ✓ |
+| [`test_agh_probe.py`](../tests/test_agh_probe.py) | Unit-тесты для chimera/modules/agh_probe.py — health-check локального | ✓ |
+| [`test_agh_ratelimit_heal.py`](../tests/test_agh_ratelimit_heal.py) | : «Клиент сыпал EOFами — убрал AGH, всё заработало». | ✓ |
+| [`test_agh_reinstall_domain.py`](../tests/test_agh_reinstall_domain.py) | : «Вбиваю при установке один домен — домен-2.example, а доходит до | ✓ |
+| [`test_aghome_setup.py`](../tests/test_aghome_setup.py) | Unit-тесты для AdGuard Home стека Chimera: | ✓ |
+
 ## YouTube/b4 (DPI bypass) (6)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -429,16 +440,6 @@
 | [`test_dpi_gate.py`](../tests/test_dpi_gate.py) | Unit-тесты для chimera/modules/dpi_gate.py. | ✓ |
 | [`test_dpi_response.py`](../tests/test_dpi_response.py) | Unit-тесты для chimera/modules/dpi_response.py. | ✓ |
 | [`test_mask_gate.py`](../tests/test_mask_gate.py) | Unit-тесты для chimera/modules/mask_gate.py. | ✓ |
-
-## AdGuard Home (5)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_agh_aware_and_start_limit.py`](../tests/test_agh_aware_and_start_limit.py) | Unit-тесты для | ✓ |
-| [`test_agh_le_cert_order.py`](../tests/test_agh_le_cert_order.py) | : «Fresh-сервер: AGH поставился, LE-сертификат НЕ выпустился | ✓ |
-| [`test_agh_probe.py`](../tests/test_agh_probe.py) | Unit-тесты для chimera/modules/agh_probe.py — health-check локального | ✓ |
-| [`test_agh_ratelimit_heal.py`](../tests/test_agh_ratelimit_heal.py) | : «Клиент сыпал EOFами — убрал AGH, всё заработало». | ✓ |
-| [`test_aghome_setup.py`](../tests/test_aghome_setup.py) | Unit-тесты для AdGuard Home стека Chimera: | ✓ |
 
 ## Telegram-боты и уведомления (5)
 

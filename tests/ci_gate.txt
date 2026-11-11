@@ -1,4 +1,10 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v13: 326 = 325 + test_agh_reinstall_domain (инцидент entry-2 11.11:
+# переустановка AGH над существующим конфигом молча брала домен из
+# aghome_state незавершённой попытки, игнорируя только что введённый
+# домен установки — LE-выпуск под мёртвый домен; фикс
+# aghome_setup._reinstall_domain: приоритет свежего core.PARAM_DOMAIN,
+# конфликт — явный выбор).
 # v12: 324 = 323 + test_exit_traffic_watcher (наблюдатель трафика
 # exit-нод: уведы «через какую ноду реально идёт трафик» — счётчики
 # Stats API outbound>>>chain-exit-N, режим-агностично для всех стратегий
@@ -40,6 +46,7 @@ tests.test_agh_aware_and_start_limit
 tests.test_agh_le_cert_order
 tests.test_agh_probe
 tests.test_agh_ratelimit_heal
+tests.test_agh_reinstall_domain
 tests.test_aghome_setup
 tests.test_all_specs_real_fetch_package
 tests.test_as_direct

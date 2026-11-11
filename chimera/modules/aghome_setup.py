@@ -1964,6 +1964,62 @@ def _ask_web_mode() -> "tuple[str, str]":
     return AGH_WEB_HTTPS_LE, domain
 
 
+def _reinstall_domain(stored_domain: str) -> str:
+    """Домен AGH при переустановке (существующий конфиг, без мастера).
+
+    Инцидент (entry-2, 11.11.2026): первая попытка установки оборвалась
+    ПОСЛЕ wizard-фазы AGH — aghome_state.json сохранил её домен
+    (domain-old.example). Повторная установка с НОВЫМ доменом сервера
+    (domain-new.example) молча финализировала AGH под СТАРЫЙ домен:
+    web_mode=https_le из state + domain из state → obtain_ssl_cert(
+    domain-old.example) → WARN «НЕ резолвится в IP сервера» (A-запись
+    старого домена уже не указывает на этот сервер) и LE-выпуск падал
+    в self-signed. Только что введённый домен установки игнорировался.
+
+    Приоритет домена при переустановке:
+      • свежий домен установки core.PARAM_DOMAIN (введён на шаге
+        «Домен (SNI)» полной установки — или восстановлен
+        identity-guard'ом из state.json в контексте меню) побеждает,
+        если сохранённого нет или они равны (без промпта);
+      • PARAM_DOMAIN пуст (AGH-standalone без основного state.json)
+        → сохранённый (поведение прежнее);
+      • конфликт (сохранённый ≠ свежий — незавершённая попытка с другим
+        доменом) → явный выбор, дефолт [1] — свежий домен установки,
+        [2] — оставить сохранённый (AGH сознательно на другом домене).
+    """
+    core = _core_module()
+    CYAN, NC, DIM, GREEN, YELLOW = (
+        core.CYAN, core.NC, core.DIM, core.GREEN, core.YELLOW)
+    _box_top, _box_row, _box_sep, _box_bottom, _box_item = (
+        core._box_top, core._box_row, core._box_sep, core._box_bottom,
+        core._box_item)
+
+    fresh = (getattr(core, "PARAM_DOMAIN", "") or "").strip().lower()
+    stored = (stored_domain or "").strip().lower()
+    if not fresh:
+        return stored
+    if not stored or stored == fresh:
+        return fresh
+
+    # конфликт: незавершённая настройка AGH сохранила другой домен
+    print()
+    _box_top("AdGuard Home — домен TLS-сертификата")
+    _box_row()
+    _box_row(f"  {DIM}Найдена незавершённая настройка AGH с доменом:{NC}")
+    _box_row(f"  {YELLOW}{stored}{NC}")
+    _box_row(f"  {DIM}Текущий домен установки сервера:{NC}")
+    _box_row(f"  {GREEN}{fresh}{NC}")
+    _box_sep()
+    _box_item("1", f"{fresh} — домен этой установки {GREEN}(рекомендуется){NC}")
+    _box_item("2", f"{stored} — домен из незавершённой настройки AGH")
+    _box_bottom()
+    try:
+        ch = input(f"{CYAN}  Выбор [1]: {NC}").strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        return fresh
+    return stored if ch == "2" else fresh
+
+
 # ============================================================================
 #  DNS-ALIVE ГАРАНТИЯ (анти black-hole в любой фазе AGH)
 # ============================================================================
@@ -2590,7 +2646,10 @@ def install_aghome(interactive: bool = True) -> bool:
     if interactive:
         st = aghome_state_load()
         web_mode = st.get("web_mode", AGH_WEB_HTTPS_LE)
-        domain = st.get("domain", "")
+        # домен: свежий домен установки приоритетнее сохранённого
+        # незавершённой попыткой (инцидент entry-2 11.11.2026 — докстринг
+        # _reinstall_domain)
+        domain = _reinstall_domain(st.get("domain", ""))
         return finalize_aghome_config(web_mode=web_mode, domain=domain)
     return True
 
