@@ -227,7 +227,10 @@ AGH_DNSCRYPT_TOML = Path("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
 def aghome_state_load() -> dict:
     """Читает состояние AGH. Поля: enabled, phase ('wizard'|'finalized'),
     web_mode, web_port, domain, self_signed, doh/dot/doq порты, tls_enabled,
-    wizard_ssh_ip (временный UFW-доступ), installed_at."""
+    wizard_ssh_ip (временный UFW-доступ), installed_at;
+    domain_conflict_ack — sticky-след решения конфликта доменов при
+    переустановке (выбор [2] «оставить сохранённый» — см.
+    _reinstall_domain_sticky)."""
     try:
         if AGH_STATE_FILE.exists():
             data = json.loads(AGH_STATE_FILE.read_text())
@@ -745,6 +748,7 @@ def migrate_dnscrypt_off_53() -> bool:
 
     # Кто-то держит :53 на loopback?
     dns53_taken = False
+    agh_owns_53 = False
     try:
         r = subprocess.run(["ss", "-tulnp"], capture_output=True, text=True,
                            check=False, timeout=10)
@@ -755,11 +759,20 @@ def migrate_dnscrypt_off_53() -> bool:
                     continue  # systemd-resolved stub — не мешает bind 127.0.0.1:53
                 if "dnscrypt" in line.lower():
                     dns53_taken = True
+                elif "adguardhome" in line.lower():
+                    # Сам AdGuardHome уже держит :53 (переустановка /
+                    # рабочая установка) — целевое состояние, а не чужой
+                    # процесс: WARN здесь плодил ложную тревогу на каждом
+                    # re-run («порт 53 занят другим процессом» при
+                    # pid=AdGuardHome — лог переустановки entry, 11.11.2026)
+                    agh_owns_53 = True
                 else:
                     # Чужой слушатель :53 — AGH не сможет забиндиться
                     warn(f"AGH: порт 53 занят другим процессом: {line.strip()[:100]}")
     except Exception:
         pass
+    if agh_owns_53:
+        info("AGH: :53 уже слушает сам AdGuardHome (переустановка) — норма")
 
     if not dns53_taken:
         info("AGH: dnscrypt не держит :53 — миграция не требуется")
@@ -2020,6 +2033,58 @@ def _reinstall_domain(stored_domain: str) -> str:
     return stored if ch == "2" else fresh
 
 
+def _reinstall_domain_sticky(st: dict) -> str:
+    """Re-install-домен с ПАМЯТЬЮ выбора — обёртка над _reinstall_domain.
+
+    Инцидент «Опять оно мне говорит вот это» (entry, 11.11.2026):
+    _reinstall_domain при конфликте stored ≠ fresh спрашивает владельца
+    КАЖДЫЙ прогон заново — выбор нигде не фиксировался, пока финализация
+    не дойдёт до конца (а она в тех прогонах обрывалась позже по ходу
+    мастера) — aghome_state.json продолжал нести домен незавершённой
+    попытки, и вопрос повторялся на каждой переустановке.
+
+    Стикiness — выбор фиксируется в state НЕМЕДЛЕННО, ДО финализации:
+      • выбран свежий ([1]/Enter/EOF) → domain := fresh: следующий
+        прогон видит stored == fresh — промпта нет (идемпотентность
+        _reinstall_domain); обрыв финализации больше не откатывает
+        решение;
+      • выбран сохранённый ([2]) → domain_conflict_ack := fresh: пока
+        домен установки не меняется, конфликт считается решённым и
+        промпта нет; смена fresh обнуляет совпадение ack — новый
+        конфликт = новый вопрос (не молчим со старым решением).
+
+    Прочая семантика — прежняя _reinstall_domain: пустой PARAM_DOMAIN
+    (AGH-standalone) → сохранённый без вопросов и без записей; равные
+    домены — без промпта и без записей.
+    """
+    core = _core_module()
+    stored = (st.get("domain") or "").strip().lower()
+    fresh = (getattr(core, "PARAM_DOMAIN", "") or "").strip().lower()
+    ack = (st.get("domain_conflict_ack") or "").strip().lower()
+
+    # Конфликт уже был решён выбором [2] при этом же fresh — не спрашиваем.
+    if stored and fresh and stored != fresh and ack == fresh:
+        try:
+            core.info(f"AGH: конфликт доменов уже решён ранее — "
+                      f"AGH остаётся на {stored}")
+        except Exception:
+            pass
+        return stored
+
+    domain = _reinstall_domain(stored)
+    if domain != stored:
+        if domain:
+            # Выбран свежий → фиксируем ДО финализации: её обрыв не
+            # должен превращать конфликт в вопрос на каждом прогоне.
+            aghome_state_save({**st, "domain": domain,
+                               "domain_conflict_ack": ""})
+    elif stored and fresh and stored != fresh:
+        # Выбран сохранённый ([2]) → ack под текущий fresh: до смены
+        # домена установки вопрос не повторяется.
+        aghome_state_save({**st, "domain_conflict_ack": fresh})
+    return domain
+
+
 # ============================================================================
 #  DNS-ALIVE ГАРАНТИЯ (анти black-hole в любой фазе AGH)
 # ============================================================================
@@ -2648,8 +2713,10 @@ def install_aghome(interactive: bool = True) -> bool:
         web_mode = st.get("web_mode", AGH_WEB_HTTPS_LE)
         # домен: свежий домен установки приоритетнее сохранённого
         # незавершённой попыткой (инцидент entry-2 11.11.2026 — докстринг
-        # _reinstall_domain)
-        domain = _reinstall_domain(st.get("domain", ""))
+        # _reinstall_domain); выбор sticky — фиксируется в state ДО
+        # финализации, обрыв не превращает конфликт в вопрос на каждом
+        # прогоне (докстринг _reinstall_domain_sticky)
+        domain = _reinstall_domain_sticky(st)
         return finalize_aghome_config(web_mode=web_mode, domain=domain)
     return True
 

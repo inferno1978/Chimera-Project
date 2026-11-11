@@ -638,6 +638,44 @@ class TestMigrateDnscryptOff53(unittest.TestCase):
         # серверов, где прошлая миграция сняла :53 без redirect)
         safety.assert_called_once_with(5300)
 
+    def test_agh_owns_53_no_false_foreign_warn(self):
+        """Переустановка: :53 держит сам AdGuardHome — целевое
+        состояние, а не чужой процесс: WARN «порт 53 занят другим
+        процессом» не должен рождаться (ложная тревога в логе
+        переустановки entry 11.11.2026 — pid=AdGuardHome в самой
+        строке предупреждения)."""
+        self.toml.write_text("listen_addresses = ['127.0.0.1:5300']\n")
+        core = self._core_mock()
+        warns, infos = [], []
+        core.warn = lambda msg, *a, **k: warns.append(msg)
+        core.info = lambda msg, *a, **k: infos.append(msg)
+        ss_agh = (
+            "udp   UNCONN 0      0          127.0.0.1:53        "
+            "0.0.0.0:*    users:((\"AdGuardHome\",pid=32207,fd=6))\n"
+            "tcp   LISTEN 0      4096       127.0.0.1:53        "
+            "0.0.0.0:*    users:((\"AdGuardHome\",pid=32207,fd=1))\n"
+            "udp   UNCONN 0      0          127.0.0.1:5300      "
+            "0.0.0.0:*    users:((\"dnscrypt-proxy\",pid=1234,fd=5))\n")
+        with patch.object(self.mod, "_core_module",
+                          return_value=core), \
+             patch.object(self.mod, "AGH_DNSCRYPT_TOML", self.toml), \
+             patch.object(self.mod, "_ensure_dns_redirect_safety",
+                          return_value=True), \
+             patch.object(self.mod, "subprocess") as sub:
+            sub.run.return_value = MagicMock(
+                returncode=0, stdout=ss_agh, stderr="")
+            ok = self.mod.migrate_dnscrypt_off_53()
+        self.assertTrue(ok)
+        self.assertEqual(warns, [])
+        # внятная INFO вместо WARN (одна на оба слушателя udp/tcp)
+        self.assertEqual(
+            [m for m in infos if "AdGuardHome" in m and "норма" in m],
+            ["AGH: :53 уже слушает сам AdGuardHome (переустановка) — норма"])
+        # миграция не требуется, TOML не тронут, бэкапов нет
+        self.assertEqual(
+            self.toml.read_text(), "listen_addresses = ['127.0.0.1:5300']\n")
+        self.assertEqual(list(self.toml.parent.glob("*.bak")), [])
+
     def test_aborts_before_toml_when_no_redirect_safety(self):
         """v41: без redirect-страховки TOML НЕ трогаем (DNS не сломаем).
 
