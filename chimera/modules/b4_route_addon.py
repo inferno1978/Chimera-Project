@@ -139,6 +139,21 @@ B4R_PROBE_TIMEOUT = 10
 # наднабор goog.json/cloud.json, см. анализ 11.11), QUIC не туннелируем
 # (udp off + upstream.udp=false → b4 режет UDP/443 на google-категорию,
 # браузеры падают на TCP → в туннель — та же философия, что Fat/Heavy).
+#
+# ДОМЕНЫ В СЕТЕ — НЕ МАРШРУТКА, А ИМЕНОВАНИЕ CONNECT'ов (критично!):
+#   tproxy-листенер b4 (listener.go: pickTarget/needsSniff) подмешивает
+#   имя для SOCKS5 CONNECT из трёх источников: SNI-сниффинг стрима,
+#   DNS-наблюдения и learned-таблицы. Сниффинг включается только когда
+#   needsSniff() = !names.Empty() || setHasDomains — а без доменов в сете
+#   и без свежих наблюдений CONNECT уходит СЫРЫМ IP (снифф не вызывается).
+#   Exit-ноды гетерогенны: одни достают сырые Google-IP, другие нет
+#   (RU2 везло на exit-4, RU1 падало на exit-2/3 — ловлено в проде).
+#   С доменами (geosite:youtube + dns.google) листенер нюхает SNI и
+#   CONNECT уходит ДОМЕНОМ — exit сам резолвит в свой локальный GGC.
+#   dns.google — за компанию: DoH-компоненты нод (8.8.x:443 с SNI
+#   dns.google) иначе блэкхолились бы сырым IP.
+#   Побочный эффект доменов безопасен: сет последний (12-я позиция),
+#   Fat/Heavy выше — в DPI-очереди имя-матч(Route) никогда не выигрывает.
 B4_SET_TEMPLATE = {
     "name": B4R_DEFAULT_SET,
     "enabled": False,
@@ -147,6 +162,8 @@ B4_SET_TEMPLATE = {
     "faking": {"sni": False},
     "targets": {
         "geoip_categories": ["google"],
+        "geosite_categories": ["youtube"],
+        "sni_domains": ["dns.google", "dns.google.com"],
         "domain_only": False,
         "ip_priority": False,
     },
@@ -531,6 +548,26 @@ def _b4r_ensure_b4_set(name: str, port: int) -> Optional[dict]:
             _err(f"b4 REST: не удалось синхронизировать upstream сета {name}: {resp}")
             return None
         _ok(f"b4: upstream сета {name} синхронизирован (127.0.0.1:{port}, mode=proxy)")
+
+    # Домены для именования CONNECT'ов (см. докстринг B4_SET_TEMPLATE):
+    # ensure только ДОБАВЛЯЕТ недостающее — пользовательские списки не трогаем.
+    targets = existing.setdefault("targets", {})
+    changed_t = False
+    gs = list(targets.get("geosite_categories") or [])
+    if "youtube" not in gs:
+        gs.append("youtube"); targets["geosite_categories"] = gs; changed_t = True
+    sd = [str(x).lower() for x in (targets.get("sni_domains") or [])]
+    for dom in B4_SET_TEMPLATE["targets"]["sni_domains"]:
+        if dom.lower() not in sd:
+            sd.append(dom); changed_t = True
+    if changed_t:
+        targets["sni_domains"] = sd
+        resp = _b4r_rest("PUT", f"/api/sets/{existing.get('id')}", existing)
+        if not resp or resp[0] != 200:
+            _err(f"b4 REST: не удалось добавить домены именования в сет {name}: {resp}")
+            return None
+        _ok(f"b4: домены именования CONNECT'ов дополнены в {name} "
+            f"(geosite:youtube + {', '.join(B4_SET_TEMPLATE['targets']['sni_domains'])})")
     return existing
 
 

@@ -313,7 +313,41 @@ class TestB4RestSide(_XrayPatchMixin, unittest.TestCase):
         self.assertEqual(created["routing"]["upstream"]["host"], "127.0.0.1")
         self.assertEqual(created["routing"]["upstream"]["port"], 10810)
         self.assertEqual(created["targets"]["geoip_categories"], ["google"])
+        self.assertEqual(created["targets"]["geosite_categories"], ["youtube"])
+        self.assertIn("dns.google", created["targets"]["sni_domains"])
         self.assertEqual(created["udp"]["mode"], "off")
+
+    def test_ensure_set_adds_naming_domains_when_missing(self):
+        """РЕГРЕСС RU1 (прод 11.11): сет без доменов → CONNECT сырыми IP →
+        exit-2/3 не достают сырые Google-IP → туннель мёртв. Ensure обязан
+        добавлять geosite:youtube + dns.google, не трогая чужие записи."""
+        sets_state = [{
+            "id": "route-1", "name": "Youtube-Route-v1", "enabled": False,
+            "routing": {"mode": "proxy", "upstream":
+                        {"host": "127.0.0.1", "port": 10810}},
+            "targets": {"geoip_categories": ["google"],
+                        "sni_domains": ["my.custom.example"]},
+        }]
+        router = self._fake_rest_routes(sets_state)
+        with patch("chimera.modules.youtube_b4._b4_rest_request",
+                   side_effect=router):
+            s = self.mod._b4r_ensure_b4_set("Youtube-Route-v1", 10810)
+        self.assertIsNotNone(s)
+        t = sets_state[0]["targets"]
+        self.assertIn("youtube", t["geosite_categories"])
+        # пользовательские домены не тронуты, шаблонные добавлены
+        self.assertIn("my.custom.example", t["sni_domains"])
+        self.assertIn("dns.google", t["sni_domains"])
+        self.assertIn("dns.google.com", t["sni_domains"])
+        # идемпотентность: повторный ensure не дублирует
+        router = self._fake_rest_routes(sets_state)
+        with patch("chimera.modules.youtube_b4._b4_rest_request",
+                   side_effect=router) as spy:
+            self.mod._b4r_ensure_b4_set("Youtube-Route-v1", 10810)
+        puts = [c for c in spy.call_args_list
+                if c.args and c.args[0] == "PUT"]
+        self.assertEqual(len(puts), 0)  # всё уже на месте — без записи
+        self.assertEqual(sets_state[0]["targets"]["sni_domains"].count("dns.google"), 1)
 
     def test_ensure_set_fixes_port_mismatch(self):
         sets_state = [{
@@ -416,6 +450,12 @@ class TestTemplate(_XrayPatchMixin, unittest.TestCase):
         self.assertIs(t["routing"]["upstream"]["use_domain"], True)
         self.assertEqual(t["targets"]["geoip_categories"], ["google"])
         self.assertNotIn("ip", t["targets"])  # только geoip-категория, без ручных IP
+        # Домены именования CONNECT'ов: без них листенер не нюхает SNI
+        # (needsSniff = !names.Empty() || setHasDomains) и CONNECT уходит
+        # сырым IP — а exit-ноды гетерогенны по сырым Google-IP (RU1, прод).
+        self.assertEqual(t["targets"]["geosite_categories"], ["youtube"])
+        self.assertEqual(t["targets"]["sni_domains"],
+                         ["dns.google", "dns.google.com"])
 
     def test_template_no_public_ip_literals(self):
         """Нулевая IP-политика leak_guard: в шаблоне нет IP-литералов,
