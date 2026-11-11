@@ -351,6 +351,12 @@ class TestSyncWithYoutubeB4(unittest.TestCase):
         self.assertEqual(self.youtube_b4.B4_VERSION,
                          self.dpi_bypass.B4_VERSION)
 
+    def test_shared_resolve_install_version(self):
+        """_resolve_install_version есть в обоих модулях — установка b4
+        в dpi_bypass и youtube_b4 резолвит один и тот же свежий release."""
+        self.assertTrue(callable(self.youtube_b4._resolve_install_version))
+        self.assertTrue(callable(self.dpi_bypass._resolve_install_version))
+
     def test_shared_queue_and_mark(self):
         """B4_QUEUE_NUM / B4_MARK / B4_IPT_COMMENT — общие iptables параметры."""
         self.assertEqual(self.youtube_b4.B4_QUEUE_NUM,
@@ -495,6 +501,121 @@ class TestDetectLatestPrereleaseVersion(unittest.TestCase):
         self.assertEqual(called_request.full_url,
                          "https://api.github.com/repos/DanielLavrushin/b4/releases")
         self.assertNotIn("/latest", called_request.full_url)
+
+
+class TestInstallVersionResolve(unittest.TestCase):
+    """_resolve_install_version — свежий стабильный release при установке b4.
+
+    Установка b4 больше не тащит зашитую B4_VERSION (прод 11.11:
+    «Скачиваю b4 v1.78.0» при живом релизе 1.90.1 → сразу авто-обновление,
+    двойная загрузка binary). Резолвер спрашивает GitHub /releases/latest
+    через _detect_latest_version; недоступен/мусор → фолбэк B4_VERSION.
+    Тестируется в ОБОИХ модулях (dpi_bypass — централизованный,
+    youtube_b4 — зеркало): модули-близнецы, правки синхронны.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        from chimera.modules import youtube_b4, dpi_bypass
+        importlib.reload(youtube_b4)
+        importlib.reload(dpi_bypass)
+        self.youtube_b4 = youtube_b4
+        self.dpi_bypass = dpi_bypass
+
+    def _both_modules(self):
+        return (self.youtube_b4, self.dpi_bypass)
+
+    def test_returns_latest_release(self):
+        """Живой GitHub → резолвнутая версия latest release (оба модуля)."""
+        for mod in self._both_modules():
+            with self.subTest(module=mod.__name__):
+                mod._detect_latest_version = lambda timeout=10: "1.90.1"
+                self.assertEqual(mod._resolve_install_version(), "1.90.1")
+
+    def test_falls_back_when_github_unavailable(self):
+        """GitHub недоступен ('' от _detect_latest_version) → B4_VERSION."""
+        for mod in self._both_modules():
+            with self.subTest(module=mod.__name__):
+                mod._detect_latest_version = lambda timeout=10: ""
+                self.assertEqual(mod._resolve_install_version(),
+                                 mod.B4_VERSION)
+
+    def test_falls_back_on_garbage_version(self):
+        """Мусорный ответ API ('unknown') → фолбэк B4_VERSION (ключ-гард)."""
+        for mod in self._both_modules():
+            with self.subTest(module=mod.__name__):
+                mod._detect_latest_version = lambda timeout=10: "unknown"
+                self.assertEqual(mod._resolve_install_version(),
+                                 mod.B4_VERSION)
+
+    def test_strips_v_prefix_defensively(self):
+        """'v'-префикс от API снимается (URL собирается как v{version})."""
+        for mod in self._both_modules():
+            with self.subTest(module=mod.__name__):
+                mod._detect_latest_version = lambda timeout=10: "v1.90.1"
+                self.assertEqual(mod._resolve_install_version(), "1.90.1")
+
+    @patch("urllib.request.urlopen")
+    def test_download_uses_passed_version_in_url(self, mock_urlopen):
+        """_download_b4_binary('9.9.9') качает v9.9.9, а не зашитую версию."""
+        captured = {}
+
+        def fake_urlopen(req, timeout=60):
+            captured["url"] = req.full_url
+            raise Exception("stop-here")
+
+        mock_urlopen.side_effect = fake_urlopen
+        for mod in self._both_modules():
+            with self.subTest(module=mod.__name__):
+                captured.clear()
+                mod._detect_arch = lambda: "amd64"
+                self.assertFalse(mod._download_b4_binary("9.9.9"))
+                self.assertIn("/download/v9.9.9/b4-linux-amd64.tar.gz",
+                              captured["url"])
+                self.assertNotIn("v1.78.0", captured["url"])
+
+    @patch("urllib.request.urlopen")
+    def test_download_default_uses_b4_version(self, mock_urlopen):
+        """Пустая версия → B4_VERSION (прямая совместимость вызовов)."""
+        captured = {}
+
+        def fake_urlopen(req, timeout=60):
+            captured["url"] = req.full_url
+            raise Exception("stop-here")
+
+        mock_urlopen.side_effect = fake_urlopen
+        for mod in self._both_modules():
+            with self.subTest(module=mod.__name__):
+                captured.clear()
+                mod._detect_arch = lambda: "amd64"
+                self.assertFalse(mod._download_b4_binary())
+                self.assertIn(f"/download/v{mod.B4_VERSION}/b4-linux-amd64.tar.gz",
+                              captured["url"])
+
+    def test_install_b4_wiring_resolves_version(self):
+        """REGRESSION: install_b4 резолвит версию и пишет её в state."""
+        import inspect
+        for mod in self._both_modules():
+            with self.subTest(module=mod.__name__):
+                src = inspect.getsource(mod.install_b4)
+                self.assertIn("_resolve_install_version()", src,
+                              "install_b4() должен резолвить свежий release")
+                self.assertIn("_download_b4_binary(version)", src,
+                              "install_b4() должен передавать версию в скачивание")
+                self.assertIn('"version": version', src,
+                              "state должен нести фактическую версию установки")
+                self.assertNotIn('"version": B4_VERSION', src,
+                                 "state не должен тащить зашитую константу")
+
+    def test_resolver_defined_before_install(self):
+        """_resolve_install_version определён до install_b4 (порядок хелперов)."""
+        import inspect
+        for mod in self._both_modules():
+            with self.subTest(module=mod.__name__):
+                src = inspect.getsource(mod)
+                self.assertLess(src.index("def _resolve_install_version"),
+                                src.index("def install_b4"))
 
 
 class TestAutoUpdatePrerelease(unittest.TestCase):

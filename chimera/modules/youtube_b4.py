@@ -404,14 +404,45 @@ def _detect_arch() -> str:
     return arch_map.get(m, "")
 
 
-def _download_b4_binary() -> bool:
-    """Скачивает b4 binary с GitHub releases. Только Linux amd64/arm64."""
+def _resolve_install_version(timeout: int = 10) -> str:
+    """Версия b4 для УСТАНОВКИ: последний стабильный release, фолбэк — B4_VERSION.
+
+    Установка с зашитой B4_VERSION качала устаревший binary и тут же
+    обновляла его авто-обновлением (прод 11.11: «Скачиваю b4 v1.78.0» →
+    сразу «Обновление: 1.78.0 → 1.90.1» — двойная загрузка 24-МБ binary
+    и лишний рестарт сервиса). Теперь установка спрашивает GitHub
+    /releases/latest тем же механизмом, что и авто-обновление
+    (_detect_latest_version — только стабильные релизы, pre-release не
+    предлагается); GitHub недоступен / мусорный ответ → проверенная
+    B4_VERSION: установка не должна падать из-за метаданных.
+    Возвращает версию без 'v'-префикса.
+    """
+    latest = _detect_latest_version(timeout=timeout)
+    if latest.startswith("v"):
+        latest = latest[1:]   # гарда: URL собирается как v{version}
+    if latest and _b4_version_key(latest)[0]:
+        _info(f"Установка b4: последний стабильный release — v{latest}")
+        return latest
+    _warn(f"Установка b4: последний release неизвестен (GitHub недоступен) — "
+          f"ставлю проверенную v{B4_VERSION}")
+    return B4_VERSION
+
+
+def _download_b4_binary(version: str = "") -> bool:
+    """Скачивает b4 binary с GitHub releases. Только Linux amd64/arm64.
+
+    version — какая версия качается (без 'v'-префикса); пустая —
+    B4_VERSION (прямая совместимость прежних вызовов). install_b4
+    передаёт версию из _resolve_install_version — при живом GitHub
+    ставится свежий release, а не зашитая константа.
+    """
+    version = str(version or "").strip() or B4_VERSION
     arch = _detect_arch()
     if not arch:
         _err(f"Неподдерживаемая архитектура: {subprocess.run(['uname','-m'],capture_output=True,text=True).stdout.strip()}")
         return False
-    url = f"https://github.com/DanielLavrushin/b4/releases/download/v{B4_VERSION}/b4-linux-{arch}.tar.gz"
-    _info(f"Скачиваю b4 v{B4_VERSION} для linux-{arch}...")
+    url = f"https://github.com/DanielLavrushin/b4/releases/download/v{version}/b4-linux-{arch}.tar.gz"
+    _info(f"Скачиваю b4 v{version} для linux-{arch}...")
     tmp_tar = Path("/tmp/b4-linux.tar.gz")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "chimera-installer/5.0"})
@@ -1443,7 +1474,10 @@ def install_b4() -> bool:
     пресет через TUI ([2]) или Discovery в Web UI. Это даёт гибкость:
     не всем подойдут встроенные пресеты (зависит от провайдера/ТСПУ).
     """
-    if not _download_b4_binary():
+    # Свежий стабильный release вместо зашитой версии (фолбэк —
+    # B4_VERSION при недоступном GitHub, см. _resolve_install_version).
+    version = _resolve_install_version()
+    if not _download_b4_binary(version):
         return False
     if not _write_empty_config():
         return False
@@ -1477,12 +1511,13 @@ def install_b4() -> bool:
         _err(f"Не удалось запустить b4: {r.stderr.strip()}")
         _info("Проверьте логи: journalctl -u b4 -n 30")
         return False
-    # Сохраняем state — preset=None (пустой конфиг, пользователь выберет).
+    # Сохраняем state — preset=None (пустой конфиг, пользователь выберет);
+    # version — фактически установленная (резолвнутая, не константа).
     _save_state({
         "installed": True,
         "active_preset": None,
         "enabled": True,
-        "version": B4_VERSION,
+        "version": version,
         "web_port": B4_WEB_PORT,
         "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
