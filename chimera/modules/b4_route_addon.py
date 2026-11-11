@@ -473,13 +473,30 @@ def _b4r_rest(method: str, path: str, payload: Optional[dict] = None):
     return _b4_rest_request(method, path, payload)
 
 
+def _b4r_sets_list() -> Optional[list]:
+    """GET /api/sets → список сетов (устойчиво к формату ответа:
+    b4 отвечает ПЛОСКИМ МАССИВОМ [{...}, ...] — как ожидает и
+    youtube_b4._b4_rest_import_set (isinstance(sets, list)); dict-обёртка
+    {"sets": [...]} допускается как толерантность к будущим версиям).
+    None — REST недоступен."""
+    resp = _b4r_rest("GET", "/api/sets")
+    if not resp or resp[0] != 200:
+        return None
+    body = resp[1]
+    if isinstance(body, dict):
+        body = body.get("sets") or []
+    if not isinstance(body, list):
+        return None
+    return body
+
+
 def _b4r_find_b4_set(name: str) -> Optional[dict]:
     """Ищет сет по имени → полный объект сета (с revision) или None."""
-    resp = _b4r_rest("GET", "/api/sets")
-    if not resp or resp[0] != 200 or not isinstance(resp[1], dict):
+    sets = _b4r_sets_list()
+    if sets is None:
         return None
-    for s in (resp[1].get("sets") or []):
-        if str(s.get("name") or "") == name:
+    for s in sets:
+        if isinstance(s, dict) and str(s.get("name") or "") == name:
             # Полный объект: GET /api/sets/{id} (с revision для PUT).
             one = _b4r_rest("GET", f"/api/sets/{s.get('id')}")
             if one and one[0] == 200 and isinstance(one[1], dict):
@@ -559,8 +576,8 @@ def _b4r_b4_status() -> dict:
     """Снимок b4-стороны для статуса/TUI."""
     st = _b4r_load_state()
     out = {"rest_ok": False, "set": None, "front": None, "escalation_ok": None}
-    resp = _b4r_rest("GET", "/api/sets")
-    if resp and resp[0] == 200 and isinstance(resp[1], dict):
+    sets = _b4r_sets_list()
+    if sets is not None:
         out["rest_ok"] = True
         out["set"] = _b4r_find_b4_set(st["b4_route_set"])
         out["front"] = _b4r_find_b4_set(st["b4_route_front_set"])

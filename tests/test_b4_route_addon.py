@@ -258,12 +258,16 @@ class TestB4RestSide(_XrayPatchMixin, unittest.TestCase):
     """b4-сторона через REST (mock _b4_rest_request в youtube_b4)."""
 
     def _fake_rest_routes(self, sets_state):
-        """Роутер mock-ответов: список сетов / создание / PUT / batch."""
+        """Роутер mock-ответов: список сетов / создание / PUT / batch.
+
+        GET /api/sets отвечает ПЛОСКИМ МАССИВОМ — как реальный b4
+        (регресс: первый деплой споткнулся ровно об это, см. changelog).
+        """
         def router(method, path, payload=None, **kw):
             if method == "GET" and path == "/api/sets":
-                return (200, {"sets": [
+                return (200, [
                     {"id": s["id"], "name": s["name"], "enabled": s["enabled"]}
-                    for s in sets_state]})
+                    for s in sets_state])
             m = (method == "GET"
                  and path.startswith("/api/sets/")
                  and not path.endswith("/batch-set-enabled"))
@@ -366,6 +370,35 @@ class TestB4RestSide(_XrayPatchMixin, unittest.TestCase):
         puts = [c for c in spy.call_args_list
                 if c.args and c.args[0] == "PUT"]
         self.assertEqual(len(puts), 0)  # уже пропісано — без записи
+
+    def test_sets_list_tolerates_array_and_dict_shapes(self):
+        """РЕГРЕСС первого деплоя: реальный b4 отвечает ПЛОСКИМ МАССИВОМ
+        на GET /api/sets (как ждёт youtube_b4._b4_rest_import_set);
+        парсер обязан брать оба формата — массив и dict-обёртку."""
+        the_set = {"id": "route-1", "name": "Youtube-Route-v1",
+                   "enabled": True}
+        for shape in (
+            [the_set],                     # плоский массив — живой b4 1.90.0
+            {"sets": [the_set]},           # dict-обёртка — толерантность
+        ):
+            def router(method, path, payload=None, _shape=shape, **kw):
+                if method == "GET" and path == "/api/sets":
+                    return (200, _shape)
+                if method == "GET" and path == "/api/sets/route-1":
+                    return (200, dict(the_set))
+                return (404, {"error": "no route"})
+            with patch("chimera.modules.youtube_b4._b4_rest_request",
+                       side_effect=router):
+                sets = self.mod._b4r_sets_list()
+                self.assertIsNotNone(sets, f"формат не распознан: {type(shape)}")
+                self.assertEqual(len(sets), 1)
+                found = self.mod._b4r_find_b4_set("Youtube-Route-v1")
+                self.assertIsNotNone(found)
+                self.assertEqual(found.get("id"), "route-1")
+        # REST недоступен → None (не список)
+        with patch("chimera.modules.youtube_b4._b4_rest_request",
+                   return_value=None):
+            self.assertIsNone(self.mod._b4r_sets_list())
 
 
 class TestTemplate(_XrayPatchMixin, unittest.TestCase):
