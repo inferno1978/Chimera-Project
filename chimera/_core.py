@@ -3107,6 +3107,17 @@ def _rebuild_and_restart_xray(ok_msg: str = "Xray активен") -> None:
     except Exception:
         pass  # не критично — это best-effort restore
 
+    # B4 Route: socks-inbound «b4-route-in» + правило inboundTag→exit
+    # (b4_route_addon, Настройки сети → BR). Тот же regenerate-риск: без
+    # restore терялся бы socks-инбаунд и правило терминатора эскалации.
+    try:
+        from chimera.modules.b4_route_addon import restore_b4_route_if_needed
+        restore_b4_route_if_needed(silent=False)
+    except ImportError:
+        pass
+    except Exception:
+        pass  # не критично — это best-effort restore
+
     # Кастомные outbound'ы (свои теги в outbounds[]). ВЫЗЫВАЕТСЯ ПЕРВЫМ из
     # restore-хуков: dns_custom:* и custom:* routing-правила могут ссылаться
     # на кастомные теги — outbound должен существовать к моменту их re-apply.
@@ -8440,6 +8451,7 @@ def _menu_network() -> None:
         _box_sep()
         _box_item("Y", f"📺 YouTube через RU  {DIM}(geosite:youtube → direct/exit toggle){NC}")
         _box_item("B", f"🛡 DPI Bypass (b4)  {DIM}(централизованный, для любых заблокированных ресурсов){NC}")
+        _box_item("BR", f"🛫 B4 Route: YouTube-эскалация → VLESS-exit  {DIM}(терминатор цепи сетов: socks-туннель → балансёр/нода){NC}")
         _box_item("MB", f"🧅 Mieru + B4  {DIM}(DPI bypass через Mieru-транспорт: те же сеты b4, маршрутка в клиентские конфиги){NC}")
         _box_sep()
         _box_item("H", f"🚀 Hysteria2 транспорт  {DIM}(Режим B, Exit-нода, Балансировщик, DPI){NC}")
@@ -8622,6 +8634,17 @@ def _menu_network() -> None:
                 do_mieru_dpi_menu()
             except ImportError as e:
                 warn(f"Модуль mieru_dpi не найден: {e}")
+                time.sleep(2)
+        elif ch.lower() == "br":
+            # B4 Route — терминатор эскалации YouTube: socks-туннель Xray
+            # → exit-каскад (балансёр/ручная нода). Третье звено цепочки
+            # сетов b4: Fat (disorder) → Heavy (tcp) → Route (туннель).
+            _load_state_into_globals()
+            try:
+                from chimera.modules.b4_route_addon import do_manage_b4_route
+                do_manage_b4_route()
+            except ImportError as e:
+                warn(f"Модуль b4_route_addon не найден: {e}")
                 time.sleep(2)
         elif ch.lower() == "q" or ch == "":
             break

@@ -78,6 +78,7 @@ tests.test_awg_transport_31
 tests.test_awg_ui_smoke
 tests.test_b4_mcp_nginx
 tests.test_b4_monitor
+tests.test_b4_route_addon
 tests.test_backup_registry
 tests.test_bandwidth_monitor
 tests.test_bootstrap_mirrors

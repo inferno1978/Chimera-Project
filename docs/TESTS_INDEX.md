@@ -2,7 +2,7 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **324** (гейт-манифест: **324**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **325** (гейт-манифест: **325**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
 ## AmneziaWG (transport Mode B + standalone 2.0) (31)
@@ -408,6 +408,17 @@
 | [`test_warp_subnet_table.py`](../tests/test_warp_subnet_table.py) | Unit-тесты «таблицы подсетей» — warpscout-дашборда Chimera | ✓ |
 | [`test_warp_telegram_probe.py`](../tests/test_warp_telegram_probe.py) | Unit-тесты интеграции идей warpscout / warpscout-tg в WARP-модуль Chimera. | ✓ |
 
+## YouTube/b4 (DPI bypass) (6)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_b4_mcp_nginx.py`](../tests/test_b4_mcp_nginx.py) | Тесты MCP-проксирования b4 через nginx front. | ✓ |
+| [`test_b4_monitor.py`](../tests/test_b4_monitor.py) | Unit-тесты ops-слоя B4 (chimera/modules/b4_monitor.py). | ✓ |
+| [`test_b4_route_addon.py`](../tests/test_b4_route_addon.py) | Тесты для chimera/modules/b4_route_addon.py — терминатора эскалации | ✓ |
+| [`test_youtube_ip_pin.py`](../tests/test_youtube_ip_pin.py) | Тесты для chimera/modules/youtube_ip_pin.py — экспериментальная опция | ✓ |
+| [`test_youtube_route.py`](../tests/test_youtube_route.py) | Тесты для chimera/modules/youtube_route.py — переключателя маршрутизации | ✓ |
+| [`test_youtube_route_v5013.py`](../tests/test_youtube_route_v5013.py) | Регрессионные тесты для    — стабильность YouTube через RU+fragment. | ✓ |
+
 ## DPI-детекторы и гейты (6)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -428,16 +439,6 @@
 | [`test_agh_probe.py`](../tests/test_agh_probe.py) | Unit-тесты для chimera/modules/agh_probe.py — health-check локального | ✓ |
 | [`test_agh_ratelimit_heal.py`](../tests/test_agh_ratelimit_heal.py) | : «Клиент сыпал EOFами — убрал AGH, всё заработало». | ✓ |
 | [`test_aghome_setup.py`](../tests/test_aghome_setup.py) | Unit-тесты для AdGuard Home стека Chimera: | ✓ |
-
-## YouTube/b4 (DPI bypass) (5)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_b4_mcp_nginx.py`](../tests/test_b4_mcp_nginx.py) | Тесты MCP-проксирования b4 через nginx front. | ✓ |
-| [`test_b4_monitor.py`](../tests/test_b4_monitor.py) | Unit-тесты ops-слоя B4 (chimera/modules/b4_monitor.py). | ✓ |
-| [`test_youtube_ip_pin.py`](../tests/test_youtube_ip_pin.py) | Тесты для chimera/modules/youtube_ip_pin.py — экспериментальная опция | ✓ |
-| [`test_youtube_route.py`](../tests/test_youtube_route.py) | Тесты для chimera/modules/youtube_route.py — переключателя маршрутизации | ✓ |
-| [`test_youtube_route_v5013.py`](../tests/test_youtube_route_v5013.py) | Регрессионные тесты для    — стабильность YouTube через RU+fragment. | ✓ |
 
 ## Telegram-боты и уведомления (5)
 
