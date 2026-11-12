@@ -18,6 +18,11 @@ Unit-тесты для AdGuard Home стека Chimera:
   13. anti-duplicate-keys: дубли top-level ключей YAML = crash-loop AGH
       (инцидент <node-2>: «whitelist_filters already defined», рестарт-каунтер 390+)
       + _wait_service: флапающий crash-loop не считается успехом
+  14. смена TLS-порта DoH + Web UI HTTPS ПОСЛЕ установки (меню A → 7):
+      строгая пред-валидация занятости (port_registry, канон тоже
+      проверяется), промпт с текущим портом, конвейер
+      change_doh_port_interactive → finalize_aghome_config
+      (UFW/реестр: старый закрывается, новый открывается)
 """
 from __future__ import annotations
 
@@ -2557,3 +2562,284 @@ class TestWebUiHelpers(unittest.TestCase):
         with patch.object(self.mod, "_get_public_ip",
                           return_value="192.168.50.1"):
             self.assertEqual(self.mod._webui_tls_host({"domain": ""}), "")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Смена TLS-порта DoH + Web UI HTTPS ПОСЛЕ установки (меню A → 7)
+# ─────────────────────────────────────────────────────────────────────────────
+class TestDohPortChange(unittest.TestCase):
+    """Смена DoH-порта живой установки (запрос владельца): через
+    port_registry — новый порт открывается, старый закрывается/снимается;
+    ДО применения выбранный порт проверяется на свободу.
+
+    Конвейер: _ask_doh_port_change (промпт, Enter = текущий) →
+    _validate_doh_port_change (строже wizard'а: канон тоже проверяется)
+    → повторная проверка перед применением (гонка) →
+    finalize_aghome_config(doh_port=новый) — UFW/реестр/state меняет он.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        import importlib
+        import chimera.modules.aghome_setup as ags
+        importlib.reload(ags)
+        self.mod = ags
+
+    def _core_mock(self):
+        core = MagicMock()
+        core.info = core.warn = core.success = lambda *a, **k: None
+        core._box_top = core._box_row = core._box_sep = core._box_bottom = (
+            lambda *a, **k: None)
+        core.CYAN = core.NC = core.DIM = core.YELLOW = core.BLUE = ""
+        return core
+
+    # ── _validate_doh_port_change — строгая смена ──────────────────
+
+    def test_change_validation_same_port_noop(self):
+        """port == current — валидный no-op: port_registry не дёргается
+        (ss видит слушателя AGH на текущем порту — не «занятость»)."""
+        import chimera.modules.port_registry as pr
+        with patch.object(pr, "port_is_free",
+                          return_value=(False, ["занят"])) as pf:
+            ok, why = self.mod._validate_doh_port_change(30443, 30443, 3000)
+        self.assertTrue(ok)
+        self.assertEqual(why, "")
+        pf.assert_not_called()
+
+    def test_change_validation_range(self):
+        ok, why = self.mod._validate_doh_port_change(444, 30443, 3000)
+        self.assertFalse(ok)
+        self.assertIn("1024–65535", why)
+
+    def test_change_validation_reserved_ports(self):
+        # 22/53/80/443/853 < 1024 — отсекаются раньше проверкой
+        # диапазона (паттерн _validate_web_port: range → reserved)
+        for port in (22, 53, 80, 443, 853):
+            ok, why = self.mod._validate_doh_port_change(port, 30443, 3000)
+            self.assertFalse(ok, f"порт {port} должен быть отброшен")
+            self.assertIn("1024–65535", why)
+        for port in (5300, 3000):
+            ok, why = self.mod._validate_doh_port_change(port, 30443, 3000)
+            self.assertFalse(ok, f"порт {port} должен быть служебным")
+            self.assertIn("служебный", why)
+
+    def test_change_validation_web_port_rejected(self):
+        ok, why = self.mod._validate_doh_port_change(8081, 30443, 8081)
+        self.assertFalse(ok)
+        self.assertIn("служебный", why)
+
+    def test_change_validation_occupied(self):
+        import chimera.modules.port_registry as pr
+        with patch.object(pr, "port_is_free",
+                          return_value=(False,
+                                        ["Порт уже слушается процессом: xray"])):
+            ok, why = self.mod._validate_doh_port_change(31443, 30443, 3000)
+        self.assertFalse(ok)
+        self.assertIn("порт занят", why)
+        self.assertIn("xray", why)
+
+    def test_change_validation_canonical_strict(self):
+        """Ключевое отличие от wizard-версии: канон 30443 при смене
+        проверяется наравне (wizard early-return терпит свой слушатель
+        при переустановке — здесь цель-канон обычный порт)."""
+        import chimera.modules.port_registry as pr
+        with patch.object(pr, "port_is_free",
+                          return_value=(False, ["Порт уже слушается: vless"])):
+            ok, why = self.mod._validate_doh_port_change(30443, 31443, 3000)
+        self.assertFalse(ok)
+        self.assertIn("порт занят", why)
+
+    def test_change_validation_free_ok(self):
+        import chimera.modules.port_registry as pr
+        with patch.object(pr, "port_is_free",
+                          return_value=(True, [])) as pf:
+            ok, why = self.mod._validate_doh_port_change(31443, 30443, 3000)
+        self.assertTrue(ok)
+        self.assertEqual(why, "")
+        pf.assert_called_once_with(31443, "tcp",
+                                   exclude_service=pr.SERVICE_AGHOME_DOH)
+
+    def test_wizard_validation_range_hole_closed(self):
+        """wizard _validate_doh_port: диапазон 1024–65535 теперь
+        проверяется и там (раньше 444 проходило); канон — без проверок."""
+        ok, why = self.mod._validate_doh_port(444, 3000)
+        self.assertFalse(ok)
+        self.assertIn("1024–65535", why)
+        ok, why = self.mod._validate_doh_port(30443, 3000)
+        self.assertTrue(ok)
+        self.assertEqual(why, "")
+
+    # ── _ask_doh_port_change — промпт ─────────────────────────────
+
+    def _ask(self, inputs, current=30443, web_port=3000,
+             free_seq=None):
+        import chimera.modules.port_registry as pr
+        if free_seq is not None:
+            _pif = patch.object(pr, "port_is_free", side_effect=free_seq)
+        else:
+            _pif = patch.object(pr, "port_is_free",
+                                return_value=(True, []))
+        with patch.object(self.mod, "_core_module",
+                          return_value=self._core_mock()), \
+             _pif, \
+             patch("builtins.input", side_effect=inputs):
+            return self.mod._ask_doh_port_change(current, web_port)
+
+    def test_ask_change_enter_keeps_current(self):
+        self.assertEqual(self._ask([""]), 30443)
+
+    def test_ask_change_eof_cancels(self):
+        self.assertEqual(self._ask([EOFError]), 30443)
+
+    def test_ask_change_same_port_returns_current(self):
+        self.assertEqual(self._ask(["30443"]), 30443)
+
+    def test_ask_change_invalid_then_valid(self):
+        self.assertEqual(self._ask(["abc", "31443"]), 31443)
+
+    def test_ask_change_occupied_reasks(self):
+        """первый выбранный порт занят — промпт сообщает причину и
+        переспрашивает; второй свободен — принимается."""
+        self.assertEqual(
+            self._ask(["31443", "31543"],
+                      free_seq=[(False, ["занят xray"]), (True, [])]),
+            31543)
+
+    # ── change_doh_port_interactive — конвейер ─────────────────────
+
+    def _state(self, **over):
+        st = {"phase": "finalized", "web_mode": "https_le",
+              "domain": "agh.example", "web_port": 3000,
+              "doh_port": 30443, "tls_enabled": True}
+        st.update(over)
+        return st
+
+    def _run_change(self, state, inputs, free_seq=None):
+        import chimera.modules.port_registry as pr
+        conf = MagicMock()
+        conf.exists.return_value = True
+        if free_seq is not None:
+            _pif = patch.object(pr, "port_is_free", side_effect=free_seq)
+        else:
+            _pif = patch.object(pr, "port_is_free",
+                                return_value=(True, []))
+        with patch.object(self.mod, "AGH_CONF", conf), \
+             patch.object(self.mod, "aghome_wizard_pending",
+                          return_value=False), \
+             patch.object(self.mod, "aghome_state_load",
+                          return_value=state), \
+             patch.object(self.mod, "_core_module",
+                          return_value=self._core_mock()), \
+             patch.object(self.mod, "finalize_aghome_config",
+                          return_value=True) as fin, \
+             _pif, \
+             patch("builtins.input", side_effect=inputs):
+            ok = self.mod.change_doh_port_interactive()
+        return ok, fin
+
+    def test_change_requires_config(self):
+        conf = MagicMock()
+        conf.exists.return_value = False
+        with patch.object(self.mod, "AGH_CONF", conf), \
+             patch.object(self.mod, "aghome_wizard_pending",
+                          return_value=False), \
+             patch.object(self.mod, "_core_module",
+                          return_value=self._core_mock()), \
+             patch.object(self.mod, "finalize_aghome_config") as fin:
+            self.assertFalse(self.mod.change_doh_port_interactive())
+        fin.assert_not_called()
+
+    def test_change_wizard_pending_rejected(self):
+        conf = MagicMock()
+        conf.exists.return_value = True
+        with patch.object(self.mod, "AGH_CONF", conf), \
+             patch.object(self.mod, "aghome_wizard_pending",
+                          return_value=True), \
+             patch.object(self.mod, "_core_module",
+                          return_value=self._core_mock()), \
+             patch.object(self.mod, "finalize_aghome_config") as fin:
+            self.assertFalse(self.mod.change_doh_port_interactive())
+        fin.assert_not_called()
+
+    def test_change_plain_mode_rejected(self):
+        """DoH живёт на tls.port_https — plain-режимы его не поднимают:
+        смена бессмысленна до переключения режима (пункт 4)."""
+        ok, fin = self._run_change(
+            self._state(web_mode="http_public", tls_enabled=False),
+            ["31443", "y"])
+        self.assertFalse(ok)
+        fin.assert_not_called()
+
+    def test_change_noop_same_port(self):
+        ok, fin = self._run_change(self._state(), ["30443"])
+        self.assertFalse(ok)
+        fin.assert_not_called()
+
+    def test_change_declined_confirmation(self):
+        ok, fin = self._run_change(self._state(), ["31443", "n"])
+        self.assertFalse(ok)
+        fin.assert_not_called()
+
+    def test_change_happy_path_calls_finalize(self):
+        ok, fin = self._run_change(self._state(), ["31443", "y"])
+        self.assertTrue(ok)
+        fin.assert_called_once_with(web_mode="https_le",
+                                    domain="agh.example",
+                                    web_port=3000, doh_port=31443)
+
+    def test_change_custom_back_to_canonical(self):
+        """текущий кастомный 31443 → возврат к канону 30443 — смена
+        работает в обе стороны (no-op только при равенстве)."""
+        ok, fin = self._run_change(self._state(doh_port=31443),
+                                   ["30443", "y"])
+        self.assertTrue(ok)
+        fin.assert_called_once_with(web_mode="https_le",
+                                    domain="agh.example",
+                                    web_port=3000, doh_port=30443)
+
+    def test_change_race_recheck_blocks_finalize(self):
+        """Порт был свободен в промпте, занят к моменту применения —
+        повторная проверка (гонка промпт→подтверждение) останавливает
+        финализацию ДО записи конфига."""
+        ok, fin = self._run_change(
+            self._state(), ["31443", "y"],
+            free_seq=[(True, []),
+                      (False, ["Порт уже слушается: xray"])])
+        self.assertFalse(ok)
+        fin.assert_not_called()
+
+    # ── wiring: меню A → 7, порядок, экспорт ────────────────────────
+
+    def test_menu_item_7_wired(self):
+        import inspect
+        src = inspect.getsource(self.mod.do_aghome_menu)
+        self.assertIn('_box_item("7"', src)
+        self.assertIn("change_doh_port_interactive()", src)
+        # подсказка пункта показывает текущий DoH-порт из state
+        self.assertIn("doh_port", src)
+
+    def test_change_pipeline_wired(self):
+        import inspect
+        src = inspect.getsource(self.mod.change_doh_port_interactive)
+        self.assertIn("_ask_doh_port_change(", src)
+        self.assertIn("_validate_doh_port_change(", src)
+        self.assertIn("finalize_aghome_config(", src)
+        # гварды: конфиг/мастер/режим TLS
+        self.assertIn("aghome_wizard_pending", src)
+        self.assertIn("AGH_WEB_HTTPS_LE", src)
+
+    def test_change_doh_port_exported(self):
+        self.assertIn("change_doh_port_interactive", self.mod.__all__)
+        self.assertTrue(callable(self.mod.change_doh_port_interactive))
+
+    def test_helpers_order(self):
+        """_validate_doh_port_change ДО _ask_doh_port_change (промпт
+        зовёт валидатор); change_doh_port_interactive ДО do_aghome_menu."""
+        import inspect
+        src = inspect.getsource(self.mod)
+        i_val = src.index("def _validate_doh_port_change(")
+        i_ask = src.index("def _ask_doh_port_change(")
+        i_change = src.index("def change_doh_port_interactive(")
+        i_menu = src.index("def do_aghome_menu(")
+        self.assertLess(i_val, i_ask)
+        self.assertLess(i_change, i_menu)

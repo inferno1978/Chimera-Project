@@ -91,7 +91,9 @@ MIGRATION (нулевый даунтайм на живых серверах):
                                даст ERR_SSL_PROTOCOL_ERROR — порт не говорит
                                TLS; браузерный вход — только :30443)
   :30443/tcp    aghome_doh   — DoH + Web UI HTTPS (native TLS AGH) —
-                               браузерный вход Web UI в TLS-режимах
+                               браузерный вход Web UI в TLS-режимах;
+                               кастомизируется: wizard при установке
+                               или Сеть → A → 7 (смена после установки)
   :853/tcp      aghome_dot   — DoT
   :853/udp      aghome_doq   — DoQ
   :5300         dnscrypt     — upstream (loopback, force=True)
@@ -1891,8 +1893,9 @@ def _validate_web_port(port: int) -> "tuple[bool, str]":
 def _ask_web_port() -> int:
     """Спрашивает порт Web UI (plain HTTP/локальный вход;).
 
-    Основной вход в Web UI — TLS :30443 (не меняется). Кастомный порт
-    управляет plain-доступом: режим «HTTP публично» и локальный вход.
+    Основной вход — TLS-порт DoH (:30443 или кастомный: wizard при
+    установке / Сеть → A → 7 после). Кастомный порт ниже управляет
+    plain-доступом: режим «HTTP публично» и локальный вход.
     Wizard-фаза всегда на :3000 — порт применяется при финализации.
     """
     core = _core_module()
@@ -1939,11 +1942,13 @@ def _validate_doh_port(port: int, web_port: int = 0) -> "tuple[bool, str]":
     Канонический AGH_DOH_PORT проходит без проверок (поведение по
     умолчанию). Кастомный не должен совпадать со служебными портами
     DNS-стека (22/53/80/443/853/5300), портом Web UI (кастомным или
-    дефолтным :3000 — wizard-фаза всегда слушает его) и не должен
-    быть занят чужим слушателем.
+    дефолтным :3000 — wizard-фаза всегда слушает его), попадать в
+    диапазон 1024–65535 и не должен быть занят чужим слушателем.
     """
     if port == AGH_DOH_PORT:
         return True, ""
+    if not (1024 <= port <= 65535):
+        return False, "порт должен быть в диапазоне 1024–65535"
     reserved = set(AGH_WEB_PORT_RESERVED) | {AGH_WEB_PORT}
     if web_port:
         reserved.add(int(web_port))
@@ -2011,6 +2016,99 @@ def _ask_doh_port(web_port: int = AGH_WEB_PORT) -> int:
             raw = input(f"{CYAN}  TLS-порт DoH [{AGH_DOH_PORT}]: {NC}").strip()
         except (EOFError, KeyboardInterrupt):
             return AGH_DOH_PORT
+
+
+def _validate_doh_port_change(port: int, current_port: int,
+                              web_port: int = 0) -> "tuple[bool, str]":
+    """Строгая валидация НОВОГО DoH-порта — смена на живой установке.
+
+    Отличия от wizard-версии _validate_doh_port:
+      • канонический AGH_DOH_PORT проверяется наравне со всеми:
+        wizard-early-return (Enter = 30443 при живом AGH на переустановке —
+        собственный слушатель не помеха) здесь не нужен: цель-канон —
+        обычный порт с полной проверкой занятости;
+      • port == current — валидный no-op: вызывающий различает «не
+        изменился» ДО системной проверки (ss видит слушателя AGH на
+        текущем порту, exclude_service покрывает только реестр/UFW,
+        не системных слушателей).
+    """
+    if port == current_port:
+        return True, ""
+    if not (1024 <= port <= 65535):
+        return False, "порт должен быть в диапазоне 1024–65535"
+    reserved = set(AGH_WEB_PORT_RESERVED) | {AGH_WEB_PORT}
+    if web_port:
+        reserved.add(int(web_port))
+    reserved.discard(AGH_DOH_PORT)
+    if port in reserved:
+        return False, (f"порт {port} служебный (SSH/DNS/Web/DoT/DoQ/dnscrypt) "
+                       "— выберите другой")
+    try:
+        from chimera.modules.port_registry import (
+            port_is_free, SERVICE_AGHOME_DOH,
+        )
+        free, conflicts = port_is_free(port, "tcp",
+                                       exclude_service=SERVICE_AGHOME_DOH)
+        if not free:
+            return False, "порт занят: " + "; ".join(conflicts[:3])
+    except Exception:
+        # port_registry недоступен — не блокируем, проверим хотя бы ss
+        if _port_listening(port, "tcp"):
+            return False, f"порт {port}/tcp уже слушается"
+    return True, ""
+
+
+def _ask_doh_port_change(current_port: int = AGH_DOH_PORT,
+                         web_port: int = AGH_WEB_PORT) -> int:
+    """Спрашивает НОВЫЙ TLS-порт DoH + Web UI HTTPS (после установки).
+
+    Смена порта живой установки (меню A → 7): Enter = текущий порт
+    (отмена смены), EOF/Ctrl+C → текущий. Валидация строже wizard'а
+    (_validate_doh_port_change): занятость проверяется для ЛЮБОГО
+    выбранного порта, включая канонический :30443. Возвращает
+    выбранный порт; равный текущему = «не изменился» (вызывающий
+    различает сравнением).
+    """
+    core = _core_module()
+    CYAN, NC, DIM, YELLOW = core.CYAN, core.NC, core.DIM, core.YELLOW
+    _box_top, _box_row, _box_sep, _box_bottom = (
+        core._box_top, core._box_row, core._box_sep, core._box_bottom)
+    print()
+    _box_top("🛡️  AdGuard Home — смена TLS-порта DoH + Web UI HTTPS")
+    _box_row()
+    _box_row(f"  {DIM}Текущий порт :{current_port} обслуживает DoH и Web UI HTTPS.{NC}")
+    _box_row(f"  {DIM}Один TLS-порт (tls.port_https) — смена переезжает оба сразу.{NC}")
+    _box_row(f"  {DIM}Enter — оставить :{current_port} (отмена).{NC}")
+    _box_sep()
+    _box_row(f"  {DIM}Старый порт закроется (UFW/реестр), новый откроется;{NC}")
+    _box_row(f"  {DIM}DoH-клиенты нужно перевести на новый URL.{NC}")
+    _box_bottom()
+    try:
+        raw = input(f"{CYAN}  Новый TLS-порт [{current_port}]: {NC}").strip()
+    except (EOFError, KeyboardInterrupt):
+        return current_port
+    while True:
+        if not raw:
+            return current_port
+        try:
+            port = int(raw)
+        except ValueError:
+            try:
+                print(f"{YELLOW}  Нужно число (Enter = {current_port}){NC}")
+                raw = input(f"{CYAN}  Новый TLS-порт [{current_port}]: {NC}").strip()
+            except (EOFError, KeyboardInterrupt):
+                return current_port
+            continue
+        if port == current_port:
+            return current_port
+        ok, why = _validate_doh_port_change(port, current_port, web_port)
+        if ok:
+            return port
+        try:
+            print(f"{YELLOW}  {why}{NC}")
+            raw = input(f"{CYAN}  Новый TLS-порт [{current_port}]: {NC}").strip()
+        except (EOFError, KeyboardInterrupt):
+            return current_port
 
 
 def _ask_web_mode() -> "tuple[str, str]":
@@ -3961,6 +4059,93 @@ def print_aghome_status() -> None:
 # ============================================================================
 #  TUI-МЕНЮ
 # ============================================================================
+def change_doh_port_interactive() -> bool:
+    """Смена TLS-порта DoH + Web UI HTTPS на ЖИВОЙ установке (меню A → 7).
+
+    Требование владельца: через port_registry — при смене открывается
+    НОВЫЙ порт и закрывается/снимается СТАРЫЙ; ДО применения выбранный
+    порт проверяется на свободу.
+
+    Конвейер:
+      1. Гарды: конфиг существует, мастер завершён, режим TLS (DoH живёт
+         на tls.port_https — plain-режимы его не поднимают, смена там
+         бессмысленна до переключения режима пунктом 4).
+      2. Строгая пред-валидация _validate_doh_port_change: диапазон
+         1024–65535, не служебный, не порт Web UI, port_is_free
+         (exclude_service=aghome_doh — собственные записи/правила AGH
+         конфликтом не считаются).
+      3. Повторная проверка занятости НЕПОСРЕДСТВЕННО перед применением
+         (гонка: порт мог быть занят между промптом и подтверждением).
+      4. finalize_aghome_config(doh_port=новый) — конвейер смены порта
+         уже существует: yaml tls.port_https, рестарт, верификация
+         TLS-портов, _register_aghome_ports (UFW+реестр: СТАРЫЙ порт
+         закрывается и снимается с регистрации, НОВЫЙ регистрируется
+         и открывается — порты не текут), state (doh_port — статус/
+         ссылки/hybrid_addon читают его оттуда).
+
+    Откат: провал финализации → Self-heal #2 возвращает конфиг мастера
+    (со СТАРЫМ портом), регистрация портов не происходит (шаг ПОСЛЕ
+    успешного рестарта) — UFW/реестр остаются со старым портом.
+    """
+    core = _core_module()
+    info, warn = core.info, core.warn
+
+    if not AGH_CONF.exists() or aghome_wizard_pending():
+        warn("AGH: конфиг не готов (мастер не завершён) — сначала пункты 1/2")
+        return False
+
+    st = aghome_state_load()
+    web_mode = st.get("web_mode", AGH_WEB_HTTPS_LE)
+    if web_mode not in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF):
+        warn(f"AGH: режим Web UI «{_web_mode_label(web_mode)}» без TLS — "
+             "DoH-порт не поднят (tls.port_https = 0)")
+        info("AGH: смените режим на HTTPS (пункт 4), затем меняйте порт")
+        return False
+
+    try:
+        current_port = int(st.get("doh_port", 0) or 0)
+    except (TypeError, ValueError):
+        current_port = 0
+    if not current_port or not (1 <= current_port <= 65535):
+        current_port = AGH_DOH_PORT
+    try:
+        web_port = int(st.get("web_port", 0) or 0)
+    except (TypeError, ValueError):
+        web_port = 0
+    if not web_port or not (1 <= web_port <= 65535):
+        web_port = AGH_WEB_PORT
+
+    new_port = _ask_doh_port_change(current_port, web_port)
+    if new_port == current_port:
+        info(f"AGH: порт не изменился (:{current_port}) — отмена")
+        return False
+
+    # повторная проверка занятости перед применением (гонка промпт → подтверждение)
+    ok, why = _validate_doh_port_change(new_port, current_port, web_port)
+    if not ok:
+        warn(f"AGH: порт {new_port} больше не свободен ({why}) — отмена")
+        return False
+
+    try:
+        ans = input(
+            f"Сменить TLS-порт DoH {current_port} → {new_port}? "
+            "(AGH перезапустится, старый порт закроется в UFW/реестре) "
+            "[y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = "n"
+    if ans not in ("y", "yes"):
+        info("AGH: смена порта отменена")
+        return False
+
+    info(f"AGH: применяю TLS-порт {current_port} → {new_port} (финализация)...")
+    return finalize_aghome_config(
+        web_mode=web_mode,
+        domain=st.get("domain", ""),
+        web_port=web_port,
+        doh_port=new_port,
+    )
+
+
 def do_aghome_menu() -> None:
     """Меню AdGuard Home (Сеть → A)."""
     core = _core_module()
@@ -3999,6 +4184,14 @@ def do_aghome_menu() -> None:
         _box_item("4", f"🔒 Сменить режим Web UI / TLS{DIM}(домен, self-signed, публичность){NC}")
         _box_item("5", f"🔄 Переприменить конфиг{DIM}(фильтры/DoH/DoT/DoQ по канону){NC}")
         _box_item("6", f"⬆️  Обновление/синк dnscrypt{DIM}(версия/пул/цепочка — общее меню){NC}")
+        _doh_hint = "(DoH + Web UI HTTPS, проверка занятости, UFW/реестр)"
+        if phase == "finalized" and st.get("tls_enabled"):
+            try:
+                _p = int(st.get("doh_port", 0) or 0) or AGH_DOH_PORT
+            except (TypeError, ValueError):
+                _p = AGH_DOH_PORT
+            _doh_hint = f"(текущий :{_p} — DoH + Web UI HTTPS)"
+        _box_item("7", f"🔌 Сменить TLS-порт DoH{DIM}{_doh_hint}{NC}")
         _box_sep()
         _box_item("9", f"🗑️  Удалить AdGuard Home{DIM}(откат к dnscrypt:5300){NC}")
         _box_row()
@@ -4073,6 +4266,15 @@ def do_aghome_menu() -> None:
             except Exception as e:
                 core.warn(f"AGH: ошибка переприменения: {e}")
             input(f"{core.BLUE}Нажмите Enter...{NC}")
+        elif ch == "7":
+            # смена TLS-порта DoH + Web UI HTTPS на живой установке
+            # (port_registry: новый открывается, старый закрывается,
+            # занятость проверяется ДО применения)
+            try:
+                change_doh_port_interactive()
+            except Exception as e:
+                core.warn(f"AGH: ошибка смены DoH-порта: {e}")
+            input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch == "9":
             try:
                 ans = input(f"{RED}Удалить AdGuard Home полностью? [y/N]: {NC}").strip().lower()
@@ -4103,6 +4305,7 @@ __all__ = [
     "aghome_status",
     "print_aghome_status",
     "do_aghome_menu",
+    "change_doh_port_interactive",
     "migrate_dnscrypt_off_53",
     "yaml_replace_sections",
     "AGH_CONF", "AGH_BIN", "AGH_WORK_DIR", "AGH_STATE_FILE",
