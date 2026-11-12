@@ -978,7 +978,9 @@ class TestWebPortLifecycleV49(unittest.TestCase):
              patch.object(self.mod, "_core_module") as cm:
             cm.return_value.info = MagicMock()
             self.mod._register_aghome_ports(5300, True, True, web_port=8081)
-        lst.assert_called_with(pr.SERVICE_AGHOME_WEB)
+        # вызывается и для Web UI, и для DoH (кастомный DoH-порт: смена
+        # тоже закрывает старый) — поэтому any_call, не строгий последний
+        lst.assert_any_call(pr.SERVICE_AGHOME_WEB)
         close.assert_any_call(3000, "tcp", pr.SERVICE_AGHOME_WEB)
         unreg.assert_any_call(pr.SERVICE_AGHOME_WEB, port=3000, proto="tcp")
 

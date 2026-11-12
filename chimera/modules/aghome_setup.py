@@ -1257,11 +1257,14 @@ def build_dns_section(dc_port: int, public_ip: str, tls_enabled: bool,
 
 
 def build_tls_section(tls_enabled: bool, server_name: str,
-                      cert_path: Optional[Path], key_path: Optional[Path]) -> str:
+                      cert_path: Optional[Path], key_path: Optional[Path],
+                      doh_port: int = AGH_DOH_PORT) -> str:
     """Секция tls: — DoH(:30443) + DoT(:853) + DoQ(:853) + HTTPS Web UI.
 
     port_https обслуживает И DoH, И Web UI (AGH мультиплексирует их на
     одном HTTPS-порту). allow_unencrypted_doh: false — DoH только через TLS.
+    doh_port — кастомный TLS-порт (кастомизация wizard'а; дефолт —
+    канонический AGH_DOH_PORT).
     """
     if not tls_enabled:
         return """tls:
@@ -1282,7 +1285,7 @@ def build_tls_section(tls_enabled: bool, server_name: str,
   enabled: true
   server_name: {_yaml_quote(server_name)}
   force_https: false
-  port_https: {AGH_DOH_PORT}
+  port_https: {doh_port}
   port_dns_over_tls: {AGH_DOT_PORT}
   port_dns_over_quic: {AGH_DOQ_PORT}
   certificate_chain: ""
@@ -1674,12 +1677,15 @@ def _open_wizard_access(ssh_ip: str) -> list:
 
 def _register_aghome_ports(dc_port: int, tls_enabled: bool,
                            web_public_plain: bool,
-                           web_port: int = AGH_WEB_PORT) -> None:
+                           web_port: int = AGH_WEB_PORT,
+                           doh_port: int = AGH_DOH_PORT) -> None:
     """Регистрирует все порты DNS-стека в port_registry + открывает публичные
     в UFW. Вызывается при установке/финализации (идемпотентно).
 
     web_port — кастомный порт Web UI. При смене порта закрывает UFW и
     снимает регистрацию СТАРОГО порта (порт не должен течь).
+    doh_port — кастомный TLS-порт DoH + Web UI HTTPS: смена порта
+    аналогично закрывает/снимает старый (UFW не должен течь).
     """
     try:
         from chimera.modules.port_registry import (
@@ -1741,8 +1747,24 @@ def _register_aghome_ports(dc_port: int, tls_enabled: bool,
 
     # DoH/DoT/DoQ — только при TLS
     if tls_enabled:
+        # смена DoH-порта: закрыть UFW и снять старую регистрацию
+        # (как у Web UI — порт не должен течь).
+        try:
+            for e in port_list_for_service(SERVICE_AGHOME_DOH):
+                try:
+                    old_doh = int(e.get("port", 0))
+                except Exception:
+                    old_doh = 0
+                if old_doh and old_doh != doh_port:
+                    ufw_close_quiet(old_doh, "tcp", SERVICE_AGHOME_DOH)
+                    port_unregister(SERVICE_AGHOME_DOH, port=old_doh,
+                                    proto="tcp")
+                    info(f"AGH: TLS-порт DoH {old_doh} → {doh_port} "
+                         f"(UFW/реестр обновлены)")
+        except Exception:
+            pass
         for tag, port, proto, label in (
-            (SERVICE_AGHOME_DOH, AGH_DOH_PORT, "tcp", "DoH + Web UI HTTPS"),
+            (SERVICE_AGHOME_DOH, doh_port, "tcp", "DoH + Web UI HTTPS"),
             (SERVICE_AGHOME_DOT, AGH_DOT_PORT, "tcp", "DoT"),
             (SERVICE_AGHOME_DOQ, AGH_DOQ_PORT, "udp", "DoQ"),
         ):
@@ -1909,6 +1931,86 @@ def _ask_web_port() -> int:
             raw = input(f"{CYAN}  Порт Web UI [{AGH_WEB_PORT}]: {NC}").strip()
         except (EOFError, KeyboardInterrupt):
             return AGH_WEB_PORT
+
+
+def _validate_doh_port(port: int, web_port: int = 0) -> "tuple[bool, str]":
+    """Проверяет кастомный TLS-порт DoH (+ Web UI HTTPS).
+
+    Канонический AGH_DOH_PORT проходит без проверок (поведение по
+    умолчанию). Кастомный не должен совпадать со служебными портами
+    DNS-стека (22/53/80/443/853/5300), портом Web UI (кастомным или
+    дефолтным :3000 — wizard-фаза всегда слушает его) и не должен
+    быть занят чужим слушателем.
+    """
+    if port == AGH_DOH_PORT:
+        return True, ""
+    reserved = set(AGH_WEB_PORT_RESERVED) | {AGH_WEB_PORT}
+    if web_port:
+        reserved.add(int(web_port))
+    reserved.discard(AGH_DOH_PORT)
+    if port in reserved:
+        return False, (f"порт {port} служебный (SSH/DNS/Web/DoT/DoQ/dnscrypt) "
+                       "— выберите другой")
+    try:
+        from chimera.modules.port_registry import (
+            port_is_free, SERVICE_AGHOME_DOH,
+        )
+        free, conflicts = port_is_free(port, "tcp",
+                                       exclude_service=SERVICE_AGHOME_DOH)
+        if not free:
+            return False, "порт занят: " + "; ".join(conflicts[:3])
+    except Exception:
+        # port_registry недоступен — не блокируем, проверим хотя бы ss
+        if _port_listening(port, "tcp"):
+            return False, f"порт {port}/tcp уже слушается"
+    return True, ""
+
+
+def _ask_doh_port(web_port: int = AGH_WEB_PORT) -> int:
+    """Спрашивает TLS-порт DoH + Web UI HTTPS (wizard, TLS-режимы).
+
+    AGH мультиплексирует DoH и Web UI HTTPS на одном TLS-порту
+    (tls.port_https) — кастомизация меняет оба сразу. Enter =
+    канонический AGH_DOH_PORT (30443). Применяется при финализации;
+    сохраняется в state (doh_port) — статус/ссылки/гибрид берут его
+    оттуда.
+    """
+    core = _core_module()
+    CYAN, NC, DIM, YELLOW = core.CYAN, core.NC, core.DIM, core.YELLOW
+    _box_top, _box_row, _box_sep, _box_bottom = (
+        core._box_top, core._box_row, core._box_sep, core._box_bottom)
+    print()
+    _box_top("🛡️  AdGuard Home — TLS-порт DoH + Web UI HTTPS")
+    _box_row()
+    _box_row(f"  {DIM}Один TLS-порт обслуживает DoH и Web UI HTTPS.{NC}")
+    _box_row(f"  {DIM}Enter — канонический :{AGH_DOH_PORT}.{NC}")
+    _box_sep()
+    try:
+        raw = input(f"{CYAN}  TLS-порт DoH [{AGH_DOH_PORT}]: {NC}").strip()
+    except (EOFError, KeyboardInterrupt):
+        return AGH_DOH_PORT
+    while True:
+        if not raw:
+            return AGH_DOH_PORT
+        try:
+            port = int(raw)
+        except ValueError:
+            try:
+                print(f"{YELLOW}  Нужно число (Enter = {AGH_DOH_PORT}){NC}")
+                raw = input(f"{CYAN}  TLS-порт DoH [{AGH_DOH_PORT}]: {NC}").strip()
+            except (EOFError, KeyboardInterrupt):
+                return AGH_DOH_PORT
+            continue
+        if port == AGH_DOH_PORT:
+            return AGH_DOH_PORT
+        ok, why = _validate_doh_port(port, web_port)
+        if ok:
+            return port
+        try:
+            print(f"{YELLOW}  {why}{NC}")
+            raw = input(f"{CYAN}  TLS-порт DoH [{AGH_DOH_PORT}]: {NC}").strip()
+        except (EOFError, KeyboardInterrupt):
+            return AGH_DOH_PORT
 
 
 def _ask_web_mode() -> "tuple[str, str]":
@@ -2497,7 +2599,8 @@ def _print_wizard_instructions(domain: str = "") -> None:
 def _complete_first_run_wizard(web_mode: str, domain: str,
                                interactive: bool = True,
                                state_extra: "dict | None" = None,
-                               web_port: int = AGH_WEB_PORT) -> bool:
+                               web_port: int = AGH_WEB_PORT,
+                               doh_port: int = 0) -> bool:
     """Мастер первого запуска: headless-API (по умолчанию) или браузер.
 
     Headless (v44): логин/пароль в TUI → POST /control/install/configure
@@ -2507,12 +2610,23 @@ def _complete_first_run_wizard(web_mode: str, domain: str,
 
     web_port — финальный порт Web UI (wizard-фаза слушает дефолт
     :3000; кастомный порт применит финализация).
+    doh_port — кастомный TLS-порт DoH + Web UI HTTPS (0/None →
+    канонический AGH_DOH_PORT; применяется при финализации, в state —
+    сразу, чтобы статус/ссылки видели выбор ещё до неё).
 
     Возвращает True, если конфиг с users создан (мастер завершён).
     """
     core = _core_module()
     info, warn, success = core.info, core.warn, core.success
     ssh_ip = _get_ssh_client_ip()
+
+    # кастомный TLS-порт DoH: 0/мусор → канонический
+    try:
+        doh_port = int(doh_port) if doh_port else 0
+    except (TypeError, ValueError):
+        doh_port = 0
+    if not doh_port or not (1 <= doh_port <= 65535):
+        doh_port = AGH_DOH_PORT
 
     aghome_state_save({
         **(state_extra or {}),
@@ -2523,7 +2637,7 @@ def _complete_first_run_wizard(web_mode: str, domain: str,
         "domain": domain,
         "self_signed": web_mode == AGH_WEB_HTTPS_SELF,
         "tls_enabled": web_mode in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF),
-        "doh_port": AGH_DOH_PORT,
+        "doh_port": doh_port,
         "dot_port": AGH_DOT_PORT,
         "doq_port": AGH_DOQ_PORT,
         "wizard_ips": ["0.0.0.0/0"],
@@ -2690,14 +2804,21 @@ def install_aghome(interactive: bool = True) -> bool:
 
     # ── 6+7. Мастер: headless-API (по умолчанию) или веб ─────────────
     web_mode, domain, web_port = AGH_WEB_LOOPBACK, "", AGH_WEB_PORT
+    doh_port = 0
     if wizard_restart:
         web_mode, domain = _ask_web_mode()
         web_port = _ask_web_port() # кастомный порт Web UI
+        # кастомный TLS-порт DoH — только для TLS-режимов (DoH живёт на
+        # tls.port_https; в plain-режимах он не поднимается)
+        if web_mode in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF):
+            doh_port = _ask_doh_port(web_port)
         if _complete_first_run_wizard(web_mode, domain, interactive,
-                                      web_port=web_port):
+                                      web_port=web_port,
+                                      doh_port=doh_port):
             return finalize_aghome_config(web_mode=web_mode,
                                           domain=domain,
                                           web_port=web_port,
+                                          doh_port=doh_port,
                                           interactive=interactive)
         # Мастер не завершён (таймаут/неинтерактивно/headless-провал
         # и таймаут веб-пути) — DNS обязан остаться живым (v44).
@@ -2775,11 +2896,14 @@ def _wait_wizard_completed(timeout_sec: int, poll_sec: float = 5.0) -> bool:
 # чинят права/пару сертификата и перезапускают TLS-секцию на live-конфиге.
 
 
-def _tls_ports_status() -> "dict[tuple[int, str], bool]":
-    """Состояние TLS-портов AGH: DoH(:30443/tcp), DoT(:853/tcp), DoQ(:853/udp)."""
+def _tls_ports_status(doh_port: int = AGH_DOH_PORT) -> "dict[tuple[int, str], bool]":
+    """Состояние TLS-портов AGH: DoH(:30443/tcp), DoT(:853/tcp), DoQ(:853/udp).
+
+    doh_port — кастомный TLS-порт DoH (дефолт AGH_DOH_PORT).
+    """
     return {
-        (AGH_DOH_PORT, "tcp"): _port_listening(AGH_DOH_PORT, "tcp",
-                                               proc="AdGuardHome"),
+        (doh_port, "tcp"): _port_listening(doh_port, "tcp",
+                                          proc="AdGuardHome"),
         (AGH_DOT_PORT, "tcp"): _port_listening(AGH_DOT_PORT, "tcp",
                                                proc="AdGuardHome"),
         (AGH_DOQ_PORT, "udp"): _port_listening(AGH_DOQ_PORT, "udp",
@@ -2879,7 +3003,8 @@ def _own_certs_dir() -> None:
 
 def _heal_tls_listeners(server_name: str, domain: str,
                         cert_path: "Path | None",
-                        key_path: "Path | None") -> "tuple[bool, Path, Path, str]":
+                        key_path: "Path | None",
+                        doh_port: int = AGH_DOH_PORT) -> "tuple[bool, Path, Path, str]":
     """Диагностика + починка TLS-портов AGH.
 
     Порядок:
@@ -2951,7 +3076,8 @@ def _heal_tls_listeners(server_name: str, domain: str,
     try:
         live_text = AGH_CONF.read_text(errors="replace")
         new_tls = build_tls_section(True, server_name,
-                                    Path(cert_path), Path(key_path))
+                                    Path(cert_path), Path(key_path),
+                                    doh_port=doh_port)
         AGH_CONF.write_text(
             yaml_replace_sections(live_text, {"tls": new_tls}))
         subprocess.run(["chown", f"{AGH_USER}:{AGH_GROUP}", str(AGH_CONF)],
@@ -2967,7 +3093,7 @@ def _heal_tls_listeners(server_name: str, domain: str,
                 f"{AGH_SERVICE_NAME} -n 30")
     # TLS-порты могут подняться на 1-3 с позже службы — поллим
     for _ in range(8):
-        if all(_tls_ports_status().values()):
+        if all(_tls_ports_status(doh_port).values()):
             return True, cert_path, key_path, "TLS-порты подняты"
         time.sleep(2)
     return (False, cert_path, key_path,
@@ -2976,7 +3102,8 @@ def _heal_tls_listeners(server_name: str, domain: str,
 
 def finalize_aghome_config(web_mode: str = "", domain: str = "",
                            interactive: bool = True,
-                           web_port: int = 0) -> bool:
+                           web_port: int = 0,
+                           doh_port: int = 0) -> bool:
     """Применяет канонический конфиг Chimera к yaml, написанному мастером.
 
     Шаги:
@@ -2993,6 +3120,9 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
 
     web_port — кастомный порт Web UI (0/None → из state, иначе
     AGH_WEB_PORT). При смене порта старый закрывается в UFW/реестре.
+    doh_port — кастомный TLS-порт DoH + Web UI HTTPS (tls.port_https;
+    0/None → из state, иначе канонический AGH_DOH_PORT). При смене
+    старый DoH-порт закрывается в UFW/реестре.
     """
     core = _core_module()
     info, warn, success = core.info, core.warn, core.success
@@ -3028,20 +3158,36 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
             web_port = 0
     if not web_port or not (1 <= web_port <= 65535):
         web_port = AGH_WEB_PORT
+    # кастомный TLS-порт DoH (state → дефолт); не должен совпадать с
+    # web_port и служебными портами DNS-стека — иначе канонический
+    try:
+        doh_port = int(doh_port) if doh_port else 0
+    except (TypeError, ValueError):
+        doh_port = 0
+    if not doh_port:
+        try:
+            doh_port = int(st.get("doh_port", 0) or 0)
+        except (TypeError, ValueError):
+            doh_port = 0
+    _doh_reserved = set(AGH_WEB_PORT_RESERVED) | {web_port, AGH_WEB_PORT}
+    _doh_reserved.discard(AGH_DOH_PORT)
+    if (not doh_port or not (1 <= doh_port <= 65535)
+            or doh_port in _doh_reserved):
+        doh_port = AGH_DOH_PORT
     tls_enabled = web_mode in (AGH_WEB_HTTPS_LE, AGH_WEB_HTTPS_SELF)
 
     # ── защита от портов-коллизий AGH ↔ Xray/AWG/чужие сервисы ────
     # AGH биндит фиксированные 53/853/30443 ДО старта xray — коллизия
     # отдаёт порт AGH и роняет xray (EOF у всех клиентов). Xray на :53 —
     # финализация невозможна в принципе (AGH обязан владеть :53).
-    _port_conf = _agh_core_port_conflicts(extra_ports=(web_port,))
+    _port_conf = _agh_core_port_conflicts(extra_ports=(web_port, doh_port))
     if AGH_DNS_PORT in _port_conf:
         warn(f"AGH: порт {AGH_DNS_PORT} занят "
              f"({'; '.join(_port_conf[AGH_DNS_PORT])}) — AGH обязан "
              f"владеть DNS :53; финализация отменена, конфиг не тронут")
         return False
     if tls_enabled:
-        _tls_hit = [p for p in (AGH_DOH_PORT, AGH_DOT_PORT, AGH_DOQ_PORT)
+        _tls_hit = [p for p in (doh_port, AGH_DOT_PORT, AGH_DOQ_PORT)
                     if p in _port_conf]
         if _tls_hit:
             for _p in _tls_hit:
@@ -3086,7 +3232,9 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         "http":             build_http_section(web_mode, web_port),
         "dns":              build_dns_section(dc_port, public_ip, tls_enabled,
                                            public_ipv6=public_ipv6),
-        "tls":              build_tls_section(tls_enabled, server_name, cert_path, key_path),
+        "tls":              build_tls_section(tls_enabled, server_name,
+                                           cert_path, key_path,
+                                           doh_port=doh_port),
         "filters":          build_filters_section(),
         "whitelist_filters": build_whitelist_filters_section(),
         "user_rules":       build_user_rules_section(),
@@ -3221,28 +3369,30 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         # AGH при ошибке сертификата молча ставит tls.enabled=false
         # и продолжает на plain DNS → порты не поднимутся сами. Даём
         # время, затем диагностируем и чиним (_heal_tls_listeners).
-        ports = _tls_ports_status()
+        ports = _tls_ports_status(doh_port)
         if not all(ports.values()):
             for _ in range(6):
                 time.sleep(2)
-                ports = _tls_ports_status()
+                ports = _tls_ports_status(doh_port)
                 if all(ports.values()):
                     break
         if not all(ports.values()):
             warn("AGH: TLS-порты не поднялись — диагностирую причину...")
             healed, cert_path, key_path, msg = _heal_tls_listeners(
-                server_name, domain, cert_path, key_path)
+                server_name, domain, cert_path, key_path,
+                doh_port=doh_port)
             if not healed:
                 warn(f"AGH: TLS не восстановлен: {msg}")
                 warn("AGH: DNS :53 работает; DoH/DoT/DoQ выключены "
                      "до починки сертификата")
             else:
                 success("AGH: TLS восстановлен (self-heal)")
-            ports = _tls_ports_status()
+            ports = _tls_ports_status(doh_port)
+        _tls_labels = {(doh_port, "tcp"): "DoH+HTTPS",
+                       (AGH_DOT_PORT, "tcp"): "DoT",
+                       (AGH_DOQ_PORT, "udp"): "DoQ"}
         for (port, proto), up in ports.items():
-            label = {(AGH_DOH_PORT, "tcp"): "DoH+HTTPS",
-                     (AGH_DOT_PORT, "tcp"): "DoT",
-                     (AGH_DOQ_PORT, "udp"): "DoQ"}[(port, proto)]
+            label = _tls_labels.get((port, proto), f"TLS :{port}/{proto}")
             if up:
                 success(f"AGH: {label} слушает :{port}/{proto}")
             else:
@@ -3277,7 +3427,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
     _ufw_clean_wizard_rules()
     _register_aghome_ports(dc_port, tls_enabled,
                            web_public_plain=(web_mode == AGH_WEB_HTTP_PUB),
-                           web_port=web_port)
+                           web_port=web_port, doh_port=doh_port)
 
     # ── Перегенерация конфига Xray ────────────────────────────────────
     if dns_udp:
@@ -3294,7 +3444,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
         "self_signed": web_mode == AGH_WEB_HTTPS_SELF,
         "tls_enabled": tls_enabled,
         "public_bind": bool(public_ip),
-        "doh_port": AGH_DOH_PORT,
+        "doh_port": doh_port,
         "dot_port": AGH_DOT_PORT,
         "doq_port": AGH_DOQ_PORT,
         "wizard_ips": [],
@@ -3303,7 +3453,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
     })
     success("AGH: финализация завершена — DNS: AGH:53 → dnscrypt:" + str(dc_port))
     if tls_enabled and domain:
-        info(f"AGH: DoH: https://{domain}:{AGH_DOH_PORT}/dns-query")
+        info(f"AGH: DoH: https://{domain}:{doh_port}/dns-query")
         info(f"AGH: DoT: {domain}:{AGH_DOT_PORT} | DoQ: {domain}:{AGH_DOQ_PORT}/udp")
     # Web UI-входы: порт следует из способа доступа (кейс ERR_SSL_
     # PROTOCOL_ERROR при https:// на plain-порту :3000). TLS-режим:
@@ -3311,7 +3461,7 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
     # :web_port — только SSH-туннелем/с сервера (снаружи закрыт UFW).
     if tls_enabled:
         info(f"AGH: Web UI (браузером): https://"
-             f"{domain or (_get_public_ip() or 'IP-СЕРВЕРА')}:{AGH_DOH_PORT}")
+             f"{domain or (_get_public_ip() or 'IP-СЕРВЕРА')}:{doh_port}")
         info(f"AGH: Web UI (SSH-туннелем): http://127.0.0.1:{web_port} "
              f"(порт :{web_port} снаружи закрыт)")
     elif web_mode == AGH_WEB_HTTP_PUB:
