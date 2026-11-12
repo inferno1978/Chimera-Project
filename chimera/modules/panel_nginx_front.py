@@ -373,7 +373,14 @@ def _generate_vhost(port: int,
 # Управление: TUI → соответствующее меню панели.
 
 server {{
-    listen {port} ssl http2;
+    # БЕЗ http2: nginx (1.24, Ubuntu) не умеет WebSocket поверх HTTP/2
+    # (RFC 8441 не поддержан) — при ALPN-согласовании h2 браузер шлёт
+    # WS-хендшейк в h2-фреймах, Upgrade-заголовка нет → все /api/ws/*
+    # (b4 UI: logs/metrics/discovery/connections; triple-панель) получают
+    # 400 и живые данные (логи/трафик по сетам) в веб-морде не идут,
+    # хотя REST работает. Админ-панелям h2 выигрыша не даёт (SSE идёт
+    # и по http/1.1), а WS-совместимость критична.
+    listen {port} ssl;
     server_name {domain};
 
     ssl_certificate     {cert_path};
