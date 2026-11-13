@@ -828,7 +828,10 @@ def _watchdog_script_content() -> str:
     """Bash-скрипт watchdog: probe → self-heal лестница.
 
     Порядок:
-      0. probe 127.0.0.1:53 (dig rc=0 = ответ есть; fallback getent),
+      0. AGH-AWARE sync: AGH активен и слушает udp :53 → redirect 53→порт
+         СНЯТ (REDIRECT в nat OUTPUT уводит локальный DNS мимо фильтров/
+         кэша/журнала AGH — счётчики молча обнуляются). Идемпотентно.
+      0.5 probe 127.0.0.1:53 (dig rc=0 = ответ есть; fallback getent),
          повтор через 3с (анти-ложное-срабатывание на транзиент).
       1. AGH активен → restart AdGuardHome → probe (владелец :53).
       2. dnscrypt-proxy (restart если лежит) + redirect 53→порт
@@ -839,9 +842,20 @@ def _watchdog_script_content() -> str:
 # Chimera Project — DNS-watchdog: системный DNS не должен умирать надолго.
 # Сгенерировано chimera/modules/resolv_conf_fix.py. НЕ редактировать вручную.
 # Управление: systemctl list-timers | grep chimera-dns-watchdog
+#
+# AGH-AWARE (двусторонняя синхронизация): AGH владеет :53 → redirect снят;
+# AGH недоступен → redirect ставится (dnscrypt страхует :53). Возврат AGH →
+# следующий проход watchdog снова снимет redirect.
 
 TAG="chimera-dns-watchdog"
 PROBE_DOMAIN="ya.ru"
+
+TOML=/etc/dnscrypt-proxy/dnscrypt-proxy.toml
+PORT_TOML=5300
+if [ -f "$TOML" ]; then
+    P=$(grep -oP "listen_addresses\\s*=\\s*\\[\\s*['\\"][^'\\"]*:\\K[0-9]+" "$TOML" 2>/dev/null | head -1)
+    [ -n "$P" ] && PORT_TOML="$P"
+fi
 
 dns_alive() {
     if command -v dig >/dev/null 2>&1; then
@@ -849,6 +863,20 @@ dns_alive() {
         return $?
     fi
     getent hosts "$PROBE_DOMAIN" >/dev/null 2>&1
+}
+
+agh_serves_53() {
+    systemctl is-active --quiet AdGuardHome 2>/dev/null || return 1
+    ss -ulnp 2>/dev/null | grep -E ':53[[:space:]]' | grep -qi adguard
+}
+
+del_redirect_all() {
+    local spec
+    while :; do
+        spec=$(iptables -t nat -S OUTPUT 2>/dev/null | grep 'chimera-dns-fix' | head -1)
+        [ -z "$spec" ] && return 0
+        iptables -t nat $(echo "$spec" | sed 's/^-A /-D /') 2>/dev/null || return 1
+    done
 }
 
 add_redirect() {
@@ -863,7 +891,16 @@ add_redirect() {
     done
 }
 
-# 0. probe (двойной — транзиент не считается смертью)
+# 0. AGH-AWARE sync: AGH владеет :53 → redirect не нужен (он уводит
+#    локальный DNS мимо фильтров/кэша/журнала AGH прямо в dnscrypt).
+if agh_serves_53; then
+    if iptables -t nat -S OUTPUT 2>/dev/null | grep -q 'chimera-dns-fix'; then
+        del_redirect_all
+        logger -t "$TAG" "AGH owns :53 — redirect 53->$PORT_TOML снят"
+    fi
+fi
+
+# 0.5 probe (двойной — транзиент не считается смертью)
 if dns_alive; then
     exit 0
 fi
