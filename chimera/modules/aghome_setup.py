@@ -3567,6 +3567,24 @@ def finalize_aghome_config(web_mode: str = "", domain: str = "",
              f"{domain or (_get_public_ip() or 'IP-СЕРВЕРА')}:{web_port}")
     else:  # loopback
         info(f"AGH: Web UI (SSH-туннелем): http://127.0.0.1:{web_port}")
+
+    # ── Напоминание: домашний IPv6 клиентов и белый список защиты ────
+    # Домен DoH/DoT/DoQ резолвится и в AAAA: клиенты с домашним IPv6
+    # пойдут к AGH по v6. В v6-INPUT до ufw стоят port-knocking / autoban
+    # / блокировка входящих из РФ — без whitelist-правила (blanket-ACCEPT
+    # первым в INPUT, v4+v6) домашний IPv6 может упираться в блок:
+    # DoH/DoT по v6 «загадочно» не работают при живом v4. Кейс 13.11.2026.
+    try:
+        if _get_public_ipv6():
+            info("AGH: если у тех, кто будет пользоваться этим DNS, дома "
+                 "есть IPv6 — добавьте их домашний IPv6-диапазон в белый "
+                 "лист сервера, иначе DNS по IPv6 может отклоняться "
+                 "защитой (по IPv4 будет работать).")
+            info("AGH:   путь: меню 5 «Безопасность и Автоматизация» → "
+                 "G «Блокировка входящих из РФ» → 4 «Whitelist» → «+» "
+                 "(формат: 2001:db8:1234:5678::/64 — префикс /64)")
+    except Exception:
+        pass
     return True
 
 
