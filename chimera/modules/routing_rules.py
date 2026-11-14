@@ -22,6 +22,11 @@ chimera/modules/routing_rules.py
   • Имппорт РФ-подсетей RIPE NCC как правила с любым outbound
     (запрос Vasily: «правила из Split Tunneling, но вместо direct —
     другой outbound»).
+  • Готовые пресеты (пункт 9): 🎮 игры / 📺 видео (YouTube+CDN, Rutube,
+    Twitch, стриминги) / 💬 соцсети (VK, OK + зарубежные) / мессенджеры —
+    geosite-категории runetfreedom одним правилом; наличие категорий
+    сверяется с живым geosite.dat (модуль geosite_codes), чтобы не
+    положить Xray ссылкой на несуществующий код.
   • Re-apply после regenerate (restore_routing_rules_if_needed) —
     вызывается из _core._rebuild_and_restart_xray, ПОСЛЕДНИМ из
     «в начало»-вставляющих: кастомные правила всегда выше встроенных.
@@ -56,6 +61,7 @@ from chimera.modules.box_renderer import (
     _box_top, _box_bottom, _box_sep, _box_row, _box_item, _box_back,
     _box_desc, _box_kv, _box_info, _box_warn, _box_ok, _box_ask,
 )
+from chimera.modules.geosite_codes import geosite_codes
 
 # ── Цвета (канон dns_rules) ───────────────────────────────────────────────────
 def _detect_colors() -> dict:
@@ -142,6 +148,113 @@ RR_PLACEMENTS     = ("top", "before_catchall")
 RR_NAME_RE        = re.compile(r'^[a-z0-9][a-z0-9._-]{1,63}$')
 RR_DOMAIN_PREFIXES = ("domain:", "full:", "regexp:", "geosite:")
 
+# ── Готовые пресеты (пункт 9): geosite-категории runetfreedom ────────────────
+# Категории сверены с актуальным release-geosite runetfreedom
+# (russia-v2ray-rules-dat = все категории v2fly domain-list-community +
+# ru-*). Наличие в ЖИВОМ dat-файле проверяется при выборе пресета
+# (geosite_codes): ссылка на отсутствующий код = мёртвый Xray (exit 23,
+# «code not found in geosite.dat» — прецедент youtube_route FIX и
+# зеркало-инцидент legacy-v3-v5).
+# domain:-дополнения YouTube: googlevideo/ggpht/youtubei живут в
+# категории google, а НЕ youtube — без них видео-стрим (тяжёлый трафик
+# *.googlevideo.com) уходит мимо правила, асимметричная маршрутизация
+# ломает сессию (канон youtube_route._YOUTUBE_DOMAINS).
+# В подсчёт доменов агрегаты !cn входят как есть — пересечения с
+# точечными категориями (vk внутри category-social-media-!cn) для
+# Xray безвредны: матчинг по объединению, дубль в списке = OR.
+RR_PRESETS: tuple = (
+    # 🎮 Игры
+    {"key": "games-all", "title": "🎮 Игры — все сервисы",
+     "desc": "Агрегат v2fly: Steam, Epic, Blizzard, Riot, EA, Ubisoft, Nintendo,"
+             " PlayStation, Xbox, Wargaming, GOG, Roblox и др.",
+     "domains": ("geosite:category-games-!cn",)},
+    {"key": "games-steam", "title": "🎮 Steam",
+     "desc": "Steam, Steam Community, CDN",
+     "domains": ("geosite:steam",)},
+    {"key": "games-epic", "title": "🎮 Epic Games",
+     "desc": "Epic Games Store, Unreal, Fortnite-домены",
+     "domains": ("geosite:epicgames",)},
+    {"key": "games-blizzard", "title": "🎮 Blizzard Battle.net",
+     "desc": "Battle.net, Blizzard-сервисы",
+     "domains": ("geosite:blizzard",)},
+    {"key": "games-riot", "title": "🎮 Riot Games",
+     "desc": "LoL, Valorant, Riot-CDN",
+     "domains": ("geosite:riot",)},
+    {"key": "games-ea", "title": "🎮 EA (+Origin)",
+     "desc": "EA-сервисы и Origin",
+     "domains": ("geosite:ea", "geosite:origin",)},
+    {"key": "games-ubisoft", "title": "🎮 Ubisoft",
+     "desc": "Ubisoft Connect, CDN",
+     "domains": ("geosite:ubisoft",)},
+    {"key": "games-nintendo", "title": "🎮 Nintendo",
+     "desc": "Nintendo eShop, аккаунты",
+     "domains": ("geosite:nintendo",)},
+    {"key": "games-playstation", "title": "🎮 PlayStation Network",
+     "desc": "PSN, PS Store",
+     "domains": ("geosite:playstation",)},
+    {"key": "games-xbox", "title": "🎮 Xbox Live",
+     "desc": "Xbox-сервисы, Game Pass",
+     "domains": ("geosite:xbox",)},
+    {"key": "games-wargaming", "title": "🎮 Wargaming",
+     "desc": "World of Tanks и др.",
+     "domains": ("geosite:wargaming",)},
+    {"key": "games-gog", "title": "🎮 GOG",
+     "desc": "GOG Galaxy, магазин",
+     "domains": ("geosite:gog",)},
+    {"key": "games-roblox", "title": "🎮 Roblox",
+     "desc": "Roblox-домены",
+     "domains": ("geosite:roblox",)},
+    {"key": "games-faceit", "title": "🎮 FACEIT",
+     "desc": "FACEIT-платформа",
+     "domains": ("geosite:faceit",)},
+    {"key": "games-eft", "title": "🎮 Escape from Tarkov",
+     "desc": "EFT, Battlestate",
+     "domains": ("geosite:escapefromtarkov",)},
+    # 📺 Видеосервисы
+    {"key": "video-all", "title": "📺 Видеосервисы — все",
+     "desc": "YouTube(+CDN), Rutube, Twitch, Netflix, Prime Video, Hulu, Disney+,"
+             " HBO, Kinopoisk, OKKO, Vimeo, Dailymotion, Kick",
+     "domains": ("geosite:youtube", "domain:googlevideo.com",
+                 "domain:ggpht.com", "domain:youtubei.googleapis.com",
+                 "geosite:rutube", "geosite:twitch", "geosite:netflix",
+                 "geosite:primevideo", "geosite:hulu", "geosite:disney",
+                 "geosite:hbo", "geosite:kinopoisk", "geosite:okko",
+                 "geosite:vimeo", "geosite:dailymotion", "geosite:kick")},
+    {"key": "video-youtube", "title": "📺 YouTube (+CDN)",
+     "desc": "YouTube + CDN видео/картинок/API (googlevideo, ggpht, youtubei)",
+     "domains": ("geosite:youtube", "domain:googlevideo.com",
+                 "domain:ggpht.com", "domain:youtubei.googleapis.com")},
+    {"key": "video-twitch", "title": "📺 Twitch",
+     "desc": "Twitch-стриминг",
+     "domains": ("geosite:twitch",)},
+    {"key": "video-streaming", "title": "📺 Зарубежные стриминги",
+     "desc": "Netflix, Prime Video, Hulu, Disney+, HBO",
+     "domains": ("geosite:netflix", "geosite:primevideo", "geosite:hulu",
+                 "geosite:disney", "geosite:hbo")},
+    {"key": "video-ru", "title": "📺 Российское видео",
+     "desc": "Rutube, Kinopoisk, OKKO (+VK-видео в пресете соцсетей)",
+     "domains": ("geosite:rutube", "geosite:kinopoisk", "geosite:okko")},
+    # 💬 Соцсети и мессенджеры
+    {"key": "social-all", "title": "💬 Соцсети — все",
+     "desc": "Зарубежные (агрегат v2fly) + российские VK/OK явными категориями",
+     "domains": ("geosite:category-social-media-!cn", "geosite:vk",
+                 "geosite:ok")},
+    {"key": "social-ru", "title": "💬 Российские соцсети",
+     "desc": "VK (вкл. видео-CDN userapi/vkuservideo) и OK",
+     "domains": ("geosite:vk", "geosite:ok")},
+    {"key": "social-foreign", "title": "💬 Зарубежные соцсети",
+     "desc": "Facebook, Instagram, Threads, Twitter/X, TikTok, Reddit, LinkedIn,"
+             " Pinterest — без российских",
+     "domains": ("geosite:facebook", "geosite:instagram", "geosite:threads",
+                 "geosite:twitter", "geosite:x", "geosite:tiktok",
+                 "geosite:reddit", "geosite:linkedin", "geosite:pinterest")},
+    {"key": "msg-all", "title": "💬 Мессенджеры",
+     "desc": "Telegram, WhatsApp, Viber, Discord (по доменам; звонки Telegram"
+             " по IP — при желании добавьте geoip:telegram в IP-поле вручную)",
+     "domains": ("geosite:telegram", "geosite:whatsapp", "geosite:viber",
+                 "geosite:discord")},
+)
+
 _CONFIG_DIR      = Path("/etc/xray")
 _ALT_CONFIG      = Path("/usr/local/etc/xray/config.json")
 
@@ -202,9 +315,12 @@ def _rr_validate_domain_item(item: str) -> "str | None":
         return None
     low = p.lower()
     if low.startswith("geosite:"):
-        # geosite-имена не содержат точку: category-ads-all, ru, youtube
+        # geosite-имена не содержат точку: category-ads-all, ru, youtube.
+        # '!' — суффиксы v2fly-агрегатов (category-games-!cn,
+        # category-social-media-!cn): Xray верхнерегистрит искомый код
+        # и находит тег в geosite.dat как есть.
         rest = p.split(":", 1)[1]
-        if not rest or not re.match(r'^[a-z0-9_-]+$', rest, re.I):
+        if not rest or not re.match(r'^[a-z0-9_!-]+$', rest, re.I):
             return f"После geosite: нет имени: '{p}'"
         return None
     if low.startswith(("domain:", "full:")):
@@ -854,6 +970,160 @@ def _rr_show_live_rules() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ГОТОВЫЕ ПРЕСЕТЫ (пункт 9) — игры / видео / соцсети
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _rr_preset_geocodes(preset: dict) -> list:
+    """geosite-коды пресета (без префикса, нижний регистр)."""
+    out = []
+    for d in preset.get("domains", []) or []:
+        low = str(d).lower()
+        if low.startswith("geosite:"):
+            out.append(low.split(":", 1)[1])
+    return out
+
+
+def _rr_preset_missing(preset: dict, codes: "dict | None") -> "list | None":
+    """Коды, которых нет в geosite.dat. None = проверка невозможна
+    (dat не распарсился) — не блокируем: финальный гвард xray run -test
+    с откатом живёт в _rr_apply_to_xray(validate=True)."""
+    if codes is None:
+        return None
+    return [c for c in _rr_preset_geocodes(preset) if c not in codes]
+
+
+def _rr_preset_total(preset: dict, codes: "dict | None") -> "int | None":
+    """Оценка числа доменов пресета (подпись в списке). None — не знаем."""
+    if codes is None:
+        return None
+    total = 0
+    for d in preset.get("domains", []) or []:
+        low = str(d).lower()
+        if low.startswith("geosite:"):
+            total += codes.get(low.split(":", 1)[1], 0)
+        else:
+            total += 1          # domain:/full: дополнение — 1 паттерн
+    return total
+
+
+def _rr_unique_preset_name(key: str) -> str:
+    """Свободное имя правила для пресета (key, key-2, key-3...)."""
+    existing = {r.get("name") for r in _rr_load().get("rules", [])}
+    if key not in existing:
+        return key
+    i = 2
+    while f"{key}-{i}" in existing:
+        i += 1
+    return f"{key}-{i}"
+
+
+def _rr_menu_presets() -> None:
+    """Меню готовых пресетов: выбрать → outbound → правило → apply.
+
+    Пресет = обычное state-правило (source=preset:<key>): после создания
+    редактируется/включается/удаляется как любое другое (пункты 2/3/4).
+    """
+    print()
+    _info("Читаю категории geosite.dat (первый раз ~2 с, дальше кэш)...")
+    codes = geosite_codes()
+    if codes is None:
+        _warn("geosite.dat не найден/не распарсился — наличие категорий проверить "
+              "не смогу; правило прогонит xray run -test при применении")
+    else:
+        _info(f"geosite.dat: {len(codes)} категорий — пресеты сверены с живым файлом")
+
+    options = []
+    for p in RR_PRESETS:
+        label = p["title"]
+        total = _rr_preset_total(p, codes)
+        if total is not None:
+            label += f"  ({total} дом.)"
+        if _rr_preset_missing(p, codes):
+            label += "  ⚠ нет в geosite.dat"
+        options.append(label)
+    options.append("— Отмена —")
+
+    idx = tui_select("Готовый пресет — быстрое правило из geosite-категорий", options)
+    if idx is None or idx == len(options) - 1:
+        return
+    preset = RR_PRESETS[idx]
+
+    # Наличие категорий: ссылка на отсутствующий код = мёртвый Xray.
+    missing = _rr_preset_missing(preset, codes)
+    if missing:
+        print()
+        _box_top(f"Пресет: {preset['title']}")
+        _box_row()
+        _box_warn(f"  В geosite.dat НЕТ категорий: {', '.join(missing)}")
+        _box_row()
+        _box_desc("Правило с geosite-кодом, которого нет в dat-файле, валит Xray")
+        _box_desc("при старте («code not found in geosite.dat» → exit 23).")
+        _box_desc("Обновите geo-файлы: Настройки сети → GeoIP/GeoSite — и повторите.")
+        _box_bottom()
+        _log("WARN", f"preset {preset['key']}: нет категорий {missing}")
+        return
+
+    print()
+    _box_top(f"Пресет: {preset['title']}")
+    _box_row()
+    _box_desc(preset["desc"])
+    _box_row()
+    for d in preset["domains"]:
+        low = str(d).lower()
+        cnt = ""
+        if codes is not None and low.startswith("geosite:"):
+            cnt = f"  — {codes.get(low.split(':', 1)[1], 0)} дом."
+        _box_row(f"  {CYAN}{d}{NC}{DIM}{cnt}{NC}")
+    _box_row()
+    _box_desc("Правило создастся с priority=10, placement=top (перебивает")
+    _box_desc("встроенные ru_subnets/youtube). Пересекающиеся пресеты: точечному")
+    _box_desc("ставьте меньший приоритет (меню 2). Дальше — обычное правило (2/3/4).")
+    _box_bottom()
+
+    outbound = _rr_pick_outbound(title=f"Куда направить: {preset['title']}?")
+    if not outbound:
+        return
+
+    name = _rr_unique_preset_name(preset["key"])
+    rule = {
+        "name": name,
+        "enabled": True,
+        "domains": list(preset["domains"]),
+        "ips": [],
+        "ports": [],
+        "outbound": outbound,
+        "priority": 10,
+        "placement": "top",
+        "chunk": RR_DEFAULT_CHUNK,
+        "source": f"preset:{preset['key']}",
+        "created_at": _rr_now(),
+        "updated_at": _rr_now(),
+    }
+
+    print()
+    _box_top(f"Новое правило (пресет): {name}")
+    _box_kv("Матч", _rr_match_summary(rule))
+    _box_kv("  домены", ", ".join(rule["domains"][:5])
+            + (" ..." if len(rule["domains"]) > 5 else ""))
+    _box_kv("Outbound", outbound)
+    _box_kv("Приоритет", "10")
+    _box_kv("Расположение", "top (выше встроенных)")
+    _box_kv("Источник", rule["source"])
+    _box_row()
+    _box_warn("  Правило действует на всех клиентов сервера сразу (routing Xray")
+    _box_warn("  не разделяет трафик по пользователям).")
+    _box_bottom()
+    if not tui_confirm("Создать правило из пресета и применить?", default=False):
+        return
+
+    state = _rr_load()
+    state.setdefault("rules", []).append(rule)
+    _rr_save(state)
+    _log_change(f"rule_add:{name}", f"preset {preset['key']} → {outbound}")
+    _rr_apply_to_xray(restart=True, validate=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  МЕНЮ
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -910,6 +1180,7 @@ def do_manage_routing_rules() -> None:
         _box_item("6", "Показать живые правила из конфига (custom:*)")
         _box_item("7", "Пере-применить все правила из state (после regenerate)")
         _box_item("8", f"Кастомные outbound'ы 🔗  {DIM}свои ноды / друзья — vless:// ссылка, мастер, JSON{NC}")
+        _box_item("9", f"Готовые пресеты  {DIM}🎮 игры / 📺 видео / 💬 соцсети — одним правилом{NC}")
         _box_row()
         _box_back()
         _box_bottom()
@@ -947,6 +1218,9 @@ def do_manage_routing_rules() -> None:
             except ImportError as e:
                 _warn(f"Модуль custom_outbounds не найден: {e}")
                 time.sleep(2)
+        elif ch == "9":
+            _rr_menu_presets()
+            input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch in ("q", ""):
             break
         else:
