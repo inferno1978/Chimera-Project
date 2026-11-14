@@ -68,7 +68,8 @@
 | Файл | За что отвечает |
 |---|---|
 | `split_tunnel.py` | Раздельное туннелирование: РФ → direct, остальное → proxy; custom domains/IPs; меню управления |
-| `geosite_codes.py` | Точные теги категорий живого geosite.dat (protobuf-парсер без зависимостей, mtime-кэш, пересечение при нескольких копиях): гвард для routing-пресетов и geosite:-правил — ссылка на отсутствующий код = мёртвый Xray («code not found», exit 23); grep-проверка split_tunnel для коротких кодов (vk/ok/x) ложноположительна |
+| `routing_rules.py` | Кастомные routing-правила Xray (пункт меню «Кастомные routing-правила»): домены/IP/порты → любой outbound, priority/placement, чанки по 500, импорт RIPE-подсетей, ГОТОВЫЕ ПРЕСЕТЫ — двухуровневый каталог 12 групп / 48 пресетов (игры+загрузки / видео / соцсети / музыка / AI / медиа / РФ-банки-магазины / dev+наука / торренты / блокировки / звонки / диагностика) с рекомендуемым outbound (chain/direct/block), предпросмотром доменов и пометкой «куцых» категорий; сборщик «свой набор» (tui_multi_select) — одно правило из отмеченных категорий |
+| `geosite_codes.py` | Точные теги категорий живого geosite.dat (protobuf-парсер без зависимостей, mtime-кэш, пересечение при нескольких копиях): гвард для routing-пресетов и geosite:-правил — ссылка на отсутствующий код = мёртвый Xray («code not found», exit 23); geosite_samples() — первые домены категории для предпросмотра в UI пресетов; grep-проверка split_tunnel для коротких кодов (vk/ok/x) ложноположительна |
 | `ru_subnets.py` | РФ-подсети из RIPE NCC → direct routing в Xray (защита от цензора) + cron обновления |
 | `as_direct.py` | AS-маршрутизация по ASN хостера/провайдера (RIPE Stat API) + cron обновления |
 | `geoip_block.py` | GeoIP-блокировка через routing rules Xray (allowlist/blocklist/scanner-block) |

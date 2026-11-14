@@ -22,9 +22,14 @@ chimera/modules/routing_rules.py
   • Имппорт РФ-подсетей RIPE NCC как правила с любым outbound
     (запрос Vasily: «правила из Split Tunneling, но вместо direct —
     другой outbound»).
-  • Готовые пресеты (пункт 9): 🎮 игры / 📺 видео (YouTube+CDN, Rutube,
-    Twitch, стриминги) / 💬 соцсети (VK, OK + зарубежные) / мессенджеры —
-    geosite-категории runetfreedom одним правилом; наличие категорий
+  • Готовые пресеты (пункт 9): двухуровневый каталог — 12 групп
+    (игры / видео / соцсети / музыка / AI / медиа / РФ-банки-магазины /
+    dev+наука / торренты / блокировки / звонки / диагностика), у каждого
+    пресета рекомендуемый outbound (chain/direct/block — Enter в пикере
+    подставляет его сразу), предпросмотр доменов категории
+    (geosite_samples) и честная пометка «куцых» категорий (<10 дом.);
+    сборщик «свой набор» — multi-select по группам → одно правило из
+    объединения доменов; geosite-категории runetfreedom; наличие
     сверяется с живым geosite.dat (модуль geosite_codes), чтобы не
     положить Xray ссылкой на несуществующий код.
   • Re-apply после regenerate (restore_routing_rules_if_needed) —
@@ -56,12 +61,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from chimera.modules.tui import tui_form, tui_select, tui_confirm, TuiField
+from chimera.modules.tui import (tui_form, tui_select, tui_multi_select,
+                                 tui_confirm, TuiField)
 from chimera.modules.box_renderer import (
     _box_top, _box_bottom, _box_sep, _box_row, _box_item, _box_back,
     _box_desc, _box_kv, _box_info, _box_warn, _box_ok, _box_ask,
 )
-from chimera.modules.geosite_codes import geosite_codes
+from chimera.modules.geosite_codes import geosite_codes, geosite_samples
 
 # ── Цвета (канон dns_rules) ───────────────────────────────────────────────────
 def _detect_colors() -> dict:
@@ -147,8 +153,16 @@ RR_DEFAULT_CHUNK  = 500       # канон ru_subnets_ripe: ≤500 CIDR на п�
 RR_PLACEMENTS     = ("top", "before_catchall")
 RR_NAME_RE        = re.compile(r'^[a-z0-9][a-z0-9._-]{1,63}$')
 RR_DOMAIN_PREFIXES = ("domain:", "full:", "regexp:", "geosite:")
+RR_TINY_CATEGORY  = 10        # «куцая» geosite-категория: <N доменов — честная пометка
+RR_SAMPLE_DOMAINS = 4         # доменов категории в предпросмотре (geosite_samples)
 
-# ── Готовые пресеты (пункт 9): geosite-категории runetfreedom ────────────────
+# ── Готовые пресеты (пункт 9): двухуровневый каталог ─────────────────────────
+# Группа (RR_PRESET_GROUPS) → пресеты группы (RR_PRESETS). Поля пресета:
+#   key    — имя правила (source=preset:<key>), при занятости суффиксы -2/-3;
+#   group  — ключ группы верхнего уровня;
+#   suggest— рекомендуемый outbound: "chain" (первый chain-exit-* — через
+#            прокси), "direct", "block"; Enter в пикере подставляет сразу,
+#            тега нет в живом конфиге — рекомендация тихо игнорируется.
 # Категории сверены с актуальным release-geosite runetfreedom
 # (russia-v2ray-rules-dat = все категории v2fly domain-list-community +
 # ru-*). Наличие в ЖИВОМ dat-файле проверяется при выборе пресета
@@ -159,59 +173,99 @@ RR_DOMAIN_PREFIXES = ("domain:", "full:", "regexp:", "geosite:")
 # категории google, а НЕ youtube — без них видео-стрим (тяжёлый трафик
 # *.googlevideo.com) уходит мимо правила, асимметричная маршрутизация
 # ломает сессию (канон youtube_route._YOUTUBE_DOMAINS).
+# Яндекс Музыка: geosite-категории yandex-music в dat-файле НЕТ —
+# music-пресеты добирают её domain:-паттернами вручную (music.yandex.ru/
+# .com), честно отражено в desc. Куцые категории (rutube 4, zoom 3,
+# kick 1...) не прячем: счётчики честные, при показе — пометка «куцая».
 # В подсчёт доменов агрегаты !cn входят как есть — пересечения с
 # точечными категориями (vk внутри category-social-media-!cn) для
 # Xray безвредны: матчинг по объединению, дубль в списке = OR.
+RR_PRESET_GROUPS: tuple = (
+    {"key": "games",  "title": "🎮 Игры"},
+    {"key": "video",  "title": "📺 Видеосервисы"},
+    {"key": "social", "title": "💬 Соцсети и мессенджеры"},
+    {"key": "music",  "title": "🎵 Музыка"},
+    {"key": "ai",     "title": "🤖 AI-сервисы"},
+    {"key": "media",  "title": "📰 Медиа"},
+    {"key": "ru",     "title": "🇷🇺 РФ: банки и магазины"},
+    {"key": "dev",    "title": "🛠 Разработка и наука"},
+    {"key": "p2p",    "title": "📡 Торренты и P2P"},
+    {"key": "block",  "title": "🚫 Блокировки"},
+    {"key": "voip",   "title": "📞 Звонки и конференции"},
+    {"key": "svc",    "title": "🌐 Диагностика"},
+)
+
 RR_PRESETS: tuple = (
     # 🎮 Игры
-    {"key": "games-all", "title": "🎮 Игры — все сервисы",
+    {"key": "games-all", "group": "games", "suggest": "chain",
+     "title": "🎮 Игры — все сервисы",
      "desc": "Агрегат v2fly: Steam, Epic, Blizzard, Riot, EA, Ubisoft, Nintendo,"
              " PlayStation, Xbox, Wargaming, GOG, Roblox и др.",
      "domains": ("geosite:category-games-!cn",)},
-    {"key": "games-steam", "title": "🎮 Steam",
+    {"key": "games-steam", "group": "games", "suggest": "chain",
+     "title": "🎮 Steam",
      "desc": "Steam, Steam Community, CDN",
      "domains": ("geosite:steam",)},
-    {"key": "games-epic", "title": "🎮 Epic Games",
+    {"key": "games-epic", "group": "games", "suggest": "chain",
+     "title": "🎮 Epic Games",
      "desc": "Epic Games Store, Unreal, Fortnite-домены",
      "domains": ("geosite:epicgames",)},
-    {"key": "games-blizzard", "title": "🎮 Blizzard Battle.net",
+    {"key": "games-blizzard", "group": "games", "suggest": "chain",
+     "title": "🎮 Blizzard Battle.net",
      "desc": "Battle.net, Blizzard-сервисы",
      "domains": ("geosite:blizzard",)},
-    {"key": "games-riot", "title": "🎮 Riot Games",
+    {"key": "games-riot", "group": "games", "suggest": "chain",
+     "title": "🎮 Riot Games",
      "desc": "LoL, Valorant, Riot-CDN",
      "domains": ("geosite:riot",)},
-    {"key": "games-ea", "title": "🎮 EA (+Origin)",
+    {"key": "games-ea", "group": "games", "suggest": "chain",
+     "title": "🎮 EA (+Origin)",
      "desc": "EA-сервисы и Origin",
      "domains": ("geosite:ea", "geosite:origin",)},
-    {"key": "games-ubisoft", "title": "🎮 Ubisoft",
+    {"key": "games-ubisoft", "group": "games", "suggest": "chain",
+     "title": "🎮 Ubisoft",
      "desc": "Ubisoft Connect, CDN",
      "domains": ("geosite:ubisoft",)},
-    {"key": "games-nintendo", "title": "🎮 Nintendo",
+    {"key": "games-nintendo", "group": "games", "suggest": "chain",
+     "title": "🎮 Nintendo",
      "desc": "Nintendo eShop, аккаунты",
      "domains": ("geosite:nintendo",)},
-    {"key": "games-playstation", "title": "🎮 PlayStation Network",
+    {"key": "games-playstation", "group": "games", "suggest": "chain",
+     "title": "🎮 PlayStation Network",
      "desc": "PSN, PS Store",
      "domains": ("geosite:playstation",)},
-    {"key": "games-xbox", "title": "🎮 Xbox Live",
+    {"key": "games-xbox", "group": "games", "suggest": "chain",
+     "title": "🎮 Xbox Live",
      "desc": "Xbox-сервисы, Game Pass",
      "domains": ("geosite:xbox",)},
-    {"key": "games-wargaming", "title": "🎮 Wargaming",
+    {"key": "games-wargaming", "group": "games", "suggest": "chain",
+     "title": "🎮 Wargaming",
      "desc": "World of Tanks и др.",
      "domains": ("geosite:wargaming",)},
-    {"key": "games-gog", "title": "🎮 GOG",
+    {"key": "games-gog", "group": "games", "suggest": "chain",
+     "title": "🎮 GOG",
      "desc": "GOG Galaxy, магазин",
      "domains": ("geosite:gog",)},
-    {"key": "games-roblox", "title": "🎮 Roblox",
+    {"key": "games-roblox", "group": "games", "suggest": "chain",
+     "title": "🎮 Roblox",
      "desc": "Roblox-домены",
      "domains": ("geosite:roblox",)},
-    {"key": "games-faceit", "title": "🎮 FACEIT",
+    {"key": "games-faceit", "group": "games", "suggest": "chain",
+     "title": "🎮 FACEIT",
      "desc": "FACEIT-платформа",
      "domains": ("geosite:faceit",)},
-    {"key": "games-eft", "title": "🎮 Escape from Tarkov",
+    {"key": "games-eft", "group": "games", "suggest": "chain",
+     "title": "🎮 Escape from Tarkov",
      "desc": "EFT, Battlestate",
      "domains": ("geosite:escapefromtarkov",)},
+    {"key": "games-downloads", "group": "games", "suggest": "direct",
+     "title": "🎮 Загрузки игр (CDN платформ)",
+     "desc": "Загрузки игр/обновлений Steam, PS, Xbox и др. (492 дом.):"
+             " геймплей — через прокси (пинг), загрузки — direct (трафик)",
+     "domains": ("geosite:category-game-platforms-download",)},
     # 📺 Видеосервисы
-    {"key": "video-all", "title": "📺 Видеосервисы — все",
+    {"key": "video-all", "group": "video", "suggest": "chain",
+     "title": "📺 Видеосервисы — все",
      "desc": "YouTube(+CDN), Rutube, Twitch, Netflix, Prime Video, Hulu, Disney+,"
              " HBO, Kinopoisk, OKKO, Vimeo, Dailymotion, Kick",
      "domains": ("geosite:youtube", "domain:googlevideo.com",
@@ -220,39 +274,167 @@ RR_PRESETS: tuple = (
                  "geosite:primevideo", "geosite:hulu", "geosite:disney",
                  "geosite:hbo", "geosite:kinopoisk", "geosite:okko",
                  "geosite:vimeo", "geosite:dailymotion", "geosite:kick")},
-    {"key": "video-youtube", "title": "📺 YouTube (+CDN)",
+    {"key": "video-youtube", "group": "video", "suggest": "chain",
+     "title": "📺 YouTube (+CDN)",
      "desc": "YouTube + CDN видео/картинок/API (googlevideo, ggpht, youtubei)",
      "domains": ("geosite:youtube", "domain:googlevideo.com",
                  "domain:ggpht.com", "domain:youtubei.googleapis.com")},
-    {"key": "video-twitch", "title": "📺 Twitch",
+    {"key": "video-twitch", "group": "video", "suggest": "chain",
+     "title": "📺 Twitch",
      "desc": "Twitch-стриминг",
      "domains": ("geosite:twitch",)},
-    {"key": "video-streaming", "title": "📺 Зарубежные стриминги",
+    {"key": "video-streaming", "group": "video", "suggest": "chain",
+     "title": "📺 Зарубежные стриминги",
      "desc": "Netflix, Prime Video, Hulu, Disney+, HBO",
      "domains": ("geosite:netflix", "geosite:primevideo", "geosite:hulu",
                  "geosite:disney", "geosite:hbo")},
-    {"key": "video-ru", "title": "📺 Российское видео",
-     "desc": "Rutube, Kinopoisk, OKKO (+VK-видео в пресете соцсетей)",
+    {"key": "video-ru", "group": "video", "suggest": "direct",
+     "title": "📺 Российское видео",
+     "desc": "Rutube, Kinopoisk, OKKO (+VK-видео в пресете соцсетей) —"
+             " direct, не гнать RU-видео через зарубежный exit",
      "domains": ("geosite:rutube", "geosite:kinopoisk", "geosite:okko")},
     # 💬 Соцсети и мессенджеры
-    {"key": "social-all", "title": "💬 Соцсети — все",
+    {"key": "social-all", "group": "social", "suggest": "chain",
+     "title": "💬 Соцсети — все",
      "desc": "Зарубежные (агрегат v2fly) + российские VK/OK явными категориями",
      "domains": ("geosite:category-social-media-!cn", "geosite:vk",
                  "geosite:ok")},
-    {"key": "social-ru", "title": "💬 Российские соцсети",
+    {"key": "social-ru", "group": "social", "suggest": "direct",
+     "title": "💬 Российские соцсети",
      "desc": "VK (вкл. видео-CDN userapi/vkuservideo) и OK",
      "domains": ("geosite:vk", "geosite:ok")},
-    {"key": "social-foreign", "title": "💬 Зарубежные соцсети",
+    {"key": "social-foreign", "group": "social", "suggest": "chain",
+     "title": "💬 Зарубежные соцсети",
      "desc": "Facebook, Instagram, Threads, Twitter/X, TikTok, Reddit, LinkedIn,"
              " Pinterest — без российских",
      "domains": ("geosite:facebook", "geosite:instagram", "geosite:threads",
                  "geosite:twitter", "geosite:x", "geosite:tiktok",
                  "geosite:reddit", "geosite:linkedin", "geosite:pinterest")},
-    {"key": "msg-all", "title": "💬 Мессенджеры",
+    {"key": "msg-all", "group": "social", "suggest": "chain",
+     "title": "💬 Мессенджеры",
      "desc": "Telegram, WhatsApp, Viber, Discord (по доменам; звонки Telegram"
              " по IP — при желании добавьте geoip:telegram в IP-поле вручную)",
      "domains": ("geosite:telegram", "geosite:whatsapp", "geosite:viber",
                  "geosite:discord")},
+    # 🎵 Музыка
+    {"key": "music-all", "group": "music", "suggest": "chain",
+     "title": "🎵 Музыка — все сервисы",
+     "desc": "Spotify, Apple Music, SoundCloud, Deezer, Tidal + Яндекс Музыка"
+             " (её нет в geosite — добавлена domain: вручную)",
+     "domains": ("geosite:spotify", "geosite:apple-music",
+                 "geosite:soundcloud", "geosite:deezer", "geosite:tidal",
+                 "domain:music.yandex.ru", "domain:music.yandex.com")},
+    {"key": "music-spotify", "group": "music", "suggest": "chain",
+     "title": "🎵 Spotify",
+     "desc": "Spotify + audio-CDN (akamaized)",
+     "domains": ("geosite:spotify",)},
+    {"key": "music-yandex", "group": "music", "suggest": "direct",
+     "title": "🎵 Яндекс Музыка",
+     "desc": "Geosite-категории нет — домены добавлены вручную; direct —"
+             " не гонять RU-музыку через зарубежный exit",
+     "domains": ("domain:music.yandex.ru", "domain:music.yandex.com")},
+    # 🤖 AI-сервисы
+    {"key": "ai-all", "group": "ai", "suggest": "chain",
+     "title": "🤖 AI — все сервисы",
+     "desc": "ChatGPT, Claude, Gemini, Perplexity и др. (агрегат v2fly"
+             " category-ai-chat-!cn) + GitHub Copilot",
+     "domains": ("geosite:category-ai-chat-!cn", "geosite:github-copilot")},
+    {"key": "ai-openai", "group": "ai", "suggest": "chain",
+     "title": "🤖 OpenAI (ChatGPT)",
+     "desc": "ChatGPT и OpenAI API",
+     "domains": ("geosite:openai",)},
+    {"key": "ai-anthropic", "group": "ai", "suggest": "chain",
+     "title": "🤖 Anthropic (Claude)",
+     "desc": "Claude (anthropic.com)",
+     "domains": ("geosite:anthropic",)},
+    {"key": "ai-gemini", "group": "ai", "suggest": "chain",
+     "title": "🤖 Google Gemini",
+     "desc": "Gemini и AI-домены Google",
+     "domains": ("geosite:google-gemini",)},
+    # 📰 Медиа
+    {"key": "media-ru-blocked", "group": "media", "suggest": "chain",
+     "title": "📰 Заблокированные в РФ медиа",
+     "desc": "Независимые медиа одним правилом: BBC, Радио Свобода, VOA,"
+             " Meduza, agents.media и др. (агрегат category-media-ru-blocked)",
+     "domains": ("geosite:category-media-ru-blocked", "geosite:bbc",
+                 "geosite:rferl", "geosite:voanews", "geosite:meduza")},
+    # 🇷🇺 РФ: банки и магазины
+    {"key": "ru-banks", "group": "ru", "suggest": "direct",
+     "title": "🇷🇺 Российские банки",
+     "desc": "Сбер, Т-Банк, Альфа, ВТБ и др. (356 дом.) — direct: банк видит"
+             " домашний IP, а не зарубежный exit (антифрод/СБ)",
+     "domains": ("geosite:category-bank-ru",)},
+    {"key": "ru-shop", "group": "ru", "suggest": "direct",
+     "title": "🇷🇺 Российские магазины",
+     "desc": "Ozon, Wildberries + агрегат ecommerce-ru — direct, чтобы не"
+             " гнать RU-заказы через зарубежный exit",
+     "domains": ("geosite:category-ecommerce-ru", "geosite:ozon",
+                 "geosite:wildberries")},
+    # 🛠 Разработка и наука
+    {"key": "dev-all", "group": "dev", "suggest": "chain",
+     "title": "🛠 Dev — все сервисы",
+     "desc": "GitHub, GitLab, Docker Hub, npm + агрегат dev-сервисов v2fly (692)",
+     "domains": ("geosite:category-dev", "geosite:github", "geosite:gitlab",
+                 "geosite:docker", "geosite:npmjs")},
+    {"key": "dev-github", "group": "dev", "suggest": "chain",
+     "title": "🛠 Хостинги кода (GitHub, GitLab)",
+     "desc": "GitHub + GitLab — из РФ капризничают",
+     "domains": ("geosite:github", "geosite:gitlab")},
+    {"key": "dev-science", "group": "dev", "suggest": "chain",
+     "title": "🛠 Наука и университеты",
+     "desc": "Журналы, университеты, Google Scholar (агрегат v2fly scholar)",
+     "domains": ("geosite:category-scholar-!cn",)},
+    # 📡 Торренты и P2P
+    {"key": "p2p-all", "group": "p2p", "suggest": "direct",
+     "title": "📡 Торренты — все трекеры",
+     "desc": "Публичные + приватные трекеры (RuTracker и др.): direct — не"
+             " жечь трафик прокси; block — запретить P2P клиентам",
+     "domains": ("geosite:category-public-tracker", "geosite:category-pt")},
+    {"key": "p2p-public", "group": "p2p", "suggest": "direct",
+     "title": "📡 Публичные трекеры",
+     "desc": "TPB, 1337x и др. (437 дом.)",
+     "domains": ("geosite:category-public-tracker",)},
+    {"key": "p2p-private", "group": "p2p", "suggest": "direct",
+     "title": "📡 Приватные трекеры",
+     "desc": "RuTracker и др. приватные (126 дом.)",
+     "domains": ("geosite:category-pt",)},
+    # 🚫 Блокировки
+    {"key": "block-ads", "group": "block", "suggest": "block",
+     "title": "🚫 Вся реклама",
+     "desc": "category-ads-all (184 тыс. дом.) — серверная блокировка рекламы"
+             " всем клиентам на уровне routing; жёстко — возможны ложные",
+     "domains": ("geosite:category-ads-all",)},
+    {"key": "block-ads-telemetry", "group": "block", "suggest": "block",
+     "title": "🚫 Реклама + телеметрия",
+     "desc": "Курируемый список v2fly (мягче ads-all) — реклама и слежка",
+     "domains": ("geosite:category-ads-and-telemetry",)},
+    {"key": "block-telemetry", "group": "block", "suggest": "block",
+     "title": "🚫 Телеметрия",
+     "desc": "Телеметрия приложений/сайтов без рекламы (298 дом.)",
+     "domains": ("geosite:category-telemetry",)},
+    # 📞 Звонки и конференции
+    {"key": "voip-all", "group": "voip", "suggest": "direct",
+     "title": "📞 Конференции (Zoom, Webex)",
+     "desc": "Zoom, Webex, TeamSpeak + VoIP-агрегат — direct: звонки"
+             " чувствительны к задержкам прокси",
+     "domains": ("geosite:zoom", "geosite:webex", "geosite:teamspeak",
+                 "geosite:category-voip")},
+    {"key": "voip-stun", "group": "voip", "suggest": "direct",
+     "title": "📞 STUN/WebRTC",
+     "desc": "STUN-серверы (359 дом.) — определение реального IP для"
+             " звонков/игр; direct, иначе ломается NAT-обход",
+     "domains": ("geosite:category-stun",)},
+    # 🌐 Диагностика
+    {"key": "svc-ip-detect", "group": "svc", "suggest": "chain",
+     "title": "🌐 Сервисы «ваш IP»",
+     "desc": "2ip.ru и др. (1682 дом.): через прокси — увидите IP выхода,"
+             " direct — домашний IP; удобно для проверки правила",
+     "domains": ("geosite:category-ip-geo-detect",)},
+    {"key": "svc-speedtest", "group": "svc", "suggest": "chain",
+     "title": "🌐 Speedtest",
+     "desc": "Speedtest и аналоги (329 дом.) — через прокси: замер"
+             " прокси-канала, а не домашнего",
+     "domains": ("geosite:category-speedtest",)},
 )
 
 _CONFIG_DIR      = Path("/etc/xray")
@@ -485,11 +667,39 @@ def _rr_picker_options(tags: list, cfg: dict) -> "tuple[list, list]":
     return labels, pick
 
 
+def _rr_suggest_outbound(suggest: "str | None", pick: list) -> "int | None":
+    """Индекс рекомендуемого outbound в списке пикера.
+
+    suggest: "chain" — первый chain-exit-* (прокси-каскад); "direct" /
+    "block" — точный тег. Не задан или нет в живом конфиге → None
+    (предвыбора нет, обычный порядок пикера).
+    """
+    if not suggest or not pick:
+        return None
+    if suggest == "chain":
+        for i, t in enumerate(pick):
+            if t.startswith("chain-exit"):
+                return i
+        return None
+    if suggest in ("direct", "block"):
+        try:
+            return pick.index(suggest)
+        except ValueError:
+            return None
+    return None
+
+
 def _rr_pick_outbound(cur_out: "str | None" = None,
-                      title: str = "Outbound (куда направить трафик)"
+                      title: str = "Outbound (куда направить трафик)",
+                      suggest: "str | None" = None,
                       ) -> "str | None":
     """Выбор outbound: живые теги + создать новый (custom_outbounds) +
-    тег вручную. Возвращает тег или None (отмена)."""
+    тег вручную. Возвращает тег или None (отмена).
+
+    suggest (пресеты): предвыбор рекомендуемого тега + пометка в
+    заголовке («рекомендуется: ...»); cur_out задан (редактирование
+    правила) — предвыбор текущего тега, рекомендация игнорируется.
+    """
     tags, cfg = _rr_live_outbounds()
     if not tags:
         manual = tui_form("Outbound (нет живого конфига)", [
@@ -503,6 +713,13 @@ def _rr_pick_outbound(cur_out: "str | None" = None,
     options = labels + ["— Создать новый outbound —  🔗",
                         "— Ввести тег вручную —"]
     pre = pick.index(cur_out) if cur_out in pick else 0
+    sug = _rr_suggest_outbound(suggest, pick)
+    if sug is not None and not cur_out:
+        pre = sug
+        what = {"chain": "через прокси (каскад)",
+                "direct": "direct (напрямую)",
+                "block": "block (заблокировать)"}.get(suggest, suggest)
+        title = f"{title}  — рекомендуется: {what}"
     idx = tui_select(title, options, default=pre)
     if idx is None:
         return None
@@ -970,7 +1187,7 @@ def _rr_show_live_rules() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ГОТОВЫЕ ПРЕСЕТЫ (пункт 9) — игры / видео / соцсети
+#  ГОТОВЫЕ ПРЕСЕТЫ (пункт 9) — двухуровневый каталог + свой набор
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _rr_preset_geocodes(preset: dict) -> list:
@@ -1006,6 +1223,19 @@ def _rr_preset_total(preset: dict, codes: "dict | None") -> "int | None":
     return total
 
 
+def _rr_preset_tiny(preset: dict, codes: "dict | None") -> list:
+    """Куцые geosite-категории пресета (< RR_TINY_CATEGORY доменов):
+    [(код, N), ...] — честная пометка «покрытие может быть неполным»."""
+    if codes is None:
+        return []
+    out = []
+    for c in _rr_preset_geocodes(preset):
+        n = codes.get(c)
+        if n is not None and n < RR_TINY_CATEGORY:
+            out.append((c, n))
+    return out
+
+
 def _rr_unique_preset_name(key: str) -> str:
     """Свободное имя правила для пресета (key, key-2, key-3...)."""
     existing = {r.get("name") for r in _rr_load().get("rules", [])}
@@ -1017,8 +1247,38 @@ def _rr_unique_preset_name(key: str) -> str:
     return f"{key}-{i}"
 
 
+def _rr_plural(n: int, forms: tuple) -> str:
+    """1 пресет / 2 пресета / 5 пресетов — русская плюрализация."""
+    n100, n10 = n % 100, n % 10
+    if 11 <= n100 <= 14:
+        return forms[2]
+    if n10 == 1:
+        return forms[0]
+    if 2 <= n10 <= 4:
+        return forms[1]
+    return forms[2]
+
+
+def _rr_presets_in_group(group_key: str) -> list:
+    """Пресеты группы в порядке каталога."""
+    return [p for p in RR_PRESETS if p.get("group") == group_key]
+
+
+def _rr_preset_label(preset: dict, codes: "dict | None") -> str:
+    """Строка списка: «🎮 Steam  (61 дом.)» (+ «⚠ нет в geosite.dat»)."""
+    label = preset["title"]
+    total = _rr_preset_total(preset, codes)
+    if total is not None:
+        label += f"  ({total} дом.)"
+    if _rr_preset_missing(preset, codes):
+        label += "  ⚠ нет в geosite.dat"
+    return label
+
+
 def _rr_menu_presets() -> None:
-    """Меню готовых пресетов: выбрать → outbound → правило → apply.
+    """Меню готовых пресетов (двухуровневое): группа → пресет →
+    outbound (с рекомендацией) → правило → apply. Плюс сборщик
+    «свой набор» — multi-select по группам → одно правило.
 
     Пресет = обычное state-правило (source=preset:<key>): после создания
     редактируется/включается/удаляется как любое другое (пункты 2/3/4).
@@ -1032,22 +1292,44 @@ def _rr_menu_presets() -> None:
     else:
         _info(f"geosite.dat: {len(codes)} категорий — пресеты сверены с живым файлом")
 
-    options = []
-    for p in RR_PRESETS:
-        label = p["title"]
-        total = _rr_preset_total(p, codes)
-        if total is not None:
-            label += f"  ({total} дом.)"
-        if _rr_preset_missing(p, codes):
-            label += "  ⚠ нет в geosite.dat"
-        options.append(label)
-    options.append("— Отмена —")
+    while True:
+        groups = [g for g in RR_PRESET_GROUPS if _rr_presets_in_group(g["key"])]
+        g_options = []
+        for g in groups:
+            presets = _rr_presets_in_group(g["key"])
+            miss = sum(1 for p in presets if _rr_preset_missing(p, codes))
+            label = (f"{g['title']}  ({len(presets)} "
+                     f"{_rr_plural(len(presets), ('пресет', 'пресета', 'пресетов'))})")
+            if miss:
+                label += f"  ⚠ {miss} с пропусками"
+            g_options.append(label)
+        g_options.append("🔧 Свой набор — отметить несколько категорий")
+        g_options.append("— Отмена —")
 
-    idx = tui_select("Готовый пресет — быстрое правило из geosite-категорий", options)
-    if idx is None or idx == len(options) - 1:
-        return
-    preset = RR_PRESETS[idx]
+        gidx = tui_select("Готовые пресеты — выберите группу", g_options)
+        if gidx is None or gidx == len(g_options) - 1:
+            return
+        if gidx == len(g_options) - 2:
+            _rr_menu_mix(codes)
+            continue
+        _rr_menu_group_presets(groups[gidx], codes)
 
+
+def _rr_menu_group_presets(group: dict, codes: "dict | None") -> None:
+    """Второй уровень каталога: пресеты внутри группы."""
+    presets = _rr_presets_in_group(group["key"])
+    while True:
+        options = [_rr_preset_label(p, codes) for p in presets]
+        options.append("— Назад —")
+        idx = tui_select(f"{group['title']} — выберите пресет", options)
+        if idx is None or idx == len(options) - 1:
+            return
+        _rr_apply_preset_flow(presets[idx], codes)
+
+
+def _rr_apply_preset_flow(preset: dict, codes: "dict | None") -> None:
+    """Карточка пресета (счётчики + предпросмотр доменов + куцые) →
+    outbound с рекомендацией → правило → apply."""
     # Наличие категорий: ссылка на отсутствующий код = мёртвый Xray.
     missing = _rr_preset_missing(preset, codes)
     if missing:
@@ -1061,7 +1343,12 @@ def _rr_menu_presets() -> None:
         _box_desc("Обновите geo-файлы: Настройки сети → GeoIP/GeoSite — и повторите.")
         _box_bottom()
         _log("WARN", f"preset {preset['key']}: нет категорий {missing}")
+        input(f"{BLUE}Нажмите Enter...{NC}")
         return
+
+    # Предпросмотр: первые домены каждой категории (~2 с один раз,
+    # дальше mtime-кэш) — видно, ЧТО именно матчится, до создания правила.
+    samples = geosite_samples(RR_SAMPLE_DOMAINS) if codes is not None else None
 
     print()
     _box_top(f"Пресет: {preset['title']}")
@@ -1072,15 +1359,27 @@ def _rr_menu_presets() -> None:
         low = str(d).lower()
         cnt = ""
         if codes is not None and low.startswith("geosite:"):
-            cnt = f"  — {codes.get(low.split(':', 1)[1], 0)} дом."
+            c = low.split(":", 1)[1]
+            cnt = f"  — {codes.get(c, 0)} дом."
+            if samples:
+                smp = ", ".join(samples.get(c, [])[:2])
+                if smp:
+                    cnt += f"  · {smp}"
         _box_row(f"  {CYAN}{d}{NC}{DIM}{cnt}{NC}")
     _box_row()
+    tiny = _rr_preset_tiny(preset, codes)
+    if tiny:
+        tlist = ", ".join(f"{c} ({n} дом.)" for c, n in tiny)
+        _box_warn(f"  Куцые категории: {tlist} — покрытие может быть неполным;")
+        _box_warn("  при желании добавьте domain:-паттерны редактором (пункт 2).")
+        _box_row()
     _box_desc("Правило создастся с priority=10, placement=top (перебивает")
     _box_desc("встроенные ru_subnets/youtube). Пересекающиеся пресеты: точечному")
     _box_desc("ставьте меньший приоритет (меню 2). Дальше — обычное правило (2/3/4).")
     _box_bottom()
 
-    outbound = _rr_pick_outbound(title=f"Куда направить: {preset['title']}?")
+    outbound = _rr_pick_outbound(title=f"Куда направить: {preset['title']}?",
+                                 suggest=preset.get("suggest"))
     if not outbound:
         return
 
@@ -1121,6 +1420,142 @@ def _rr_menu_presets() -> None:
     _rr_save(state)
     _log_change(f"rule_add:{name}", f"preset {preset['key']} → {outbound}")
     _rr_apply_to_xray(restart=True, validate=True)
+    input(f"{BLUE}Нажмите Enter...{NC}")
+
+
+def _rr_menu_mix(codes: "dict | None") -> None:
+    """Сборщик «свой набор»: multi-select пресетов по группам → ОДНО
+    правило из объединения доменов (OR-семантика Xray).
+
+    Категории, отсутствующие в geosite.dat, в набор не попадают —
+    WARN и пропуск (защита от мёртвого Xray, канон пресетов).
+    """
+    picked: list = []
+    picked_keys: set = set()
+
+    while True:
+        groups = [g for g in RR_PRESET_GROUPS if _rr_presets_in_group(g["key"])]
+        g_options = [g["title"] for g in groups]
+        g_options.append("✔ Завершить набор" if picked else "— Отмена —")
+        gidx = tui_select("Свой набор — добавить категории из группы", g_options)
+        if gidx is None or gidx == len(g_options) - 1:
+            if not picked:
+                return
+            break
+        group = groups[gidx]
+        presets = _rr_presets_in_group(group["key"])
+        options = [_rr_preset_label(p, codes) for p in presets]
+        sel = tui_multi_select(
+            f"{group['title']} — отметьте Space, Enter — готово", options)
+        if not sel:
+            continue
+        for i in sel:
+            p = presets[i]
+            if p["key"] in picked_keys:
+                continue
+            missing = _rr_preset_missing(p, codes)
+            if missing:
+                _warn(f"«{p['title']}» пропущен — нет категорий: "
+                      f"{', '.join(missing)}")
+                continue
+            picked.append(p)
+            picked_keys.add(p["key"])
+        if picked:
+            _info(f"В наборе {len(picked)} "
+                  f"{_rr_plural(len(picked), ('категория', 'категории', 'категорий'))}"
+                  " — можно добавить ещё из другой группы")
+
+    # Объединение доменов с дедупом (порядок выбора сохраняется).
+    domains: list = []
+    seen: set = set()
+    for p in picked:
+        for d in p["domains"]:
+            low = str(d).lower()
+            if low not in seen:
+                seen.add(low)
+                domains.append(d)
+
+    # Рекомендация outbound: единая для всех отмеченных — иначе без
+    # предвыбора (смешали direct и block — решает человек).
+    suggests = {p.get("suggest") for p in picked}
+    suggest = suggests.pop() if len(suggests) == 1 else None
+
+    total = None
+    if codes is not None:
+        total = 0
+        for d in domains:
+            low = str(d).lower()
+            if low.startswith("geosite:"):
+                total += codes.get(low.split(":", 1)[1], 0)
+            else:
+                total += 1
+
+    print()
+    _box_top("🔧 Свой набор — одно правило из отмеченных категорий")
+    _box_row()
+    _box_desc("Домены всех отмеченных пресетов объединяются в ОДНО правило (OR).")
+    _box_row()
+    for p in picked:
+        _box_row(f"  {CYAN}{p['title']}{NC}")
+    _box_row()
+    _box_kv("Матч", f"{len(domains)} паттернов"
+            + (f" (~{total} дом.)" if total is not None else ""))
+    _box_kv("  домены", ", ".join(domains[:6])
+            + (" ..." if len(domains) > 6 else ""))
+    tiny_pairs: list = []
+    for p in picked:
+        tiny_pairs.extend(_rr_preset_tiny(p, codes))
+    if tiny_pairs:
+        tlist = ", ".join(f"{c} ({n})" for c, n in tiny_pairs)
+        _box_warn(f"  Куцые категории: {tlist} — покрытие может быть неполным.")
+    _box_row()
+    _box_desc("Правило создастся с priority=10, placement=top — как пресет;")
+    _box_desc("пересечения с другими правилами решайте приоритетами (меню 2).")
+    _box_bottom()
+
+    outbound = _rr_pick_outbound(title="Куда направить: свой набор?",
+                                 suggest=suggest)
+    if not outbound:
+        return
+
+    name = _rr_unique_preset_name("mix")
+    rule = {
+        "name": name,
+        "enabled": True,
+        "domains": domains,
+        "ips": [],
+        "ports": [],
+        "outbound": outbound,
+        "priority": 10,
+        "placement": "top",
+        "chunk": RR_DEFAULT_CHUNK,
+        "source": "mix:" + "+".join(p["key"] for p in picked),
+        "created_at": _rr_now(),
+        "updated_at": _rr_now(),
+    }
+
+    print()
+    _box_top(f"Новое правило (свой набор): {name}")
+    _box_kv("Матч", _rr_match_summary(rule))
+    _box_kv("  домены", ", ".join(rule["domains"][:5])
+            + (" ..." if len(rule["domains"]) > 5 else ""))
+    _box_kv("Outbound", outbound)
+    _box_kv("Приоритет", "10")
+    _box_kv("Расположение", "top (выше встроенных)")
+    _box_kv("Источник", rule["source"])
+    _box_row()
+    _box_warn("  Правило действует на всех клиентов сервера сразу (routing Xray")
+    _box_warn("  не разделяет трафик по пользователям).")
+    _box_bottom()
+    if not tui_confirm("Создать правило из набора и применить?", default=False):
+        return
+
+    state = _rr_load()
+    state.setdefault("rules", []).append(rule)
+    _rr_save(state)
+    _log_change(f"rule_add:{name}", f"{rule['source']} → {outbound}")
+    _rr_apply_to_xray(restart=True, validate=True)
+    input(f"{BLUE}Нажмите Enter...{NC}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1180,7 +1615,7 @@ def do_manage_routing_rules() -> None:
         _box_item("6", "Показать живые правила из конфига (custom:*)")
         _box_item("7", "Пере-применить все правила из state (после regenerate)")
         _box_item("8", f"Кастомные outbound'ы 🔗  {DIM}свои ноды / друзья — vless:// ссылка, мастер, JSON{NC}")
-        _box_item("9", f"Готовые пресеты  {DIM}🎮 игры / 📺 видео / 💬 соцсети — одним правилом{NC}")
+        _box_item("9", f"Готовые пресеты  {DIM}12 групп: игры / видео / соцсети / музыка / AI / РФ / торренты / блокировки — + свой набор{NC}")
         _box_row()
         _box_back()
         _box_bottom()

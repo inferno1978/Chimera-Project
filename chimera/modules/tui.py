@@ -4,11 +4,12 @@ chimera/modules/tui.py
 TUI-компоненты для интерактивных форм и диалогов Chimera Project.
 
 Содержит:
-  • tui_input    — однострочный ввод с историей
-  • tui_confirm  — диалог да/нет
-  • tui_select   — выбор из списка стрелками
-  • tui_progress — прогресс-бар
-  • tui_form     — многострочная форма ввода
+  • tui_input        — однострочный ввод с историей
+  • tui_confirm      — диалог да/нет
+  • tui_select       — выбор из списка стрелками
+  • tui_multi_select — мульти-выбор галочками (Space отметить, a все)
+  • tui_progress     — прогресс-бар
+  • tui_form         — многострочная форма ввода
 
 Точка входа из _core.py:
     from chimera.modules.tui import (
@@ -366,6 +367,91 @@ def tui_select(
             _render()
         elif k in ('\r', '\n'):
             return cur
+        elif k in ('\x1b', 'q', '\x03'):
+            if k == '\x03':
+                raise KeyboardInterrupt
+            return None
+
+
+# ── tui_multi_select ──────────────────────────────────────────────────────────
+
+def tui_multi_select(
+    title:    str,
+    options:  "list[str]",
+    selected: "list[int] | None" = None,
+) -> "list[int] | None":
+    """
+    Мульти-выбор галочками: ↑↓ — курсор, Space — отметить/снять, a —
+    все/ничего, Enter — подтвердить (возвращает список индексов
+    отмеченных, может быть пустым), Esc/q — отмена (None).
+    Тот же бокс/ширина/маркер ▶, что у tui_select.
+    Graceful fallback: нумерованный список + input('1,3,5' / 'all').
+    """
+    if not options:
+        return None
+
+    sel = set(selected or [])
+
+    if not _is_tty():
+        _box_top(title)
+        for i, o in enumerate(options, 1):
+            mark = f"{GREEN}[x]{NC}" if (i - 1) in sel else f"{DIM}[ ]{NC}"
+            _box_row(f"  {DIM}{i:>2}.{NC} {mark} {o}")
+        _box_bottom()
+        raw = input(f"  {CYAN}Номера через запятую (all = все, Enter = отмена):{NC} ")
+        raw = raw.strip().lower()
+        if not raw:
+            return None
+        if raw in ("all", "все"):
+            return list(range(len(options)))
+        out: list = []
+        for part in raw.replace(" ", "").split(","):
+            if part.isdigit() and 1 <= int(part) <= len(options):
+                out.append(int(part) - 1)
+        return sorted(set(out))
+
+    cur = 0
+
+    def _render():
+        os.system("clear")
+        print()
+        _box_top(title)
+        _box_row()
+        for i, opt in enumerate(options):
+            chk = f"{GREEN}[x]{NC}" if i in sel else f"{DIM}[ ]{NC}"
+            if i == cur:
+                marker = f"{GREEN}▶{NC}"
+                line   = f"  {marker} {chk} {BOLD}{opt}{NC}"
+            else:
+                marker = f"{DIM} {NC}"
+                line   = f"  {marker} {chk} {DIM}{opt}{NC}"
+            _box_row(line)
+        _box_row()
+        _box_row(f"  {DIM}↑↓ курсор  Space отметить  a все/ничего  "
+                 f"Enter готово  Esc отмена{NC}")
+        _box_bottom()
+
+    _render()
+
+    while True:
+        k = _getch_raw()
+        if k == 'KEY_UP':
+            cur = (cur - 1) % len(options)
+            _render()
+        elif k == 'KEY_DOWN':
+            cur = (cur + 1) % len(options)
+            _render()
+        elif k == ' ':
+            if cur in sel:
+                sel.discard(cur)
+            else:
+                sel.add(cur)
+            _render()
+        elif k in ('a', 'A'):
+            sel = set() if len(sel) == len(options) else set(range(len(options)))
+            _render()
+        elif k in ('\r', '\n'):
+            return sorted(sel)
         elif k in ('\x1b', 'q', '\x03'):
             if k == '\x03':
                 raise KeyboardInterrupt
