@@ -28,8 +28,9 @@ chimera/modules/routing_rules.py
     пресета рекомендуемый outbound (chain/direct/block — Enter в пикере
     подставляет его сразу), предпросмотр доменов категории
     (geosite_samples) и честная пометка «куцых» категорий (<10 дом.);
-    сборщик «свой набор» — multi-select по группам → одно правило из
-    объединения доменов; geosite-категории runetfreedom; наличие
+    сборщик «свой набор» — multi-select по группам И/ИЛИ ввод своих
+    доменов (список вручную) → одно правило из объединения доменов;
+    geosite-категории runetfreedom; наличие
     сверяется с живым geosite.dat (модуль geosite_codes), чтобы не
     положить Xray ссылкой на несуществующий код.
   • Re-apply после regenerate (restore_routing_rules_if_needed) —
@@ -1278,7 +1279,8 @@ def _rr_preset_label(preset: dict, codes: "dict | None") -> str:
 def _rr_menu_presets() -> None:
     """Меню готовых пресетов (двухуровневое): группа → пресет →
     outbound (с рекомендацией) → правило → apply. Плюс сборщик
-    «свой набор» — multi-select по группам → одно правило.
+    «свой набор» — multi-select по группам и/или ввод своих доменов
+    → одно правило.
 
     Пресет = обычное state-правило (source=preset:<key>): после создания
     редактируется/включается/удаляется как любое другое (пункты 2/3/4).
@@ -1303,7 +1305,7 @@ def _rr_menu_presets() -> None:
             if miss:
                 label += f"  ⚠ {miss} с пропусками"
             g_options.append(label)
-        g_options.append("🔧 Свой набор — отметить несколько категорий")
+        g_options.append("🔧 Свой набор — категории и/или свои домены")
         g_options.append("— Отмена —")
 
         gidx = tui_select("Готовые пресеты — выберите группу", g_options)
@@ -1423,25 +1425,81 @@ def _rr_apply_preset_flow(preset: dict, codes: "dict | None") -> None:
     input(f"{BLUE}Нажмите Enter...{NC}")
 
 
+def _rr_input_own_domains(codes: "dict | None") -> "list | None":
+    """Ввод списка своих доменов (помимо категорий): форма с валидатором
+    домен-паттернов → дедуп без учёта регистра → сверка geosite:-кодов
+    с живым geosite.dat (канон пресетов: отсутствующий код НЕ попадает
+    в правило — защита от мёртвого Xray; финальный гвард xray run -test
+    остаётся в _rr_apply_to_xray).
+
+    Возвращает список паттернов или None (отмена / после фильтра пусто).
+    """
+    form = tui_form("Свои домены — список", [
+        TuiField(key="domains", label="Домены", default="", required=True,
+                 validator=_rr_validate_domains,
+                 hint="example.com, domain:google.com, geosite:category-ads-all"),
+    ])
+    if form is None:
+        return None
+    seen: set = set()
+    out: list = []
+    for d in _split_list(form.get("domains", "")):
+        low = d.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        out.append(d)
+    if not out:
+        return None
+    if codes is not None:
+        missing = [d.split(":", 1)[1] for d in out
+                   if d.lower().startswith("geosite:")
+                   and d.split(":", 1)[1] not in codes]
+        if missing:
+            _warn("Пропущены geosite-коды, которых нет в geosite.dat: "
+                  + ", ".join(missing))
+            out = [d for d in out
+                   if not (d.lower().startswith("geosite:")
+                           and d.split(":", 1)[1] not in codes)]
+            if not out:
+                return None
+    return out
+
+
 def _rr_menu_mix(codes: "dict | None") -> None:
-    """Сборщик «свой набор»: multi-select пресетов по группам → ОДНО
-    правило из объединения доменов (OR-семантика Xray).
+    """Сборщик «свой набор»: multi-select пресетов по группам и/или ввод
+    своих доменов (список вручную) → ОДНО правило из объединения
+    (OR-семантика Xray).
 
     Категории, отсутствующие в geosite.dat, в набор не попадают —
-    WARN и пропуск (защита от мёртвого Xray, канон пресетов).
+    WARN и пропуск (защита от мёртвого Xray, канон пресетов); свои
+    geosite:-коды проходят ту же сверку на вводе.
     """
     picked: list = []
     picked_keys: set = set()
+    own_batch = 0
 
     while True:
         groups = [g for g in RR_PRESET_GROUPS if _rr_presets_in_group(g["key"])]
         g_options = [g["title"] for g in groups]
+        g_options.append("📝 Свои домены — ввести список (помимо категорий)")
         g_options.append("✔ Завершить набор" if picked else "— Отмена —")
-        gidx = tui_select("Свой набор — добавить категории из группы", g_options)
+        gidx = tui_select("Свой набор — что добавить в правило", g_options)
         if gidx is None or gidx == len(g_options) - 1:
             if not picked:
                 return
             break
+        if gidx == len(g_options) - 2:
+            doms = _rr_input_own_domains(codes)
+            if doms:
+                own_batch += 1
+                key = "own" if own_batch == 1 else f"own-{own_batch}"
+                picked.append({"title": f"📝 Свои домены ({len(doms)} шт)",
+                               "key": key, "domains": doms,
+                               "suggest": None, "own": True})
+                _info(f"Свои домены ({len(doms)} шт) добавлены — можно "
+                      "добавить категории, ещё домены или завершить")
+            continue
         group = groups[gidx]
         presets = _rr_presets_in_group(group["key"])
         options = [_rr_preset_label(p, codes) for p in presets]
@@ -1461,9 +1519,19 @@ def _rr_menu_mix(codes: "dict | None") -> None:
             picked.append(p)
             picked_keys.add(p["key"])
         if picked:
-            _info(f"В наборе {len(picked)} "
-                  f"{_rr_plural(len(picked), ('категория', 'категории', 'категорий'))}"
-                  " — можно добавить ещё из другой группы")
+            n_cat = sum(1 for p in picked if not p.get("own"))
+            n_own = len(picked) - n_cat
+            parts = []
+            if n_cat:
+                parts.append(f"{n_cat} "
+                             + _rr_plural(n_cat, ("категория", "категории",
+                                                  "категорий")))
+            if n_own:
+                parts.append(f"{n_own} "
+                             + _rr_plural(n_own, ("список доменов",
+                                                  "списка доменов",
+                                                  "списков доменов")))
+            _info("В наборе: " + " + ".join(parts) + " — можно добавить ещё")
 
     # Объединение доменов с дедупом (порядок выбора сохраняется).
     domains: list = []
@@ -1491,9 +1559,10 @@ def _rr_menu_mix(codes: "dict | None") -> None:
                 total += 1
 
     print()
-    _box_top("🔧 Свой набор — одно правило из отмеченных категорий")
+    _box_top("🔧 Свой набор — одно правило (категории и/или свои домены)")
     _box_row()
-    _box_desc("Домены всех отмеченных пресетов объединяются в ОДНО правило (OR).")
+    _box_desc("Домены всех отмеченных пунктов (категории + свои домены)")
+    _box_desc("объединяются в ОДНО правило (OR-семантика Xray).")
     _box_row()
     for p in picked:
         _box_row(f"  {CYAN}{p['title']}{NC}")
@@ -1518,7 +1587,15 @@ def _rr_menu_mix(codes: "dict | None") -> None:
     if not outbound:
         return
 
-    name = _rr_unique_preset_name("mix")
+    only_own = all(p.get("own") for p in picked)
+    name = _rr_unique_preset_name("own-domains" if only_own else "mix")
+    if only_own:
+        src = "own:" + ", ".join(domains[:3]) \
+            + ("..." if len(domains) > 3 else "")
+    else:
+        src = "mix:" + "+".join(
+            f"own({len(p['domains'])})" if p.get("own") else p["key"]
+            for p in picked)
     rule = {
         "name": name,
         "enabled": True,
@@ -1529,7 +1606,7 @@ def _rr_menu_mix(codes: "dict | None") -> None:
         "priority": 10,
         "placement": "top",
         "chunk": RR_DEFAULT_CHUNK,
-        "source": "mix:" + "+".join(p["key"] for p in picked),
+        "source": src,
         "created_at": _rr_now(),
         "updated_at": _rr_now(),
     }
@@ -1615,7 +1692,7 @@ def do_manage_routing_rules() -> None:
         _box_item("6", "Показать живые правила из конфига (custom:*)")
         _box_item("7", "Пере-применить все правила из state (после regenerate)")
         _box_item("8", f"Кастомные outbound'ы 🔗  {DIM}свои ноды / друзья — vless:// ссылка, мастер, JSON{NC}")
-        _box_item("9", f"Готовые пресеты  {DIM}12 групп: игры / видео / соцсети / музыка / AI / РФ / торренты / блокировки — + свой набор{NC}")
+        _box_item("9", f"Готовые пресеты  {DIM}12 групп: игры / видео / соцсети / музыка / AI / РФ / торренты / блокировки — + свой набор / свои домены{NC}")
         _box_row()
         _box_back()
         _box_bottom()

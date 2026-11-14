@@ -753,5 +753,214 @@ class TestRuSubnetsImportBuild(unittest.TestCase):
             self.assertEqual(r["outboundTag"], "chain-exit-2")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  «Свой набор»: свои домены помимо категорий
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestOwnDomainsMix(unittest.TestCase):
+    """Ввод своих доменов в сборщике «свой набор» (помимо категорий):
+    список вручную → правило с любым outbound (UX пикера пресетов)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _rr(self):
+        from chimera.modules import routing_rules as rr
+        return rr
+
+    @staticmethod
+    def _n_groups(rr):
+        return len([g for g in rr.RR_PRESET_GROUPS
+                    if rr._rr_presets_in_group(g["key"])])
+
+    def test_own_input_parses_and_dedups(self):
+        """Список через запятую → паттерны; дедуп без учёта регистра,
+        порядок первого вхождения сохраняется."""
+        rr = self._rr()
+        with patch.object(rr, "tui_form", return_value={
+                "domains": "example.com, foo.org, example.com, EXAMPLE.COM"}):
+            out = rr._rr_input_own_domains(None)
+        self.assertEqual(out, ["example.com", "foo.org"])
+
+    def test_own_input_cancel_returns_none(self):
+        """Отмена формы → None (в набор не попадает)."""
+        rr = self._rr()
+        with patch.object(rr, "tui_form", return_value=None):
+            self.assertIsNone(rr._rr_input_own_domains(None))
+
+    def test_own_input_geosite_missing_dropped(self):
+        """geosite:-код, отсутствующий в dat, выбрасывается с WARN;
+        валидные паттерны остаются (канон пресетов)."""
+        rr = self._rr()
+        with patch.object(rr, "tui_form", return_value={
+                "domains": "geosite:category-ads-all, geosite:no-such-cat, a.com"}), \
+             patch.object(rr, "_warn") as w:
+            out = rr._rr_input_own_domains({"category-ads-all": 100})
+        self.assertEqual(out, ["geosite:category-ads-all", "a.com"])
+        w.assert_called_once()
+
+    def test_own_input_all_geosite_missing_returns_none(self):
+        """После фильтра пусто → None (мёртвый набор не создаётся)."""
+        rr = self._rr()
+        with patch.object(rr, "tui_form", return_value={
+                "domains": "geosite:no-such-cat"}), \
+             patch.object(rr, "_warn"):
+            self.assertIsNone(rr._rr_input_own_domains({}))
+
+    def test_own_input_geosite_kept_when_codes_unknown(self):
+        """geosite.dat не распарсился (codes=None) — geosite: остаётся:
+        финальный гвард xray run -test в _rr_apply_to_xray."""
+        rr = self._rr()
+        with patch.object(rr, "tui_form", return_value={
+                "domains": "geosite:whatever"}):
+            self.assertEqual(rr._rr_input_own_domains(None),
+                             ["geosite:whatever"])
+
+    def test_mix_flow_own_only_creates_own_rule(self):
+        """Только свои домены: правило own-domains, outbound из пикера,
+        apply с рестартом и валидацией."""
+        rr = self._rr()
+        own_idx = self._n_groups(rr)
+        fin_idx = own_idx + 1
+        saved = {}
+
+        def fake_save(state):
+            saved.update(state)
+
+        with patch.object(rr, "tui_select", side_effect=[own_idx, fin_idx]), \
+             patch.object(rr, "tui_form", return_value={
+                 "domains": "a.com, b.org"}), \
+             patch.object(rr, "tui_confirm", return_value=True), \
+             patch.object(rr, "_rr_pick_outbound", return_value="direct"), \
+             patch.object(rr, "_rr_load", return_value={"rules": []}), \
+             patch.object(rr, "_rr_save", side_effect=fake_save), \
+             patch.object(rr, "_rr_apply_to_xray", return_value=True) as ax, \
+             patch.object(rr, "_log_change"), \
+             patch("builtins.input", return_value=""):
+            rr._rr_menu_mix(None)
+
+        rule = saved["rules"][0]
+        self.assertEqual(rule["name"], "own-domains")
+        self.assertEqual(rule["domains"], ["a.com", "b.org"])
+        self.assertEqual(rule["outbound"], "direct")
+        self.assertEqual(rule["priority"], 10)
+        self.assertEqual(rule["placement"], "top")
+        self.assertTrue(rule["enabled"])
+        self.assertEqual(rule["source"], "own:a.com, b.org")
+        ax.assert_called_once_with(restart=True, validate=True)
+
+    def test_mix_flow_two_own_batches_source_lists_domains(self):
+        """Две пачки своих доменов: ключи own/own-2, source — первые
+        три домена объединения (читаемая трассировка)."""
+        rr = self._rr()
+        own_idx = self._n_groups(rr)
+        fin_idx = own_idx + 1
+        saved = {}
+
+        def fake_save(state):
+            saved.update(state)
+
+        with patch.object(rr, "tui_select",
+                          side_effect=[own_idx, own_idx, fin_idx]), \
+             patch.object(rr, "tui_form",
+                          side_effect=[{"domains": "a.com"},
+                                       {"domains": "b.org, c.net"}]), \
+             patch.object(rr, "tui_confirm", return_value=True), \
+             patch.object(rr, "_rr_pick_outbound", return_value="block"), \
+             patch.object(rr, "_rr_load", return_value={"rules": []}), \
+             patch.object(rr, "_rr_save", side_effect=fake_save), \
+             patch.object(rr, "_rr_apply_to_xray", return_value=True), \
+             patch.object(rr, "_log_change"), \
+             patch("builtins.input", return_value=""):
+            rr._rr_menu_mix(None)
+
+        rule = saved["rules"][0]
+        self.assertEqual(rule["name"], "own-domains")
+        self.assertEqual(rule["domains"], ["a.com", "b.org", "c.net"])
+        self.assertEqual(rule["source"], "own:a.com, b.org, c.net")
+        self.assertEqual(rule["outbound"], "block")
+
+    def test_mix_flow_mixed_categories_and_own(self):
+        """Категория + свои домены: имя mix, source mix:<key>+own(N),
+        кросс-дедуб домена пресета со своим в другом регистре."""
+        rr = self._rr()
+        groups = [g for g in rr.RR_PRESET_GROUPS
+                  if rr._rr_presets_in_group(g["key"])]
+        own_idx, fin_idx = len(groups), len(groups) + 1
+        p0 = rr._rr_presets_in_group(groups[0]["key"])[0]
+        dup = str(p0["domains"][0])
+        saved = {}
+
+        def fake_save(state):
+            saved.update(state)
+
+        with patch.object(rr, "tui_select",
+                          side_effect=[0, own_idx, fin_idx]), \
+             patch.object(rr, "tui_multi_select", return_value=[0]), \
+             patch.object(rr, "tui_form", return_value={
+                 "domains": f"{dup.upper()}, own.example.org"}), \
+             patch.object(rr, "tui_confirm", return_value=True), \
+             patch.object(rr, "_rr_pick_outbound",
+                          return_value="chain-exit-1"), \
+             patch.object(rr, "_rr_load", return_value={"rules": []}), \
+             patch.object(rr, "_rr_save", side_effect=fake_save), \
+             patch.object(rr, "_rr_apply_to_xray", return_value=True), \
+             patch.object(rr, "_log_change"), \
+             patch("builtins.input", return_value=""):
+            rr._rr_menu_mix(None)
+
+        rule = saved["rules"][0]
+        self.assertEqual(rule["name"], "mix")
+        self.assertEqual(rule["source"], f"mix:{p0['key']}+own(2)")
+        self.assertIn("own.example.org", rule["domains"])
+        # кросс-дедуб: dup в другом регистре не дублируется
+        lows = [d.lower() for d in rule["domains"]]
+        self.assertEqual(lows.count(dup.lower()), 1)
+        self.assertEqual(rule["outbound"], "chain-exit-1")
+
+    def test_mix_flow_outbound_cancel_no_save(self):
+        """Отмена в пикере outbound → правило не сохраняется."""
+        rr = self._rr()
+        own_idx = self._n_groups(rr)
+        fin_idx = own_idx + 1
+        with patch.object(rr, "tui_select",
+                          side_effect=[own_idx, fin_idx]), \
+             patch.object(rr, "tui_form", return_value={"domains": "a.com"}), \
+             patch.object(rr, "_rr_pick_outbound", return_value=None), \
+             patch.object(rr, "_rr_load", return_value={"rules": []}), \
+             patch.object(rr, "_rr_save") as sv, \
+             patch.object(rr, "_rr_apply_to_xray") as ax, \
+             patch("builtins.input", return_value=""):
+            rr._rr_menu_mix(None)
+        sv.assert_not_called()
+        ax.assert_not_called()
+
+    def test_mix_flow_decline_confirm_no_apply(self):
+        """Отказ на подтверждении → state не тронут, apply не зовётся."""
+        rr = self._rr()
+        own_idx = self._n_groups(rr)
+        fin_idx = own_idx + 1
+        with patch.object(rr, "tui_select",
+                          side_effect=[own_idx, fin_idx]), \
+             patch.object(rr, "tui_form", return_value={"domains": "a.com"}), \
+             patch.object(rr, "tui_confirm", return_value=False), \
+             patch.object(rr, "_rr_pick_outbound", return_value="direct"), \
+             patch.object(rr, "_rr_load", return_value={"rules": []}), \
+             patch.object(rr, "_rr_save") as sv, \
+             patch.object(rr, "_rr_apply_to_xray") as ax, \
+             patch("builtins.input", return_value=""):
+            rr._rr_menu_mix(None)
+        sv.assert_not_called()
+        ax.assert_not_called()
+
+    def test_own_rule_name_uniquified(self):
+        """Повторное own-правило получает own-domains-2 (канон имён)."""
+        rr = self._rr()
+        with patch.object(rr, "_rr_load", return_value={
+                "rules": [{"name": "own-domains"}]}):
+            self.assertEqual(rr._rr_unique_preset_name("own-domains"),
+                             "own-domains-2")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
