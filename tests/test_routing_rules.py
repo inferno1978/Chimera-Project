@@ -14,10 +14,15 @@ Unit-тесты для chimera/modules/routing_rules.py.
      конфиге (xray run -test)
   5. restore_routing_rules_if_needed — re-apply после regenerate
   6. _rr_is_catchall — определение catch-all
+  7. «Свой набор»: ввод своих доменов помимо категорий (TestOwnDomainsMix)
+  8. ext:<файл>.dat:<категория> — пользовательские geo-файлы Xray:
+     валидатор формата, as-is в domain-матч, мягкая проверка файла
+     в каталогах geo-данных (TestExtDomains)
 """
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -960,6 +965,147 @@ class TestOwnDomainsMix(unittest.TestCase):
                 "rules": [{"name": "own-domains"}]}):
             self.assertEqual(rr._rr_unique_preset_name("own-domains"),
                              "own-domains-2")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ext:<файл>.dat:<категория> — пользовательские geo-файлы Xray
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestExtDomains(unittest.TestCase):
+    """ext:-синтаксис внешних geo-файлов в поле доменов: валидатор
+    формата (без пути/..), as-is в Xray domain-матч, мягкая проверка
+    наличия .dat в каталогах geo-данных."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def _rr(self):
+        from chimera.modules import routing_rules as rr
+        return rr
+
+    def test_ext_valid(self):
+        """Валидные ext:-строки проходят (регистр имени/категории
+        сохраняется, .dat в любом регистре)."""
+        from chimera.modules.routing_rules import _rr_validate_domain_item
+        self.assertIsNone(
+            _rr_validate_domain_item("ext:test.dat:category-test"))
+        self.assertIsNone(
+            _rr_validate_domain_item("ext:My-File_1.dat:Cat.42"))
+        self.assertIsNone(
+            _rr_validate_domain_item("ext:geosite.dat:google"))
+        self.assertIsNone(
+            _rr_validate_domain_item("ext:a-b._c.dat:x_y"))
+        self.assertIsNone(
+            _rr_validate_domain_item("EXT:test.dat:category-test"))
+
+    def test_ext_invalid_format(self):
+        """Кривой формат отклоняется с понятной причиной."""
+        from chimera.modules.routing_rules import _rr_validate_domain_item
+        self.assertIsNotNone(_rr_validate_domain_item("ext:test.dat"))
+        self.assertIsNotNone(_rr_validate_domain_item("ext:test.txt:cat"))
+        self.assertIsNotNone(_rr_validate_domain_item("ext:test.dat:"))
+        self.assertIsNotNone(_rr_validate_domain_item("ext::cat"))
+        self.assertIsNotNone(_rr_validate_domain_item("ext:cat"))
+        self.assertIsNotNone(_rr_validate_domain_item("ext:"))
+
+    def test_ext_rejects_paths_and_dotdot(self):
+        """Путь и «..» в имени файла запрещены (только имя.dat)."""
+        from chimera.modules.routing_rules import _rr_validate_domain_item
+        self.assertIsNotNone(
+            _rr_validate_domain_item("ext:/etc/x.dat:cat"))
+        self.assertIsNotNone(
+            _rr_validate_domain_item("ext:../t.dat:cat"))
+        self.assertIsNotNone(
+            _rr_validate_domain_item("ext:sub/dir.dat:cat"))
+        self.assertIsNotNone(
+            _rr_validate_domain_item("ext:..\\x.dat:cat"))
+        self.assertIsNotNone(_rr_validate_domain_item("ext:..dat:cat"))
+        self.assertIsNotNone(_rr_validate_domain_item("ext:a..b.dat:cat"))
+
+    def test_ext_rejects_bad_category_chars(self):
+        """Категория — только [a-zA-Z0-9._-]: «!»/пробел/лишняя
+        четвёртая часть отклоняются."""
+        from chimera.modules.routing_rules import _rr_validate_domain_item
+        self.assertIsNotNone(_rr_validate_domain_item("ext:t.dat:cat!"))
+        self.assertIsNotNone(_rr_validate_domain_item("ext:t.dat:ca t"))
+        self.assertIsNotNone(
+            _rr_validate_domain_item("ext:t.dat:cat:extra"))
+
+    def test_ext_mixed_list_valid(self):
+        """ext: в одном списке с обычными доменами и geosite:."""
+        from chimera.modules.routing_rules import _rr_validate_domains
+        self.assertIsNone(_rr_validate_domains(
+            "example.com, ext:test.dat:category-test, geosite:ru"))
+        self.assertIsNotNone(_rr_validate_domains(
+            "example.com, ext:bad|name.dat:cat"))
+
+    def test_build_keeps_ext_as_is(self):
+        """ext:-строка попадает в Xray domain-матч БЕЗ изменений
+        (штатный механизм Xray)."""
+        from chimera.modules.routing_rules import _rr_build_xray_rules
+        rule = {
+            "name": "ext-test", "enabled": True,
+            "domains": ["ext:test.dat:category-test", "example.com"],
+            "ips": [], "ports": [], "outbound": "block",
+            "priority": 10, "placement": "top", "source": "manual",
+        }
+        xr, err = _rr_build_xray_rules(rule)
+        self.assertEqual(err, "")
+        self.assertEqual(len(xr), 1)
+        self.assertEqual(xr[0]["domain"],
+                         ["ext:test.dat:category-test", "example.com"])
+        self.assertEqual(xr[0]["outboundTag"], "block")
+
+    def test_warn_missing_ext_files(self):
+        """Отсутствующий .dat — WARN с именем файла и каталогов;
+        существующий — тишина."""
+        import tempfile
+        rr = self._rr()
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "present.dat").write_bytes(b"x")
+            with patch.object(rr, "_rr_geo_asset_dirs", return_value=[td]), \
+                 patch.object(rr, "_warn") as w:
+                rr._rr_warn_missing_ext_files(
+                    ["ext:present.dat:ok", "ext:missing.dat:cat",
+                     "geosite:ru", "example.com"])
+            w.assert_called_once()
+            self.assertIn("missing.dat", w.call_args[0][0])
+            self.assertNotIn("present.dat", w.call_args[0][0])
+
+    def test_warn_silent_when_all_files_exist(self):
+        """Все ext-файлы на месте — WARN не зовётся."""
+        import tempfile
+        rr = self._rr()
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "a.dat").write_bytes(b"x")
+            (Path(td) / "b.dat").write_bytes(b"x")
+            with patch.object(rr, "_rr_geo_asset_dirs", return_value=[td]), \
+                 patch.object(rr, "_warn") as w:
+                rr._rr_warn_missing_ext_files(
+                    ["ext:a.dat:cat", "ext:b.dat:cat"])
+            w.assert_not_called()
+
+    def test_geo_asset_dirs_canon(self):
+        """Каталоги = родители GEOSITE_DAT_CANDIDATES (+env при наличии)."""
+        rr = self._rr()
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("XRAY_LOCATION_ASSET", None)
+            dirs = rr._rr_geo_asset_dirs()
+        self.assertIn("/etc/xray", dirs)
+        self.assertIn("/usr/local/share/xray", dirs)
+        with patch.dict("os.environ", {"XRAY_LOCATION_ASSET": "/opt/geo"}):
+            self.assertEqual(rr._rr_geo_asset_dirs()[0], "/opt/geo")
+
+    def test_own_input_ext_passes_geosite_filter(self):
+        """ext: не путается под geosite:-фильтр своих доменов и не
+        выбрасывается из-за отсутствия кода в geosite.dat."""
+        rr = self._rr()
+        with patch.object(rr, "tui_form", return_value={
+                "domains": "ext:test.dat:category-test, a.com"}), \
+             patch.object(rr, "_rr_warn_missing_ext_files"), \
+             patch.object(rr, "_warn"):
+            out = rr._rr_input_own_domains({"ru": 5})
+        self.assertEqual(out, ["ext:test.dat:category-test", "a.com"])
 
 
 if __name__ == "__main__":

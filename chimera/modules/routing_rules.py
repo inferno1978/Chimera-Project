@@ -8,7 +8,9 @@ chimera/modules/routing_rules.py
   вкл/выкл, приоритет, расположение в конфиге }.
 
 Возможности:
-  • Матч: домен-паттерны (plain / domain: / full: / regexp: / geosite:),
+  • Матч: домен-паттерны (plain / domain: / full: / regexp: / geosite: /
+    ext:<файл>.dat:<категория> — пользовательские geo-файлы Xray: .dat
+    кладётся в каталог geo-данных вручную, автоскачивание не предусмотрено),
     IP/CIDR (в т.ч. geoip:), порты/диапазоны. Несколько полей в одном
     правиле = AND (семантика Xray), значения внутри списка = OR.
   • Действие: любой outboundTag из живого конфига (chain-exit-N, direct,
@@ -68,7 +70,8 @@ from chimera.modules.box_renderer import (
     _box_top, _box_bottom, _box_sep, _box_row, _box_item, _box_back,
     _box_desc, _box_kv, _box_info, _box_warn, _box_ok, _box_ask,
 )
-from chimera.modules.geosite_codes import geosite_codes, geosite_samples
+from chimera.modules.geosite_codes import (GEOSITE_DAT_CANDIDATES,
+                                           geosite_codes, geosite_samples)
 
 # ── Цвета (канон dns_rules) ───────────────────────────────────────────────────
 def _detect_colors() -> dict:
@@ -492,7 +495,8 @@ def _rr_validate_name(text: str) -> "str | None":
 
 
 def _rr_validate_domain_item(item: str) -> "str | None":
-    """Один домен-паттерн: plain / domain: / full: / regexp: / geosite:"""
+    """Один домен-паттерн: plain / domain: / full: / regexp: / geosite: /
+    ext:<файл>.dat:<категория> — внешний geo-файл Xray."""
     p = item.strip()
     if not p:
         return None
@@ -515,6 +519,22 @@ def _rr_validate_domain_item(item: str) -> "str | None":
         rest = p.split(":", 1)[1]
         if not rest:
             return f"После regexp: нет выражения: '{p}'"
+        return None
+    if low.startswith("ext:"):
+        # ext:<файл>.dat:<категория> — штатный механизм Xray для внешних
+        # geo-файлов (эквивалент geosite:, но файл произвольный; .dat
+        # кладётся пользователем в каталог geo-данных). Формат — только
+        # имя файла без пути и «..» + .dat + категория [A-Za-z0-9._-]+;
+        # существование файла — мягкая проверка на вводе
+        # (_rr_warn_missing_ext_files), финальный гвард — xray run -test.
+        rest = p.split(":", 1)[1]
+        m = re.match(r'^([A-Za-z0-9._-]+\.dat):([A-Za-z0-9._-]+)$',
+                     rest, re.I)
+        if not m:
+            return (f"'{p}' — нужно ext:<файл>.dat:<категория> "
+                    f"(имя файла без пути и без ..)")
+        if ".." in m.group(1):
+            return f"'{p}' — «..» в имени файла не допускается"
         return None
     if " " in p:
         return f"Пробелы не допускаются: '{p}'"
@@ -579,6 +599,48 @@ def _rr_make_list_validator(item_validator):
 _rr_validate_domains = _rr_make_list_validator(_rr_validate_domain_item)
 _rr_validate_ips     = _rr_make_list_validator(_rr_validate_ip_item)
 _rr_validate_ports   = _rr_make_list_validator(_rr_validate_port_item)
+
+
+def _rr_geo_asset_dirs() -> list:
+    """Каталоги geo-данных Xray (канон geosite_codes.GEOSITE_DAT_CANDIDATES
+    + XRAY_LOCATION_ASSET, если задан). Только для мягких подсказок —
+    собственный порядок поиска Xray не дублирует."""
+    dirs: list = []
+    env = os.environ.get("XRAY_LOCATION_ASSET")
+    if env:
+        dirs.append(env)
+    dirs.extend(str(p.parent) for p in GEOSITE_DAT_CANDIDATES)
+    out, seen = [], set()
+    for d in dirs:
+        if d and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def _rr_warn_missing_ext_files(domains: list) -> None:
+    """Мягкая проверка ext:<файл>.dat из списка доменов: есть ли файл
+    хотя бы в одном каталоге geo-данных. Только WARN — файл можно
+    доложить позже; финальный гвард остаётся xray run -test в
+    _rr_apply_to_xray (откат конфига с текстом ошибки). Загрузку
+    geosite/geoip не затрагивает."""
+    files: set = set()
+    for d in domains or []:
+        s = str(d)
+        if not s.lower().startswith("ext:"):
+            continue
+        parts = s.split(":")
+        if len(parts) >= 3 and parts[1]:
+            files.add(parts[1])
+    if not files:
+        return
+    dirs = _rr_geo_asset_dirs()
+    for f in sorted(files):
+        if not any((Path(d) / f).is_file() for d in dirs):
+            _warn(f"ext-файл '{f}' не найден в каталогах geo-данных "
+                  f"({', '.join(dirs)}). Положите его туда до применения "
+                  f"правила — иначе Xray откажется стартовать, apply "
+                  f"откатит конфиг с ошибкой")
 
 
 def _rr_validate_priority(text: str) -> "str | None":
@@ -1433,11 +1495,13 @@ def _rr_input_own_domains(codes: "dict | None") -> "list | None":
     остаётся в _rr_apply_to_xray).
 
     Возвращает список паттернов или None (отмена / после фильтра пусто).
+    ext:-строки geosite-фильтром не трогаются (файл кладёт пользователь
+    сам) — по ним отдельная мягкая проверка _rr_warn_missing_ext_files.
     """
     form = tui_form("Свои домены — список", [
         TuiField(key="domains", label="Домены", default="", required=True,
                  validator=_rr_validate_domains,
-                 hint="example.com, domain:google.com, geosite:category-ads-all"),
+                 hint="example.com, domain:google.com, geosite:category-ads-all, ext:file.dat:tag"),
     ])
     if form is None:
         return None
@@ -1463,6 +1527,7 @@ def _rr_input_own_domains(codes: "dict | None") -> "list | None":
                            and d.split(":", 1)[1] not in codes)]
             if not out:
                 return None
+    _rr_warn_missing_ext_files(out)
     return out
 
 
@@ -1777,7 +1842,7 @@ def _rr_menu_add_or_edit(existing: "dict | None" = None) -> "dict | None":
                          hint="a-z0-9._- ; идентификатор в comment=custom:<имя>"),
                 TuiField(key="domains", label="Домены", default=", ".join(f_default("domains", []) or []),
                          validator=_rr_validate_domains,
-                         hint="example.com, domain:google.com, geosite:category-ads-all"),
+                         hint="example.com, domain:google.com, geosite:category-ads-all, ext:file.dat:tag"),
                 TuiField(key="ips", label="IP / CIDR", default=", ".join(f_default("ips", []) or []),
                          validator=_rr_validate_ips,
                          hint="1.2.3.0/24, 5.6.7.8, geoip:ru — пусто = нет"),
@@ -1811,6 +1876,10 @@ def _rr_menu_add_or_edit(existing: "dict | None" = None) -> "dict | None":
                   f"поддерживаются. Вынесите их в отдельное правило.")
             continue
         break
+
+    # Мягкая проверка ext:-файлов (только WARN; финальный гвард —
+    # xray run -test в момент применения).
+    _rr_warn_missing_ext_files(domains)
 
     # ── Шаг 2: outbound ──
     outbound = _rr_pick_outbound(cur_out=f_default("outbound", "direct"))
