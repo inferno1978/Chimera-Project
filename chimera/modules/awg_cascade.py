@@ -494,6 +494,40 @@ def _awgs_cascade_b4_split_excl() -> str:
         return ""
 
 
+def awgs_cascade_exit_all(state: Optional[dict] = None) -> bool:
+    """Режим «весь трафик через exit»: RU-сети ТОЖЕ каскадом на exit.
+
+    state['cascade_exit_all'] (bool, default False = прежний RU-split).
+    Запрос владельца 14.11: «сейчас каскад настроен так, что ру-трафик
+    идет напрямую с ру-ноды, а зарубежный - через exit ноду. надо так,
+    чтобы все шло через exit». В exit-all mark-правило теряет RU-
+    исключение (blanket-форма, зеркало v6-ветки, которая и так вся
+    идёт через exit), RU-FORWARD-ACCEPT не ставится. ipset awg_ru_networks
+    и cron ru.zone НЕ трогаем — переключение обратно мгновенное.
+    B4-сплит остаётся отдельным исключением (его direct-плечо —
+    самостоятельный переключатель, осознанная семантика «exit-all не
+    ломает b4-сплит»: домены сплита идут через b4 даже в exit-all).
+    """
+    if state is None:
+        try:
+            state = awgs_state_load()
+        except Exception:
+            state = {}
+    return bool((state or {}).get("cascade_exit_all"))
+
+
+def _awgs_cascade_ru_excl(state: Optional[dict] = None) -> str:
+    """RU-исключение каскадного mark-правила (строка с ведущим пробелом).
+
+    Обычный режим: ' -m set ! --match-set awg_ru_networks dst' — RU-сети
+    не маркируются → main → напрямую с entry. Режим exit-all: '' — весь
+    клиентский v4 маркируется → table 2000 → awg1 → exit (RU тоже).
+    Единая точка формы для apply_iptables, routing-скрипта и LB-хука."""
+    if awgs_cascade_exit_all(state):
+        return ""
+    return f" -m set ! --match-set {AWGS_IPSET_NAME} dst"
+
+
 def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     """Применяет iptables-правила для каскада.
 
@@ -510,6 +544,11 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     Основная идея:
     1. Трафик клиентов awg0 к RU-сетям → напрямую через host (без mark)
     2. Весь остальной клиентский → mark 0x2000 (PREROUTING!) → table 2000 → awg1
+
+    (exit-all, 14.11): режим state['cascade_exit_all'] снимает RU-исключение —
+    весь клиентский v4 маркируется и уходит через awg1 (RU-сети тоже);
+    blanket-форма mark-правила (зеркало v6-ветки ниже), RU-FORWARD-ACCEPT
+    не ставится. B4-сплит-исключение работает в обоих режимах.
 
     (IPv6): при непустом subnet_v6 — v6-зеркало каскада:
     ВЕСЬ клиентский v6 (без RU-ipset — v6-ру-сетей в ru.zone нет, а
@@ -531,12 +570,17 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     # B4-сплит — mark-правило получает исключение direct-плеча
     # (dst ∈ awg_b4_direct НЕ маркируется → main → WAN → b4 → RU-IP)
     _b4x = _awgs_cascade_b4_split_excl()
+    # exit-all — RU-исключение снимается (весь клиентский v4 → awg1)
+    _exit_all = awgs_cascade_exit_all()
+    _rux = _awgs_cascade_ru_excl()
 
     rules = [
         # PREROUTING — ДО route decision (иначе транзит не
         # попадает в table 2000; см. докстринг). -i awg0 — только
         # клиентский трафик, серверный (ens3 in) не трогаем.
-        f"iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
+        # _rux: ' -m set ! --match-set awg_ru_networks dst' обычно,
+        # '' в режиме exit-all (blanket — RU тоже через awg1).
+        f"iptables -t mangle -A PREROUTING -i awg0{_rux}{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK}",
 
         # NAT для выхода через awg1
         f"iptables -t nat -A POSTROUTING -o awg1 -j MASQUERADE",
@@ -546,8 +590,13 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
         "iptables -A FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
 
         # Для RU-сетей — forward напрямую через host-интерфейс
-        f"iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT",
+        # (НЕ в режиме exit-all: немаркированного RU-плеча больше нет)
+    ]
+    if not _exit_all:
+        rules.append(
+            f"iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT")
 
+    rules += [
         # TCPMSS clamp — двойное туннелирование (awg0 MTU 1280 внутри
         # awg1 MTU 1280 + оверхед обфускации снаружи). значение поднято
         # с 1140 до 1240/1220 (точное попадание в MTU 1280: 1240+40=1280 v4,
@@ -570,6 +619,12 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
                f"while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -m set ! --match-set awg_b4_direct dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
                f"while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done; "
                f"while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done; "
+               # exit-all-формы (blanket, ±b4) — чистим всегда: переключение
+               # режима не должно оставлять конкурирующую марку (последний
+               # MARK в цепочке затирает fwmark — тот же класс урока, что и
+               # легаси-марка выше)
+               f"while iptables -t mangle -D PREROUTING -i awg0 -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
+               f"while iptables -t mangle -D PREROUTING -i awg0{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done; "
                f"while iptables -t nat -D POSTROUTING -o awg1 -j MASQUERADE 2>/dev/null; do :; done; "
                f"while iptables -D FORWARD -i awg0 -o awg1 -j ACCEPT 2>/dev/null; do :; done; "
                f"while iptables -D FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; do :; done; "
@@ -583,6 +638,11 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
                       capture=True, check=False, quiet=True)
         if r.returncode != 0:
             core.log_to_file("WARN", f"iptables rule failed: {rule}: {r.stderr}")
+
+    if _exit_all:
+        core.log_to_file("INFO",
+                         "cascade: exit-all — весь клиентский v4 через exit "
+                         "(RU-сети тоже, blanket mark-форма)")
 
     # Policy routing: marked-трафик → через awg1
     # КРИТИЧЕСКИЙ фикс — `ip route add default via {gw} dev awg1
@@ -708,29 +768,52 @@ def _awgs_cascade_create_routing_script(exit_subnet: str,
     # состояния (скрипт перегенерируется при вкл/выкл сплита и смене exit)
     _b4x = _awgs_cascade_b4_split_excl()
     _split_on = bool(_b4x)
+    # exit-all — RU-исключение снимается (запрос владельца 14.11:
+    # «все должно идти через exit»); форма зеркалит apply_iptables
+    _exit_all = awgs_cascade_exit_all()
+    _rux = _awgs_cascade_ru_excl()
 
-    # «ДРУГАЯ форма» mark-правила для подчистки в boot-скрипте (ФИКС
-    # 2026-10-05): актуальная форма ставится разделом 2.1 выше; цикл
-    # ниже должен удалять именно ДРУГУЮ, а не ту же самую. Раньше цикл
-    # безусловно содержал b4-исключение — при сплите ВКЛ он удалял ТО
-    # ЖЕ правило, что 2.1 только что добавил: после каждого запуска
-    # скрипта (бут/рестарт awg-cascade-routing/смена exit) MARK-правило
-    # исчезало, весь клиентский трафик уходил без марки → main → WAN
-    # напрямую, каскад молча обходился (E2E 2026-10-05: live mangle
-    # PREROUTING без awg0-правила на 138/91/45 при живом table-2000).
-    # Теперь: сплит ВКЛ → актуальна сплит-форма, убираем blanket-форму
-    # (без исключения); сплит ВЫКЛ → актуальна blanket, убираем сплит-форму.
-    if _split_on:
-        _other_form_del = (
-            f"while iptables -t mangle -D PREROUTING -i awg0 "
-            f"-m set ! --match-set {AWGS_IPSET_NAME} dst "
-            f"-j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done")
+    # «ДРУГИЕ формы» mark-правила для подчистки в boot-скрипте (ФИКС
+    # 2026-10-05 + exit-all 14.11): актуальная форма ставится разделом
+    # 2.1 выше; циклы ниже должны удалять все ОСТАЛЬНЫЕ комбинации
+    # (RU±b4, blanket±b4 — режим exit-all и сплит вкл/выкл), а не
+    # актуальную. Раньше цикл безусловно содержал b4-исключение — при
+    # сплите ВКЛ он удалял ТО ЖЕ правило, что 2.1 только что добавил:
+    # после каждого запуска скрипта (бут/рестарт routing/смена exit)
+    # MARK-правило исчезало, весь клиентский трафик уходил без марки
+    # → main → WAN напрямую, каскад молча обходился (E2E 2026-10-05:
+    # live mangle PREROUTING без awg0-правила на 138/91/45 при живом
+    # table-2000). Генерация: все 4 комбинации (ru_excl/blanket ×
+    # b4x/'') минус актуальная (_rux+_b4x).
+    # хардкод-форма b4-исключения (сплит мог быть выключен ПОСЛЕ того,
+    # как iptables-persist сохранил сплит-форму — бут обязан её убирать;
+    # при сплите ВКЛ дубль с _b4x безвреден)
+    _B4X_HARD = " -m set ! --match-set awg_b4_direct dst"
+    _other_forms_del = ""
+    for _ru_form in (f" -m set ! --match-set {AWGS_IPSET_NAME} dst", ""):
+        for _b4_form in (_b4x, _B4X_HARD, ""):
+            _cur = f"{_ru_form}{_b4_form}"
+            if _cur == f"{_rux}{_b4x}":
+                continue  # актуальная форма — её ставит 2.1, не трогаем
+            _other_forms_del += (
+                f"while iptables -t mangle -D PREROUTING -i awg0{_cur} "
+                f"-j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done\n")
+    if not _other_forms_del:
+        _other_forms_del = "true\n"
+
+    # 2.4 RU-сети: forward-исключение (обычный режим) или его зачистка
+    # (exit-all: немаркированного RU-плеча нет — ставить нечего, но
+    # хвост от прежнего режима убрать: FORWARD policy может быть DROP,
+    # мёртвое правило безвредно, но чистый набор — канон)
+    if _exit_all:
+        _RU_FORWARD_BLOCK = (
+            "# exit-all: немаркированного RU-плеча нет — forward-исключение\n"
+            "# не нужно; подчистка на случай переключения режима\n"
+            f"while iptables -D FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT 2>/dev/null; do :; done")
     else:
-        _other_form_del = (
-            f"while iptables -t mangle -D PREROUTING -i awg0 "
-            f"-m set ! --match-set {AWGS_IPSET_NAME} dst "
-            f"-m set ! --match-set awg_b4_direct dst "
-            f"-j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done")
+        _RU_FORWARD_BLOCK = (
+            f"iptables -C FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT 2>/dev/null || \\\n"
+            f"    iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT")
 
     if _split_on:
         _B4_SPLIT_IPSET_BLOCK = (
@@ -812,15 +895,16 @@ fi
 #     транзит уходил в main → DROP; метка в OUTPUT маркировала серверный
 #     трафик — SSH-lockout). -i awg0 — только клиентский трафик.
 #     {_B4_SPLIT_RULE_NOTE}
-iptables -t mangle -C PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null || \
-    iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK}
+#     {'EXIT-ALL: RU-исключения НЕТ — весь клиентский v4 через awg1 (RU-сети тоже).' if _exit_all else 'RU-сети (ipset) не маркируются → напрямую с entry.'}
+iptables -t mangle -C PREROUTING -i awg0{_rux}{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null || \
+    iptables -t mangle -A PREROUTING -i awg0{_rux}{_b4x} -j MARK --set-mark {AWGS_CASCADE_FWMARK}
 # подчистка старых FORWARD-MARK правил от предыдущих версий chimera
 while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK} 2>/dev/null; do :; done
 # легаси-марка 0x2000 (без b4-exempt бита) — убрать, чтобы не
 # конкурировала с актуальной (последняя MARK в цепочке затирает fwmark)
-# + ДРУГАЯ форма mark-правила (сплит вкл/выкл) — актуальную из 2.1 не трогаем
-{_other_form_del}
-while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done
+# + ДРУГИЕ формы mark-правила (режим exit-all × сплит вкл/выкл —
+# актуальную из 2.1 не трогаем)
+{_other_forms_del}while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done
 while iptables -t mangle -D FORWARD -i awg0 -m set ! --match-set {AWGS_IPSET_NAME} dst -j MARK --set-mark {AWGS_CASCADE_FWMARK_LEGACY} 2>/dev/null; do :; done
 # 2.2 NAT для выхода через awg1
 iptables -t nat -C POSTROUTING -o awg1 -j MASQUERADE 2>/dev/null || \
@@ -830,9 +914,8 @@ iptables -C FORWARD -i awg0 -o awg1 -j ACCEPT 2>/dev/null || \
     iptables -A FORWARD -i awg0 -o awg1 -j ACCEPT
 iptables -C FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
     iptables -A FORWARD -i awg1 -o awg0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-# 2.4 RU-сети — напрямую через host
-iptables -C FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT 2>/dev/null || \
-    iptables -A FORWARD -i awg0 -m set --match-set {AWGS_IPSET_NAME} dst -j ACCEPT
+# 2.4 RU-сети — напрямую через host{' (exit-all: раздел-зачистка)' if _exit_all else ''}
+{_RU_FORWARD_BLOCK}
 # 2.5 TCPMSS clamp (точное попадание в awg1 MTU 1280: v4 1240+40,
 # v6 1220+60; клиентские конфиги ставят MTU=1280 — кламп как страховка
 # для клиентов с MTU 1500; E2E 2026-10-05)
@@ -1799,10 +1882,14 @@ def do_manage_awg_cascade() -> None:
         print()
         _box_top(f"Каскад из 2 серверов (RU → зарубеж)")
         _box_row()
-        _box_desc("Клиент ──► AWG0 (вход, РФ) ──┬──► RU-сети напрямую")
-        _box_desc("                              └──► AWG1 (выход, зарубеж) ──► мир")
-        _box_row()
         state = awgs_state_load()
+        if awgs_cascade_exit_all(state):
+            _box_desc("Клиент ──► AWG0 (вход, РФ) ────► AWG1 (выход, зарубеж) ──► мир")
+            _box_desc("                     режим exit-all: весь трафик через exit, RU-сети тоже")
+        else:
+            _box_desc("Клиент ──► AWG0 (вход, РФ) ──┬──► RU-сети напрямую")
+            _box_desc("                              └──► AWG1 (выход, зарубеж) ──► мир")
+        _box_row()
         role = state.get("cascade_role", "")
         if role:
             from .awg_protocol import awg_protocol_label
@@ -1828,6 +1915,13 @@ def do_manage_awg_cascade() -> None:
         _box_desc("выбранные сеты b4 → напрямую через DPI-bypass "
                   "(цель видит RU-IP — YouTube без рекламы), остальное — "
                   "каскадом на exit. Требует b4 (меню 3 → Y → B).")
+        _exit_all = awgs_cascade_exit_all(state)
+        _box_item("7", f"Весь трафик через exit (RU-сети тоже): "
+                 f"{'ВКЛЮЧЁН' if _exit_all else 'выключен'}")
+        _box_desc("exit-all: весь клиентский трафик уходит через зарубежный "
+                  "exit, включая российские сайты (RU-IP не светится с этой "
+                  "ноды). Выключено — RU-сети идут напрямую (split-tunnel). "
+                  "Переключение мгновенное, без переустановки каскада.")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -1856,6 +1950,24 @@ def do_manage_awg_cascade() -> None:
             # B4-сплит — подменю awg_b4_split
             from .awg_b4_split import do_manage_awg_b4_split
             do_manage_awg_b4_split()
+        elif ch == "7":
+            # exit-all — весь клиентский трафик через exit (RU-сети тоже)
+            _new = not _exit_all
+            _mode = "ВКЛЮЧИТЬ весь трафик через exit (RU-сети тоже)" \
+                if _new else "ВЫКЛЮЧИТЬ exit-all (RU-сети — напрямую с этой ноды)"
+            try:
+                ok = input(f"\n  {_mode}? [y/N]: ").strip().lower()
+            except EOFError:
+                ok = ""
+            if ok in ("y", "yes", "д", "да"):
+                if awgs_cascade_set_exit_all(_new):
+                    core.success("Режим exit-all: "
+                                 + ("включён — весь трафик через exit"
+                                    if _new else
+                                    "выключен — RU-сети напрямую"))
+                else:
+                    warn("Не переключилось (см. выше)")
+            input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch in ("q", ""):
             break
 
@@ -2271,6 +2383,13 @@ def _awgs_cascade_status() -> None:
         _pv = state.get("protocol_version", "2.0")
         _box_row(f"  Протокол: {CYAN}{awg_protocol_label(_pv)}{NC}")
 
+        # Режим маршрутизации: exit-all (весь трафик через exit) или
+        # обычный RU-split (RU-сети напрямую с entry)
+        if awgs_cascade_exit_all(state):
+            _box_row(f"  Режим: {GREEN}весь трафик через exit{NC} (RU-сети тоже)")
+        else:
+            _box_row(f"  Режим: RU-напрямую / зарубеж — exit (split-tunnel)")
+
         # Проверяем awg1 (туннель к AWG1)
         r = core._run(["systemctl", "is-active", "awg-quick@awg1"],
                       capture=True, check=False)
@@ -2285,14 +2404,17 @@ def _awgs_cascade_status() -> None:
         status_str = f"{GREEN}active{NC}" if rt_active else f"{RED}inactive{NC}"
         _box_row(f"  awg-cascade-routing: {status_str}")
 
-        # Проверяем ipset
+        # Проверяем ipset (в exit-all не участвует в маршрутизации, но
+        # остаётся загруженным — мгновенный откат режима)
+        _ipset_note = (f" {DIM}(не участвует в маршрутизации — exit-all){NC}"
+                       if awgs_cascade_exit_all(state) else "")
         r = core._run(["ipset", "list", AWGS_IPSET_NAME],
                       capture=True, check=False)
         if r.returncode == 0:
             import re
             m = re.search(r"Number of entries:\s+(\d+)", r.stdout)
             n = m.group(1) if m else "?"
-            _box_row(f"  ipset {AWGS_IPSET_NAME}: {GREEN}{n} сетей{NC}")
+            _box_row(f"  ipset {AWGS_IPSET_NAME}: {GREEN}{n} сетей{NC}{_ipset_note}")
         else:
             _box_row(f"  ipset {AWGS_IPSET_NAME}: {RED}не загружен{NC}")
 
@@ -2375,4 +2497,45 @@ def awgs_cascade_routing_regen_lb() -> bool:
     subnet = st.get("cascade_subnet") or AWGS_DEFAULT_SUBNET
     v6 = awg_v6_ula_from_subnet(subnet) if st.get("allow_ipv6_tunnel") else ""
     _awgs_cascade_create_routing_script(subnet, subnet_v6=v6)
+    return True
+
+
+def awgs_cascade_set_exit_all(enabled: bool) -> bool:
+    """Включить/выключить режим «весь трафик через exit» (RU-сети тоже).
+
+    Запрос владельца 14.11: «сейчас каскад настроен так, что ру-трафик
+    идет напрямую с ру-ноды, а зарубежный - через exit ноду. надо так,
+    чтобы все шло через exit». Мгновенный переключатель (без переезда
+    туннелей): state['cascade_exit_all'] → apply_iptables (сам ветвится
+    в LB-диспетчер при lb on) → перегенерация awg-routing.sh → рестарт
+    awg-cascade-routing. ipset/cron ru.zone не трогаем — обратное
+    переключение тоже мгновенное.
+
+    Возвращает True при успехе. Роль обязана быть entry (переключать
+    маршрутизацию клиентов можно только на входной ноде).
+    """
+    core = _core_module()
+    state = awgs_state_load()
+    if state.get("cascade_role") != "entry":
+        core.warn("Режим «весь трафик через exit» применим только к "
+                  "entry-ноде каскада (этот сервер принимает клиентов)")
+        return False
+
+    state["cascade_exit_all"] = bool(enabled)
+    if not awgs_state_save(state):
+        core.warn("Не удалось сохранить state — режим не переключён")
+        return False
+
+    # параметры каскада из state (канон routing_script_regen в b4_split)
+    from .awg_net_common import awg_v6_ula_from_subnet
+    subnet = state.get("cascade_subnet") or AWGS_DEFAULT_SUBNET
+    v6 = awg_v6_ula_from_subnet(subnet) if state.get("allow_ipv6_tunnel") else ""
+
+    # apply сам ветвится: LB on → lb_dispatcher_install (хук с учётом
+    # exit_all), off → обычный каскадный MARK-путь; create_script
+    # аналогично (LB-форма/обычная, RU-исключение по режиму)
+    _awgs_cascade_apply_iptables(subnet, subnet_v6=v6)
+    _awgs_cascade_create_routing_script(subnet, subnet_v6=v6)
+    core._run(["systemctl", "restart", "awg-cascade-routing"],
+              check=False, quiet=True)
     return True

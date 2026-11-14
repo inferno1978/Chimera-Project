@@ -344,6 +344,14 @@ def _awgs_uninstall_cleanup_iptables() -> None:
         ("iptables", "-t", "mangle", "-D", "PREROUTING", "-i", "awg0",
          "-m", "set", "!", "--match-set", AWGS_IPSET_NAME, "dst",
          "-j", "MARK", "--set-mark", str(AWGS_CASCADE_FWMARK)),
+        # exit-all (14.11): blanket-форма mark-правила (весь трафик через
+        # exit, без RU-исключения) — чистим при любом режиме на момент
+        # удаления, чтобы uninstall не оставлял хвост
+        ("iptables", "-t", "mangle", "-D", "PREROUTING", "-i", "awg0",
+         "-j", "MARK", "--set-mark", str(AWGS_CASCADE_FWMARK)),
+        ("iptables", "-t", "mangle", "-D", "PREROUTING", "-i", "awg0",
+         "-m", "set", "!", "--match-set", "awg_b4_direct", "dst",
+         "-j", "MARK", "--set-mark", str(AWGS_CASCADE_FWMARK)),
         # Легаси: FORWARD-MARK (промежуточная версия)
         ("iptables", "-t", "mangle", "-D", "FORWARD", "-i", "awg0",
          "-m", "set", "!", "--match-set", AWGS_IPSET_NAME, "dst",

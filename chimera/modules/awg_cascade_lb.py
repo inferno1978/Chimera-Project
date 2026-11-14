@@ -274,11 +274,15 @@ def _split_excl() -> list:
         return []
 
 
-def lb_hook_argv(v6: bool = False) -> list:
+def lb_hook_argv(v6: bool = False, exit_all: bool = False) -> list:
     """Хук-правило диспетчера в mangle PREROUTING (полный argv).
 
     Наследует исключения прежнего каскадного mark-правила: RU-сети
     (awg_ru_networks) всегда; awg_b4_direct — при активном B4-сплите.
+    exit_all=True — режима «весь трафик через exit» (запрос владельца
+    14.11): RU-исключение снимается, хук ловит ВЕСЬ клиентский v4
+    (зеркалит _awgs_cascade_apply_iptables blanket-форму; B4-сплит-
+    исключение сохраняется — отдельный переключатель).
     v6 — БЕЗ set-матчей: awg_ru_networks/awg_b4_direct — inet-сеты,
     в ip6tables их матчить нельзя (ошибка применения). Форма зеркалит
     оригинальный v6-MARK каскада (apply_iptables: -i awg0 -j MARK
@@ -289,8 +293,11 @@ def lb_hook_argv(v6: bool = False) -> list:
     if v6:
         return [ipt, "-t", "mangle", "-A", "PREROUTING",
                 "-i", "awg0", "-j", chain]
-    spec = ["-i", "awg0", "-m", "set", "!", "--match-set",
-            AWGS_IPSET_NAME, "dst"] + _split_excl()
+    if exit_all:
+        spec = ["-i", "awg0"] + _split_excl()
+    else:
+        spec = ["-i", "awg0", "-m", "set", "!", "--match-set",
+                AWGS_IPSET_NAME, "dst"] + _split_excl()
     return [ipt, "-t", "mangle", "-A", "PREROUTING"] + spec + ["-j", chain]
 
 
@@ -531,7 +538,10 @@ def _purge_pair_tcpmss(iface: str, v6: bool = False) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _hook_variants(v6: bool = False) -> list:
-    """Хук в вариантах (сплит вкл/выкл) + v6 — для зачистки/синка."""
+    """Хук в вариантах (сплит вкл/выкл × режим exit-all) + v6 — для
+    зачистки/синка. Переключение режима/сплита не должно оставлять
+    конкурирующий хук: пакет матчит ПЕРВЫЙ jump в PREROUTING.
+    """
     ipt = "ip6tables" if v6 else "iptables"
     chain = AWGS_LB_CHAIN6 if v6 else AWGS_LB_CHAIN
     base = ["-i", "awg0", "-m", "set", "!", "--match-set",
@@ -540,6 +550,10 @@ def _hook_variants(v6: bool = False) -> list:
     for excl in (_split_excl(), []):
         out.append([ipt, "-t", "mangle", "-A", "PREROUTING"]
                    + base + excl + ["-j", chain])
+    # exit-all-формы (без RU-исключения, ±b4) — чистка при смене режима
+    for excl in (_split_excl(), []):
+        out.append([ipt, "-t", "mangle", "-A", "PREROUTING",
+                    "-i", "awg0"] + excl + ["-j", chain])
     if v6:
         out.append([ipt, "-t", "mangle", "-A", "PREROUTING",
                     "-i", "awg0", "-j", chain])
@@ -569,6 +583,9 @@ def lb_dispatcher_install(state: Optional[dict] = None) -> bool:
         return False
     lb = _lb_tree(state)
     strategy = lb_strategy(state)
+    # exit-all (весь трафик через exit): хук без RU-исключения,
+    # RU-FORWARD не ставится (зеркалит _awgs_cascade_apply_iptables)
+    exit_all = bool(state.get("cascade_exit_all"))
     shares = ((lb.get("balance") or {}).get("shares")) or {}
     alive = lb.get("alive") or list(slots.keys())
     pinned = state.get("lb_pinned") or ""
@@ -639,7 +656,7 @@ def lb_dispatcher_install(state: Optional[dict] = None) -> bool:
         use_v6 = v6_on if v6 else True
         if not use_v6:
             continue
-        if not _check_or_add(lb_hook_argv(v6)):
+        if not _check_or_add(lb_hook_argv(v6, exit_all=exit_all)):
             ok = False
             _warn("hook rule failed")
         if not _check_or_add(lb_save_argv(v6)):
@@ -732,10 +749,16 @@ def lb_dispatcher_install(state: Optional[dict] = None) -> bool:
                   f"while ip -6 rule del fwmark {mark:#x} lookup {table} 2>/dev/null; do :; done; "
                   f"true"])
 
-    # RU-сети — forward напрямую (общий с каскадом, v4)
-    _check_or_add(["iptables", "-A", "FORWARD", "-i", "awg0",
-                   "-m", "set", "--match-set", AWGS_IPSET_NAME, "dst",
-                   "-j", "ACCEPT"])
+    # RU-сети — forward напрямую (общий с каскадом, v4);
+    # exit-all — не ставим и подчищаем хвост от прежнего режима
+    # (немаркированного RU-плеча в exit-all нет)
+    _ru_fwd = ["iptables", "-A", "FORWARD", "-i", "awg0",
+               "-m", "set", "--match-set", AWGS_IPSET_NAME, "dst",
+               "-j", "ACCEPT"]
+    if exit_all:
+        _while_del(_ru_fwd)
+    else:
+        _check_or_add(_ru_fwd)
 
     # 6. лишние слоты (сдвиг списка при удалении exit'ов)
     n = len(slots)
@@ -777,11 +800,18 @@ def _remove_cascade_mark_path() -> None:
     parts += [
         f"while iptables -t mangle -D PREROUTING {base} -j MARK --set-mark {fwml} 2>/dev/null; do :; done;",
         f"while iptables -t mangle -D FORWARD {base} -j MARK --set-mark {fwml} 2>/dev/null; do :; done;",
+        # exit-all-формы (blanket, ±b4) — чистим всегда (смена режима
+        # не должна оставлять конкурирующую марку: последний MARK в
+        # цепочке затирает fwmark — класс урока легаси-марки)
         f"while iptables -t mangle -D PREROUTING -i awg0 -j MARK --set-mark {fwm} 2>/dev/null; do :; done;",
+        f"while iptables -t mangle -D PREROUTING -i awg0 -m set ! --match-set awg_b4_direct dst -j MARK --set-mark {fwm} 2>/dev/null; do :; done;",
         f"while ip6tables -t mangle -D PREROUTING -i awg0 -j MARK --set-mark {fwm} 2>/dev/null; do :; done;",
         f"while ip6tables -t mangle -D PREROUTING -i awg0 -j MARK --set-mark {fwml} 2>/dev/null; do :; done;",
         "true",
     ]
+    if b4x:
+        parts.append(f"while iptables -t mangle -D PREROUTING -i awg0{b4x} "
+                     f"-j MARK --set-mark {fwm} 2>/dev/null; do :; done;")
     _run(["bash", "-c", " ".join(parts)])
 
 
@@ -1566,11 +1596,29 @@ def lb_routing_script_text(state: Optional[dict] = None) -> str:
     if not n:
         return ""
     v6_on = bool(state.get("allow_ipv6_tunnel"))
+    # exit-all (весь трафик через exit): RU-исключения в хуке нет,
+    # RU-FORWARD — раздел-зачистка (зеркалит lb_dispatcher_install)
+    exit_all = bool(state.get("cascade_exit_all"))
     fwm = f"{AWGS_CASCADE_FWMARK:#x}"
     our = f"{_OUR_VALUE:#x}/{_OUR_MASK_CT:#x}"
     full = f"{_OUR_MASK_FULL:#x}"
     ipset = AWGS_IPSET_NAME
     b4x_s = " ".join(_split_excl())
+    rux_s = ("" if exit_all
+             else f"-m set ! --match-set {ipset} dst")
+    hook_spec = " ".join(x for x in (rux_s, b4x_s) if x)
+    # хук-строка для скрипта без двойных пробелов при пустом hook_spec
+    hook_ipt = f"-i awg0{(' ' + hook_spec) if hook_spec else ''} -j"
+    if exit_all:
+        _ru_fwd_txt = (
+            "# 4. exit-all: немаркированного RU-плеча нет — forward-исключение\n"
+            "# не нужно; подчистка на случай переключения режима\n"
+            f"while iptables -D FORWARD -i awg0 -m set --match-set {ipset} dst -j ACCEPT 2>/dev/null; do :; done")
+    else:
+        _ru_fwd_txt = (
+            "# 4. RU-сети — forward напрямую\n"
+            f"iptables -C FORWARD -i awg0 -m set --match-set {ipset} dst -j ACCEPT 2>/dev/null || \\\n"
+            f"    iptables -A FORWARD -i awg0 -m set --match-set {ipset} dst -j ACCEPT")
 
     # ожидание линков (systemd поднимает awg-quick@awgN параллельно;
     # маршруты replace упадут на несуществующем интерфейсе)
@@ -1640,14 +1688,12 @@ iptables -t mangle -A {AWGS_LB_CHAIN} -m connmark --mark {our} -j CONNMARK --res
 iptables -t mangle -A {AWGS_LB_CHAIN} -m mark --mark {our} -j RETURN
 iptables -t mangle -A {AWGS_LB_CHAIN} -j MARK --set-mark {AWGS_CASCADE_FWMARK | 1:#x}
 iptables -t mangle -A {AWGS_LB_CHAIN} -m mark --mark {AWGS_CASCADE_FWMARK | 1:#x} -j RETURN
-# 3. хук → save (порядок критичен: хук РАНЬШЕ save)
-iptables -t mangle -C PREROUTING -i awg0 -m set ! --match-set {ipset} dst{(' ' + b4x_s) if b4x_s else ''} -j {AWGS_LB_CHAIN} 2>/dev/null || \\
-    iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set {ipset} dst{(' ' + b4x_s) if b4x_s else ''} -j {AWGS_LB_CHAIN}
+# 3. хук → save (порядок критичен: хук РАНЬШЕ save){' — exit-all: весь клиентский v4, без RU-исключения' if exit_all else ''}
+iptables -t mangle -C PREROUTING {hook_ipt} {AWGS_LB_CHAIN} 2>/dev/null || \\
+    iptables -t mangle -A PREROUTING {hook_ipt} {AWGS_LB_CHAIN}
 iptables -t mangle -C PREROUTING -i awg0 -j CONNMARK --save-mark --nfmask {full} --ctmask {full} 2>/dev/null || \\
     iptables -t mangle -A PREROUTING -i awg0 -j CONNMARK --save-mark --nfmask {full} --ctmask {full}{v6_hook}{v6_save}
-# 4. RU-сети — forward напрямую
-iptables -C FORWARD -i awg0 -m set --match-set {ipset} dst -j ACCEPT 2>/dev/null || \\
-    iptables -A FORWARD -i awg0 -m set --match-set {ipset} dst -j ACCEPT
+{_ru_fwd_txt}
 # 5. пер-слот: таблицы/маршруты/MASQUERADE/FORWARD/TCPMSS
 {''.join(per_slot)}
 # 6. зачистка лишних слотов
@@ -1919,13 +1965,20 @@ def lb_hook_sync(excl: bool) -> bool:
     без разрыва. Затем старая форма удаляется. v4+v6.
     """
     want_with = excl
+    try:
+        _exit_all = bool((awgs_state_load() or {}).get("cascade_exit_all"))
+    except Exception:
+        _exit_all = False
     for v6 in (False, True):
-        want = lb_hook_argv(v6) if want_with else _hook_no_split(v6)
-        other = _hook_no_split(v6) if want_with else lb_hook_argv(v6)
+        want = (lb_hook_argv(v6, exit_all=_exit_all) if want_with
+                else _hook_no_split(v6, exit_all=_exit_all))
+        other = (_hook_no_split(v6, exit_all=_exit_all) if want_with
+                 else lb_hook_argv(v6, exit_all=_exit_all))
         if want == other:
-            # v6: единственная форма (set-матчи в ip6tables невозможны,
-            # сплит-исключения в v6 нет) — только убедиться, что стоит;
-            # удаление «другой» снесло бы только что добавленную
+            # v6 (и exit-all без сплита): единственная форма (set-матчи
+            # в ip6tables невозможны, RU-исключения в exit-all нет) —
+            # только убедиться, что стоит; удаление «другой» снесло бы
+            # только что добавленную
             _check_or_add(want)
             continue
         # 1) убедиться что нужная форма есть
@@ -1935,9 +1988,12 @@ def lb_hook_sync(excl: bool) -> bool:
     return True
 
 
-def _hook_no_split(v6: bool = False) -> list:
+def _hook_no_split(v6: bool = False, exit_all: bool = False) -> list:
     """Хук БЕЗ сплит-исключения (вторая форма для синка).
 
+    exit_all=True — без RU-исключения (режим «весь трафик через
+    exit»: blanket-форма — зеркало lb_hook_argv(exit_all=True) при
+    выключенном сплите).
     v6 — единственная голая форма (-i awg0 -j awg_lb6): set-матчи
     inet в ip6tables невозможны, сплит-исключения в v6 нет
     (== lb_hook_argv(True)).
@@ -1945,6 +2001,9 @@ def _hook_no_split(v6: bool = False) -> list:
     ipt = "ip6tables" if v6 else "iptables"
     chain = AWGS_LB_CHAIN6 if v6 else AWGS_LB_CHAIN
     if v6:
+        return [ipt, "-t", "mangle", "-A", "PREROUTING",
+                "-i", "awg0", "-j", chain]
+    if exit_all:
         return [ipt, "-t", "mangle", "-A", "PREROUTING",
                 "-i", "awg0", "-j", chain]
     return [ipt, "-t", "mangle", "-A", "PREROUTING",

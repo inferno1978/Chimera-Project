@@ -1549,3 +1549,131 @@ class TestExitLabelCanon(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ── 11. exit-all (весь трафик через exit, 14.11): формы хука/скрипта/диспетчера ─
+
+class TestExitAllForms(_LbTestBase):
+    """exit-all: хук диспетчера без RU-исключения, RU-FORWARD-зачистка.
+
+    Запрос владельца: «надо так, чтобы все шло через exit» — RU-сети
+    тоже каскадом. B4-сплит остаётся отдельным исключением.
+    """
+
+    def test_hook_argv_v4_exit_all(self):
+        # exit-all: blanket-хук, set-матчей нет вовсе
+        a = self.lb.lb_hook_argv(False, exit_all=True)
+        self.assertEqual(
+            a, ["iptables", "-t", "mangle", "-A", "PREROUTING",
+                "-i", "awg0", "-j", "awg_lb"])
+        self.assertNotIn("--match-set", a)
+
+    def test_hook_argv_v4_exit_all_with_split(self):
+        # exit-all + сплит: b4-плечо остаётся, RU-исключения нет
+        with patch.object(self.lb, "_split_excl",
+                          return_value=["-m", "set", "!", "--match-set",
+                                        "awg_b4_direct", "dst"]):
+            a = self.lb.lb_hook_argv(False, exit_all=True)
+        self.assertEqual(
+            a, ["iptables", "-t", "mangle", "-A", "PREROUTING",
+                "-i", "awg0", "-m", "set", "!", "--match-set",
+                "awg_b4_direct", "dst", "-j", "awg_lb"])
+
+    def test_hook_argv_v4_normal_untouched(self):
+        # обратная совместимость: без exit_all — прежняя RU-форма
+        a = self.lb.lb_hook_argv(False)
+        self.assertEqual(
+            a, ["iptables", "-t", "mangle", "-A", "PREROUTING",
+                "-i", "awg0", "-m", "set", "!", "--match-set",
+                "awg_ru_networks", "dst", "-j", "awg_lb"])
+
+    def test_hook_no_split_exit_all_blanket(self):
+        # exit-all: обе формы хука совпадают (blanket) — гвард lb_hook_sync
+        self.assertEqual(self.lb._hook_no_split(False, exit_all=True),
+                         self.lb.lb_hook_argv(False, exit_all=True))
+
+    def test_hook_variants_include_blanket(self):
+        # зачистка обязана знать exit-all-формы: смена режима не должна
+        # оставлять конкурирующий хук (пакет матчит ПЕРВЫЙ jump)
+        vars_ = self.lb._hook_variants(False)
+        blanket = ["iptables", "-t", "mangle", "-A", "PREROUTING",
+                   "-i", "awg0", "-j", "awg_lb"]
+        self.assertIn(blanket, vars_)
+        self.assertTrue(any("awg_ru_networks" in v for v in vars_),
+                        "RU-формы исчезли из вариантов зачистки")
+
+    def test_script_exit_all_hook_and_ru_cleanup(self):
+        # LB-скрипт в exit-all: хук blanket, RU-FORWARD — зачистка
+        st = self._lb_state(n=2)
+        st["cascade_exit_all"] = True
+        txt = self.lb.lb_routing_script_text(st)
+        hooks = [l.strip() for l in txt.splitlines()
+                 if "PREROUTING -i awg0" in l and "awg_lb" in l
+                 and l.strip().startswith("iptables -t mangle -C")]
+        self.assertTrue(hooks, f"хук не найден в скрипте")
+        self.assertNotIn("awg_ru_networks", hooks[0],
+                         f"exit-all: RU-исключение в хуке: {hooks[0]}")
+        self.assertIn(
+            "while iptables -D FORWARD -i awg0 -m set --match-set "
+            "awg_ru_networks dst -j ACCEPT", txt)
+        self.assertNotIn(
+            "iptables -A FORWARD -i awg0 -m set --match-set "
+            "awg_ru_networks dst -j ACCEPT", txt)
+
+    def test_script_normal_untouched(self):
+        # обычный режим: хук с RU-исключением, RU-FORWARD ставится
+        st = self._lb_state(n=2)
+        txt = self.lb.lb_routing_script_text(st)
+        hooks = [l.strip() for l in txt.splitlines()
+                 if "PREROUTING -i awg0" in l and "awg_lb" in l
+                 and l.strip().startswith("iptables -t mangle -C")]
+        self.assertTrue(hooks)
+        self.assertIn("awg_ru_networks", hooks[0])
+        self.assertIn(
+            "iptables -A FORWARD -i awg0 -m set --match-set "
+            "awg_ru_networks dst -j ACCEPT", txt)
+
+    def test_dispatcher_exit_all_blanket_hook(self):
+        # диспетчер в exit-all: blanket-хук установлен, RU-исключение
+        # в хуке не ставится, RU-FORWARD снесен (while-del), не добавлен
+        self._use_rec_run()
+        st = self._lb_state(n=2)
+        st["cascade_exit_all"] = True
+        self.assertTrue(self.lb.lb_dispatcher_install(st))
+        # blanket-хук: bash -C/-A тело содержит форму без set-матчей
+        self.assertTrue(self.rec.bash_has("-C PREROUTING -i awg0 -j awg_lb"),
+                        f"blanket-хук не установлен: {self.rec.bash[:5]}")
+        # RU-форма хука не устанавливалась
+        self.assertFalse(self.rec.bash_has(
+            "iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set "
+            "awg_ru_networks dst -j awg_lb"),
+            "exit-all: установлена RU-форма хука")
+        # RU-FORWARD удалён, не установлен
+        self.assertTrue(self.rec.bash_has(
+            "while iptables -D FORWARD -i awg0 -m set --match-set "
+            "awg_ru_networks dst -j ACCEPT"),
+            "exit-all: нет зачистки RU-FORWARD")
+        self.assertFalse(self.rec.bash_has(
+            "iptables -A FORWARD -i awg0 -m set --match-set "
+            "awg_ru_networks dst -j ACCEPT"),
+            "exit-all: RU-FORWARD установлен")
+
+    def test_dispatcher_normal_keeps_ru(self):
+        # обычный режим: RU-FORWARD установлен (обратная совместимость)
+        self._use_rec_run()
+        st = self._lb_state(n=2)
+        self.assertTrue(self.lb.lb_dispatcher_install(st))
+        self.assertTrue(self.rec.bash_has(
+            "iptables -A FORWARD -i awg0 -m set --match-set "
+            "awg_ru_networks dst -j ACCEPT"))
+
+    def test_hook_sync_exit_all_no_ru_delete(self):
+        # синк сплита в exit-all: обе формы без RU — совпадают, гвард
+        # не удаляет только что поставленный хук
+        self._use_rec_run()
+        self._write_state(self._lb_state(n=2) | {"cascade_exit_all": True})
+        self.assertTrue(self.lb.lb_hook_sync(excl=True))
+        # хук blanket стоит; удаления его быть не должно
+        self.assertFalse(any(
+            "-D PREROUTING -i awg0 -j awg_lb" in b for b in self.rec.bash),
+            "exit-all: синк снёс blanket-хук")

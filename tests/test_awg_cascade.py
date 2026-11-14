@@ -864,3 +864,218 @@ class TestDoManageAwgCascade(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Режим «весь трафик через exit» (state['cascade_exit_all'], 14.11)
+#  Запрос владельца: «сейчас каскад настроен так, что ру-трафик идет
+#  напрямую с ру-ноды, а зарубежный - через exit ноду. надо так, чтобы
+#  все шло через exit».
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCascadeExitAll(unittest.TestCase):
+    """exit-all: хелперы, apply_iptables, routing-скрипт, переключатель."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "state.json"
+        self._script = self._tmpdir / "awg-routing.sh"
+        self._run_calls = []
+        self._patches = [
+            patch("chimera.modules.awg_state.AWGS_STATE_FILE", self._state),
+            patch("chimera.modules.awg_cascade.AWGS_CASCADE_DIR", self._tmpdir),
+            patch("chimera.modules.awg_cascade.AWGS_ROUTING_SCRIPT", self._script),
+            # сплит выключен — чистые формы без b4-исключения
+            patch("chimera.modules.awg_cascade._awgs_cascade_b4_split_excl",
+                  return_value=""),
+        ]
+        for p in self._patches:
+            p.start()
+        self.addCleanup(self._stop)
+
+    def _stop(self):
+        for p in self._patches:
+            p.stop()
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write_state(self, d):
+        self._state.write_text(json.dumps(d))
+
+    def _mock_core(self):
+        core = MagicMock()
+        core.log_to_file = MagicMock()
+        core.info = MagicMock()
+        core.warn = MagicMock()
+
+        def _capture_run(cmd, **kwargs):
+            self._run_calls.append(cmd)
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+
+        core._run = _capture_run
+        return core
+
+    # ── хелперы режима ────────────────────────────────────────────────────
+
+    def test_flag_default_false_and_set(self):
+        """Флаг читается из state; дефолт False (обратная совместимость)."""
+        from chimera.modules import awg_cascade
+        self._write_state({})
+        self.assertFalse(awg_cascade.awgs_cascade_exit_all())
+        self._write_state({"cascade_exit_all": True})
+        self.assertTrue(awg_cascade.awgs_cascade_exit_all())
+        # прямой state-аргумент (чистая функция)
+        self.assertTrue(awg_cascade.awgs_cascade_exit_all(
+            {"cascade_exit_all": True}))
+        self.assertFalse(awg_cascade.awgs_cascade_exit_all({}))
+
+    def test_ru_excl_forms(self):
+        """_awgs_cascade_ru_excl: исключение обычно / '' в exit-all."""
+        from chimera.modules import awg_cascade
+        self._write_state({})
+        self.assertEqual(
+            awg_cascade._awgs_cascade_ru_excl(),
+            " -m set ! --match-set awg_ru_networks dst")
+        self._write_state({"cascade_exit_all": True})
+        self.assertEqual(awg_cascade._awgs_cascade_ru_excl(), "")
+
+    # ── apply_iptables: живые правила ─────────────────────────────────────
+
+    def test_apply_iptables_exit_all_blanket(self):
+        """exit-all: mark-правило blanket (без RU-ipset), RU-FORWARD не ставится."""
+        from chimera.modules import awg_cascade
+        self._write_state({"cascade_exit_all": True})
+        mock_core = self._mock_core()
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core):
+            awg_cascade._awgs_cascade_apply_iptables("172.16.61.0/24")
+        cmds = [" ".join(c) for c in self._run_calls]
+        marks = [c for c in cmds
+                 if "-A PREROUTING" in c and "-j MARK" in c]
+        self.assertTrue(marks, f"нет mark-правила: {cmds}")
+        self.assertNotIn("awg_ru_networks", marks[0],
+                         f"exit-all: RU-исключение в mark-правиле: {marks[0]}")
+        ru_fwd_add = [c for c in cmds
+                      if "iptables -A FORWARD" in c
+                      and "awg_ru_networks" in c and "-j ACCEPT" in c]
+        self.assertEqual(ru_fwd_add, [],
+                         f"exit-all: RU-FORWARD-ACCEPT не должен ставиться: {ru_fwd_add}")
+
+    def test_apply_iptables_normal_ru_split_kept(self):
+        """Обычный режим не изменился: RU-исключение в mark + RU-FORWARD-ACCEPT."""
+        from chimera.modules import awg_cascade
+        self._write_state({})
+        mock_core = self._mock_core()
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core):
+            awg_cascade._awgs_cascade_apply_iptables("172.16.61.0/24")
+        cmds = [" ".join(c) for c in self._run_calls]
+        marks = [c for c in cmds
+                 if "-A PREROUTING" in c and "-j MARK" in c]
+        self.assertTrue(marks)
+        self.assertIn("awg_ru_networks", marks[0])
+        ru_fwd_add = [c for c in cmds
+                      if "iptables -A FORWARD" in c
+                      and "awg_ru_networks" in c and "-j ACCEPT" in c]
+        self.assertTrue(ru_fwd_add, "нет RU-FORWARD-ACCEPT в обычном режиме")
+
+    # ── routing-скрипт: бут-сходимость ────────────────────────────────────
+
+    def test_script_exit_all_blanket_and_cleanup(self):
+        """exit-all-скрипт: blanket-марка, RU-FORWARD-зачистка; актуальная
+        форма НЕ попадает в del-набор (класс урока E2E 2026-10-05)."""
+        import re as _re
+        from chimera.modules import awg_cascade
+        self._write_state({"cascade_exit_all": True})
+        awg_cascade._awgs_cascade_create_routing_script("172.16.61.0/24")
+        s = self._script.read_text()
+        # blanket-марка (актуальная форма 2.1)
+        self.assertIn(
+            "iptables -t mangle -A PREROUTING -i awg0 -j MARK --set-mark 33280", s)
+        # RU-FORWARD — раздел-зачистка, установка отсутствует
+        self.assertIn(
+            "while iptables -D FORWARD -i awg0 -m set --match-set "
+            "awg_ru_networks dst -j ACCEPT 2>/dev/null; do :; done", s)
+        self.assertNotIn(
+            "iptables -A FORWARD -i awg0 -m set --match-set "
+            "awg_ru_networks dst -j ACCEPT", s)
+        # инвариант: форма установки НЕ встречается в del-циклах той же марки
+        adds = _re.findall(r"-A PREROUTING -i awg0(.*?) -j MARK --set-mark 33280", s)
+        dels = _re.findall(r"-D PREROUTING -i awg0(.*?) -j MARK --set-mark 33280", s)
+        self.assertTrue(adds and adds[0] == "")
+        for d in dels:
+            self.assertNotEqual(d, "", "exit-all: del-цикл сносит актуальную blanket-форму")
+
+    def test_script_normal_del_blanket_form(self):
+        """Обычный режим: RU-форма ставится, blanket-форма (exit-all хвост)
+        и хардкод b4-форма зачищаются."""
+        from chimera.modules import awg_cascade
+        self._write_state({})
+        awg_cascade._awgs_cascade_create_routing_script("172.16.61.0/24")
+        s = self._script.read_text()
+        self.assertIn(
+            "iptables -t mangle -A PREROUTING -i awg0 -m set ! --match-set "
+            "awg_ru_networks dst -j MARK --set-mark 33280", s)
+        # зачистка exit-all blanket-формы
+        self.assertIn(
+            "while iptables -t mangle -D PREROUTING -i awg0 -j MARK "
+            "--set-mark 33280 2>/dev/null; do :; done", s)
+        # зачистка хардкод b4-формы (сплит мог выключиться до ребута)
+        self.assertIn(
+            "while iptables -t mangle -D PREROUTING -i awg0 -m set ! "
+            "--match-set awg_ru_networks dst -m set ! --match-set "
+            "awg_b4_direct dst -j MARK --set-mark 33280 2>/dev/null; "
+            "do :; done", s)
+        # RU-FORWARD ставится как раньше
+        self.assertIn(
+            "iptables -A FORWARD -i awg0 -m set --match-set "
+            "awg_ru_networks dst -j ACCEPT", s)
+
+    # ── переключатель ─────────────────────────────────────────────────────
+
+    def test_set_exit_all_role_guard(self):
+        """Не-entry нода: отказ, state не меняется."""
+        from chimera.modules import awg_cascade
+        self._write_state({"cascade_role": "exit"})
+        mock_core = self._mock_core()
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core):
+            self.assertFalse(awg_cascade.awgs_cascade_set_exit_all(True))
+        st = json.loads(self._state.read_text())
+        self.assertNotIn("cascade_exit_all", st)
+
+    def test_set_exit_all_success_flow(self):
+        """entry: флаг сохранён, правила/скрипт перегенерированы, юнит
+        перезапущен (канон apply → script → restart)."""
+        from chimera.modules import awg_cascade
+        self._write_state({"cascade_role": "entry",
+                           "cascade_subnet": "172.16.61.0/24"})
+        mock_core = self._mock_core()
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(awg_cascade, "_awgs_cascade_apply_iptables") as m_apply, \
+             patch.object(awg_cascade, "_awgs_cascade_create_routing_script") as m_script:
+            self.assertTrue(awg_cascade.awgs_cascade_set_exit_all(True))
+        st = json.loads(self._state.read_text())
+        self.assertTrue(st.get("cascade_exit_all"))
+        m_apply.assert_called_once_with("172.16.61.0/24", subnet_v6="")
+        m_script.assert_called_once_with("172.16.61.0/24", subnet_v6="")
+        restarts = [" ".join(c) for c in self._run_calls
+                    if "systemctl" in " ".join(c) and "restart" in " ".join(c)]
+        self.assertTrue(any("awg-cascade-routing" in r for r in restarts),
+                        f"нет рестарта routing-юнита: {self._run_calls}")
+
+    def test_set_exit_all_disable(self):
+        """Обратное переключение: флаг снят."""
+        from chimera.modules import awg_cascade
+        self._write_state({"cascade_role": "entry",
+                           "cascade_subnet": "172.16.61.0/24",
+                           "cascade_exit_all": True})
+        mock_core = self._mock_core()
+        with patch.object(awg_cascade, "_core_module", return_value=mock_core), \
+             patch.object(awg_cascade, "_awgs_cascade_apply_iptables"), \
+             patch.object(awg_cascade, "_awgs_cascade_create_routing_script"):
+            self.assertTrue(awg_cascade.awgs_cascade_set_exit_all(False))
+        st = json.loads(self._state.read_text())
+        self.assertFalse(st.get("cascade_exit_all"))
