@@ -28,6 +28,7 @@ API:
       domain: Optional[str] = None,
       websocket_origin_rewrite: bool = False,
       backend_http_scheme: str = "http",  # http or https backend
+      dual_stack: Optional[bool] = None,  # None=авто: глобальный IPv6 у ноды → listen v4+[::]
   ) -> tuple[bool, str]
 
   panel_nginx_front_remove(
@@ -43,8 +44,10 @@ API:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -80,6 +83,49 @@ def _find_ssl_cert(domain: str) -> "tuple[Optional[Path], Optional[Path]]":
     if cert.exists() and key.exists():
         return cert, key
     return None, None
+
+
+def _node_has_global_ipv6() -> bool:
+    """Есть ли у ноды глобальный IPv6-адрес (критерий dual-stack listen).
+
+    `ip -6 addr show scope global`; fe80:: (link-local) и v4-mapped
+    адреса не считаются (как в aghome_setup._get_public_ipv6). Ошибки,
+    отсутствие `ip`, пустой вывод → False: на v4-only ноде listen [::]
+    не нужен — nginx не поднял бы v6-сокеты.
+    """
+    try:
+        r = subprocess.run(
+            ["ip", "-6", "addr", "show", "scope", "global"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if r.returncode != 0:
+        return False
+    for line in (r.stdout or "").splitlines():
+        m = re.match(r"\s*inet6\s+([0-9a-fA-F:.]+)/\d+\s+scope\s+global", line)
+        if not m:
+            continue
+        addr = m.group(1).lower()
+        if not addr.startswith("fe80") and "." not in addr:
+            return True
+    return False
+
+
+def _ipv6_listen_ok(port: int) -> bool:
+    """Слушает ли nginx фактический [::]:port (проверка после reload).
+
+    systemctl reload nginx возвращает 0, даже если master НЕ принял
+    новый конфиг (например, bind-конфликт v6-сокета с чужим процессом):
+    старые воркеры продолжают старый конфиг, и «молчаливый недо-reload»
+    никто бы не заметил. Здесь — честная проверка слушателя по ss.
+    """
+    try:
+        r = subprocess.run(["ss", "-tln"], capture_output=True, text=True,
+                           check=False, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return bool(re.search(r"\[::\]:" + str(port) + r"\s", r.stdout or ""))
 
 
 def _generate_self_signed_tls(public_ip: str,
@@ -272,6 +318,7 @@ def _generate_vhost(port: int,
                     panel_name_slug: str = "panel",
                     mcp_proxy: bool = False,
                     long_timeouts: bool = False,
+                    dual_stack: bool = False,
                     ) -> str:
     """Генерирует nginx vhost config.
 
@@ -290,6 +337,10 @@ def _generate_vhost(port: int,
         (нужно для b4 >= 1.80, MCP-сервер панели).
       long_timeouts: если True — proxy_read/send_timeout 3600s вместо 60s
         (LLM-стримы/SSE: ответ модели может идти минутами без чанков;
+      dual_stack: если True — слушать и на v4, и на [::] (IPv6). Решение
+        «есть ли у ноды глобальный v6» принимает caller: генератор чистый
+        (систему не трогает). [::] на v4-only ноде ставить нельзя — nginx
+        не принял бы конфиг.
     """
     # WebSocket origin rewrite block
     if websocket_origin_rewrite:
@@ -368,12 +419,16 @@ def _generate_vhost(port: int,
         root /var/www/{domain};
     }}"""
 
+    # Dual-stack listen: v4 — всегда; [::] — только по решению caller'а
+    # (panel_nginx_front_install: авто-детект глобального IPv6 ноды).
+    listen_v6 = f"\n    listen [::]:{port} ssl http2;" if dual_stack else ""
+
     return f"""# Chimera — nginx front для {panel_name_slug} с TLS.
 # Сгенерировано panel_nginx_front.py. НЕ редактировать вручную.
 # Управление: TUI → соответствующее меню панели.
 
 server {{
-    listen {port} ssl http2;
+    listen {port} ssl http2;{listen_v6}
     server_name {domain};
 
     ssl_certificate     {cert_path};
@@ -412,6 +467,114 @@ server {{
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  FIREWALL FALLBACK (iptables/ip6tables — когда UFW недоступен)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _iptables_fallback_open(port: int, also_v6: bool = False) -> None:
+    """Fallback-открытие порта в iptables (+ ip6tables при also_v6).
+
+    UFW недоступен/inactive: v4-правило — всегда; v6 — только когда фронт
+    слушает [::] (dual-stack), иначе бессмысленно (ufw открывает порт в
+    обоих стеках разом — fallback обязан быть симметричным). Идемпотентно
+    (проверка -C перед -I), persist через netfilter-persistent.
+    """
+    core = _core_module()
+    info, warn = core.info, core.warn
+    CYAN, NC, RED, YELLOW, DIM = (core.CYAN, core.NC, core.RED,
+                                  core.YELLOW, core.DIM)
+    import shutil as _sh
+    for ipt_name in (["iptables"] + (["ip6tables"] if also_v6 else [])):
+        ipt = _sh.which(ipt_name)
+        if not ipt:
+            if ipt_name == "iptables":
+                warn(f"  {RED}Ни UFW, ни iptables не найдены — порт {port} "
+                     f"НЕ открыт в фаерволе!{NC}")
+                warn(f"  {YELLOW}Откройте вручную или проверьте security group "
+                     f"хостинг-провайдера.{NC}")
+            else:
+                warn(f"  {RED}{ipt_name} не найден — v6-часть порта {port} "
+                     f"НЕ открыта (dual-stack слушает [::], фаервол v6 закрыт){NC}")
+            continue
+        # Проверяем существующее правило (идемпотентность).
+        try:
+            r_check = subprocess.run(
+                [ipt, "-C", "INPUT", "-p", "tcp", "--dport", str(port),
+                 "-j", "ACCEPT"],
+                capture_output=True, check=False, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            r_check = None
+        if r_check is not None and r_check.returncode != 0:
+            # Правила нет — добавляем.
+            try:
+                r_add = subprocess.run(
+                    [ipt, "-I", "INPUT", "1", "-p", "tcp",
+                     "--dport", str(port), "-j", "ACCEPT"],
+                    capture_output=True, text=True, check=False, timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                r_add = None
+            if r_add is not None and r_add.returncode == 0:
+                info(f"  {CYAN}Порт {port}/tcp открыт в {ipt_name}{NC}")
+                # Persist rules (iptables-persistent / netfilter-persistent).
+                np = _sh.which("netfilter-persistent")
+                if np:
+                    try:
+                        subprocess.run([np, "save"], capture_output=True,
+                                       check=False, timeout=120)
+                    except subprocess.TimeoutExpired:
+                        pass
+            else:
+                why = (f"таймаут {ipt_name} (xtables-лок занят?)"
+                       if r_add is None
+                       else r_add.stderr.strip()[:200])
+                warn(f"  {RED}Не удалось открыть порт {port} в {ipt_name}: "
+                     f"{why}{NC}")
+                warn(f"  {YELLOW}Откройте вручную: {ipt_name} -I INPUT 1 "
+                     f"-p tcp --dport {port} -j ACCEPT{NC}")
+        else:
+            info(f"  {DIM}Порт {port}/tcp уже открыт в {ipt_name}{NC}")
+
+
+def _iptables_fallback_close(port: int) -> None:
+    """Симметричное закрытие orphaned-правил: iptables + ip6tables.
+
+    Install при dual-stack мог открыть порт в обоих стеках (fallback-ветка
+    без UFW) — закрытие обязано пройти по обоим, иначе останется orphaned
+    v6-правило при закрытом v4. Правил нет — тишина (-C не проходит →
+    выход). Persist через netfilter-persistent.
+    """
+    import shutil as _sh
+    for ipt_name in ("iptables", "ip6tables"):
+        ipt = _sh.which(ipt_name)
+        if not ipt:
+            continue
+        args = ["-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]
+        for _ in range(5):
+            try:
+                r_check = subprocess.run(
+                    [ipt, "-C", "INPUT"] + args,
+                    capture_output=True, check=False, timeout=30,
+                )
+                if r_check.returncode != 0:
+                    break  # правила нет — выходим
+                subprocess.run(
+                    [ipt, "-D", "INPUT"] + args,
+                    capture_output=True, check=False, timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                break  # xtables-лок занят — повторный запуск дочистит
+    # Persist после удаления.
+    np = _sh.which("netfilter-persistent")
+    if np:
+        try:
+            subprocess.run([np, "save"], capture_output=True,
+                           check=False, timeout=120)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  УСТАНОВКА / УДАЛЕНИЕ
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -429,7 +592,9 @@ def panel_nginx_front_install(
     cert_name_slug: "Optional[str]" = None,
     mcp_proxy: bool = False,
     long_timeouts: bool = False,
+    dual_stack: "Optional[bool]" = None,
 ) -> "tuple[bool, str]":
+
     """Устанавливает nginx front с TLS для панели.
 
     Args:
@@ -447,6 +612,9 @@ def panel_nginx_front_install(
       mcp_proxy: True → добавить location /api/mcp (loopback-Host для
         MCP go-sdk, SSE без буферизации; b4 >= 1.80).
       long_timeouts: True → proxy_read/send_timeout 3600s вместо 60s
+      dual_stack: None → авто-детект глобального IPv6 ноды (есть —
+        слушаем v4+[::]); True/False — явное управление (тесты, override).
+        В state.json пишется «ipv6»: bool.
 
     Returns:
       (success, message)
@@ -534,6 +702,17 @@ def panel_nginx_front_install(
             return False, f"SSL-сертификат для {domain} не найден и не получен"
 
     # 3. Генерация vhost.
+    # Dual-stack: None → авто-детект (глобальный IPv6 у ноды → слушаем
+    # v4+[::]; иначе только v4 — на v4-only ноде listen [::] не нужен,
+    # nginx не поднял бы v6-сокеты).
+    if dual_stack is None:
+        dual_stack = _node_has_global_ipv6()
+    if dual_stack:
+        info(f"  {CYAN}Dual-stack: глобальный IPv6 у ноды есть — "
+             f"listen {port} будет v4+[::]{NC}")
+    else:
+        info(f"  {DIM}Dual-stack: глобального IPv6 нет — listen {port} "
+             f"только v4{NC}")
     vhost = _generate_vhost(
         port=port,
         backend_port=backend_port,
@@ -545,6 +724,7 @@ def panel_nginx_front_install(
         panel_name_slug=cert_name_slug,
         mcp_proxy=mcp_proxy,
         long_timeouts=long_timeouts,
+        dual_stack=dual_stack,
     )
 
     # 4. Запись vhost + symlink.
@@ -580,6 +760,28 @@ def panel_nginx_front_install(
     except subprocess.TimeoutExpired:
         pass
 
+    # 5.5 Dual-stack верификация: reload мог «молча не приняться»
+    # (bind-конфликт [::]:port с чужим процессом: systemctl вернёт 0,
+    # старые воркеры продолжат старый конфиг). Панель при этом жива на
+    # v4 — поэтому WARN, а не fail; проверяем фактического слушателя.
+    if dual_stack:
+        try:
+            v6_listening = False
+            for _ in range(2):
+                time.sleep(1.5)
+                v6_listening = _ipv6_listen_ok(port)
+                if v6_listening:
+                    break
+            if v6_listening:
+                info(f"  {CYAN}[::]:{port} слушает — dual-stack "
+                     f"подтверждён{NC}")
+            else:
+                warn(f"  {YELLOW}[::]:{port} НЕ слушает: reload не принял "
+                     f"конфиг (bind-конфликт v6-сокета?). Панель работает "
+                     f"по v4; см. ss -tln и лог nginx{NC}")
+        except Exception:
+            pass
+
     # 6. Регистрация в port_registry + открытие порта в фаерволе.
     # ВАЖНО: ufw_open_port() работает только если UFW активен.
     # Если UFW не установлен или inactive — fallback на iptables.
@@ -610,56 +812,12 @@ def panel_nginx_front_install(
         if ufw_ok:
             info(f"  {CYAN}Порт {port}/tcp открыт в UFW: {ufw_msg}{NC}")
         else:
-            # UFW не установлен или inactive — fallback на iptables.
+            # UFW не установлен или inactive — fallback на iptables
+            # (+ip6tables при dual-stack: ufw открывает порт сразу в
+            # обоих стеках, fallback обязан быть симметричным, иначе
+            # v6-путь остался бы закрытым при слушающем [::]).
             info(f"  {YELLOW}UFW недоступен ({ufw_msg}) — открываю порт через iptables...{NC}")
-            import shutil as _sh
-            ipt = _sh.which("iptables")
-            if ipt:
-                # Проверяем существующее правило (идемпотентность).
-                try:
-                    r_check = subprocess.run(
-                        [ipt, "-C", "INPUT", "-p", "tcp", "--dport", str(port),
-                         "-j", "ACCEPT"],
-                        capture_output=True, check=False, timeout=30,
-                    )
-                except subprocess.TimeoutExpired:
-                    r_check = None
-                if r_check is not None and r_check.returncode != 0:
-                    # Правила нет — добавляем.
-                    try:
-                        r_add = subprocess.run(
-                            [ipt, "-I", "INPUT", "1", "-p", "tcp",
-                             "--dport", str(port), "-j", "ACCEPT"],
-                            capture_output=True, text=True, check=False,
-                            timeout=30,
-                        )
-                    except subprocess.TimeoutExpired:
-                        r_add = None
-                    if r_add is not None and r_add.returncode == 0:
-                        info(f"  {CYAN}Порт {port}/tcp открыт в iptables{NC}")
-                        # Persist rules (iptables-persistent / netfilter-persistent).
-                        np = _sh.which("netfilter-persistent")
-                        if np:
-                            try:
-                                subprocess.run([np, "save"], capture_output=True,
-                                               check=False, timeout=120)
-                            except subprocess.TimeoutExpired:
-                                pass
-                    else:
-                        why = ("таймаут iptables (xtables-лок занят?)"
-                               if r_add is None
-                               else r_add.stderr.strip()[:200])
-                        warn(f"  {RED}Не удалось открыть порт {port} в iptables: "
-                             f"{why}{NC}")
-                        warn(f"  {YELLOW}Откройте вручную: iptables -I INPUT 1 "
-                             f"-p tcp --dport {port} -j ACCEPT{NC}")
-                else:
-                    info(f"  {DIM}Порт {port}/tcp уже открыт в iptables{NC}")
-            else:
-                warn(f"  {RED}Ни UFW, ни iptables не найдены — порт {port} "
-                     f"НЕ открыт в фаерволе!{NC}")
-                warn(f"  {YELLOW}Откройте вручную или проверьте security group "
-                     f"хостинг-провайдера.{NC}")
+            _iptables_fallback_open(port, also_v6=bool(dual_stack))
     except Exception as _e:
         warn(f"  {RED}Ошибка открытия порта {port} в фаерволе: {_e}{NC}")
         warn(f"  {YELLOW}Откройте вручную: iptables -I INPUT 1 -p tcp "
@@ -672,6 +830,7 @@ def panel_nginx_front_install(
         "port": port,
         "domain": domain if not use_self_signed else None,
         "self_signed": use_self_signed,
+        "ipv6": bool(dual_stack),
         "url": f"https://{domain if not use_self_signed else (public_ip or 'SERVER_IP')}:{port}",
     }, indent=2))
 
@@ -746,33 +905,11 @@ def panel_nginx_front_remove(
         except Exception as _e:
             warn(f"  {YELLOW}port_registry/UFW error: {_e} — fallback на iptables...{NC}")
         # Fallback: убираем orphaned iptables правила (если port_registry
-        # не нашёл их, или UFW inactive при install).
+        # не нашёл их, или UFW inactive при install). Симметрично install:
+        # v4 + v6 (ip6tables) — иначе при dual-stack осталось бы
+        # orphaned v6-правило при закрытом v4.
         import shutil as _sh
-        ipt = _sh.which("iptables")
-        if ipt:
-            args = ["-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]
-            for _ in range(5):
-                try:
-                    r_check = subprocess.run(
-                        [ipt, "-C", "INPUT"] + args,
-                        capture_output=True, check=False, timeout=30,
-                    )
-                    if r_check.returncode != 0:
-                        break  # правила нет — выходим
-                    subprocess.run(
-                        [ipt, "-D", "INPUT"] + args,
-                        capture_output=True, check=False, timeout=30,
-                    )
-                except subprocess.TimeoutExpired:
-                    break  # xtables-лок занят — повторный запуск дочистит
-            # Persist после удаления.
-            np = _sh.which("netfilter-persistent")
-            if np:
-                try:
-                    subprocess.run([np, "save"], capture_output=True,
-                                   check=False, timeout=120)
-                except subprocess.TimeoutExpired:
-                    pass
+        _iptables_fallback_close(port)
         # Также снимаем orphaned UFW правило (если осталось).
         if _sh.which("ufw"):
             # text=True ОБЯЗАТЕЛЬНО при input=str (иначе memoryview()
@@ -805,6 +942,7 @@ def panel_nginx_front_status(state_file: Path) -> dict:
         port: int | None
         domain: str | None
         self_signed: bool
+        ipv6: bool | None  # с 15.11: dual-stack слушатель (v4+[::])
         url: str | None
     """
     if not state_file.exists():

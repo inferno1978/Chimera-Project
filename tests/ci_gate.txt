@@ -234,6 +234,7 @@ tests.test_node_health_monitor
 tests.test_olcrtc
 tests.test_openflux
 tests.test_panel_nginx_front_input
+tests.test_panel_nginx_front_v6
 tests.test_port_follow
 tests.test_port_hopping
 tests.test_port_knocking
