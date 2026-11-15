@@ -16,8 +16,13 @@ chimera/modules/custom_outbounds.py
 Возможности:
   • Импорт по ссылке: vless:// (REALITY/TLS, tcp/ws/grpc/httpupgrade/xhttp/
     kcp/quic/http), vmess:// (base64-JSON), trojan://, ss:// (SIP002 + legacy)
-  • Мастер: vless / vmess / trojan / shadowsocks / socks / http — форма
-    по протоколу + транспорт + security (none/tls/reality)
+  • Мастер: vless / vmess / trojan / shadowsocks / socks / http / freedom —
+    форма по протоколу + транспорт + security (none/tls/reality)
+  • freedom — локальный egress с собственной стратегией резолва: кейс
+    «панели по v4» на exit-нодах — тег direct-v4 (domainStrategy UseIPv4)
+    + routing-правило на домены панелей, когда v6-путь до цели мёртв
+    у хостера, а freedom UseIPv6v4 зависает без быстрого fallback
+    (чёрная дыра: SYN тонет без RST — dialer ждёт таймаут минутами)
   • Готовый однострочный JSON outbound (v2rayN / Xray-формат)
   • Вкл/выкл, удаление (с проверкой ссылок из routing.rules), TCP-проверка
     доступности, просмотр JSON, пере-применение
@@ -66,11 +71,26 @@ from chimera.modules.box_renderer import (
     _box_top, _box_bottom, _box_sep, _box_row, _box_item,
     _box_back, _box_desc, _box_kv, _box_warn, _box_ok,
 )
+from chimera.modules.domain_strategy import make_freedom_outbound
 
 # ── Константы ─────────────────────────────────────────────────────────────────
 CO_STATE_FILE  = Path("/var/lib/xray-installer/custom_outbounds.json")
 CO_TAG_RE      = re.compile(r'^[a-z0-9][a-z0-9._-]{1,63}$')
-CO_PROTOCOLS   = ("vless", "vmess", "trojan", "shadowsocks", "socks", "http")
+CO_PROTOCOLS   = ("vless", "vmess", "trojan", "shadowsocks", "socks", "http",
+                  "freedom")
+# freedom — локальный egress: стратегии резолва Xray (порядок = порядок
+# в пикере; дефолт UseIPv4 — самый частый кейс: v4-пин доменов при мёртвом
+# v6-пути до цели).
+CO_DS_STRATEGIES = ("UseIPv4", "UseIPv6v4", "UseIPv4v6", "UseIPv6", "UseIP",
+                    "AsIs")
+CO_DS_LABELS = (
+    "UseIPv4 — только IPv4 (v4-пин доменов при мёртвом v6-пути)",
+    "UseIPv6v4 — IPv6 первым, fallback v4 (как direct флота)",
+    "UseIPv4v6 — IPv4 первым, fallback v6",
+    "UseIPv6 — только IPv6",
+    "UseIP — обе семьи, как отдал DNS",
+    "AsIs — не резолвить (звонить как есть)",
+)
 CO_NETWORKS    = ("tcp", "ws", "grpc", "httpupgrade", "xhttp")
 CO_METHODS     = ("chacha20-ietf-poly1305", "aes-256-gcm", "aes-128-gcm",
                   "2022-blake3-aes-256-gcm", "2022-blake3-aes-128-gcm",
@@ -741,6 +761,18 @@ def _co_v_port(text: str) -> "str | None":
     return None
 
 
+def _co_v_ip_opt(text: str) -> "str | None":
+    """sendThrough: пусто (как решит ОС) или IP-литерал v4/v6."""
+    t = text.strip()
+    if not t:
+        return None
+    try:
+        ipaddress.ip_address(t.strip("[]"))
+        return None
+    except ValueError:
+        return f"'{t}' — нужен IP-адрес (v4 или v6) или пусто"
+
+
 def _co_v_uuid(text: str) -> "str | None":
     t = text.strip()
     if not t:
@@ -805,6 +837,12 @@ def _co_describe(entry: dict) -> str:
     """Короткая сводка для списка: 'vless  1.2.3.4:443  tcp/reality'."""
     ob    = entry.get("outbound", {}) or {}
     proto = ob.get("protocol", "?")
+    if proto == "freedom":
+        s = ob.get("settings") or {}
+        out = f"freedom  {s.get('domainStrategy', 'AsIs')}"
+        if s.get("sendThrough"):
+            out += f"  src {s['sendThrough']}"
+        return out
     addr, port = _co_target(ob)
     ss    = ob.get("streamSettings") or {}
     net   = ss.get("network", "tcp")
@@ -830,6 +868,13 @@ def _co_extract_spec(ob: dict) -> dict:
         spec.update(address=v.get("address", ""), port=str(v.get("port", "")),
                     password=v.get("password", "") or u.get("pass", ""),
                     method=v.get("method", ""), user=u.get("user", ""))
+    if proto == "freedom":
+        # локальный egress: для префилла мастера важны только стратегия и
+        # привязка источника; vnext/servers/транспорт у freedom нет
+        spec["dsStrategy"] = s.get("domainStrategy", "AsIs")
+        if s.get("sendThrough"):
+            spec["sendThrough"] = s["sendThrough"]
+        return spec
     ss = ob.get("streamSettings") or {}
     net = ss.get("network", "tcp")
     spec["network"] = net
@@ -893,6 +938,15 @@ def _co_suggest_tag(raw: str, protocol: str, target: "tuple") -> str:
     return base[:64]
 
 
+def _co_freedom_default_tag(ds: str) -> str:
+    """Дефолт-тег для freedom: UseIPv4 → direct-v4 (канон кейса «панели
+    по v4» на exit-нодах), иначе freedom-<стратегия>."""
+    ds = (ds or "").strip()
+    if ds == "UseIPv4":
+        return "direct-v4"
+    return "freedom-" + (ds.lower() or "asis")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  МАСТЕР (форма по протоколу → settings + streamSettings)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -924,6 +978,45 @@ def _co_settings_from_form(protocol: str, f: dict, flow: str = "",
     return {"servers": [srv]}
 
 
+def _co_wizard_freedom(spec: "dict | None" = None) -> "tuple | None":
+    """Мастер freedom: локальный egress — только domainStrategy (+sendThrough).
+
+    Сборка — через domain_strategy.make_freedom_outbound: дуал-запись
+    domainStrategy (settings + sockopt) — та же конвенция, что у всех
+    freedom-outbound'ов флота (см. докстринг domain_strategy). Адреса/порта
+    и транспорта у freedom нет — отдельная мини-форма, а не общая Форма 1.
+    Возвращает (settings, streamSettings, warnings) или None (отмена).
+    """
+    spec = spec or {}
+    pref = str(spec.get("dsStrategy", "") or "")
+    try:
+        pre = list(CO_DS_STRATEGIES).index(pref)
+    except ValueError:
+        pre = 0
+    si = tui_select("domainStrategy — как резолвить и куда звонить",
+                    list(CO_DS_LABELS), default=pre)
+    if si is None:
+        return None
+    ds = CO_DS_STRATEGIES[si]
+    fh = tui_form("freedom — привязка источника (опционально)", [
+        TuiField(key="sendThrough", label="sendThrough",
+                 default=str(spec.get("sendThrough", "") or ""),
+                 validator=_co_v_ip_opt,
+                 hint="локальный IP интерфейса (напр. WARP); пусто — как решит ОС"),
+    ])
+    if not fh:
+        return None
+    send_through = (fh.get("sendThrough") or "").strip() or None
+    ob = make_freedom_outbound("x", ds, send_through=send_through)
+    warnings: list = []
+    if ds.startswith("UseIPv6"):
+        warnings.append(
+            "у ноды должен быть живой IPv6-egress: freedom не делает быстрый "
+            "fallback — при мёртвом v6-пути dial зависает (чёрная дыра: SYN "
+            "тонет без RST, dialer ждёт таймаут)")
+    return ob["settings"], ob["streamSettings"], warnings
+
+
 def _co_wizard(protocol: str, spec: "dict | None" = None) -> "tuple | None":
     """Мастер: формы → (settings, streamSettings, warnings) или None.
 
@@ -931,6 +1024,9 @@ def _co_wizard(protocol: str, spec: "dict | None" = None) -> "tuple | None":
     """
     spec = spec or {}
     d = lambda k, dv="": str(spec.get(k, dv) or dv or "")
+
+    if protocol == "freedom":
+        return _co_wizard_freedom(spec)
 
     # ── Форма 1: сервер + креды ──
     fields = [
@@ -1148,7 +1244,12 @@ def _co_preview(tag: str, parts: dict, warnings: list,
     print()
     _box_top(f"{'Замена' if replace_name else 'Новый'} outbound: {tag}")
     _box_kv("Протокол", proto)
-    _box_kv("Адрес", f"{addr}:{port}")
+    if proto == "freedom":
+        _box_kv("Egress", settings.get("domainStrategy", "AsIs"))
+        if settings.get("sendThrough"):
+            _box_kv("sendThrough", settings["sendThrough"])
+    else:
+        _box_kv("Адрес", f"{addr}:{port}")
     if proto in ("vless", "vmess"):
         u = ((settings.get("vnext") or [{}])[0].get("users") or [{}])[0]
         _box_kv("UUID", _co_mask(u.get("id", ""), 6))
@@ -1166,7 +1267,7 @@ def _co_preview(tag: str, parts: dict, warnings: list,
         srv = (settings.get("servers") or [{}])[0]
         if srv.get("users"):
             _box_kv("Авторизация", f"{srv['users'][0].get('user', '')} / •••")
-    if stream:
+    if stream and proto != "freedom":
         _box_kv("Транспорт", stream.get("network", "tcp"))
         _box_kv("Security", stream.get("security", "none"))
         sec_s = stream.get("security")
@@ -1244,6 +1345,16 @@ def _co_refs_in_routing(tag: str) -> list:
 
 
 def _co_tcp_check(entry: dict) -> None:
+    ob = entry.get("outbound", {}) or {}
+    if ob.get("protocol") == "freedom":
+        print()
+        _box_top(f"TCP-проверка: {entry.get('name', '?')}")
+        _box_row()
+        _box_desc("freedom — локальный egress ноды: цели (адрес:порт) нет,")
+        _box_desc("TCP-проверка неприменима. Живость проверяется реальным")
+        _box_desc("трафиком через routing-правило на этот тег.")
+        _box_bottom()
+        return
     addr, port = _co_target(entry.get("outbound", {}))
     print()
     _box_top(f"TCP-проверка: {entry.get('name', '?')}")
@@ -1307,7 +1418,7 @@ def _co_add_flow(replace: "dict | None" = None) -> "dict | None":
 
     methods = [
         "Импорт ссылки   vless://  vmess://  trojan://  ss://",
-        "Мастер          форма по протоколу (vless/vmess/trojan/ss/socks/http)",
+        "Мастер          форма по протоколу (vless/vmess/trojan/ss/socks/http/freedom)",
         "Готовый JSON    однострочный outbound (v2rayN / Xray-формат)",
     ]
     mdef = 0
@@ -1350,6 +1461,9 @@ def _co_add_flow(replace: "dict | None" = None) -> "dict | None":
         settings, stream, warnings = res
         parts = {"protocol": CO_PROTOCOLS[pi], "settings": settings,
                  "streamSettings": stream}
+        if parts["protocol"] == "freedom":
+            suggested = _co_freedom_default_tag(
+                (settings or {}).get("domainStrategy", ""))
     else:
         raw = _co_paste("Готовый JSON outbound",
                         'Одна строка: {"protocol":"vless","settings":{…}} — '

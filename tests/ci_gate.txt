@@ -1,4 +1,13 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v14: 328 = 327 + test_custom_outbounds_freedom (freedom-ветка мастера
+# кастомных outbound'ов — кейс «панели по v4» на exit-нодах 15.11:
+# v6-путь до панелей у хостера полумёртв — SYN доходит, SYN-ACK тонет;
+# freedom UseIPv6v4 виснет без быстрого fallback → кастомный freedom
+# UseIPv4 с тегом direct-v4 + routing-правило на домены панелей;
+# до правки freedom добавлялся только готовым JSON).
+# Между v13 и v14: 327 = 326 + test_panel_nginx_front_v6 (dual-stack
+# listen фронтов панелей, 4dcc8de — строка в манифесте добавлена,
+# заметка в шапке тогда не заводилась).
 # v13: 326 = 325 + test_agh_reinstall_domain (инцидент entry-2 11.11:
 # переустановка AGH над существующим конфигом молча брала домен из
 # aghome_state незавершённой попытки, игнорируя только что введённый
@@ -112,6 +121,7 @@ tests.test_csqtt_manual_binary
 tests.test_csqtt_packages
 tests.test_csqtt_uninstall_state
 tests.test_custom_outbounds
+tests.test_custom_outbounds_freedom
 tests.test_diagnostics
 tests.test_diagnostics_errorlog
 tests.test_dns_ipv6
