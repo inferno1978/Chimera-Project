@@ -600,15 +600,21 @@ def do_awg_diagnose_menu() -> None:
         # живом туннеле» (инцидент: peers=39, handshakes=38, каскад жив,
         # панель показывала «НЕ установлен» — юзер не мог ни клиентов,
         # ни каскад, ни backup).
-        from .awg_state import awgs_state_integrity
-        _integ = awgs_state_integrity()
+        # FIX 16.11.2026: добавлен вид потери "stub" — файл есть, JSON
+        # валиден, но installed нет при живом awg0.conf (RMW-писатель
+        # поверх потери; живые RU1/RU2 10.11).
+        from .awg_state import awgs_state_loss_reason
+        _loss = awgs_state_loss_reason()
         _t = report.get("tunnel") or {}
         _peers_live = _t.get("peers") or 0
         _svc_live = (report.get("service") or {}).get("active")
-        _state_lost = (_integ in ("corrupt", "missing")
+        _state_lost = (_loss in ("corrupt", "missing", "stub")
                        and (_peers_live or _svc_live or AWGS_SERVER_CONF.exists()))
-        if _integ == "corrupt":
+        if _loss == "corrupt":
             _box_row(f"  {RED}●{NC} STATE ПОВРЕЖДЁН (JSON не читается)")
+        if _loss == "stub":
+            _box_row(f"  {RED}●{NC} STATE — СТАБ без installed "
+                     f"(потеря, похороненная RMW-писателем)")
         if _state_lost:
             _box_row(f"  {RED}●{NC} Standalone AWG НЕ установлен в state, НО "
                      f"туннель жив (peers={_peers_live}) — state утерян.")

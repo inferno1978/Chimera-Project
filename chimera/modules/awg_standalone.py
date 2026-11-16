@@ -2464,15 +2464,21 @@ def do_manage_awg_standalone() -> None:
         else:
             # FIX 09.11.2026: «Не установлен» может значить ПОТЕРЮ state при
             # живом туннеле (инцидент: peers=39, handshakes=38, каскад жив,
-            # но панель врала «Не установлен»). Отличаем три состояния.
-            from .awg_state import awgs_state_integrity
-            _integ = awgs_state_integrity()
-            if _integ == "corrupt":
+            # но панель врала «Не установлен»). Отличаем состояния.
+            # FIX 16.11.2026: добавлено состояние СТАБ — файл state есть,
+            # JSON валиден, но installed отсутствует при живом awg0.conf
+            # (RMW-писатель поверх потери; живые RU1/RU2 10.11). Раньше
+            # такой случай показывал голое «Не установлен» и прятал потерю.
+            from .awg_state import awgs_state_loss_reason
+            _loss = awgs_state_loss_reason()
+            if _loss == "corrupt":
                 _box_row(f"  {RED}● STATE ПОВРЕЖДЁН{NC} — туннель может быть жив!"
                          f"  {YELLOW}восстановление: п.9{NC}")
-            elif _integ == "missing" and AWGS_SERVER_CONF.exists():
+            elif _loss in ("missing", "stub"):
+                _why = ("state отсутствует" if _loss == "missing"
+                        else "state — стаб без installed")
                 _box_row(f"  {YELLOW}○ Не установлен{NC}  "
-                         f"{RED}— но найден awg0.conf: state утерян"
+                         f"{RED}— но найден awg0.conf: {_why}"
                          f" (живой туннель?) — п.9{NC}")
             else:
                 _box_row(f"  {YELLOW}○ Не установлен{NC}")

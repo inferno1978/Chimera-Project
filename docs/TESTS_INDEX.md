@@ -2,10 +2,10 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **328** (гейт-манифест: **328**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **329** (гейт-манифест: **329**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
-## AmneziaWG (transport Mode B + standalone 2.0) (31)
+## AmneziaWG (transport Mode B + standalone 2.0) (32)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
 |---|---|---|
@@ -37,6 +37,7 @@
 | [`test_awg_standalone_31.py`](../tests/test_awg_standalone_31.py) | Unit-тесты AWG 3.1 в awg_standalone.py / awg_state.py / awg_peers.py. | ✓ |
 | [`test_awg_state.py`](../tests/test_awg_state.py) | Unit-тесты для chimera/modules/awg_state.py. | ✓ |
 | [`test_awg_state_race.py`](../tests/test_awg_state_race.py) | Регрессионные тесты инцидента 09.11.2026 «AWG 3.1 пропал после обновления». | ✓ |
+| [`test_awg_state_stub_guard.py`](../tests/test_awg_state_stub_guard.py) | Регрессионные тесты инцидента 16.11.2026 «стаб-перезапись поверх потери | ✓ |
 | [`test_awg_transport.py`](../tests/test_awg_transport.py) | Unit-тесты для chimera/modules/awg_transport.py. | ✓ |
 | [`test_awg_transport_31.py`](../tests/test_awg_transport_31.py) | Unit-тесты AWG 3.1 в awg_transport.py — Mode B (транспорт exit-ноды). | ✓ |
 | [`test_awg_ui_smoke.py`](../tests/test_awg_ui_smoke.py) | UI-smoke стилизации AWG-семейства (кейс стилизации AWG TUI, окт.2026). | ✓ |

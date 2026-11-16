@@ -364,7 +364,15 @@ def awgs_cascade_setup_awg0(
     _st = awgs_state_load()
     _st[AWGS_CASCADE_EXITS_KEY] = _exits
     _st[AWGS_CASCADE_ACTIVE_KEY] = _name
-    awgs_state_save(_st)
+    # FIX 16.11.2026: честный результат сохранения. При потерянном state
+    # гард awgs_state_save отказывает (стаб не пишется) — раньше success
+    # врал, а стаб {"cascade_exits":[...]} без installed/peers хоронил
+    # потерю (живой RU2 10.11: добавление exit'а поверх потери создало
+    # 535-байтный стаб с фиктивным 1.2.3.4 и скрыло пропажу на 6 дней).
+    if not awgs_state_save(_st):
+        warn("State НЕ сохранён (потерян? восстановление: AWG-меню → "
+             "пункт 9) — exit НЕ зарегистрирован в списке каскада")
+        return False
 
     success("Каскад AWG0 (вход) настроен")
     return True

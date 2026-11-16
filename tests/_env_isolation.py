@@ -58,6 +58,24 @@ _DEFAULT_PREFIXES = (
     # (runtime-проверки вида «если xray доступен — прогнать -test» корректно
     # скипаются, как в чистой среде)
     "/usr/local/bin/xray",
+    # FIX 16.11.2026 (класс «тест на живой ноде сносит прод», доказан
+    # дважды: 27.10 xray-config перезаписан, 16.11 telemt-тест снёс
+    # /etc/telemt + бинарь + unit + state — b79e067 закрыл ТОТ тест
+    # патчингом путей, но префиксный список прод-деревьев остался
+    # неполным): AWG- и Telemt-прод-деревья. В чистой среде их нет —
+    # значит, тест обязан видеть их как ENOENT и на живой ноде.
+    "/etc/amnezia",
+    "/etc/awg-cascade",
+    "/root/awg",
+    "/etc/telemt",
+    "/usr/local/bin/telemt",
+    "/etc/systemd/system/telemt.service",
+    "/etc/systemd/system/awg-cascade-routing.service",
+    "/etc/systemd/system/awg-quick@.service",
+    "/usr/local/sbin/awg-nat-rules.sh",
+    "/usr/local/sbin/awg-expires-check.sh",
+    "/usr/local/sbin/awg-cascade-ru-update.sh",
+    "/usr/local/sbin/awg-cascade-failover.sh",
 )
 
 _installed = False

@@ -62,6 +62,19 @@ def awgs_backup_create(label: str = "") -> Path | None:
         warn(f"state {'повреждён' if _integ == 'corrupt' else 'утерян'} — "
              f"в backup попадут только конфиги/ключи. "
              f"Восстановление state: AWG-меню → пункт 9")
+    else:
+        # FIX 16.11.2026: СТАБ — файл есть, но installed нет при живом
+        # awg0.conf (RMW-писатель поверх потери; живые RU1/RU2 10.11).
+        # Раньше backup молча упаковывал стаб как настоящий state.
+        try:
+            from .awg_state import awgs_state_loss_reason
+            _loss = awgs_state_loss_reason()
+        except Exception:
+            _loss = ""
+        if _loss == "stub":
+            warn("state — СТАБ без installed (state потерян) — в backup "
+                 "попадёт бесполезный стаб + конфиги/ключи. "
+                 "Восстановление state: AWG-меню → пункт 9")
 
     AWGS_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")

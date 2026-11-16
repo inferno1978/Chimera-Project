@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .awg_constants import AWGS_STATE_FILE, AWGS_INTERFACE, AWGS_DEFAULT_PORT
+from .awg_constants import AWGS_SERVER_CONF
 from .awg_constants import AWGS_DEFAULT_SUBNET, AWGS_DEFAULT_SUBNET_V6, AWGS_DEFAULT_MTU
 from .awg_constants import AWGS_DEFAULT_PARAMS, AWGS_DEFAULT_PROTOCOL_VERSION
 from .awg_protocol import awg_normalize_version, awg_state_protocol_version
@@ -96,6 +97,37 @@ def awgs_state_integrity() -> str:
         return "ok"
     except Exception:
         return "corrupt"
+
+
+def awgs_state_loss_reason() -> str:
+    """Причина потери state для меню/диагностики/мониторов.
+
+    Возвращает:
+      ""        — всё хорошо (state валиден и installed, либо AWG не
+                  установлен вовсе: файла нет и awg0.conf нет);
+      "missing" — state-файл отсутствует при живом awg0.conf;
+      "corrupt" — state-файл существует, но JSON не парсится;
+      "stub"    — FIX 16.11.2026: файл есть, JSON валиден, но installed
+                  отсутствует при живом awg0.conf — стаб, написанный
+                  read-modify-write писателем поверх потери (класс бага,
+                  закрытый гардом awgs_state_save; на живых RU1/RU2
+                  10.11 такие стабы прожили шесть дней, показывая в меню
+                  голое «Не установлен»). Восстановление во всех трёх
+                  случаях — AWG-меню → пункт 9 (rebuild из живой системы).
+
+    Отличие от awgs_state_integrity(): та описывает ТОЛЬКО файл
+    (ok|missing|corrupt) и ничего не знает про awg0.conf; эта функция
+    сопоставляет файл с фактом установки.
+    """
+    integ = awgs_state_integrity()
+    if integ == "corrupt":
+        return "corrupt"
+    if integ == "missing":
+        return "missing" if AWGS_SERVER_CONF.exists() else ""
+    # integrity == "ok": файл есть и парсится
+    if not awgs_state_load().get("installed") and AWGS_SERVER_CONF.exists():
+        return "stub"
+    return ""
 
 
 def _awgs_state_quarantine(reason: str) -> str:
@@ -145,8 +177,22 @@ def awgs_state_load() -> dict:
         return {}
 
 
-def awgs_state_save(state: dict) -> bool:
+def awgs_state_save(state: dict, *, force: bool = False) -> bool:
     """Атомарно сохраняет state. Возвращает True при успехе.
+
+    FIX 16.11.2026 (инцидент «стаб-перезапись поверх потери», живые
+    RU1/RU2 10.11): ГАРД — отказ записи, если новый state НЕ несёт
+    installed=True, притом что AWG реально установлен (существует
+    awg0.conf). Раньше любой read-modify-write писатель при ПОТЕРЯННОМ
+    state (missing/corrupt → awgs_state_load()=={}) молча сохранял
+    merge-результат стабом вида {"lb": ...} / {"cascade_exits": [...]}
+    без installed/peers: integrity становился "ok", меню показывало
+    голое «Не установлен» и потеря пряталась навсегда (живые артефакты:
+    оба state RU1/RU2 сброшены в 535-байтные стабы одной минутой
+    10.11 13:39–13:41, у RU2 — {"cascade_exits":[{"name":"1.2.3.4"}]}
+    от add-exit поверх потери). force=True — осознанный обход для
+    спец-флоу (uninstall гардом не затрагивается — пишет unlink'ом;
+    recovery пишет полноценный state с installed=True).
 
     FIX 09.11.2026 (инцидент «AWG 3.1 пропал после обновления»):
     tmp-файл теперь УНИКАЛЕН (pid + monotonic_ns). Раньше ВСЕ процессы
@@ -158,6 +204,20 @@ def awgs_state_save(state: dict) -> bool:
     файл вида {"lb": ...} без installed/peers/cascade_exits).
     Плюс fsync перед rename — durability при падении питания.
     """
+    if (not force and not state.get("installed")
+            and AWGS_SERVER_CONF.exists()):
+        try:
+            core = _core_module()
+            core.log_to_file(
+                "ERROR",
+                "awgs_state_save: ОТКАЗ — попытка записать state без "
+                "installed при живом awg0.conf (state потерян; потерю "
+                "хоронит стаб). Восстановление: AWG-меню → пункт 9. "
+                "Стаб НЕ записан; вызывающий код обязан получить False "
+                "и не считать операцию успешной")
+        except Exception:
+            pass
+        return False
     tmp = None
     try:
         AWGS_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -191,10 +251,18 @@ def awgs_state_save(state: dict) -> bool:
 
 
 def awgs_state_update(**kwargs: Any) -> dict:
-    """Частичное обновление state (merge top-level keys). Возвращает обновлённый state."""
+    """Частичное обновление state (merge top-level keys). Возвращает обновлённый state.
+
+    FIX 16.11.2026: при потере state (файл missing/corrupt → load()=={}
+    при живом awg0.conf) обновление ОТКАЗЫВАЕТСЯ гардом awgs_state_save
+    (стаб не создаётся) и возвращает фактическое содержимое диска ({}),
+    а не merge-призрак: вызывающий код не должен считать операцию
+    успешной, пока state не восстановлен (AWG-меню → п.9).
+    """
     state = awgs_state_load()
     state.update(kwargs)
-    awgs_state_save(state)
+    if not awgs_state_save(state):
+        return awgs_state_load()
     return state
 
 
@@ -268,9 +336,14 @@ def awgs_state_set_protocol_version(version: str) -> bool:
     перехода 2.0 → 3.1 нужна переустановка/ротация обфускации с новым
     набором параметров (иначе state будет обещать 3.1 без 3.1-директив).
     Вызывается только из флоу установки/ротации.
+
+    FIX 16.11.2026: честный результат сохранения (раньше всегда True —
+    при потерянном state врал об успехе; гард awgs_state_save теперь
+    честно возвращает False).
     """
-    awgs_state_update(protocol_version=awg_normalize_version(version))
-    return True
+    state = awgs_state_load()
+    state["protocol_version"] = awg_normalize_version(version)
+    return awgs_state_save(state)
 
 
 # ── Peers management (вспомогательные функции для state) ────────────────────
