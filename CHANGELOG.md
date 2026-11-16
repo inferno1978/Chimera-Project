@@ -1,6 +1,17 @@
 # Changelog
 
-> Формат: запись = `# Changelog new entry — feat(nginx-stub): идемпотентный HSTS-апгрейд живых vhost'ов — upgrade_vhosts_hsts(): флотовый rollout фикса 8824000 без переустановки (бэкап + nginx -t гейт + rollback + dry-run) (16 Nov 2026)`
+> Формат: запись = `# Changelog new entry — chore(deploy): флотовый rollout HSTS-апгрейда заглушек (8980e90) — 6 нод живого флота (2 RU-entry + 4 активных exit): идемпотентный upgrade_vhosts_hsts, бэкапы, nginx -t + reload, внешняя верификация HSTS (16 Nov 2026)`
+
+# Changelog new entry — chore(deploy): флотовый rollout HSTS-апгрейда заглушек (8980e90) — 6 нод живого флота (2 RU-entry + 4 активных exit): идемпотентный upgrade_vhosts_hsts, бэкапы, nginx -t + reload, внешняя верификация HSTS (16 Nov 2026)
+
+## Контекст: РКН-волна 16.11 — аудит пяти рекомендаций (8824000) закрыл единственный пробел (HSTS на заглушках) на уровне шаблонов, мигратор 8980e90 сделал применение безопасным без переустановки; оставалось применить на живых нодах флота.
+
+## Rollout: на 6 нодах живого флота — 2 RU-entry и 4 активных exit (состав exit-стороны взят из конфигов хаб-ноды: chain-узлы VLESS-цепочки + активные AWG-exit каскада): (1) /opt/chimera git pull --ff-only до 8980e90 + py_compile nginx_setup; (2) upgrade_vhosts_hsts() — изменены vhost'ы заглушек (1-2 server-блока на ноду: REALITY-маска/own-site/xHTTP-main), у каждого target'а в sites-available лежит бэкап .bak-hsts-<ts>; (3) nginx -t успешен на всех, systemctl reload nginx, nginx и xray active после. Два адреса, встречающихся ТОЛЬКО в старых state-бэкапах (в активном каскаде отсутствуют), указанные SSH-креды не приняли — не тронуты, вопрос их статуса (выведены/иные креды) за владельцем.
+
+## Верификация: nginx -T — Strict-Transport-Security присутствует во всех целевых vhost'ах каждой ноды (количество вхождений совпадает с числом заглушечных блоков + фронты панелей, имевшие HSTS до роллаута); внешняя проверка xHTTP-ноды, где 443 держит nginx: HTTP/2 200 + strict-transport-security: max-age=63072000; панельный фронт — тот же заголовок. Read-only съём состояния защит по флоту: RU-entry-ноды — ipset-семейство блокировки РФ + port-knocking + whitelist активно (правила INPUT v4/v6 присутствуют); exit-ноды — ipset'ы точечно (manual-ban, awg-наборы), гео/стук на сервисных портах не включены — осознанно: exit принимает трафик RU-entry, blanket-геоблок на VPN-порте сломал бы каскад; при необходимости закрывать только менеджмент-порты. Повторный прогон мигратора на любой ноде — no-op по построению.
+
+## Тесты: код не менялся (роллаут 8980e90); на нодах изменены только живые vhost-файлы вне репо; откат на любую ноду — cp с .bak-hsts-* + reload. Гигиена 25→26→25: старейшая запись перенесена в docs/changelog/2026-11.md без правки текста + пополнение в шапке архива.
+
 
 # Changelog new entry — feat(nginx-stub): идемпотентный HSTS-апгрейд живых vhost'ов — upgrade_vhosts_hsts(): флотовый rollout фикса 8824000 без переустановки (бэкап + nginx -t гейт + rollback + dry-run) (16 Nov 2026)
 
@@ -246,16 +257,6 @@
 ## Решение: (1) install_health_monitor(5) на RU1 (sudo, пароль по stdin, не в командной строке) и RU2: cron /etc/cron.d/xray-node-health каждые 5 мин + /usr/local/bin/xray-node-health-check.sh (bash -n OK на обеих). (2) Живые прогоны check_nodes_once на обеих: все 4 exit-ноды up (full-path 128-204 мс, RTT 33-59 мс), changed=false — нулевой TG-шум при неизменных статусах; первый крон-раунд отработал сам (RU1 17:55:01, далее 18:00 на обеих — крон жив, не только ручной прогон). (3) Rollout fix(wpp): pull --ff-only 1d748aa→40e209e на обеих, py_compile с -W error::SyntaxWarning — COMPILE_OK_NO_WARNINGS. (4) VLESS failover-watchdog (xray-failover-watch + auto-fallback, поминутные) НЕ установлен сознательно: генератор зондирует exit-ноды голым TCP (>/dev/tcp) каждую минуту = ~10 коннектов/10 мин с IP ноды = 2× порога fail2ban xray-reality (5/10 мин; живой кейс №3: u1nl забанила entry за собственные зонды) — без верифицированного whitelist RU1/RU2 на ВСЕХ exit-нодах это риск самобана и обрыва каскада; предложение владельцу — волна-5: перевести генератор на полный REALITY-зонд (мост --hm-check по паттерну HM/7b66f6a), после чего установка безопасна.
 
 ## Тесты: HM — живые прогоны на обеих нодах (4/4 ноды up, JSON в отчёте сессии), крон-раунды 18:00:0x зафиксированы в /var/log/xray-node-health.log на обеих; wpp — COMPILE_OK_NO_WARNINGS с -W error::SyntaxWarning на обеих нодах; перед пушем leak_guard LEAK 0; поминутные таймеры обеих нод — без ошибок в journal. (10 Nov 2026)
-
----
-
-# Changelog new entry — fix(wpp): SyntaxWarning invalid escape '\/' в parseVlessUrl (wpp_ui) — бэкслеши JS-regex удвоены, рантайм-содержимое байт-в-байт прежнее (10 Nov 2026)
-
-## Контекст: отчёт пользователя (Ubuntu 24.04, Python 3.12.3, ветка chimera-v5, c437f4d): при `python3 verify.py` — `SyntaxWarning: invalid escape sequence '\/'` из chimera/modules/wpp_ui.py:671; 409 проверок проходят, но предупреждение мусорит stderr (и по стратегии CPython невалидные escape идут курсом на ошибку компиляции в будущих релизах). Источник: JS-regex автозаполнения VLESS-URL в HTML-шаблоне страницы нод внутри python f-строки: '/^vless:\/\/([^@:]+)@([^:]+):(\d+)\??([^#]*)#?(.*)$/' — невалидные в питон-литерале escape '\/', '\d', '\?' (бэкслеш сохраняется, но предупреждение на каждый)
-
-## Решение: как и верифицировано в отчёте — удвоение бэкслешей в ЛИТЕРАЛЕ (vless:\\/\\/ … (\\d+) \\??): рантайм-строка не меняется НИ НА БАЙТ (невалидный escape в Python сохраняет бэкслеш — удвоение его воспроизводит), JS-regex в шаблоне идентичен, парсинг VLESS URL в панели не затронут, источник предупреждения устранён. Репо-скан (compile() всех *.py, warnings-рекордер) подтверждает: wpp_ui:671 — ЕДИНСТВЕННОЕ invalid escape во всём дереве (остальные вхождения vless:// — без бэкслешей, валидны); после правки — 0 срабатываний.
-
-## Тесты: verify.py — 410 ✓ (готовность 10.0/10), stderr пуст (SyntaxWarning исчез); эквивалентность литералов: runtime-строки старой и новой записи IDENTICAL: True; чанки pytest (CHIMERA_TEST_ISOLATE=1): test_wpp_portal_mieru + test_wpp_upstream_sync 44 OK (импортируют wpp_ui), test_user_portal + test_admin_panel 14 OK (рендер панелей через wpp_ui). (10 Nov 2026)
 
 ---
 
