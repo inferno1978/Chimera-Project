@@ -1,4 +1,9 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v16: 330 = 329 + test_nginx_stub_hsts_upgrade (РКН-волна 16.11:
+# идемпотентный HSTS-апгрейд живых vhost'ов — ноды с конфигами до
+# 8824000 получают Strict-Transport-Security без переустановки:
+# вставка в блоки с X-Robots-Tag без HSTS, бэкап + nginx -t гейт +
+# rollback, идемпотентность, dry-run; флотовый rollout-инструмент).
 # v15: 329 = 328 + test_awg_state_stub_guard (инцидент 16.11 «стаб-
 # перезапись поверх потери state»: живые RU1/RU2 10.11 — оба state
 # сброшены в 535-байтные стабы без installed/peers одной минутой,
@@ -247,6 +252,7 @@ tests.test_network_setup
 tests.test_nginx_cdn_masking_config
 tests.test_nginx_cleanup_stale_vhosts
 tests.test_nginx_reality_reinstall
+tests.test_nginx_stub_hsts_upgrade
 tests.test_nginx_watchdog
 tests.test_no_streamup_typo
 tests.test_node_health_monitor

@@ -1,6 +1,15 @@
 # Changelog
 
-> Формат: запись = `# Changelog new entry — fix(nginx-stub): HSTS на заглушках — РКН-волна 16.11: аудит пяти рекомендаций по минимизации блокировок: TLS 1.2/1.3 уже во всех vhost-шаблонах, HSTS был только на фронтах панелей — добавлен во все три шаблона заглушек nginx_setup (16 Nov 2026)`
+> Формат: запись = `# Changelog new entry — feat(nginx-stub): идемпотентный HSTS-апгрейд живых vhost'ов — upgrade_vhosts_hsts(): флотовый rollout фикса 8824000 без переустановки (бэкап + nginx -t гейт + rollback + dry-run) (16 Nov 2026)`
+
+# Changelog new entry — feat(nginx-stub): идемпотентный HSTS-апгрейд живых vhost'ов — upgrade_vhosts_hsts(): флотовый rollout фикса 8824000 без переустановки (бэкап + nginx -t гейт + rollback + dry-run) (16 Nov 2026)
+
+## Контекст: фикс 8824000 добавил HSTS в ШАБЛОНЫ заглушек (own-site, xHTTP-main, REALITY-маска), но живые конфиги на нодах генерировались раньше — переустановка nginx-части ради одной строки на каждой ноде флота избыточна и рискованна (merge-логика own-site/REALITY-сокетов в одном vhost тонкая — см. 2e39801). Для РКН-волны нужен безопасный однотипный инструмент применения на всех нодах флота (RU-entry + exit), не зависящий от того, каким релизом генерился живой конфиг.
+
+## Решение: nginx_setup.upgrade_vhosts_hsts(apply=True) — идемпотентный мигратор живых vhost'ов: (1) скан sites-enabled, симлинки резолвятся к target'у в sites-available; (2) top-level server-блоки (баланс скобок — та же техника, что _extract_server_blocks_with), содержащие X-Robots-Tag (маркер chimera-заглушки) и НЕ содержащие Strict-Transport-Security, получают add_header Strict-Transport-Security "max-age=63072000" always; с тем же отступом, что строка X-Robots-Tag; (3) блоки с HSTS (фронты панелей) не трогаются — двойной заголовок исключён по построению; блоки без маркера (ACME :80, default reject, чужие vhost'ы) не трогаются вовсе; (4) перед правкой — бэкап <файл>.bak-hsts-<ts> рядом с target'ом; (5) nginx -t — гейт: провал → полный rollback всех изменений этого прогона, ok=False; (6) systemctl reload nginx — только при изменениях; повторный прогон — полный no-op (0 вызовов _run, новых бэкапов нет). Вызов на ноде после git pull: cd /opt/chimera && python3 -c "from chimera.modules.nginx_setup import upgrade_vhosts_hsts; import json; print(json.dumps(upgrade_vhosts_hsts(), ensure_ascii=False, indent=1))". Хелпер _iter_top_level_server_blocks — общая переиспользуемая замена ручного перебора блоков.
+
+## Тесты: +8 tests/test_nginx_stub_hsts_upgrade.py (ci_gate.txt v16: 330 = 329 + 1, docs/TESTS_INDEX.md регенерирован scripts/tests_index.py): вставка с сохранением отступа + бэкап к target'у (не к симлинку); идемпотентность (повтор — no-op: changed пуст, reload не зовётся, бэкап один); отказ двойного заголовка на блоках с HSTS (фронт панели); игнор блоков без маркера (ACME/reject); два заглушечных блока в одном файле — оба закрыты; dry-run не трогает файлы и не зовёт _run; провал nginx -t — полный rollback содержимого; отсутствие sites-enabled — ok без исключений. Регресс nginx-семейства (reality_reinstall, cdn_masking, cleanup_stale, watchdog, singbox, b4_mcp_nginx, panel_nginx_front_v6/input) + test_nginx_stub_hsts_upgrade + test_tests_index — OK; py_compile OK; static ci_suite.sh RC=0. Гигиена 25→26→25: старейшая запись перенесена в docs/changelog/2026-11.md без правки текста + пополнение в шапке архива.
+
 
 # Changelog new entry — fix(nginx-stub): HSTS на заглушках — РКН-волна 16.11: аудит пяти рекомендаций по минимизации блокировок: TLS 1.2/1.3 уже во всех vhost-шаблонах, HSTS был только на фронтах панелей — добавлен во все три шаблона заглушек nginx_setup (16 Nov 2026)
 
@@ -247,16 +256,6 @@
 ## Решение: как и верифицировано в отчёте — удвоение бэкслешей в ЛИТЕРАЛЕ (vless:\\/\\/ … (\\d+) \\??): рантайм-строка не меняется НИ НА БАЙТ (невалидный escape в Python сохраняет бэкслеш — удвоение его воспроизводит), JS-regex в шаблоне идентичен, парсинг VLESS URL в панели не затронут, источник предупреждения устранён. Репо-скан (compile() всех *.py, warnings-рекордер) подтверждает: wpp_ui:671 — ЕДИНСТВЕННОЕ invalid escape во всём дереве (остальные вхождения vless:// — без бэкслешей, валидны); после правки — 0 срабатываний.
 
 ## Тесты: verify.py — 410 ✓ (готовность 10.0/10), stderr пуст (SyntaxWarning исчез); эквивалентность литералов: runtime-строки старой и новой записи IDENTICAL: True; чанки pytest (CHIMERA_TEST_ISOLATE=1): test_wpp_portal_mieru + test_wpp_upstream_sync 44 OK (импортируют wpp_ui), test_user_portal + test_admin_panel 14 OK (рендер панелей через wpp_ui). (10 Nov 2026)
-
----
-
-# Changelog new entry — chore(deploy): rollout слияния волны-4 (1d748aa) на RU1/RU2 — 490/490 тестов OK на живых нодах, регенерация бота+монитора, форс-дайджесты владельцу, таймеры чисты (10 Nov 2026)
-
-## Контекст: деплой коммита-слияния параллельных реализаций волны-4 (1d748aa поверх 1def58f, см. запись ниже) на обеих Российских нодах; локальный гейт перед деплоем зелёный (821 passed / 0 failed + финализаторы leak_guard LEAK 0 / full_test 10/10 / tests_index FRESH).
-
-## Решение: (1) push 1d748aa в main подтверждён (fast-forward, без force; контрольный leak_guard перед пушем — LEAK 0); (2) pull в /opt/chimera обеих нод — прод-код поминутных таймеров обновлён немедленно; (3) py_compile 11 файлов волны-4 — COMPILE_OK на обеих; (4) регенерация xray-tg-bot.py + xray-tg-monitor.sh на обеих (бот RU2 — active, перезапущен регенерацией; RU1 — сервис выключен владельцем, состояние не менялось); failover/nginx watchdog-скрипты на нодах не установлены — перегенерация не требуется (генераторы починены для будущих установок); (5) форс-дайджесты traffic_snapshot обеих нод — реальные уведы с составом каскадов ушли владельцу (snapshot_hours конфига восстановлен исходным); (6) поминутные таймеры awg-cascade-failover/mieru-cascade-health/users-watchdog/xray-fw-guard — на новом коде, journal 30 мин без ошибок, failed-юнитов нет.
-
-## Тесты: прогоны из CI-чекаутов /root/chimera-ci (python3 -m unittest, CHIMERA_TEST_ISOLATE=1) на живых нодах, по 2 чанка на ноду: RU1 — 187 (failover+fw_guard+tg_bot+h2-тройка common/quality/salamander) + 303 (steal+bandwidth+nginx_watchdog+diagnostics+errorlog) = 490 OK; RU2 — 187 + 303 = 490 OK; 0 failed, падений нет. (Гигиена: 25→26→25 — старейшая запись feat(bandwidth_monitor) «честная методика замера» 08.11 перенесена в docs/changelog/2026-11.md без правки текста.)
 
 ---
 

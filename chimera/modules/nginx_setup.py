@@ -368,6 +368,159 @@ def _cleanup_stale_chimera_vhosts(new_domain: str) -> int:
     return removed
 
 
+# ── HSTS-апгрейд живых vhost'ов (FIX 16.11.2026, РКН-волна) ──────────────────
+
+_HSTS_HEADER_LINE = 'add_header Strict-Transport-Security "max-age=63072000" always;'
+_HSTS_BAK_SUFFIX = ".bak-hsts"
+
+
+def _iter_top_level_server_blocks(text: str):
+    """(start, end) индексы строк top-level server{}-блоков, включительно.
+
+    Баланс фигурных скобок — как в _extract_server_blocks_with (синтаксис
+    nginx-конфига не содержит скобок внутри строк-значений).
+    """
+    blocks, start, depth, in_block = [], 0, 0, False
+    for i, line in enumerate(text.splitlines()):
+        stripped = line.strip()
+        if not in_block:
+            if stripped.split("{", 1)[0].strip() == "server":
+                in_block, start, depth = True, i, line.count("{") - line.count("}")
+        else:
+            depth += line.count("{") - line.count("}")
+        if in_block and depth <= 0:
+            blocks.append((start, i))
+            in_block, depth = False, 0
+    return blocks
+
+
+def upgrade_vhosts_hsts(apply: bool = True) -> dict:
+    """Идемпотентный апгрейд ЖИВЫХ vhost'ов: HSTS в заглушках.
+
+    Шаблоны 8824000 отдают Strict-Transport-Security в заглушках
+    (own-site, xHTTP-main, REALITY-маска через unix-сокет), но конфиги
+    на нодах генерировались ДО фикса — переустановка ради одной строки
+    не нужна. Апгрейдер добавляет HSTS-строку в каждый top-level
+    server-блок, который уже содержит X-Robots-Tag (маркер
+    chimera-заглушки) и ещё НЕ содержит Strict-Transport-Security:
+      • блоки с HSTS (фронты панелей) не трогаются — двойной заголовок
+        не допускается;
+      • блоки без X-Robots-Tag (ACME :80, default reject, чужие vhost'ы)
+        не трогаются вовсе.
+
+    Перед правкой файла — бэкап <файл>.bak-hsts-<ts> рядом с оригиналом
+    (для симлинка sites-enabled бэкап кладётся к target'у в
+    sites-available). После правок — nginx -t; при провале ВСЕ бэкапы
+    восстанавливаются, ok=False. systemctl reload nginx — только при
+    изменениях. Идемпотентно: повторный прогон без изменений не пишет
+    файлы, не делает бэкапы и не дёргает nginx.
+
+    Возвращает {"ok": bool, "changed": [имена файлов], "reloaded": bool,
+                "report": [строки для оператора]}.
+    """
+    core = _core_module()
+    info, warn = core.info, core.warn
+    _run = core._run
+    enabled_dir = Path(core.NGINX_ENABLED_DIR)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    report: list = []
+    changed: list = []
+    originals: dict = {}   # real_path -> исходный текст (для rollback)
+
+    if not enabled_dir.exists():
+        return {"ok": True, "changed": [], "reloaded": False,
+                "report": ["sites-enabled не найден — nginx не установлен?"]}
+
+    for entry in sorted(enabled_dir.iterdir()):
+        if entry.is_dir():
+            continue
+        real = entry
+        try:
+            if entry.is_symlink():
+                real = entry.resolve()
+        except Exception:
+            real = entry
+        if not real.is_file():
+            continue
+        try:
+            text = real.read_text()
+        except Exception:
+            continue
+        lines = text.splitlines()
+        insertions = []
+        for (s, e) in _iter_top_level_server_blocks(text):
+            block = "\n".join(lines[s:e + 1])
+            if "X-Robots-Tag" not in block:
+                continue
+            if "Strict-Transport-Security" in block:
+                continue
+            for j in range(s, e + 1):
+                if "X-Robots-Tag" in lines[j]:
+                    indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
+                    insertions.append((j, indent + _HSTS_HEADER_LINE))
+                    break
+        if not insertions:
+            continue
+        if not apply:
+            report.append(f"БЫЛО БЫ изменено (dry-run): {real.name} "
+                          f"(+{len(insertions)} HSTS)")
+            continue
+        bak = real.with_name(real.name + f"{_HSTS_BAK_SUFFIX}-{ts}")
+        try:
+            bak.write_bytes(real.read_bytes())
+        except Exception as exc:
+            warn(f"Бэкап не создан ({real.name}: {exc}) — файл пропущен")
+            continue
+        originals[real] = text
+        for j, new_line in sorted(insertions, reverse=True):
+            lines.insert(j, new_line)
+        new_text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+        real.write_text(new_text)
+        changed.append(real.name)
+        report.append(f"{real.name}: +HSTS ({len(insertions)} блок(ов), "
+                      f"бэкап {bak.name})")
+
+    if not changed:
+        return {"ok": True, "changed": [], "reloaded": False,
+                "report": report or ["Изменений не требуется: HSTS уже "
+                                     "на месте во всех chimera-заглушках"]}
+
+    # nginx -t — гейт; при провале полный rollback
+    _find = getattr(core, "find_nginx_bin", None)
+    _nginx_bin = (_find() if callable(_find) else None) or "/usr/sbin/nginx"
+    r = _run([_nginx_bin, "-t"], capture=True, check=False)
+    if getattr(r, "returncode", 1) != 0:
+        for real, orig in originals.items():
+            try:
+                real.write_text(orig)
+            except Exception:
+                pass
+        err = (getattr(r, "stderr", "") or "")[:200]
+        report.append(f"nginx -t ПРОВАЛ — все изменения откачены: {err}")
+        try:
+            core.log_to_file("ERROR", "upgrade_vhosts_hsts: nginx -t "
+                             f"провалился, rollback: {err}")
+        except Exception:
+            pass
+        return {"ok": False, "changed": [], "reloaded": False,
+                "report": report}
+
+    r2 = _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
+    reloaded = getattr(r2, "returncode", 1) == 0
+    if not reloaded:
+        report.append("WARN: systemctl reload nginx не удался — конфиг "
+                      "валид (nginx -t OK), но продолжает работать старый")
+    else:
+        report.append("nginx перезагружен (reload)")
+    try:
+        core.log_to_file("INFO", f"upgrade_vhosts_hsts: HSTS добавлен в "
+                         f"{len(changed)} vhost(ов): {', '.join(changed)}")
+    except Exception:
+        pass
+    return {"ok": True, "changed": changed, "reloaded": reloaded,
+            "report": report}
+
+
 def setup_nginx_temp(domain: Optional[str] = None) -> None:
     """Создаёт временный HTTP:80 vhost для certbot ACME-челленджа.
 
