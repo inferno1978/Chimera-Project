@@ -1140,9 +1140,14 @@ def _write_config(port, ipv4, ipv6, tls_domain, users, use_middle_proxy,
             # MERGE: если в переданном users есть юзер, которого нет в existing —
             # это новый юзер (добавлен при установке). Если в existing есть юзер,
             # которого нет в переданном — это существующий юзер, НЕ теряем.
+            #  FIX (инцидент 16.11.2026, нода 138.х): при совпадении имени
+            # (юзер есть и в existing, и в переданном списке) побеждает
+            # секрет ИЗ existing. Раньше молча побеждал переданный —
+            # свежесгенерированный на этапе опроса имён — секрет живого
+            # юзера ротировался без ведома админа, и все выданные ему
+            # tg://proxy-ссылки переставали работать.
             for name, secret in existing_users.items():
-                if name not in users:
-                    users[name] = secret
+                users[name] = secret
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     arr = ", ".join(f'"{u}"' for u in users)
@@ -2074,10 +2079,17 @@ def _install_binary(url) -> bool:
 #  SYSTEMD / UFW / ОПТИМИЗАЦИЯ
 # ══════════════════════════════════════════════════════════════════════════════
 def _install_service() -> None:
+    #  FIX (инцидент 16.11.2026, нода 138.х): StartLimitIntervalSec/
+    # StartLimitBurst живут в [Unit] (с systemd 230), а не в [Service] —
+    # из-за них systemd на каждый daemon-reload сыпет в журнал
+    # "Unknown key name 'StartLimitIntervalSec' in section 'Service',
+    # ignoring" (у этой ноды — сотни таких строк).
     SERVICE_FILE.write_text("""[Unit]
 Description=Telemt MTProxy Server
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -2089,8 +2101,6 @@ Restart=on-failure
 RestartSec=10
 TimeoutStartSec=90
 TimeoutStopSec=10s
-StartLimitIntervalSec=60s
-StartLimitBurst=3
 LimitNOFILE=1048576
 LimitNPROC=infinity
 Nice=-10
@@ -3069,6 +3079,15 @@ def _menu_users(server_ip: str) -> None:
                 _warn("Нет данных. Выполните установку.")
             else:
                 _if_mod = _get_ios_fix_module()
+                #  FIX (инцидент 16.11.2026): правила iOS-фикса могли
+                # протухнуть (iptables-restore из старого rules.v4, смена
+                # порта Telemt) — чиним ДО показа ссылок, иначе выдадим
+                # iOS-ссылку на порт, который никуда не ведёт.
+                if _if_mod is not None:
+                    try:
+                        _if_mod.resync_if_enabled()
+                    except Exception:
+                        pass
                 _ios_st = _if_mod.status() if _if_mod is not None else {"enabled": False}
                 for n, s in users.items():
                     sec  = _make_tls_secret(s, domain)
@@ -3719,14 +3738,32 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
     _box_info("Допустимо: латиница, цифры, _ и - ; длина 3-16.")
     _box_info("Ctrl+C — отмена.")
     _box_bot(); print()
+    #  FIX (инцидент 16.11.2026, нода 138.х): при переустановке «поверх»
+    # ввод СУЩЕСТВУЮЩЕГО имени выдавал юзеру НОВЫЙ случайный секрет — все
+    # ранее выданные tg://proxy-ссылки этого юзера молча умирали («из трёх
+    # ссылок работала только одна»). Секрет юзера живёт столько же, сколько
+    # сам юзер: переустановка — не повод его ротировать. Для имён, уже
+    # присутствующих в текущем telemt.toml, секрет СОХРАНЯЕМ (конфиг ещё не
+    # тронут — stop/wipe идёт ниже, поэтому читаем ДО них).
+    _existing_users = _load_users() if CONFIG_FILE.exists() else {}
+
+    def _secret_for(name: str) -> str:
+        """Секрет для имени: существующему юзеру — его старый секрет."""
+        if name in _existing_users:
+            return _existing_users[name]
+        return _generate_secret()
+
     while True:
         first_name = proto_ask(f"  {CYAN}Имя первого пользователя: {NC}", c=True).strip()
         if not first_name:
             first_name = "user1"; break
         if _validate_username(first_name): break
         _warn("Недопустимое имя. Попробуйте ещё раз.")
-    users: dict = {first_name: _generate_secret()}
-    _ok(f"Пользователь: {first_name}")
+    users: dict = {first_name: _secret_for(first_name)}
+    if first_name in _existing_users:
+        _ok(f"Пользователь: {first_name}  (секрет сохранён — прежние ссылки работают)")
+    else:
+        _ok(f"Пользователь: {first_name}")
     print()
     while True:
         ans = proto_ask(f"  {CYAN}Добавить ещё пользователя? [y/N]: {NC}", c=True).strip().lower()
@@ -3737,7 +3774,11 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
         except KeyboardInterrupt:
             print(); raise _Cancelled()
         if _validate_username(n) and n not in users:
-            users[n] = _generate_secret(); _ok(f"Добавлен: {n}")
+            users[n] = _secret_for(n)
+            if n in _existing_users:
+                _ok(f"Добавлен: {n}  (секрет сохранён — прежние ссылки работают)")
+            else:
+                _ok(f"Добавлен: {n}")
         else:
             _warn("Недопустимое имя или уже есть.")
 
@@ -3881,6 +3922,22 @@ def _run_install_inner(server_ip: str, server_ipv6: str) -> None:
         time.sleep(2); waited += 2
     else:
         _warn(f"Порт не открылся за 40с — journalctl -u telemt -n 30")
+
+    #  FIX (инцидент 16.11.2026, нода 138.х): правила iOS-фикса (TCPMSS +
+    # REDIRECT ext_port→port) живут в iptables и переживают переустановку
+    # через rules.v4 — при смене порта Telemt они остаются со СТАРЫМ
+    # dport/--to-ports (живые правила редиректили 5001→5000 при Telemt на
+    # 4000), а _rules_exist() по одному лишь тегу считал их «активными»:
+    # iOS-ссылки на 4001 не работали, меню показывало их как рабочие.
+    # Синхронизируем правила под текущий порт сразу после старта Telemt.
+    try:
+        _ios_resync_mod = _get_ios_fix_module()
+        if _ios_resync_mod is not None:
+            _rs_ok, _rs_msg = _ios_resync_mod.resync_if_enabled()
+            if _rs_ok and "переприменены" in (_rs_msg or ""):
+                _warn(f"iOS-фикс: {_rs_msg}")
+    except Exception:
+        pass
 
     # ── Post-install: проверка ME-серверов и автоматический fallback ──────────
     # Выполняется только при use_mp=True и если fallback настроен.

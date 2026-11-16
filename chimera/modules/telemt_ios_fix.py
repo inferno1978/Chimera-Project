@@ -344,6 +344,47 @@ def _rules_exist() -> bool:
     r = _run(["iptables", "-t", "mangle", "-S", "PREROUTING"], capture=True)
     return _COMMENT_TAG in (r.stdout or "")
 
+def _rules_snapshot() -> dict:
+    """Разбирает ЖИВЫЕ правила с тегом: mangle → [(dport, mss)], nat → [(dport, to_port)].
+
+    Инцидент 16.11.2026 (нода 138.х): наличие тега ≠ корректность правил.
+    iptables-restore из rules.v4 (или чужой netfilter-persistent save)
+    может вернуть версию со СТАРЫМИ портами — живые правила редиректили
+    5001→5000 при Telemt, слушающем на 4000, а _rules_exist() по одному
+    тегу продолжал считать фикс «активным». Для сверки с конфигом нужен
+    разбор --dport / --to-ports, а не только комментарий.
+    """
+    snap: dict = {"mangle": [], "nat": []}
+    for table in ("mangle", "nat"):
+        r = _run(["iptables", "-t", table, "-S", "PREROUTING"], capture=True)
+        for line in (r.stdout or "").splitlines():
+            if _COMMENT_TAG not in line:
+                continue
+            dport_m = re.search(r"--dport\s+(\d+)", line)
+            if not dport_m:
+                continue
+            dport = int(dport_m.group(1))
+            if table == "mangle":
+                mss_m = re.search(r"--set-mss\s+(\d+)", line)
+                snap["mangle"].append((dport, int(mss_m.group(1)) if mss_m else 0))
+            else:
+                to_m = re.search(r"--to-ports?\s+(\d+)", line)
+                snap["nat"].append((dport, int(to_m.group(1)) if to_m else 0))
+    return snap
+
+def _rules_match(cfg: IosFixConfig, telemt_port: int) -> bool:
+    """True, если живые правила в точности соответствуют cfg и текущему порту Telemt.
+
+    Актуально = nat-REDIRECT ведёт cfg.ext_port → telemt_port И mangle-TCPMSS
+    клампит cfg.ext_port (любой MSS — его значение админ меняет осознанно).
+    """
+    if telemt_port <= 0 or cfg.ext_port <= 0:
+        return False
+    snap = _rules_snapshot()
+    nat_ok = any(d == cfg.ext_port and t == telemt_port for d, t in snap["nat"])
+    mangle_ok = any(d == cfg.ext_port for d, _ in snap["mangle"])
+    return nat_ok and mangle_ok
+
 def _remove_rules() -> int:
     """
     Удаляет ВСЕ правила mangle/nat PREROUTING с нашим тегом.
@@ -431,17 +472,72 @@ def status() -> dict:
     """Возвращает текущее состояние фикса для отображения в mtproto_menu() и при показе ссылок."""
     cfg = _load_state()
     active = _rules_exist()
+    telemt_port = _get_telemt_port()
+    #  FIX (инцидент 16.11.2026): правила с тегом могут быть ПРОТАХШИМИ
+    # (не те порты). «Активен» теперь значит «активен И порты сходятся
+    # с текущим портом Telemt»; для протухшего случая отдельный флаг stale,
+    # чтобы UI не показывал iOS-ссылки на порт, который никуда не ведёт.
+    stale = bool(active and cfg.enabled and telemt_port and
+                 not _rules_match(cfg, telemt_port))
     return {
-        "enabled": cfg.enabled and active,
+        "enabled": cfg.enabled and active and not stale,
         "configured_but_inactive": cfg.enabled and not active,
+        "stale": stale,
         "ext_port": cfg.ext_port,
-        "target_port": cfg.target_port,
+        "target_port": telemt_port or cfg.target_port,
         "mss": cfg.mss,
     }
+
+def resync_if_enabled() -> tuple[bool, str]:
+    """Self-heal: сверить живые iptables-правила с конфигом и портом Telemt.
+
+    Не интерактивен и идемпотентен. Вызывается установщиком Telemt
+    (mtproto.py — сразу после старта сервиса) и на входе в ios_fix_menu().
+    Поведение:
+      • фикс выключен в state             → (True,  «выключен») без действий;
+      • правила актуальны                 → (True,  «актуальны») без действий;
+      • правил нет (reboot/restore)       → переприменяем под текущий порт;
+      • правила есть, но порты не те      → переприменяем (инцидент 16.11.2026:
+                                           rules.v4 вернул 5001→5000 при
+                                           Telemt на 4000 — iOS-ссылки на 4001
+                                           молча умирали);
+    После переприменения правила персистятся (rules.v4 /
+    netfilter-persistent), target_port в state обновляется на живой порт.
+    """
+    cfg = _load_state()
+    if not cfg.enabled:
+        # Инвариант модуля: правила в iptables ⇔ фикс включён. Если state
+        # сброшен/потерян, а правила с тегом остались (инцидент 16.11.2026:
+        # юнит-тесты установщика перезаписали реальный state-файл
+        # дефолтами, «мёртвый» редирект 5001→5000 продолжал перехватывать
+        # порт) — убираем их и персистим.
+        if _rules_exist():
+            _remove_rules()
+            _persist_rules()
+            return True, "фикс выключен, но правила были в iptables — убраны."
+        return True, "iOS-фикс выключен — правила не трогаем."
+    telemt_port = _get_telemt_port()
+    if telemt_port <= 0:
+        return False, "Порт Telemt не определён — синхронизация невозможна."
+    if _rules_match(cfg, telemt_port):
+        return True, f"правила актуальны: {cfg.ext_port} → {telemt_port}."
+    before = f"{cfg.ext_port} → {cfg.target_port}"
+    cfg.target_port = telemt_port
+    ok, msg = _apply_rules(cfg)
+    if not ok:
+        return False, msg
+    _save_state(cfg)
+    _persist_rules()
+    return True, (
+        f"правила переприменены: {cfg.ext_port} → {telemt_port} "
+        f"(было: {before})"
+    )
 
 def ios_fix_status_line() -> str:
     """Однострочный статус для главного меню mtproto_menu()."""
     st = status()
+    if st.get("stale"):
+        return f"{RED}⚠ правила протухли{NC}  {DIM}порт {st['ext_port']} → {st['target_port']}: не сходится с iptables{NC}"
     if st["enabled"]:
         return f"{GREEN}● активен{NC}  {DIM}порт {st['ext_port']} → {st['target_port']}, MSS {st['mss']}{NC}"
     if st["configured_but_inactive"]:
@@ -457,6 +553,14 @@ def ios_fix_menu() -> None:
     """
     if not _CONFIG_FILE.exists():
         _box_err("Telemt не установлен."); _pause(); return
+
+    # Self-heal на входе: правила могли протухнуть (iptables-restore из
+    # старого rules.v4, смена порта Telemt без переприменения фикса) —
+    # чиним ДО показа статуса, чтобы UI не врал.
+    try:
+        resync_if_enabled()
+    except Exception:
+        pass
 
     while True:
         os.system("clear")

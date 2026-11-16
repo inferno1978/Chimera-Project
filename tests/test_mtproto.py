@@ -1936,8 +1936,29 @@ class TestMtprotoCloseAllPorts(unittest.TestCase):
 
     def test_full_uninstall_uses_close_all_ports(self):
         """_full_uninstall обязан звать _mtproto_close_all_ports (не только
-        _mtproto_ufw_close текущего порта) — регрессия кейса 8443."""
+        _mtproto_ufw_close текущего порта) — регрессия кейса 8443.
+
+        Инцидент 16.11.2026 (нода 138.х): этот тест, запущенный на ЖИВОЙ
+        ноде, реально снёс /etc/telemt, /usr/local/bin/telemt, systemd-unit
+        telemt.service, iOS-фикс-правила и его state-файл (сервис продолжал
+        работать из памяти, но после рестарта поднялся бы уже ни с чем).
+        Две причины негерметичности:
+          1) мокается только _run (systemctl/iptables → no-op), а удаление
+             файлов в _full_uninstall идёт напрямую через Path/shutil —
+             вообще без _run;
+          2) patch.dict(sys.modules, ...) НЕ подменяет submodule для
+             `from chimera.modules import telemt_ios_fix` — from-import
+             резолвит атрибут уже загруженного пакета, поэтому фик-модуль
+             внутрь _full_uninstall не попадал и вызывался НАСТОЯЩИЙ
+             telemt_ios_fix с его реальными _remove_rules/_save_state/
+             _teardown_ufw (живые iptables, state-файл, UFW).
+        Фикс: пути mtproto перенаправляются во временный каталог
+        (uninstall-петля честно что-то удаляет — но во tmp), а настоящий
+        telemt_ios_fix мокается patch.object по атрибутам РЕАЛЬНОГО модуля
+        — это перехватывает и from-import."""
+        import shutil
         from chimera.modules import mtproto
+        from chimera.modules import telemt_ios_fix as _ios_real
 
         _ios_fake = types.ModuleType("chimera.modules.telemt_ios_fix")
         _ios_fake._load_state = lambda: None
@@ -1945,18 +1966,50 @@ class TestMtprotoCloseAllPorts(unittest.TestCase):
         _ios_fake._save_state = lambda cfg: None
         _ios_fake.IosFixConfig = MagicMock()
 
-        with patch.object(mtproto, "_run"), \
-             patch.object(mtproto, "_get_port", return_value=9443), \
-             patch.object(mtproto, "_banner"), \
-             patch.object(mtproto, "_mtproto_close_all_ports") as _mca, \
-             patch.object(sys.modules["chimera._core"] if "chimera._core" in sys.modules
-                          else types.ModuleType("x"), "_pause", create=True), \
-             patch.dict(sys.modules,
-                        {"chimera.modules.telemt_ios_fix": _ios_fake}):
-            ok = mtproto._full_uninstall(silent=True)
-        self.assertTrue(ok)
-        _mca.assert_called_once()
-        self.assertEqual(_mca.call_args.kwargs.get("extra_port"), 9443)
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            path_overrides = {
+                "BIN_PATH": tmp / "telemt-bin",
+                "SERVICE_FILE": tmp / "telemt.service",
+                "CONFIG_DIR": tmp / "etc-telemt",
+                "CONFIG_FILE": tmp / "etc-telemt" / "telemt.toml",
+                "WORK_DIR": tmp / "var-lib-telemt",
+                "LOG_FILE": tmp / "telemt.log",
+                "CRON_FILE": tmp / "cron.d" / "telemt-iptables",
+                "OPTIMIZER_CONF": tmp / "optimizer.conf",
+                "LIMITS_CONF": tmp / "limits.conf",
+            }
+            # Заглушки, чтобы uninstall-петля честно удаляла (внутри tmp)
+            path_overrides["BIN_PATH"].write_text("x")
+            path_overrides["SERVICE_FILE"].write_text("x")
+            path_overrides["CONFIG_DIR"].mkdir(parents=True)
+            path_overrides["CONFIG_FILE"].write_text("port = 9443\n")
+            path_overrides["CRON_FILE"].parent.mkdir(parents=True, exist_ok=True)
+            path_overrides["CRON_FILE"].write_text("x")
+
+            with patch.object(mtproto, "_run"), \
+                 patch.object(mtproto, "_get_port", return_value=9443), \
+                 patch.object(mtproto, "_banner"), \
+                 patch.object(mtproto, "_mtproto_close_all_ports") as _mca, \
+                 patch.object(sys.modules["chimera._core"] if "chimera._core" in sys.modules
+                              else types.ModuleType("x"), "_pause", create=True), \
+                 patch.dict(sys.modules,
+                            {"chimera.modules.telemt_ios_fix": _ios_fake}), \
+                 patch.multiple(mtproto, **path_overrides), \
+                 patch.object(_ios_real, "_load_state", return_value=None), \
+                 patch.object(_ios_real, "_teardown_ufw", return_value=None), \
+                 patch.object(_ios_real, "_remove_rules", return_value=0), \
+                 patch.object(_ios_real, "_save_state", lambda cfg: None):
+                ok = mtproto._full_uninstall(silent=True)
+            self.assertTrue(ok)
+            _mca.assert_called_once()
+            self.assertEqual(_mca.call_args.kwargs.get("extra_port"), 9443)
+            # Uninstall реально отработал — но только по временным путям.
+            self.assertFalse(path_overrides["BIN_PATH"].exists())
+            self.assertFalse(path_overrides["SERVICE_FILE"].exists())
+            self.assertFalse(path_overrides["CONFIG_DIR"].exists())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestEnsureIptRestoreService(unittest.TestCase):
