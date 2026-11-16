@@ -111,6 +111,7 @@ CHAIN_OUT       = "TELEMT_STATS_OUT"
 #   AWG:   xray направляет через freedom+fwmark → awg0 → exit VPS
 #          (dokodemo обрабатывается uid xray → fwmark проставляется корректно)
 XRAY_TPROXY_TAG    = "tproxy-telemt"
+XRAY_TPROXY_TAG_V6 = "tproxy-telemt-v6"  # ::1 — ip6tables REDIRECT ведёт на ::1
 XRAY_TPROXY_PORT   = 10811          # порт dokodemo-door; не конфликтует с 10808
 XRAY_CONFIG_PATHS  = [
     Path("/etc/xray/config.json"),
@@ -1424,44 +1425,76 @@ def _xray_get_proxy_tag(cfg: dict) -> tuple:
 
 def _xray_inject_dokodemo(cfg: dict, port: int) -> bool:
     """
-    Добавляет dokodemo-door inbound + routing rule в конфиг xray.
+    Добавляет dokodemo-door inbound'ы (v4+v6) + routing rule в конфиг xray.
     followRedirect=True: принимает TCP переброшенные iptables REDIRECT.
     Возвращает True если конфиг изменён.
+
+    FIX (инцидент 2026-11-16, нода 138.х): слушатели создаются в ДВУХ стеках —
+    127.0.0.1 (iptables REDIRECT) и ::1 (ip6tables REDIRECT). Раньше
+    слушался только v4, при этом REDIRECT-правила ip6tables для Telegram-
+    подсетей v6 создавались исправно: каждое v6-соединение к TG попадало
+    на ::1:port, где слушателя нет — мгновенный отказ, рабочим оставался
+    только fallback на v4. Симптом: ~50к пакетов в час уходило в ip6tables
+    REDIRECT-правила в никуда.
     """
-    if _xray_has_inbound(cfg, XRAY_TPROXY_TAG):
-        return False
+    changed = False
 
-    cfg.setdefault("inbounds", []).append({
-        "tag":      XRAY_TPROXY_TAG,
-        "port":     port,
-        "listen":   "127.0.0.1",
-        "protocol": "dokodemo-door",
-        "settings": {"network": "tcp", "followRedirect": True},
-        "sniffing": {"enabled": False},
-    })
+    if not _xray_has_inbound(cfg, XRAY_TPROXY_TAG):
+        cfg.setdefault("inbounds", []).append({
+            "tag":      XRAY_TPROXY_TAG,
+            "port":     port,
+            "listen":   "127.0.0.1",
+            "protocol": "dokodemo-door",
+            "settings": {"network": "tcp", "followRedirect": True},
+            "sniffing": {"enabled": False},
+        })
+        changed = True
 
-    proxy_tag, is_balancer = _xray_get_proxy_tag(cfg)
-    rule: dict = {"type": "field", "inboundTag": [XRAY_TPROXY_TAG]}
-    if is_balancer:
-        rule["balancerTag"] = proxy_tag
-    else:
-        rule["outboundTag"] = proxy_tag
+    # FIX 2026-11-16: v6-слушатель — без него ip6tables REDIRECT попадает в пустоту.
+    if not _xray_has_inbound(cfg, XRAY_TPROXY_TAG_V6):
+        cfg.setdefault("inbounds", []).append({
+            "tag":      XRAY_TPROXY_TAG_V6,
+            "port":     port,
+            "listen":   "::1",
+            "protocol": "dokodemo-door",
+            "settings": {"network": "tcp", "followRedirect": True},
+            "sniffing": {"enabled": False},
+        })
+        changed = True
 
+    # Routing rule: оба тега. Отдельная ветка нужна и как миграция уже
+    # развёрнутых конфигов (v4 inbound есть, routing знает только его).
     rules: list = cfg.setdefault("routing", {}).setdefault("rules", [])
-    rules.insert(0, rule)
-    return True
+    rule = next((r for r in rules
+                 if XRAY_TPROXY_TAG in r.get("inboundTag", [])), None)
+    if rule is None:
+        proxy_tag, is_balancer = _xray_get_proxy_tag(cfg)
+        rule = {"type": "field", "inboundTag": [XRAY_TPROXY_TAG]}
+        if is_balancer:
+            rule["balancerTag"] = proxy_tag
+        else:
+            rule["outboundTag"] = proxy_tag
+        rules.insert(0, rule)
+        changed = True
+    if XRAY_TPROXY_TAG_V6 not in rule.setdefault("inboundTag", []):
+        rule["inboundTag"].append(XRAY_TPROXY_TAG_V6)
+        changed = True
+
+    return changed
 
 
 def _xray_remove_dokodemo(cfg: dict) -> bool:
-    """Удаляет dokodemo inbound и routing rule из конфига xray."""
+    """Удаляет dokodemo inbound'ы (v4+v6) и routing rule из конфига xray."""
     changed = False
+    _tags = (XRAY_TPROXY_TAG, XRAY_TPROXY_TAG_V6)
     inbounds = cfg.get("inbounds", [])
-    new_ib = [ib for ib in inbounds if ib.get("tag") != XRAY_TPROXY_TAG]
+    new_ib = [ib for ib in inbounds if ib.get("tag") not in _tags]
     if len(new_ib) != len(inbounds):
         cfg["inbounds"] = new_ib
         changed = True
     rules = cfg.get("routing", {}).get("rules", [])
-    new_r = [r for r in rules if XRAY_TPROXY_TAG not in r.get("inboundTag", [])]
+    new_r = [r for r in rules
+             if not any(t in r.get("inboundTag", []) for t in _tags)]
     if len(new_r) != len(rules):
         cfg["routing"]["rules"] = new_r
         changed = True

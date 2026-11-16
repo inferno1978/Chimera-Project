@@ -235,6 +235,45 @@ def _ensure_nginx_sites_enabled_include() -> None:
 
 
 # =============================================================================
+#  _extract_server_blocks_with — извлечение top-level server{}-блоков по listen
+# =============================================================================
+#  ФИКС (инцидент 2026-11-16, нода 138.х): REALITY-сокет VLESS
+#  (listen unix:/dev/shm/... proxy_protocol, xver=1) и own-site маска Telemt
+#  (listen 127.0.0.1:8444) живут в ОДНОМ файле sites-available/<domain>.
+#  Оба генератора раньше писали файл целиком, затирая чужие server-блоки:
+#  • own-site install → REALITY терял dest-сокет → ВСЕ VLESS-клиенты
+#    отваливались на TLS-рукопожатии («соединение есть, трафик не бежит»);
+#  • REALITY regen → маска own-site умирала → Telemt сплайсил failed
+#    handshakes в никуда.
+#  Хелпер достаёт полные server{}-блоки (по балансу фигурных скобок),
+#  чей listen содержит одну из needle-строк, — для слияния при записи.
+# =============================================================================
+def _extract_server_blocks_with(text: str, needles) -> str:
+    """Полные top-level server{}-блоки, чей listen содержит needle.
+
+    Возвращает текст с блоками (разделены пустой строкой) или "" если
+    подходящих нет. Синтаксис nginx-конфига здесь не содержит фигурных
+    скобок внутри строк-значений, поэтому баланс скобок надёжен.
+    """
+    blocks, buf, depth, in_block = [], [], 0, False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not in_block:
+            head = stripped.split("{", 1)[0].strip()
+            if head == "server":
+                in_block, buf, depth = True, [line], line.count("{") - line.count("}")
+            continue
+        buf.append(line)
+        depth += line.count("{") - line.count("}")
+        if depth <= 0:
+            block = "\n".join(buf)
+            if any(n in block for n in needles):
+                blocks.append(block)
+            in_block, buf, depth = False, [], 0
+    return "\n\n".join(blocks)
+
+
+# =============================================================================
 #  _cleanup_stale_chimera_vhosts — удаление старых Chimera vhost при смене домена
 # =============================================================================
 #  ВАЖНАЯ ИСТОРИЯ ФИКСА:
@@ -607,7 +646,28 @@ def setup_nginx_final(domain: Optional[str] = None,
              f"(статический HTTPS, без proxy_protocol)")
 
         cfg = NGINX_CONF_DIR / PARAM_DOMAIN
-        cfg.write_text(textwrap.dedent(f"""\
+
+        # === ФИКС (инцидент 2026-11-16, нода 138.х): не затирать REALITY-сокет VLESS ===
+        # В файле домена могут уже жить server-блоки VLESS REALITY
+        # (listen unix:/dev/shm/... proxy_protocol, xver=1) — они в том же
+        # sites-available/<domain>. Раньше own-site писал файл целиком и
+        # стирал их: nginx поднимался без сокета, REALITY терял dest и ВСЕ
+        # VLESS-клиенты отваливались на TLS-рукопожатии («соединение есть,
+        # трафик не бежит»). 80-блок REALITY (301) заменяется нашим (404,
+        # без редиректа на 443=Telemt) — это требование own-site-режима;
+        # сокет-блоки переносятся как есть.
+        _reality_keep = ""
+        if cfg.exists():
+            try:
+                _reality_keep = _extract_server_blocks_with(
+                    cfg.read_text(), ("listen unix:",))
+            except Exception:
+                _reality_keep = ""
+            if _reality_keep:
+                info("VLESS REALITY-сокет в vhost обнаружен — "
+                     "server-блоки сохраняются (merge с own-site)")
+
+        _os_body = textwrap.dedent(f"""\
             # =============================================================================
             # Own-site HTTPS-сайт для Telemt mask (свой домен + свой сайт)
             # Nginx слушает 127.0.0.1:{SERVER_PORT} — Telemt сплайсит failed
@@ -654,7 +714,8 @@ def setup_nginx_final(domain: Optional[str] = None,
                 server_name _;
                 {_os_default_ssl}
             }}
-        """))
+        """)
+        cfg.write_text(_os_body + (f"\n{_reality_keep}\n" if _reality_keep else ""))
         link = NGINX_ENABLED_DIR / PARAM_DOMAIN
         link.unlink(missing_ok=True)
         link.symlink_to(cfg)
@@ -991,7 +1052,33 @@ def setup_nginx_final(domain: Optional[str] = None,
         )
 
     cfg = NGINX_CONF_DIR / PARAM_DOMAIN
-    cfg.write_text(textwrap.dedent(f"""\
+
+    # === ФИКС (инцидент 2026-11-16, нода 138.х): не затирать own-site маску Telemt ===
+    # В файле домена могут уже жить server-блоки Telemt own-site
+    # (listen 127.0.0.1:<mask_port> — маска для failed handshakes Telemt).
+    # Раньше REALITY-генератор писал файл целиком, стирая их: маска
+    # умирала, Telemt сплайсил failed handshakes в никуда. При обнаружении:
+    # 8444-блоки переносятся; 80-блок остаётся own-site (return 404, БЕЗ
+    # редиректа на :443 — порт 443 занимает Telemt, а 301-редирект туда
+    # ломает renew/маску), свой 80-блок с 301 НЕ эмитится — иначе nginx
+    # берёт первый по порядку и редирект уводит на порт Telemt.
+    _mask_keep = ""
+    _mask_80 = ""
+    if cfg.exists():
+        try:
+            _old_text = cfg.read_text()
+            _mask_keep = _extract_server_blocks_with(
+                _old_text, ("listen 127.0.0.1:",))
+            if _mask_keep:
+                _mask_80 = _extract_server_blocks_with(
+                    _old_text, ("listen 80;",))
+        except Exception:
+            _mask_keep = ""
+        if _mask_keep:
+            info("Telemt own-site маска в vhost обнаружена — блоки "
+                 "сохраняются (merge с REALITY, 80-блок остаётся own-site)")
+
+    _tpl_80 = textwrap.dedent(f"""\
         # HTTP → HTTPS redirect (+ ACME-челлендж для certbot renew)
         # ВАЖНО: return 301 обязан быть ВНУТРИ location /, а не на уровне
         # server: server-level return выполняется ДО выбора location и
@@ -1004,7 +1091,9 @@ def setup_nginx_final(domain: Optional[str] = None,
             location /.well-known/acme-challenge/ {{ root {web_root}; }}
             location / {{ return 301 https://$host$request_uri; }}
         }}
+    """)
 
+    _tpl_sock = textwrap.dedent(f"""\
         # Main server: VLESS fallback via Unix socket
         server {{
             server_name {PARAM_DOMAIN};
@@ -1039,7 +1128,9 @@ def setup_nginx_final(domain: Optional[str] = None,
             server_name _;
             {default_server_ssl}
         }}
-    """))
+    """)
+    cfg.write_text((_mask_80 or _tpl_80) + "\n" + _tpl_sock
+                   + (f"\n{_mask_keep}\n" if _mask_keep else ""))
 
     # Создаём временный unix-сокет если нет.
     # РЕИНСТАЛЛ-БЕЗОПАСНОСТЬ (репорт 04.11): сначала проба живости —
