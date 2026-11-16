@@ -700,6 +700,10 @@ def setup_nginx_final(domain: Optional[str] = None,
                 root {web_root};
                 index index.html;
 
+                # FIX 16.11.2026 (РКН-волна, рекомендация «заглушка обязана
+                # отдавать TLS 1.2/1.3 + HSTS»): HSTS как у живых сайтов —
+                # тем же max-age, что и на фронтах панелей.
+                add_header Strict-Transport-Security "max-age=63072000" always;
                 add_header X-Robots-Tag "noindex, nofollow" always;
             {_os_rate_limit}
 
@@ -906,6 +910,10 @@ def setup_nginx_final(domain: Optional[str] = None,
                 root {web_root};
                 index index.html;
 
+                # FIX 16.11.2026 (РКН-волна, рекомендация «заглушка обязана
+                # отдавать TLS 1.2/1.3 + HSTS»): HSTS как у живых сайтов —
+                # тем же max-age, что и на фронтах панелей.
+                add_header Strict-Transport-Security "max-age=63072000" always;
                 add_header X-Robots-Tag "noindex, nofollow" always;
 {_cdn_server_extras}
                 # ── xHTTP path → Xray backend (loopback) ─────────────────────────
@@ -1113,6 +1121,10 @@ def setup_nginx_final(domain: Optional[str] = None,
             root {web_root};
             index index.html;
 
+            # FIX 16.11.2026 (РКН-волна, рекомендация «заглушка обязана
+            # отдавать TLS 1.2/1.3 + HSTS»): HSTS как у живых сайтов —
+            # тем же max-age, что и на фронтах панелей.
+            add_header Strict-Transport-Security "max-age=63072000" always;
             add_header X-Robots-Tag "noindex, nofollow" always;
         {rate_limit}
 
