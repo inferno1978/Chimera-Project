@@ -161,7 +161,7 @@ class TestWhitelistValidation(unittest.TestCase):
         self.assertEqual(fw._valid_ip("1.2.3.4"), "v4")
         self.assertEqual(fw._valid_ip("::1"), "v6")
         self.assertEqual(fw._valid_ip("2001:db8::5"), "v6")
-        self.assertEqual(fw._valid_ip("2600::"), "v6")
+        self.assertEqual(fw._valid_ip("fd00::1"), "v6")
 
     def test_invalid_ips(self):
         for bad in ("1.2.3.4/32", "999.1.1.1", "1.2.3", "", "abc",

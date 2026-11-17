@@ -247,6 +247,7 @@ sudo python3 main.py
 | [`GITHUB_BYPASS_FAQ.md`](docs/faq/GITHUB_BYPASS_FAQ.md) | GitHub Bypass (b4): три режима блока, сет GitHub-Fat-v1, watchdog |
 | [`NNM_BYPASS_FAQ.md`](docs/faq/NNM_BYPASS_FAQ.md) | NNM-Club Bypass (b4): SNI-блок за Cloudflare, сет NNM-Fat-v1 |
 | [`OWN_DOH_FAQ.md`](docs/faq/OWN_DOH_FAQ.md) | Собственные DoH-резолверы в сетах b4 (миграция с Cloudflare) |
+| [`SMARTDNS_FAQ.md`](docs/faq/SMARTDNS_FAQ.md) | SmartDNS-нода: DoH/DoT stealth + SNI-прокси, режимы standalone/companion, установка, GeoHide, взаимодействие с Химерой |
 | [`BOOTSTRAP_SECURITY.md`](docs/faq/BOOTSTRAP_SECURITY.md) | Модель доверия bootstrap: Ed25519-подпись, ротация ключей, компрометация |
 | [`GIT_REWRITE_MIGRATION_FAQ.md`](docs/faq/GIT_REWRITE_MIGRATION_FAQ.md) | Миграция старых клонов после rewrite истории 29.10.2026: divergent branches, unmerged files, SyntaxError в main.py |
 | [`CHAIN_RELAY_FAQ.md`](docs/faq/CHAIN_RELAY_FAQ.md) | Chain Relay: релеи каскада, порты, диагностика |
