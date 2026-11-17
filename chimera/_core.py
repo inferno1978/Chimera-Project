@@ -8463,6 +8463,7 @@ def _menu_network() -> None:
         _box_sep()
         _box_item("D", f"🌐 Кастомные DNS правила  {DIM}(hosts / routing override){NC}")
         _box_item("DR", f"🔒 Принудительный DNS REDIRECT  {DIM}(NAT на dnscrypt-proxy, anti-leak){NC}")
+        _box_item("SD", f"🛰 SmartDNS-нода  {DIM}(DoH/DoT stealth + SNI-прокси; отдельный VPS или companion со вторым IP){NC}")
         _box_item("RR", f"🧭 Кастомные routing-правила  {DIM}(домен/IP/CIDR/порт → любой outbound, приоритет){NC}")
         _box_item("CO", f"🔗 Кастомные outbound'ы  {DIM}(свои ноды / друзья: ссылка vless://, мастер, JSON){NC}")
         _box_item("M", f"📏 MTU/MSS автотюнинг  {DIM}(оптимизация для exit-нод){NC}")
@@ -8637,6 +8638,16 @@ def _menu_network() -> None:
                 do_manage_youtube_via_ru()
             except ImportError as e:
                 warn(f"Модуль youtube_route не найден: {e}")
+                time.sleep(2)
+        elif ch.lower() == "sd":
+            # SmartDNS-нода — DoH/DoT stealth + SNI-прокси (Python-порт
+            # smartdns-installer v3.0.0): standalone (отдельный VPS) или
+            # companion (этот VPS + второй IP, изоляция от стека Химеры).
+            try:
+                from chimera.modules.smartdns import do_smartdns_menu
+                do_smartdns_menu()
+            except ImportError as e:
+                warn(f"Модуль smartdns не найден: {e}")
                 time.sleep(2)
         elif ch.lower() == "b":
             # DPI Bypass (b4) — централизованный, для любых заблокированных ресурсов.

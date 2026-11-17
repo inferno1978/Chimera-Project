@@ -190,6 +190,39 @@ SERVICE_WPP_NGINX       = "chimera-wpp-nginx" # nginx front для WPP (TLS)
 # Front с LE/self-signed TLS (по образцу B4 / Triple Panel / WPP).
 SERVICE_LIBRECHAT_WEB   = "librechat_web"          # LibreChat web UI (loopback, по умолч. 3080)
 SERVICE_LIBRECHAT_NGINX = "chimera-librechat-nginx"  # nginx front для LibreChat (TLS)
+# SmartDNS-стек (модули smartdns*.py, Python-переписывание bash-установщика
+# smartdns-installer v3.0.0): DoH/DoT stealth-нода + SNI-прокси.
+# Два режима развёртывания: standalone (отдельный VPS, публичные порты
+# wildcard) и companion (тот же VPS с Химерой + второй IP: публичные
+# порты привязаны к bind_ip — записи реестра несут поле bind_ip).
+SERVICE_SMARTDNS_HTTP    = "smartdns_http"      # nginx 80 → https redirect (companion: bind_ip)
+SERVICE_SMARTDNS_DOT     = "smartdns_dot"       # xray DoT dokodemo 853/tcp (companion: bind_ip)
+SERVICE_SMARTDNS_DOH     = "smartdns_doh"       # xray DoH stealth dokodemo 8444/tcp (companion: bind_ip)
+SERVICE_SMARTDNS_WEB     = "smartdns_web"       # nginx cover-site TLS 9443/tcp (companion: bind_ip)
+SERVICE_SMARTDNS_ENGINE  = "smartdns_engine"    # DNS-движок loopback 5353 tcp+udp (oxidns/AGH)
+SERVICE_SMARTDNS_DOHLOC  = "smartdns_doh_local" # DNS-движок DoH loopback 8053/tcp
+SERVICE_SMARTDNS_DOTHERM = "smartdns_dot_term"  # nginx stream DoT-терминатор loopback 8853/tcp
+SERVICE_SMARTDNS_STEALTH = "smartdns_stealth"   # nginx stealth-фронт loopback 9444/tcp (proxy_protocol)
+
+
+def _bind_scopes_overlap(bind_a: "Optional[str]", bind_b: "Optional[str]",
+                         ) -> bool:
+    """Пересекаются ли два bind-скоупа реестра/проверки (IP-осведомлённость).
+
+    None = wildcard (0.0.0.0 / [::] — любой адрес хоста). Правила:
+      • None vs None           → пересечение (старая семантика реестра);
+      • None vs "1.2.3.4"      → НЕ пересечение: ядро Linux разрешает
+        одновременный bind wildcard и specific (specific выигрывает на своём
+        адресе) — coexistence легален (режим companion Химеры: nginx на
+        0.0.0.0:80 + drop-in на ВТОРОМ IP:80 в одном процессе nginx);
+      • "1.2.3.4" vs "1.2.3.4" → пересечение (один адрес);
+      • "1.2.3.4" vs "5.6.7.8" → НЕ пересечение (разные адреса).
+    """
+    if bind_a is None and bind_b is None:
+        return True
+    if bind_a is None or bind_b is None:
+        return False
+    return str(bind_a) == str(bind_b)
 
 
 # ── Чтение/запись реестра ────────────────────────────────────────────────────
@@ -279,18 +312,17 @@ def _ss_available() -> bool:
     return bool(shutil.which("ss"))
 
 
-def port_check_system(port: int, proto: str = "tcp") -> list[str]:
-    """Проверяет, занят ли порт в системе (active listeners).
+def _ss_listeners(port: int, proto: str = "tcp") -> list[tuple[str, str]]:
+    """Парсит `ss` и возвращает слушателей порта как (bind_addr, proc_desc).
 
-    Возвращает список описаний кто слушает порт (process name + pid).
-    Пустой список = порт свободен.
-
-    Использует `ss` (iproute2) — стандарт в современных Linux.
+    bind_addr — нормализованный адрес сокета БЕЗ порта:
+      "*"            — wildcard (0.0.0.0 / [::] / *);
+      "127.0.0.1"    — конкретный IPv4;
+      "::1"          — конкретный IPv6.
     """
     if not _ss_available():
         return []
     proto_flag = "-t" if proto == "tcp" else "-u"
-    # -ltnp = listening, tcp, numeric, processes
     try:
         r = subprocess.run(
             ["ss", proto_flag + "lnp"],
@@ -301,28 +333,65 @@ def port_check_system(port: int, proto: str = "tcp") -> list[str]:
         return []
     if r.returncode != 0:
         return []
-    results: list[str] = []
-    # Формат ss:
-    # State   Recv-Q  Send-Q Local Address:Port  Peer Address:Port Process
-    # LISTEN  0       511    0.0.0.0:443         0.0.0.0:*         users:(("nginx",pid=1234,fd=8))
-    # LISTEN  0       511    [::]:443            [::]:*
-    port_str = f":{port} "
-    port_str_end = f":{port}\n"
+    out: list[tuple[str, str]] = []
     for line in r.stdout.splitlines():
-        # Ищем ":<port> " или ":<port>\n" чтобы не матчить 4430 как 443.
-        if port_str in line or line.rstrip().endswith(f":{port}"):
-            # Парсим process — последняя колонка.
-            parts = line.split()
-            proc_info = parts[-1] if parts else ""
-            if proc_info.startswith("users:"):
-                # "users:(("nginx",pid=1234,fd=8))"
-                m = re.search(r'\("([^"]+)",pid=(\d+)', proc_info)
-                if m:
-                    results.append(f"{m.group(1)} (pid={m.group(2)})")
-                else:
-                    results.append(proc_info)
-            else:
-                results.append("(unknown process)")
+        if not (f":{port} " in line or line.rstrip().endswith(f":{port}")):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        local = parts[3] if not parts[0].startswith("State") else (
+            parts[3] if len(parts) > 3 else "")
+        # ss header: State Recv-Q Send-Q Local-Address:Port ...
+        if local.endswith(f":{port}"):
+            addr = local[: -len(f":{port}")]
+        else:
+            # fallback: последняя колонка с двоеточием до порта
+            addr = "*"
+        if addr in ("*", "0.0.0.0", "[::]", "::", ""):
+            addr = "*"
+        addr = addr.lstrip("[").rstrip("]")
+        proc_info = parts[-1] if parts else ""
+        if proc_info.startswith("users:"):
+            m = re.search(r'\("([^"]+)",pid=(\d+)', proc_info)
+            proc = f"{m.group(1)} (pid={m.group(2)})" if m else proc_info
+        else:
+            proc = "(unknown process)"
+        out.append(("*" if addr in ("", "*") else addr, proc))
+    return out
+
+
+def port_check_system(port: int, proto: str = "tcp",
+                      bind_ip: "Optional[str]" = None) -> list[str]:
+    """Проверяет, занят ли порт в системе (active listeners).
+
+    Возвращает список описаний кто слушает порт (process name + pid).
+    Пустой список = порт свободен.
+
+    Использует `ss` (iproute2) — стандарт в современных Linux.
+
+    bind_ip (IP-осведомлённость, режим companion SmartDNS): проверяем
+    конфликт привязки <bind_ip>:<port>. Ядро Linux разрешает одновременный
+    bind wildcard (0.0.0.0:80) и specific (1.2.3.4:80) — specific-сокет
+    забирает трафик своего адреса. Поэтому:
+      • bind_ip=None (старая семантика): ЛЮБОЙ слушатель порта = занят;
+      • bind_ip задан: конфликт — только слушатель на ТОМ ЖЕ адресе
+        (включая loopback-специфику); wildcard-слушатель и чужой
+        specific-адрес конфликтом НЕ являются.
+    """
+    listeners = _ss_listeners(port, proto)
+    results: list[str] = []
+    for addr, proc in listeners:
+        if bind_ip is not None:
+            b = str(bind_ip).lstrip("[").rstrip("]")
+            if addr == "*" or (addr != b and b not in ("0.0.0.0", "::")):
+                # wildcard-слушатель сосуществует с specific-bind;
+                # чужой specific-адрес — тем более.
+                continue
+            results.append(f"{proc} @ {addr}:{port}")
+        else:
+            results.append(f"{proc} @ {addr}:{port}"
+                           if addr != "*" else proc)
     return results
 
 
@@ -381,7 +450,8 @@ def _check_ufw_rules(port: int, proto: str = "tcp") -> list[dict]:
 # ── Публичный API ────────────────────────────────────────────────────────────
 
 def port_get_conflicts(port: int, proto: str = "tcp",
-                       exclude_service: "Optional[str]" = None) -> list[dict]:
+                       exclude_service: "Optional[str]" = None,
+                       bind_ip: "Optional[str]" = None) -> list[dict]:
     """Возвращает список конфликтов для порта.
 
     Каждый конфликт — dict:
@@ -391,24 +461,33 @@ def port_get_conflicts(port: int, proto: str = "tcp",
 
     exclude_service — сервис, который проверяет порт для себя (его собственные
     записи в реестре/UFW игнорируются — это нормально, что он видит свой порт).
+
+    bind_ip — IP-осведомлённость (режим companion SmartDNS): проверяем
+    конфликт привязки <bind_ip>:<port>, а не wildcard:<port>. Записи
+    реестра с ДРУГИМ bind-скоупом и wildcard-слушатели ss конфликтом
+    не являются (см. _bind_scopes_overlap / port_check_system).
     """
     conflicts: list[dict] = []
 
-    # 1. Реестр port_registry.json
+    # 1. Реестр port_registry.json (IP-осознанно: конфликт только при
+    #    пересечении bind-скоупов — поле bind_ip в записи, None = wildcard).
     entries = _registry_load()
     for e in entries:
         if e.get("port") == port and e.get("proto", "tcp") == proto:
             if exclude_service and e.get("service") == exclude_service:
                 continue
+            if not _bind_scopes_overlap(e.get("bind_ip"), bind_ip):
+                continue
             conflicts.append({
                 "type": "registry",
                 "service": e.get("service", "?"),
                 "detail": f"Зарегистрирован за сервисом '{e.get('service', '?')}'"
-                          f" ({e.get('comment', '')})",
+                          f" ({e.get('comment', '')})"
+                          + (f" bind {e.get('bind_ip')}" if e.get("bind_ip") else ""),
             })
 
-    # 2. Активные системные слушатели (ss)
-    sys_listeners = port_check_system(port, proto)
+    # 2. Активные системные слушатели (ss; IP-осознанно через bind_ip)
+    sys_listeners = port_check_system(port, proto, bind_ip=bind_ip)
     for listener in sys_listeners:
         conflicts.append({
             "type": "system",
@@ -422,6 +501,14 @@ def port_get_conflicts(port: int, proto: str = "tcp",
         # Если правило принадлежит exclude_service — не считаем конфликтом.
         if exclude_service and exclude_service in r.get("comment", ""):
             continue
+        # IP-осознанность: правило с ЯВНЫМ destination-адресом, не равным
+        # нашему bind_ip, регулирует чужой скоуп (например Chimera открыла
+        # 443 глобально, а мы ставим 443-редирект на втором IP) — не конфликт.
+        if bind_ip is not None:
+            m_dst = re.search(r"\bto\s+((?:\d{1,3}\.){3}\d{1,3})\b",
+                              r.get("raw", ""))
+            if m_dst and m_dst.group(1) != str(bind_ip):
+                continue
         conflicts.append({
             "type": "ufw",
             "service": r.get("comment", ""),
@@ -440,7 +527,8 @@ def port_get_conflicts(port: int, proto: str = "tcp",
 
 
 def port_is_free(port: int, proto: str = "tcp",
-                 exclude_service: "Optional[str]" = None) -> "tuple[bool, list[str]]":
+                 exclude_service: "Optional[str]" = None,
+                 bind_ip: "Optional[str]" = None) -> "tuple[bool, list[str]]":
     """Проверяет, свободен ли порт.
 
     Возвращает (is_free, conflict_descriptions).
@@ -449,8 +537,10 @@ def port_is_free(port: int, proto: str = "tcp",
 
     exclude_service — сервис, для которого проверяем (его собственные правила
     не считаются конфликтом).
+    bind_ip — IP-осведомлённость (см. port_get_conflicts): проверка
+    привязки <bind_ip>:<port>; wildcard-слушатели/чужие скоупы не конфликт.
     """
-    conflicts = port_get_conflicts(port, proto, exclude_service)
+    conflicts = port_get_conflicts(port, proto, exclude_service, bind_ip=bind_ip)
     # Фильтруем — /etc_services не блокирующий.
     blocking = [c for c in conflicts if c["type"] != "etc_services"]
     if not blocking:
@@ -459,7 +549,8 @@ def port_is_free(port: int, proto: str = "tcp",
 
 
 def port_register(service_tag: str, port: int, proto: str = "tcp",
-                  comment: str = "", force: bool = False) -> "tuple[bool, str]":
+                  comment: str = "", force: bool = False,
+                  bind_ip: "Optional[str]" = None) -> "tuple[bool, str]":
     """Регистрирует порт за сервисом.
 
     Args:
@@ -468,6 +559,10 @@ def port_register(service_tag: str, port: int, proto: str = "tcp",
       proto: "tcp" или "udp"
       comment: человекочитаемое описание
       force: если True — не проверять конфликты (ОСТОРОЖНО)
+      bind_ip: если задан — порт привязан к конкретному IP (режим companion
+        SmartDNS: второй IP на том же VPS). Запись получает поле bind_ip;
+        конфликт-проверка и ss-проверка становятся IP-осознанными
+        (wildcard-слушатель — не конфликт; ср. port_get_conflicts).
 
     Returns:
       (success, message)
@@ -487,7 +582,8 @@ def port_register(service_tag: str, port: int, proto: str = "tcp",
     # Проверка конфликтов (до локировки — использует ss/ufw, не реестр).
     if not force:
         is_free, conflict_descs = port_is_free(port, proto,
-                                                exclude_service=service_tag)
+                                                exclude_service=service_tag,
+                                                bind_ip=bind_ip)
         if not is_free:
             return False, (f"Порт {port}/{proto} занят: "
                            + "; ".join(conflict_descs))
@@ -500,7 +596,8 @@ def port_register(service_tag: str, port: int, proto: str = "tcp",
             for i, e in enumerate(entries):
                 if (e.get("service") == service_tag
                     and e.get("port") == port
-                    and e.get("proto", "tcp") == proto):
+                    and e.get("proto", "tcp") == proto
+                    and e.get("bind_ip") == bind_ip):
                     existing_idx = i
                     break
 
@@ -511,6 +608,8 @@ def port_register(service_tag: str, port: int, proto: str = "tcp",
                 "comment":      comment,
                 "registered_at": datetime.now(timezone.utc).isoformat(),
             }
+            if bind_ip:
+                entry["bind_ip"] = bind_ip
 
             if existing_idx is not None:
                 entries[existing_idx] = entry
@@ -520,7 +619,8 @@ def port_register(service_tag: str, port: int, proto: str = "tcp",
             _registry_save(entries)
     except TimeoutError as e:
         return False, str(e)
-    return True, f"Порт {port}/{proto} зарегистрирован за '{service_tag}'"
+    return True, (f"Порт {port}/{proto} зарегистрирован за '{service_tag}'"
+                  + (f" (bind {bind_ip})" if bind_ip else ""))
 
 
 def port_register_range(service_tag: str, port_start: int, port_end: int,

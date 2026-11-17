@@ -1,4 +1,10 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v17: 334 = 330 + smartdns-семейство (Python-порт smartdns-installer v3.0.0:
+# DoH/DoT stealth-нода в двух режимах standalone/companion — test_smartdns_stack
+# конфиги xray/движков/nginx drop-in + cover site + версии; test_smartdns_firewall
+# per-IP разводка iptables/ufw + ватчеры; test_smartdns_module — режимы,
+# визард-валидация, state, port_plan/CLI; test_smartdns_port_registry —
+# bind_ip-осознанность реестра портов: companion на втором IP Химеры).
 # v16: 330 = 329 + test_nginx_stub_hsts_upgrade (РКН-волна 16.11:
 # идемпотентный HSTS-апгрейд живых vhost'ов — ноды с конфигами до
 # 8824000 получают Strict-Transport-Security без переустановки:
@@ -289,6 +295,10 @@ tests.test_singbox_nginx
 tests.test_singbox_packages
 tests.test_singbox_sni_autoconfig
 tests.test_singbox_state
+tests.test_smartdns_firewall
+tests.test_smartdns_module
+tests.test_smartdns_port_registry
+tests.test_smartdns_stack
 tests.test_singbox_ufw
 tests.test_singbox_vless_ws_cdn
 tests.test_singbox_vless_ws_cdn_fix

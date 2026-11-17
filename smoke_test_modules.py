@@ -106,6 +106,13 @@ TEST_CASES = [
     # ("xray_install", "install_xray", "установка Xray"),
     # ("emergency_repair", "do_emergency_repair", "восстановление"),
     # ("uninstall", "do_uninstall", "удаление"),
+    # SmartDNS-нода (Python-порт smartdns-installer v3.0.0):
+    # меню безопасно (input='q' сразу выходит, _refresh_latest_cache без
+    # установленного стека не дёргает сеть); install/update/uninstall НЕ
+    # вызываем — инсталляционные (как xray_install выше).
+    ("smartdns", "do_smartdns_menu", "меню SmartDNS-ноды"),
+    ("smartdns", "update_availability", "сводка обновлений (no-arg)"),
+    ("smartdns_firewall", "build_ufw_commands_cli", "CLI: построитель ufw (safe-обёртка)"),
 ]
 
 # Патчи для системных операций

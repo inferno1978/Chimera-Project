@@ -1,6 +1,6 @@
 # Chimera Project — Карта проекта
 
-Полная карта всех модулей `chimera/modules/` (144 файла) + `_core.py`.
+Полная карта всех модулей `chimera/modules/` (147 файлов) + `_core.py`.
 
 `_core.py` (8 093 строк) — ядро установщика: глобальное состояние, главный orchestrator `main_menu()`, `_load_state_into_globals()`, функции которые мутируют много globals (AWG, chain multi-node, install orchestration). Все модули ниже обращаются к ядру через `_core_module()` lazy binding.
 
@@ -74,6 +74,9 @@
 | `as_direct.py` | AS-маршрутизация по ASN хостера/провайдера (RIPE Stat API) + cron обновления |
 | `geoip_block.py` | GeoIP-блокировка через routing rules Xray (allowlist/blocklist/scanner-block) |
 | `dns_rules.py` | Правила DNS для Xray |
+| `smartdns.py` | **SmartDNS-нода — оркестратор (Python-порт bash-установщика smartdns-installer v3.0.0, паттерн B4).** DoH/DoT stealth + SNI-прокси в двух режимах: standalone (отдельный VPS, полный стек, порты wildcard) и companion (тот же VPS с Химерой + второй IP: NAT-редиректы и DROP-правила скоуплены `-d <bind_ip>`, ufw только per-IP, движок oxidns). Установка (визард в боксах / CLI `install --mode companion --bind-ip … --non-interactive`), транзакция с бэкапом и откатом, port_registry (SERVICE_SMARTDNS_*, IP-осознанные записи), версии/обновления как у B4 (GitHub releases/latest + TTL-кэш 6ч/30мин + header row меню «доступно новое → [3]»), preflight, status/backup/rollback/uninstall, whitelist-меню. Точка входа: Настройки сети → SD. |
+| `smartdns_stack.py` | **SmartDNS — компонентный слой:** загрузки через download_manager (xray/oxidns/AGH, авто-latest release + фолбэк-теги, зеркала release+gh-proxy), конфиги xray (dokodemo 8444/853, bind по режиму) + routing-правила GeoHide, конфиги движков (oxidns/AGH, loopback 5353/8053), nginx full/drop-in (companion: conf.d + stream-conf.d + идемпотентный stream-include-хук, основной конфиг Химеры не трогается), процедурный cover-site генератор (seed-детерминизм), Cloudflare A/AAAA sync + wildcard-сертификат acme.sh DNS-01 + TLS-верификация, systemd-юниты smartdns-* (полный неймспейс), geo-таймеры (PYTHONPATH-safe, `python3 -m chimera.modules.smartdns_stack update-geosite|update-geohide`), dig-верификация бэкенда. |
+| `smartdns_firewall.py` | **SmartDNS — firewall-слой:** чистые билдеры iptables/ip6tables (SMARTDNS_*-цепочки; companion — `-d <bind_ip>` на 443-редиректах и DROP-правилах: порты 9443/9444 Химеры на основном IP живут) и ufw (companion — per-IP allow без --force enable и без 443), ipset-наборы + restore/save, self-contained runtime-скрипты (firewall-apply с пререндеренными правилами, DoH/DoT-ватчеры авторизации — tail логов → ipset add TTL 24ч), whitelist-операции (add/remove/flush/toggle/mode separate↔shared с копированием активных IP). |
 | `ingress_geoip.py` | Блокировка входящих соединений по GeoIP через ipset/iptables |
 | `ripe_file_age.py` | Проверка актуальности RIPE-файла перед включением блокировки |
 
