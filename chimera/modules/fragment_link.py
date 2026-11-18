@@ -406,7 +406,10 @@ def _build_xray_client_json(state: dict, packets: str, length: str,
     # DUAL-схема (31.10.2026): + finalmask вдобавок к legacy-паре
     # (freedom.fragment+dialerProxy) — миграция Xray 26.10.29
     # (freedom.fragment deprecated → streamSettings.finalmask.tcp).
-    apply_stream_finalmask(outbound, packets, length, interval)
+    # v-noise (18.11.2026): + finalmask.udp noise-запись при комбо
+    # fragment+noise (зеркало легаси freedom.settings.noises).
+    apply_stream_finalmask(outbound, packets, length, interval,
+                           noise_packet, noise_delay)
 
     return {
         "log": {"loglevel": "warning"},

@@ -26,6 +26,30 @@ legacy-паре (freedom-outbound settings.fragment + sockopt.dialerProxy), а �
 миграции (freedom.fragment удалён) читают finalmask. Рубильник:
 CHIMERA_FRAGMENT_FINALMASK=0. См. build_stream_finalmask().
 
+DUAL-схема noise-зеркала (18.11.2026): freedom.noises мигрирует туда же —
+предупреждение ядра (26.10.29, infra/conf/freedom.go, commit 613d8147):
+`"noises" in Freedom` → `"noise" in "streamSettings.finalmask.udp"`.
+Химера зеркалит noises в finalmask.udp ВДОБАВОК к legacy-паре. Точная схема
+(infra/conf/transport_finalmask.go, NoiseMask/NoiseItem):
+  finalmask.udp = [{"type": "noise",
+                    "settings": {"noise": [{"rand": "20-50",
+                                             "delay": "10-20"}]}}]
+  • rand  — Int32Range, длина случайного шума: перенос легаси-поля packet
+    при type="rand" (в NoiseItem «type» = ТИП КОНТЕНТА фиксированного packet:
+    str/hex/base64/array; переносить туда легаси "rand" НЕЛЬЗЯ —
+    «unknown type», отказ конфига)
+  • delay — Int32Range, диапазон мс (как легаси)
+  • reset не задаём: ResetMax=0 → шум one-shot на адрес (transport/internet/
+    finalmask/noise/conn.go:111) — семантика легаси firstWrite
+Совместимость (сверено по тегам репозитория Xray-core): маска "noise" в
+udpmaskLoader и поля rand/delay NoiseItem стабильны с v26.7.28 (июль 2026)
+и присутствуют во ВСЕХ ядрах, знающих finalmask, — т.е. та же матрица, что у
+fragment-dual: ядра до finalmask поле игнорируют целиком (молча), ядра
+v26.7.28+ парсят noise-маску валидно, пост-миграционные (noises удалён) —
+читают её как единственный источник шума. Рубильник точечный:
+CHIMERA_FINALMASK_NOISE=0 (общий CHIMERA_FRAGMENT_FINALMASK=0 глушит
+finalmask целиком). См. build_stream_finalmask_noise().
+
 ВАЖНО: фрагментация применяется ТОЛЬКО к исходящим соединениям (outbounds),
 и ТОЛЬКО в клиентском конфиге (не в серверном xray/config.json на VPS).
 Серверный config.json этим модулем не затрагивается ни при каких условиях.
@@ -236,6 +260,14 @@ def _finalmask_enabled() -> bool:
         not in ("0", "off", "no", "false")
 
 
+def _finalmask_noise_enabled() -> bool:
+    """Рубильник noise-зеркала: CHIMERA_FINALMASK_NOISE=0 — выкл (дефолт вкл).
+    Точечный: глушит только finalmask.udp noise-запись, не весь finalmask
+    (общий CHIMERA_FRAGMENT_FINALMASK=0 глушит finalmask целиком)."""
+    return os.environ.get("CHIMERA_FINALMASK_NOISE", "1").strip().lower() \
+        not in ("0", "off", "no", "false")
+
+
 def build_stream_finalmask(
     packets: str = "",
     length: str = "",
@@ -276,14 +308,74 @@ def build_stream_finalmask(
     }
 
 
+def build_stream_finalmask_noise(
+    noise_packet: str = "",
+    noise_delay: str = "",
+) -> Optional[dict]:
+    """
+    finalmask.udp noise-запись — зеркало легаси freedom.settings.noises.
+
+    Формат (infra/conf/transport_finalmask.go, NoiseMask/NoiseItem):
+        {"type": "noise",
+         "settings": {"noise": [
+             {"rand": "<packet>", "delay": "<delay>"}]}}
+
+    Легаси-поле packet при type="rand" (диапазон длины случайного шума)
+    переносится в NoiseItem.rand (Int32Range), НЕ в NoiseItem.type: «type»
+    здесь — тип контента фиксированного packet (str/hex/base64/array),
+    «rand» как type ядро не знает — отказ конфига. delay — Int32Range,
+    формат «min-max» идентичен легаси.
+
+    None — если параметры шума неполные или рубильник
+    CHIMERA_FINALMASK_NOISE выключен: noise-зеркало не проставляется,
+    fragment-dual не тронут.
+    """
+    if not _finalmask_noise_enabled():
+        return None
+    if not (noise_packet and noise_delay):
+        return None
+    return {
+        "type": "noise",
+        "settings": {
+            "noise": [
+                {
+                    "rand":  noise_packet,
+                    "delay": noise_delay,
+                },
+            ],
+        },
+    }
+
+
 def apply_stream_finalmask(outbound: dict, packets: str, length: str,
-                           interval: str) -> Optional[dict]:
+                           interval: str, noise_packet: Optional[str] = None,
+                           noise_delay: Optional[str] = None) -> Optional[dict]:
     """
     Проставляет streamSettings.finalmask на основной (proxy) outbound.
     Вызывается генераторами (link/noise/mux/fuzzer/config) после сборки
     outbound; возвращает finalmask (или None) для проверок вызывающего кода.
+
+    v-noise (18.11.2026): при заданных noise_packet+noise_delay к tcp-
+    фрагмент-записи добавляется udp noise-запись — DUAL-зеркало легаси
+    freedom.settings.noises (миграция ядра: "noises" in Freedom →
+    "noise" in "streamSettings.finalmask.udp"). Оба рубильника — общий
+    CHIMERA_FRAGMENT_FINALMASK и точечный CHIMERA_FINALMASK_NOISE.
     """
     fm = build_stream_finalmask(packets, length, interval)
+    noise_mask = None
+    if noise_packet and noise_delay:
+        noise_mask = build_stream_finalmask_noise(noise_packet, noise_delay)
+    if not _finalmask_enabled():
+        # общий рубильник глушит finalmask ЦЕЛИКОМ (включая noise-запись)
+        return None
+    if fm is None:
+        # фрагмент выключен (пресет «0»), но шум может быть включён один —
+        # финальная маска тогда состоит из одной noise-записи
+        if noise_mask is None:
+            return None
+        fm = {"udp": [noise_mask]}
+    elif noise_mask is not None:
+        fm = {**fm, "udp": [noise_mask]}
     if fm:
         outbound.setdefault("streamSettings", {})["finalmask"] = fm
     return fm
@@ -462,7 +554,10 @@ def generate_fragment_client_config(
     # DUAL-схема (31.10.2026): + streamSettings.finalmask вдобавок к
     # legacy-паре freedom.fragment+dialerProxy — подготовка к миграции
     # Xray-core (26.10.29: freedom.fragment deprecated → finalmask.tcp).
-    apply_stream_finalmask(outbound, packets, length, interval)
+    # v-noise (18.11.2026): + finalmask.udp noise-запись при комбо
+    # fragment+noise (зеркало легаси freedom.settings.noises).
+    apply_stream_finalmask(outbound, packets, length, interval,
+                           noise_packet, noise_delay)
 
     client_cfg = {
         "log": {"loglevel": "warning"},

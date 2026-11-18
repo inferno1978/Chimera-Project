@@ -164,6 +164,117 @@ class TestStreamFinalmask(unittest.TestCase):
             ob["streamSettings"]["sockopt"]["dialerProxy"], "fragment")
 
 
+class TestStreamFinalmaskNoise(unittest.TestCase):
+    """build_stream_finalmask_noise — DUAL-схема noise-зеркала
+    (миграция Xray 26.10.29: freedom.noises deprecated →
+    streamSettings.finalmask.udp, тип маски "noise"). Проставляется
+    ВДОБАВОК к legacy-паре (freedom.settings.noises) и к tcp-фрагмент-
+    зеркалу; ядра, не знающие finalmask, поле игнорируют целиком
+    (encoding/json) — та же матрица совместимости, что у fragment-dual."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_structure_noise_recipe(self):
+        """Структура noise-маски = NoiseMask/NoiseItem (infra/conf/
+        transport_finalmask.go): легаси packet(type=rand) → rand,
+        легаси delay → delay; «rand» НЕ переносится в type (там — тип
+        контента фиксированного packet: str/hex/base64/array)."""
+        from chimera.modules.fragment_config import build_stream_finalmask_noise
+        nm = build_stream_finalmask_noise("20-50", "10-20")
+        self.assertEqual(nm, {
+            "type": "noise",
+            "settings": {"noise": [
+                {"rand": "20-50", "delay": "10-20"},
+            ]},
+        })
+
+    def test_incomplete_params_return_none(self):
+        """Неполные параметры шума → None: noise-зеркала нет, fragment-dual
+        не тронут (как при комбо без шума)."""
+        from chimera.modules.fragment_config import build_stream_finalmask_noise
+        self.assertIsNone(build_stream_finalmask_noise("", ""))
+        self.assertIsNone(build_stream_finalmask_noise("20-50", ""))
+        self.assertIsNone(build_stream_finalmask_noise("", "10-20"))
+
+    def test_env_knob_noise_off(self):
+        """CHIMERA_FINALMASK_NOISE=0 — точечный escape-hatch (дефолт вкл):
+        глушит только noise-запись, tcp-фрагмент-зеркало живо."""
+        import os
+        from chimera.modules.fragment_config import (
+            build_stream_finalmask_noise, apply_stream_finalmask)
+        with patch.dict(os.environ, {"CHIMERA_FINALMASK_NOISE": "0"}):
+            self.assertIsNone(build_stream_finalmask_noise("20-50", "10-20"))
+            ob = {"tag": "proxy", "streamSettings": {}}
+            fm = apply_stream_finalmask(ob, "1-3", "10-20", "10-20",
+                                        "20-50", "10-20")
+            self.assertEqual(fm, {"tcp": [{
+                "type": "fragment",
+                "settings": {"packets": "1-3", "length": "10-20",
+                             "interval": "10-20"},
+            }]})
+        # дефолт (переменной нет) — включено
+        self.assertIsNotNone(build_stream_finalmask_noise("20-50", "10-20"))
+
+    def test_common_knob_gates_noise_too(self):
+        """CHIMERA_FRAGMENT_FINALMASK=0 глушит finalmask ЦЕЛИКОМ —
+        включая noise-запись (общий рубильник старше и главнее)."""
+        import os
+        from chimera.modules.fragment_config import apply_stream_finalmask
+        with patch.dict(os.environ, {"CHIMERA_FRAGMENT_FINALMASK": "0"}):
+            ob = {"tag": "proxy", "streamSettings": {}}
+            fm = apply_stream_finalmask(ob, "1-3", "10-20", "10-20",
+                                        "20-50", "10-20")
+            self.assertIsNone(fm)
+            self.assertNotIn("finalmask", ob["streamSettings"])
+
+    def test_apply_combo_tcp_and_udp(self):
+        """Комбо fragment+noise: finalmask несёт tcp-фрагмент-запись И
+        udp noise-запись; legacy-пара (dialerProxy + noises на
+        freedom-outbound) не тронута — dual, а не замена."""
+        from chimera.modules.fragment_config import apply_stream_finalmask
+        ob = {"tag": "proxy",
+              "streamSettings": {"sockopt": {"dialerProxy": "fragment"}}}
+        fm = apply_stream_finalmask(ob, "1-3", "10-20", "10-20",
+                                    "20-50", "10-20")
+        self.assertEqual(fm, {
+            "tcp": [{"type": "fragment",
+                     "settings": {"packets": "1-3", "length": "10-20",
+                                  "interval": "10-20"}}],
+            "udp": [{"type": "noise",
+                     "settings": {"noise": [{"rand": "20-50",
+                                             "delay": "10-20"}]}}],
+        })
+        self.assertIs(ob["streamSettings"]["finalmask"], fm)
+        self.assertEqual(
+            ob["streamSettings"]["sockopt"]["dialerProxy"], "fragment")
+
+    def test_apply_noise_only_without_fragment(self):
+        """Фрагмент выключен (пресет «0»), шум включён: финальная маска
+        состоит из одной noise-записи (udp), tcp-ветки нет."""
+        from chimera.modules.fragment_config import apply_stream_finalmask
+        ob = {"tag": "proxy", "streamSettings": {}}
+        fm = apply_stream_finalmask(ob, "", "", "", "20-50", "5-10")
+        self.assertEqual(fm, {"udp": [{
+            "type": "noise",
+            "settings": {"noise": [{"rand": "20-50", "delay": "5-10"}]},
+        }]})
+        self.assertIs(ob["streamSettings"]["finalmask"], fm)
+
+    def test_apply_without_noise_args_only_tcp(self):
+        """Без noise-аргументов — прежнее поведение: только tcp-запись,
+        udp-ветки нет (обратная совместимость fragment-семьи)."""
+        from chimera.modules.fragment_config import apply_stream_finalmask
+        ob = {"tag": "proxy", "streamSettings": {}}
+        fm = apply_stream_finalmask(ob, "tlshello", "10-20", "10-20")
+        self.assertEqual(fm, {"tcp": [{
+            "type": "fragment",
+            "settings": {"packets": "tlshello", "length": "10-20",
+                         "interval": "10-20"},
+        }]})
+        self.assertNotIn("udp", fm)
+
+
 class TestBuildFragmentOutbound(unittest.TestCase):
     """build_fragment_outbound — freedom-outbound (валидная схема Xray-core)."""
 

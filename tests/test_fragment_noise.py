@@ -167,6 +167,13 @@ class TestBuildXrayNoiseJson(unittest.TestCase):
         self.assertEqual(fm["settings"],
                          {"packets": "1-3", "length": "10-20",
                           "interval": "10-20"})
+        # DUAL-схема noise-зеркала (18.11.2026): finalmask.udp несёт
+        # noise-маску — зеркало легаси freedom.settings.noises
+        # (rand/delay = packet/delay, reset не задаём: one-shot)
+        nm = proxy["streamSettings"]["finalmask"]["udp"][0]
+        self.assertEqual(nm["type"], "noise")
+        self.assertEqual(nm["settings"]["noise"],
+                         [{"rand": "20-50", "delay": "10-20"}])
 
     def test_outbound_tags_unique(self):
         """Теги outbound уникальны (proxy/fragment/direct/block)."""

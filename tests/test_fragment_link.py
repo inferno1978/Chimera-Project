@@ -382,6 +382,12 @@ class TestBuildXrayClientJson(unittest.TestCase):
         self.assertEqual(sockopt["dialerProxy"], "fragment")
         self.assertNotIn("fragment", sockopt)
         self.assertNotIn("noise", sockopt)
+        # DUAL-схема noise-зеркала (18.11.2026): finalmask.udp несёт
+        # noise-маску — зеркало легаси noises (rand=packet, delay=delay)
+        fm = proxy["streamSettings"]["finalmask"]
+        self.assertEqual(
+            fm["udp"][0]["settings"]["noise"],
+            [{"rand": "20-50", "delay": "10-20"}])
 
     def test_noise_omitted_when_params_absent(self):
         """Без noise-параметров noises на fragment-outbound нет (обратная
@@ -395,6 +401,9 @@ class TestBuildXrayClientJson(unittest.TestCase):
         sockopt = proxy["streamSettings"]["sockopt"]
         self.assertNotIn("noise", sockopt)
         self.assertNotIn("noises", sockopt)
+        # без noise-параметров — и udp-ветки в finalmask нет
+        # (только tcp-фрагмент-зеркало, прежнее поведение)
+        self.assertNotIn("udp", proxy["streamSettings"]["finalmask"])
 
 
 class TestBuildSingboxJson(unittest.TestCase):

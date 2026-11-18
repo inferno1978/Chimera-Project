@@ -237,7 +237,10 @@ def _build_xray_noise_json(
         }
 
     # DUAL-схема (31.10.2026): + finalmask вдобавок к legacy-паре.
-    apply_stream_finalmask(outbound, frag_packets, frag_length, frag_interval)
+    # v-noise (18.11.2026): + finalmask.udp noise-запись — зеркало
+    # легаси freedom.settings.noises (миграция ядра 26.10.29).
+    apply_stream_finalmask(outbound, frag_packets, frag_length, frag_interval,
+                           noise_packet, noise_delay)
 
     return {
         "log": {"loglevel": "warning"},
