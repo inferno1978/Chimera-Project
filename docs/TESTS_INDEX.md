@@ -2,10 +2,10 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **335** (гейт-манифест: **335**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **337** (гейт-манифест: **337**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
-## AmneziaWG (transport Mode B + standalone 2.0) (32)
+## AmneziaWG (transport Mode B + standalone 2.0) (34)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
 |---|---|---|
@@ -25,6 +25,7 @@
 | [`test_awg_i2i5_mimicry.py`](../tests/test_awg_i2i5_mimicry.py) | Unit-тесты автозаполнения I2-I5 (сверка с генератором ARCHITECT, Task 31): | ✓ |
 | [`test_awg_install_fixes.py`](../tests/test_awg_install_fixes.py) | Юнит-тесты фиксов (E2E fi1 2026-10-03): | ✓ |
 | [`test_awg_ipv6_dualstack.py`](../tests/test_awg_ipv6_dualstack.py) | Unit-тесты для IPv6-интеграции AWG. | ✓ |
+| [`test_awg_link_probe.py`](../tests/test_awg_link_probe.py) | Unit-тесты зонда плеча каскада и классификатора паттернов среды | ✓ |
 | [`test_awg_net_common.py`](../tests/test_awg_net_common.py) | Unit-тесты для chimera/modules/awg_net_common.py. | ✓ |
 | [`test_awg_peers.py`](../tests/test_awg_peers.py) | Unit-тесты для chimera/modules/awg_peers.py. | ✓ |
 | [`test_awg_presets.py`](../tests/test_awg_presets.py) | Unit-тесты для chimera/modules/awg_presets.py. | ✓ |
@@ -33,6 +34,7 @@
 | [`test_awg_qr.py`](../tests/test_awg_qr.py) | Unit-тесты для chimera/modules/awg_qr.py. | ✓ |
 | [`test_awg_qr_31.py`](../tests/test_awg_qr_31.py) | Unit-тесты AWG 3.1 в awg_qr.py — клиентские конфиги и vpn:// URI. | ✓ |
 | [`test_awg_rest_api.py`](../tests/test_awg_rest_api.py) | Unit-тесты для chimera/modules/awg_rest_api.py и интеграции с rest_api. | ✓ |
+| [`test_awg_split_direction.py`](../tests/test_awg_split_direction.py) | Unit-тесты split-direction — пары однонаправленных туннелей entry↔exit | ✓ |
 | [`test_awg_standalone.py`](../tests/test_awg_standalone.py) | Unit-тесты для chimera/modules/awg_standalone.py. | ✓ |
 | [`test_awg_standalone_31.py`](../tests/test_awg_standalone_31.py) | Unit-тесты AWG 3.1 в awg_standalone.py / awg_state.py / awg_peers.py. | ✓ |
 | [`test_awg_state.py`](../tests/test_awg_state.py) | Unit-тесты для chimera/modules/awg_state.py. | ✓ |

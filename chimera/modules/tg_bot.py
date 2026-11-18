@@ -272,6 +272,12 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "traffic_node_down":       "📴",  # активная проба: нода недоступна
         "traffic_node_degraded":   "🐌",  # активная проба: нода тупит (RTT)
         "traffic_node_up":         "🔌",  # активная проба: нода восстановлена
+        # split-direction AWG-каскада (awg_split_direction.py; пара
+        # однонаправленных туннелей для сред «отправить можем, принять
+        # нет» — кейс Виталия, см. AWG_SPLIT_DIRECTION_FAQ)
+        "awg_split_on":        "↔️",   # режим включён (e2e верифицирована)
+        "awg_split_dir_dead":  "🩹",   # плечо умирало, рестарт спас
+        "awg_split_off":       "↩️",   # авто-откат на штатный awg1
         # Naive-каскад: минимальный upstream-watcher (exit_traffic_watcher,
         # мультитранспортность 11.11.2026 — проба upstream Entry→Exit)
         "naive_upstream_down":     "📴",  # Naive: upstream недоступен

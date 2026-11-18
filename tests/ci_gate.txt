@@ -1,4 +1,14 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v19: 337 = 335 + split-direction-семейство (кейс Виталия «AWG между
+# двумя своими VPS при блокировке 16k: отправить можем, принять нет» —
+# test_awg_link_probe зонд плеча L0-L2 (handshake/счётчики → шлюз →
+# большой поток 50+ КБ fwmark-путём) + классификатор 7 паттернов среды
+# + матрица «симптом → пресет»; test_awg_split_direction пара
+# однонаправленных туннелей: конфиги плеч (AllowedIPs пира in-плеча
+# содержит out-адрес entry — dst-роутинг WG), routing-скрипты entry/exit
+# (connmark → in-плечо), лестница включения с e2e-гейтом и откатом
+# БЕЗ переключения транзита, health-тик (ok/e2e-кулдаун/recovered/
+# rollback по fail_limit), watchdog-юниты, интеграция с activate_exit).
 # v18: 335 = 334 + test_nginx_hsts_menu (вопрос сообщества 18.11 «где в
 # меню найти мигратор, чтобы HSTS включить на живой ноде»: TUI-обёртка
 # do_upgrade_vhosts_hsts_interactive над upgrade_vhosts_hsts (16.11) +
@@ -99,6 +109,7 @@ tests.test_awg_diagnose
 tests.test_awg_expires
 tests.test_awg_hw_tuning
 tests.test_awg_i2i5_mimicry
+tests.test_awg_link_probe
 tests.test_awg_install_fixes
 tests.test_awg_ipv6_dualstack
 tests.test_awg_net_common
@@ -114,6 +125,7 @@ tests.test_awg_standalone_31
 tests.test_awg_state
 tests.test_awg_state_race
 tests.test_awg_state_stub_guard
+tests.test_awg_split_direction
 tests.test_awg_transport
 tests.test_awg_transport_31
 tests.test_awg_ui_smoke

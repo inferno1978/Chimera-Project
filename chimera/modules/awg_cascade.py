@@ -1311,6 +1311,20 @@ def awgs_cascade_activate_exit(name: str, probe_timeout: int = 0) -> bool:
         warn(f"Exit-нода '{name}' не найдена в списке каскада")
         return False
 
+    # Split-direction: плечи настроены на endpoint конкретного exit —
+    # переключение активного exit'а в split-режиме разорвёт связку
+    # (транзит уйдёт на другой exit, а плечи смотрят на старый).
+    # Честный отказ с путём решения (канон LB-ветки выше).
+    try:
+        from .awg_split_direction import split_is_on
+        if split_is_on():
+            warn("Каскад в режиме split-direction — переключение exit "
+                 "недоступно (плечи привязаны к текущему exit). Сначала "
+                 "меню 8 → 4 (выключить split), затем переключайте exit")
+            return False
+    except Exception:
+        pass
+
     # FIX 11.11 (дрейф после утери state, живой кейс RU2 — эхо инцидента
     # 08.11): LB в state ВЫКЛ (state перестроен recovery-ом), но живая
     # система несёт leftover LB-диспетчер — mangle-цепочка awg_lb всё
@@ -1930,6 +1944,17 @@ def do_manage_awg_cascade() -> None:
                   "exit, включая российские сайты (RU-IP не светится с этой "
                   "ноды). Выключено — RU-сети идут напрямую (split-tunnel). "
                   "Переключение мгновенное, без переустановки каскада.")
+        try:
+            from .awg_split_direction import split_is_on
+            _split_on = split_is_on(state)
+        except Exception:
+            _split_on = False
+        _box_item("8", f"Split-direction: пара однонаправленных туннелей "
+                 f"{'ВКЛЮЧЁН' if _split_on else 'выключен'}")
+        _box_desc("Кейс «отправить можем — принять нет»: исходящий транзит "
+                  "через одно плечо, входящий — через другое, раздельный "
+                  "health-плечей, e2e-верификация, авто-откат на штатный "
+                  "awg1. Внутри: зонд плеча (портрет поля + вердикт).")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -1976,6 +2001,10 @@ def do_manage_awg_cascade() -> None:
                 else:
                     warn("Не переключилось (см. выше)")
             input(f"{core.BLUE}Нажмите Enter...{NC}")
+        elif ch == "8":
+            # split-direction — пара однонаправленных туннелей
+            from .awg_split_direction import do_manage_awg_split_direction
+            do_manage_awg_split_direction()
         elif ch in ("q", ""):
             break
 
@@ -2468,6 +2497,20 @@ def _awgs_cascade_status() -> None:
         except Exception:
             pass
 
+        # Split-direction (краткая строка статуса; полная — меню 8 → 5)
+        try:
+            from .awg_split_direction import split_state_get
+            _sbox = split_state_get(state)
+            if _sbox.get("endpoint"):
+                _on = "ВКЛЮЧЁН" if _sbox.get("enabled") else "выключен"
+                _col = GREEN if _sbox.get("enabled") else DIM
+                _box_row(f"  Split-direction: {_col}{_on}{NC} — "
+                         f"out:{_sbox.get('port_out', '?')} / "
+                         f"in:{_sbox.get('port_in', '?')} "
+                         f"({_sbox.get('endpoint')})")
+        except Exception:
+            pass
+
     elif role == "exit":
         from .awg_protocol import awg_protocol_label
         _pv = state.get("protocol_version", "2.0")
@@ -2546,4 +2589,15 @@ def awgs_cascade_set_exit_all(enabled: bool) -> bool:
     _awgs_cascade_create_routing_script(subnet, subnet_v6=v6)
     core._run(["systemctl", "restart", "awg-cascade-routing"],
               check=False, quiet=True)
+
+    # Split-direction жив поверх каскадных правил: его mark-правило
+    # зеркалит форму RU-исключения (вкл/выкл exit-all меняет её) —
+    # перегенерируем split-скрипт, чтобы формы не разъехались (две
+    # конкурирующие MARK-цепи = последняя затирает fwmark).
+    try:
+        from .awg_split_direction import split_is_on, split_apply_entry
+        if split_is_on():
+            split_apply_entry()
+    except Exception:
+        pass
     return True

@@ -237,6 +237,81 @@ AWGS_B4_EXEMPT_BIT: int = 0x8000
 AWGS_CASCADE_FWMARK_LEGACY: int = 0x2000  # легаси-марка (без b4-exempt бита) — только для cleanup
 AWGS_CASCADE_FWMARK: int = 0x8200  # 33280 = 0x8000 (b4-exempt) | 0x0200 (тег каскада)
 
+# ── Split-direction: пара однонаправленных туннелей entry↔exit ───────────────
+# Режим для сред, где штатный двунаправленный туннель живёт только в одну
+# сторону (кейс «Виталий»: AWG между двумя своими VPS — «отправить можем,
+# принять нет»; собрал вручную два туннеля: один отправляет, другой
+# принимает). Chimera оформляет эту схему штатно: два AWG-туннеля
+# awg-split-out (несёт ИСХОДЯЩИЙ транзит RU→exit) и awg-split-in (несёт
+# ВХОДЯЩИЙ транзит exit→RU), каждое направление — отдельная сущность со
+# своим health-check; штатный awg1 остаётся горячим fallback-путём.
+#
+# Имена интерфейсов НЕ awg2/awg3 — те программно заняты слотами LB
+# (awg1..awg16, awg_cascade_lb), «awg-split-*» не пересекается.
+AWGS_SPLIT_OUT_IFACE: str = "awg-split-out"
+AWGS_SPLIT_IN_IFACE:  str = "awg-split-in"
+AWGS_SPLIT_OUT_CONF:  Path = AWGS_CONF_DIR / "awg-split-out.conf"
+AWGS_SPLIT_IN_CONF:   Path = AWGS_CONF_DIR / "awg-split-in.conf"
+
+# Подсети плеч: /24 на каждое, не пересекаются ни с клиентской awg0
+# (10.66.66.0/24 / 10.66.67.0/24), ни с каскадным линком (172.16.61.0/24),
+# ни с multi-exit-подсетями (172.16.xx.0/24 от exit-боксов).
+AWGS_SPLIT_OUT_SUBNET: str = "172.16.62.0/24"   # .1 = exit, .2 = entry
+AWGS_SPLIT_IN_SUBNET:  str = "172.16.63.0/24"   # .1 = exit, .2 = entry
+
+# UDP-порты серверных сторон на exit (ListenPort). Дефолты не пересекаются
+# ни с AWGS_DEFAULT_PORT (51820), ни с каскадными 52831/528xx.
+AWGS_SPLIT_PORT_OUT: int = 52840
+AWGS_SPLIT_PORT_IN:  int = 52841
+
+# Fwmark/таблицы: НЕ 0x82xx/20xx — тот блок занят каскадом (0x8200→2000) и
+# слотами LB (0x8201..0x8210 → 2001..2016). Тег split = 0x0400, бит 0x8000
+# (b4-exempt) сохранён в каждой марке — каскадный транзит шифруется до
+# exit, DPI-bypass b4 ему не нужен (см. комментарий у AWGS_CASCADE_FWMARK).
+AWGS_SPLIT_FWMARK_OUT: int = 0x8402   # транзит RU→exit через awg-split-out
+AWGS_SPLIT_FWMARK_IN:  int = 0x8403   # connmark/марка возврата exit→RU
+AWGS_SPLIT_TABLE_OUT:  int = 2402
+AWGS_SPLIT_TABLE_IN:   int = 2403
+
+# State-ключ режима в awg_standalone_state.json.
+AWGS_SPLIT_STATE_KEY: str = "split_direction"
+
+# Тайминги watchdog (канон AWGS_FAILOVER_*): handshake старше N сек =
+# подозрение на смерть; ожидание handshake после рестарта туннеля.
+AWGS_SPLIT_STALE_SEC: int = 300
+AWGS_SPLIT_PROBE_SEC: int = 18
+# End-to-end зонд (ping через оба плеча) — не чаще раза в N секунд
+# (ежеминутный health-тик гоняет дешёвую проверку handshake; дорогой
+# e2e-пробег с кулдауном, чтобы не греть канал зря).
+AWGS_SPLIT_E2E_INTERVAL_SEC: int = 300
+# Подряд неудачных health-тиков до аварийного отката на штатный awg1.
+AWGS_SPLIT_FAIL_LIMIT: int = 3
+
+# Зонд плеча (awg_link_probe): большой прогон через каскад fwmark-путём.
+# 48 x 1200 байт ≈ 57 КБ в каждую сторону — заведомо за порогом
+# антитуннеля 16–32 КБ (FAQ RU_NODE_CASCADE §3.2): живой поток доживает
+# до конца, режущийся — сыплет потерями на середине.
+AWGS_PROBE_PING_COUNT: int = 48
+AWGS_PROBE_PING_SIZE:  int = 1200
+# Потери большого зонда ≥ N% = «поток режется по объёму» (stream-cut).
+AWGS_PROBE_CUT_LOSS_PCT: int = 80
+# Потери < N% при живом handshake = «плечо живо в обе стороны».
+AWGS_PROBE_OK_LOSS_PCT: int = 20
+# Хост e2e-зонда (ICMP отвечает; НЕ хардкод в логику — параметр).
+AWGS_PROBE_HOST: str = "1.1.1.1"
+
+# Файлы watchdog (канон awg-cascade-failover: wrapper + svc + timer).
+AWGS_SPLIT_SCRIPT: Path = Path("/usr/local/sbin/awg-split-direction.sh")
+AWGS_SPLIT_SVC:    Path = Path("/etc/systemd/system/awg-split-direction.service")
+AWGS_SPLIT_TIMER:  Path = Path("/etc/systemd/system/awg-split-direction.timer")
+# Entry-скрипт правил split-режима (ставится ПОСЛЕ каскадного awg-routing.sh
+# и живёт отдельно — не патчим чужой скрипт).
+AWGS_SPLIT_ENTRY_SCRIPT: Path = AWGS_CASCADE_DIR / "awg-split-entry.sh"
+AWGS_SPLIT_ENTRY_SVC: Path = Path("/etc/systemd/system/awg-split-entry-routing.service")
+# Exit-сторона: routing-скрипт + юнит (настраиваются в меню НА exit-ноде).
+AWGS_SPLIT_EXIT_SCRIPT: Path = AWGS_CASCADE_DIR / "awg-split-exit.sh"
+AWGS_SPLIT_EXIT_SVC: Path = Path("/etc/systemd/system/awg-split-exit-routing.service")
+
 # ── Источники ru.zone для каскада ───────────────────────────────────────────
 AWGS_RU_ZONE_URL: str = "https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone"
 # Fallback — статический снимок ru.zone из репозитория АВТОРА amneziawg-installer
