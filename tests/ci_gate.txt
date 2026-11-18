@@ -1,4 +1,9 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v18: 335 = 334 + test_nginx_hsts_menu (вопрос сообщества 18.11 «где в
+# меню найти мигратор, чтобы HSTS включить на живой ноде»: TUI-обёртка
+# do_upgrade_vhosts_hsts_interactive над upgrade_vhosts_hsts (16.11) +
+# пункт 5d в меню 1 — dry-run/применить/отмена, отчёты ok/no-op/провал
+# nginx -t, EOF/Ctrl+C, исключение апгрейдера, врезка пункта в _core).
 # v17: 334 = 330 + smartdns-семейство (Python-порт smartdns-installer v3.0.0:
 # DoH/DoT stealth-нода в двух режимах standalone/companion — test_smartdns_stack
 # конфиги xray/движков/nginx drop-in + cover site + версии; test_smartdns_firewall
@@ -257,6 +262,7 @@ tests.test_network_bench
 tests.test_network_setup
 tests.test_nginx_cdn_masking_config
 tests.test_nginx_cleanup_stale_vhosts
+tests.test_nginx_hsts_menu
 tests.test_nginx_reality_reinstall
 tests.test_nginx_stub_hsts_upgrade
 tests.test_nginx_watchdog

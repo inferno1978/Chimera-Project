@@ -2,7 +2,7 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **334** (гейт-манифест: **334**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **335** (гейт-манифест: **335**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
 ## AmneziaWG (transport Mode B + standalone 2.0) (32)
@@ -133,6 +133,25 @@
 | [`test_ripe_file_age.py`](../tests/test_ripe_file_age.py) | Unit-тесты для chimera/modules/ripe_file_age.py. | ✓ |
 | [`test_ru_subnets.py`](../tests/test_ru_subnets.py) | Unit-тесты для chimera/modules/ru_subnets.py. | ✓ |
 
+## Установка/bootstrap (14)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_bootstrap_mirrors.py`](../tests/test_bootstrap_mirrors.py) | Unit-тесты мульти-источникового bootstrap.sh (CHIMERA_MIRROR / CHIMERA_BRANCH). | ✓ |
+| [`test_emergency_repair_socket_wait.py`](../tests/test_emergency_repair_socket_wait.py) | Юнит-тест на логику ожидания Unix-сокета в аварийном восстановлении. | ✓ |
+| [`test_install_prompts.py`](../tests/test_install_prompts.py) | Unit-тесты для chimera/modules/install_prompts.py — _prompt_h1_h4_unique(). | ✓ |
+| [`test_nginx_cdn_masking_config.py`](../tests/test_nginx_cdn_masking_config.py) | Регрессионные тесты на баги в CDN masking профиле nginx-конфига: | ✓ |
+| [`test_nginx_cleanup_stale_vhosts.py`](../tests/test_nginx_cleanup_stale_vhosts.py) | Тесты для chimera.modules.nginx_setup._cleanup_stale_chimera_vhosts. | ✓ |
+| [`test_nginx_hsts_menu.py`](../tests/test_nginx_hsts_menu.py) | Тесты для TUI-обёртки HSTS-апгрейда живых vhost'ов (меню 1 → 5d). | ✓ |
+| [`test_nginx_reality_reinstall.py`](../tests/test_nginx_reality_reinstall.py) | — | ✓ |
+| [`test_nginx_stub_hsts_upgrade.py`](../tests/test_nginx_stub_hsts_upgrade.py) | Тесты для chimera.modules.nginx_setup.upgrade_vhosts_hsts. | ✓ |
+| [`test_nginx_watchdog.py`](../tests/test_nginx_watchdog.py) | Unit-тесты для chimera/modules/nginx_watchdog.py. | ✓ |
+| [`test_secure_bootstrap.py`](../tests/test_secure_bootstrap.py) | Тесты безопасной мульти-зеркальной установки (CHIMERA SECURE INSTALL). | ✓ |
+| [`test_ssl_cert_guard.py`](../tests/test_ssl_cert_guard.py) | : защита LE-сертификата + устойчивая DNS-проверка (инцидент 203.0.113.102). | ✓ |
+| [`test_ssl_certbot.py`](../tests/test_ssl_certbot.py) | Unit-тесты для chimera/modules/ssl_certbot.py. | ✓ |
+| [`test_uninstall_dns_alive.py`](../tests/test_uninstall_dns_alive.py) | Regression-тесты инцидента (server-ru): ПОЛНОЕ удаление Chimera | ✓ |
+| [`test_uninstall_nginx_safety.py`](../tests/test_uninstall_nginx_safety.py) | Regression-тесты для критического бага в uninstall.py. | ✓ |
+
 ## Hysteria2 (14)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -170,24 +189,6 @@
 | [`test_singbox_vless_ws_cdn_fix.py`](../tests/test_singbox_vless_ws_cdn_fix.py) | Тесты для v4.23.1 — фиксы двух багов из v4.23: | ✓ |
 | [`test_singbox_vless_ws_cdn_fix2.py`](../tests/test_singbox_vless_ws_cdn_fix2.py) | Тесты для v4.23.2 — 4 продакшн-фикса из v4.23.1: | ✓ |
 | [`test_singbox_vless_ws_cdn_fix3.py`](../tests/test_singbox_vless_ws_cdn_fix3.py) | Тесты для v4.23.3 — 2 фикса порядка операций: | ✓ |
-
-## Установка/bootstrap (13)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_bootstrap_mirrors.py`](../tests/test_bootstrap_mirrors.py) | Unit-тесты мульти-источникового bootstrap.sh (CHIMERA_MIRROR / CHIMERA_BRANCH). | ✓ |
-| [`test_emergency_repair_socket_wait.py`](../tests/test_emergency_repair_socket_wait.py) | Юнит-тест на логику ожидания Unix-сокета в аварийном восстановлении. | ✓ |
-| [`test_install_prompts.py`](../tests/test_install_prompts.py) | Unit-тесты для chimera/modules/install_prompts.py — _prompt_h1_h4_unique(). | ✓ |
-| [`test_nginx_cdn_masking_config.py`](../tests/test_nginx_cdn_masking_config.py) | Регрессионные тесты на баги в CDN masking профиле nginx-конфига: | ✓ |
-| [`test_nginx_cleanup_stale_vhosts.py`](../tests/test_nginx_cleanup_stale_vhosts.py) | Тесты для chimera.modules.nginx_setup._cleanup_stale_chimera_vhosts. | ✓ |
-| [`test_nginx_reality_reinstall.py`](../tests/test_nginx_reality_reinstall.py) | — | ✓ |
-| [`test_nginx_stub_hsts_upgrade.py`](../tests/test_nginx_stub_hsts_upgrade.py) | Тесты для chimera.modules.nginx_setup.upgrade_vhosts_hsts. | ✓ |
-| [`test_nginx_watchdog.py`](../tests/test_nginx_watchdog.py) | Unit-тесты для chimera/modules/nginx_watchdog.py. | ✓ |
-| [`test_secure_bootstrap.py`](../tests/test_secure_bootstrap.py) | Тесты безопасной мульти-зеркальной установки (CHIMERA SECURE INSTALL). | ✓ |
-| [`test_ssl_cert_guard.py`](../tests/test_ssl_cert_guard.py) | : защита LE-сертификата + устойчивая DNS-проверка (инцидент 203.0.113.102). | ✓ |
-| [`test_ssl_certbot.py`](../tests/test_ssl_certbot.py) | Unit-тесты для chimera/modules/ssl_certbot.py. | ✓ |
-| [`test_uninstall_dns_alive.py`](../tests/test_uninstall_dns_alive.py) | Regression-тесты инцидента (server-ru): ПОЛНОЕ удаление Chimera | ✓ |
-| [`test_uninstall_nginx_safety.py`](../tests/test_uninstall_nginx_safety.py) | Regression-тесты для критического бага в uninstall.py. | ✓ |
 
 ## Фрагментация TLS (fragment-стек) (13)
 

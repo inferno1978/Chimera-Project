@@ -1172,19 +1172,56 @@ class TestXrayConfigManipulation(unittest.TestCase):
         self.assertEqual(rules[0]["balancerTag"], "chain-balancer")
 
     def test_inject_dokodemo_idempotent(self):
-        """Если dokodemo уже есть — возвращается False без изменений."""
+        """Если dokodemo уже есть (v4+v6+rule) — False без изменений.
+
+        FIX 18.11: фикстура устарела после dual-stack фикса 16.11 — собиралась
+        только с v4-тегом (и пустым routing), а _xray_inject_dokodemo с тех
+        пор ДОБАВЛЯЕТ недостающий v6-слушатель и v6-тег в rule (миграция
+        конфигов до фикса) → честно возвращала True, тест краснел.
+        Идемпотентное состояние = ОБА слушателя + rule с обоими тегами.
+        """
         from chimera.modules.mtproto import (
-            _xray_inject_dokodemo, XRAY_TPROXY_TAG,
+            _xray_inject_dokodemo, XRAY_TPROXY_TAG, XRAY_TPROXY_TAG_V6,
         )
         cfg = {
-            "inbounds": [{"tag": XRAY_TPROXY_TAG, "port": 10811}],
-            "routing": {"rules": []},
+            "inbounds": [
+                {"tag": XRAY_TPROXY_TAG, "port": 10811},
+                {"tag": XRAY_TPROXY_TAG_V6, "port": 10811},
+            ],
+            "routing": {"rules": [
+                {"type": "field",
+                 "inboundTag": [XRAY_TPROXY_TAG, XRAY_TPROXY_TAG_V6],
+                 "outboundTag": "proxy"},
+            ]},
         }
         result = _xray_inject_dokodemo(cfg, 10811)
         self.assertFalse(result)
         # Конфиг не изменён
-        self.assertEqual(len(cfg["inbounds"]), 1)
-        self.assertEqual(len(cfg["routing"]["rules"]), 0)
+        self.assertEqual(len(cfg["inbounds"]), 2)
+        self.assertEqual(len(cfg["routing"]["rules"]), 1)
+        self.assertEqual(cfg["routing"]["rules"][0]["inboundTag"],
+                         [XRAY_TPROXY_TAG, XRAY_TPROXY_TAG_V6])
+
+    def test_inject_dokodemo_migrates_v4_only_to_dualstack(self):
+        """Конфиг до dual-stack фикса 16.11 (только v4): v6-слушатель
+        добавляется, routing rule расширяется v6-тегом — True (миграция)."""
+        from chimera.modules.mtproto import (
+            _xray_inject_dokodemo, XRAY_TPROXY_TAG, XRAY_TPROXY_TAG_V6,
+        )
+        cfg = {
+            "inbounds": [{"tag": XRAY_TPROXY_TAG, "port": 10811}],
+            "routing": {"rules": [
+                {"type": "field", "inboundTag": [XRAY_TPROXY_TAG],
+                 "outboundTag": "proxy"},
+            ]},
+        }
+        result = _xray_inject_dokodemo(cfg, 10811)
+        self.assertTrue(result)
+        tags = [ib["tag"] for ib in cfg["inbounds"]]
+        self.assertIn(XRAY_TPROXY_TAG_V6, tags)
+        self.assertEqual(len(cfg["inbounds"]), 2)
+        self.assertIn(XRAY_TPROXY_TAG_V6,
+                      cfg["routing"]["rules"][0]["inboundTag"])
 
     def test_inject_dokodemo_creates_routing_if_absent(self):
         """Если в cfg нет 'routing' ключа — он создаётся."""

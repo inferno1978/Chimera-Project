@@ -7983,6 +7983,7 @@ def _menu_install_system() -> None:
         _box_item("5", "🔧 Обновить Xray-core")
         _box_item("5b", f"♻️  Перегенерировать конфиг Xray  {DIM}(из state.json; опция выставить minClientVer — гейт для ядер 26.7.x и sing-box/mihomo-клиентов){NC}")
         _box_item("5c", f"⬇️  Даунгрейд ядра Xray  {DIM}(26.7.28 / 26.6.27 / 26.3.27 — конфиг подгоняется под эпоху автоматически; вернуть sing-box-клиентов){NC}")
+        _box_item("5d", f"🔒 HSTS-апгрейд живых vhost'ов  {DIM}(nginx: Strict-Transport-Security в заглушки без переустановки — dry-run / применить){NC}")
         _box_item("6", f"🛠️  Аварийное восстановление  {DIM}(из state.json, без переустановки){NC}")
         _box_item("7", "🗑️  Удалить установку")
         _box_item("8", "🧪 Запустить unit-тесты")
@@ -8022,6 +8023,13 @@ def _menu_install_system() -> None:
                 do_xray_downgrade_interactive()
             except ImportError as _e:
                 warn(f"Модуль даунгрейда ядра не найден: {_e}")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "5d":
+            try:
+                from chimera.modules.nginx_setup import do_upgrade_vhosts_hsts_interactive
+                do_upgrade_vhosts_hsts_interactive()
+            except ImportError as _e:
+                warn(f"Модуль nginx_setup не найден: {_e}")
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "6":
             do_emergency_repair()

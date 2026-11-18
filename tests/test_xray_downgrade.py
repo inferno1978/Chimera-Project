@@ -181,6 +181,19 @@ class _TmpBase(unittest.TestCase):
         sys.modules["chimera._core"] = self._fake_core
         self._saved_xi = sys.modules.get("chimera.modules.xray_install")
 
+        # Анти-загрязнение между файлами сьюта (инцидент 18.11): tearDownModule
+        # соседнего файла (например, test_nginx_stub_hsts_upgrade) выпиливает
+        # из sys.modules ВСЕ chimera.*, отсутствовавшие в его снапшоте — включая
+        # наш module-level xdg, добавленный при коллекции. Ленивый импорт в
+        # xray_install.do_xray_update_interactive (строка ~3006) тогда создаёт
+        # СВЕЖИЙ xray_downgrade, чьи модульные константы STATE_FILE /
+        # XRAY_CONFIG_PATHS указывают на ПРОД-пути (модуль держит их сам, не
+        # через _core) — подгонка min_client_ver пишет мимо tmp-state теста
+        # (а на живой CI-ноде — в прод-state.json). Регистрируем СВОЙ xdg
+        # (ровно тот объект, что патчим ниже) перед каждым тестом.
+        self._saved_xdg = sys.modules.get("chimera.modules.xray_downgrade")
+        sys.modules["chimera.modules.xray_downgrade"] = xdg
+
         patcher = patch.object(xdg, "STATE_FILE", self.state_file)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -197,6 +210,10 @@ class _TmpBase(unittest.TestCase):
             sys.modules.pop("chimera.modules.xray_install", None)
         else:
             sys.modules["chimera.modules.xray_install"] = self._saved_xi
+        if self._saved_xdg is None:
+            sys.modules.pop("chimera.modules.xray_downgrade", None)
+        else:
+            sys.modules["chimera.modules.xray_downgrade"] = self._saved_xdg
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def _write_state(self, d: dict):

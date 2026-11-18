@@ -26,12 +26,19 @@ AWG_EXIT_ENABLED, PARAM_USE_DNSCRYPT) читаются из _core через _co
 STAGE_NGINX_DONE мутируется через setattr(core, ...) — это эквивалент
 `global STAGE_NGINX_DONE; STAGE_NGINX_DONE = True` в старом _core.py.
 
+РКН-волна 16.11 (HSTS, фикс 8824000 → живые ноды):
+  • upgrade_vhosts_hsts(apply)           — идемпотентный HSTS-апгрейд ЖИВЫХ vhost'ов
+                                           (бэкап + nginx -t гейт + rollback + dry-run)
+  • do_upgrade_vhosts_hsts_interactive() — TUI-обёртка над апгрейдером: меню 1 → 5d
+                                           (dry-run / применить + человекочитаемый отчёт)
+
 Точки входа из _core.py:
     from chimera.modules.nginx_setup import (
         setup_nginx_rate_limit, create_website,
         _create_techhub, _create_nexcloud, _create_simple_site,
         _ensure_nginx_sites_enabled_include,
         setup_nginx_temp, setup_nginx_final, setup_nginx_systemd_override,
+        do_upgrade_vhosts_hsts_interactive,
     )
 
 Доступ к helpers ядра (info/warn/success/_run/log_to_file/find_nginx_bin) —
@@ -519,6 +526,94 @@ def upgrade_vhosts_hsts(apply: bool = True) -> dict:
         pass
     return {"ok": True, "changed": changed, "reloaded": reloaded,
             "report": report}
+
+
+def do_upgrade_vhosts_hsts_interactive() -> None:
+    """Интерактивный HSTS-апгрейд живых vhost'ов (меню 1 → 5d).
+
+    TUI-обёртка над upgrade_vhosts_hsts(): dry-run или применение +
+    человекочитаемый отчёт (изменённые файлы / бэкапы / reload).
+
+    Ответ на вопрос сообщества 18.11 («где в меню найти мигратор, чтобы
+    HSTS включить на живой ноде»): до этого upgrade_vhosts_hsts() была
+    библиотечной функцией — на ноде её звали python -c одной строкой,
+    из меню управление было недоступно.
+    """
+    core = _core_module()
+    warn = core.warn
+    CYAN, NC = core.CYAN, core.NC
+    DIM, GREEN, RED = core.DIM, core.GREEN, core.RED
+    _box_top, _box_row = core._box_top, core._box_row
+    _box_sep, _box_item = core._box_sep, core._box_item
+    _box_back, _box_bottom = core._box_back, core._box_bottom
+
+    # ── Экран 1: что делает + выбор ────────────────────────────────────
+    print()
+    _box_top("🔒 HSTS-АПГРЕЙД ЖИВЫХ VHOST'ОВ (NGINX)")
+    _box_row()
+    _box_row("  Добавляет заголовок Strict-Transport-Security")
+    _box_row("  (max-age=63072000 — 2 года) в ЖИВЫЕ chimera-заглушки nginx,")
+    _box_row("  сгенерированные ДО появления HSTS в шаблонах (фикс 8824000).")
+    _box_row("  Переустановка nginx-части не нужна.")
+    _box_row()
+    _box_row(f"  {DIM}• идемпотентно: повторный прогон — no-op;{NC}")
+    _box_row(f"  {DIM}• бэкап каждого файла (.bak-hsts-<ts>) рядом с target'ом;{NC}")
+    _box_row(f"  {DIM}• nginx -t гейт: провал → полный rollback изменений;{NC}")
+    _box_row(f"  {DIM}• reload — только при изменениях; блоки с HSTS (фронты{NC}")
+    _box_row(f"  {DIM}    панелей) и чужие vhost'ы не трогаются вовсе.{NC}")
+    _box_row()
+    _box_item("1", f"🔍 Dry-run  {DIM}(показать, что изменится — без записей){NC}")
+    _box_item("2", f"🔒 Применить  {DIM}(бэкап + nginx -t + reload){NC}")
+    _box_row()
+    _box_back()
+    _box_bottom()
+    try:
+        ch = input(f"{CYAN}Выбор:{NC} ").strip()
+    except (KeyboardInterrupt, EOFError):
+        return
+    if ch not in ("1", "2"):
+        return
+
+    apply_changes = ch == "2"
+    try:
+        result = upgrade_vhosts_hsts(apply=apply_changes)
+    except Exception as exc:
+        warn(f"HSTS-апгрейд упал с исключением: {exc}")
+        return
+
+    # ── Экран 2: отчёт ─────────────────────────────────────────────────
+    changed = result.get("changed") or []
+    reloaded = bool(result.get("reloaded"))
+    print()
+    if result.get("ok"):
+        _box_top("🔒 HSTS-АПГРЕЙД — ОТЧЁТ")
+        _box_row()
+        if apply_changes:
+            if changed:
+                tail = (", nginx перезагружен" if reloaded else
+                        " (reload не удался — конфиг валиден, продолжает "
+                        "работать прежний)")
+                _box_row(f"  {GREEN}Готово:{NC} HSTS добавлен в "
+                         f"{GREEN}{len(changed)}{NC} vhost(ов){tail}")
+            else:
+                _box_row(f"  {GREEN}Изменений не требуется:{NC} HSTS уже на "
+                         "месте во всех chimera-заглушках")
+        else:
+            _box_row("  Dry-run — файлы не менялись:")
+        _box_row()
+        for line in result.get("report") or []:
+            _box_row(f"  {line}")
+    else:
+        _box_top("🔒 HSTS-АПГРЕЙД — ПРОВАЛ")
+        _box_row()
+        _box_row(f"  {RED}nginx -t провалился — все изменения откачены.{NC}")
+        _box_row("  Живая конфигурация не тронута (бэкапы сохранены):")
+        _box_row()
+        for line in result.get("report") or []:
+            _box_row(f"  {line}")
+    _box_row()
+    _box_back()
+    _box_bottom()
 
 
 def setup_nginx_temp(domain: Optional[str] = None) -> None:
