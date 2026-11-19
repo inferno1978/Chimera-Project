@@ -32,13 +32,22 @@ STAGE_NGINX_DONE мутируется через setattr(core, ...) — это �
   • do_upgrade_vhosts_hsts_interactive() — TUI-обёртка над апгрейдером: меню 1 → 5d
                                            (dry-run / применить + человекочитаемый отчёт)
 
+nginx.org-перевод флота 19.11 (HTTP/2-синтаксис, порог директивы 1.25.1):
+  • upgrade_vhosts_http2_syntax(apply)   — идемпотентная миграция ЖИВЫХ vhost'ов:
+                                           'listen … ssl http2;' → 'listen … ssl;'
+                                           + 'http2 on;' (бэкап + nginx -t гейт +
+                                           rollback + dry-run; чужие vhost'ы — пропуск)
+  • do_upgrade_vhosts_http2_interactive() — TUI-обёртка: меню 1 → 5e
+  • порог версии в setup_nginx_final исправлен 1.25 → 1.25.1 (на 1.25.0
+    директивы http2 on; ещё нет — unknown directive; см. также _nginx_version_tuple)
+
 Точки входа из _core.py:
     from chimera.modules.nginx_setup import (
         setup_nginx_rate_limit, create_website,
         _create_techhub, _create_nexcloud, _create_simple_site,
         _ensure_nginx_sites_enabled_include,
         setup_nginx_temp, setup_nginx_final, setup_nginx_systemd_override,
-        do_upgrade_vhosts_hsts_interactive,
+        do_upgrade_vhosts_hsts_interactive, do_upgrade_vhosts_http2_interactive,
     )
 
 Доступ к helpers ядра (info/warn/success/_run/log_to_file/find_nginx_bin) —
@@ -210,17 +219,20 @@ def _create_simple_site(
 # =============================================================================
 #  ШАГ 10: NGINX ВРЕМЕННЫЙ КОНФИГ
 # =============================================================================
-def _ensure_nginx_sites_enabled_include() -> None:
+def _ensure_nginx_sites_enabled_include(nginx_conf: Optional[Path] = None) -> None:
     """
     nginx из официального репо (nginx.org) использует conf.d/ и не включает
     sites-enabled/ по умолчанию. Эта функция добавляет:
         include /etc/nginx/sites-enabled/*;
     после строки include conf.d в блоке http {} если отсутствует.
+
+    nginx_conf (v5.7, nginx_updater-гард): необязательный путь — по умолчанию
+    системный /etc/nginx/nginx.conf; тесты подставляют свой tmp-файл.
     """
     core = _core_module()
     info = core.info
     warn = core.warn
-    nginx_conf = Path("/etc/nginx/nginx.conf")
+    nginx_conf = nginx_conf or Path("/etc/nginx/nginx.conf")
     if not nginx_conf.exists():
         return
     text = nginx_conf.read_text()
@@ -616,6 +628,295 @@ def do_upgrade_vhosts_hsts_interactive() -> None:
     _box_bottom()
 
 
+# ── HTTP/2-синтаксис живых vhost'ов (19.11, перевод флота на nginx.org) ───────
+
+_HTTP2_BAK_SUFFIX = ".bak-http2"
+_HTTP2_ON_LINE = "http2 on;"
+# Маркеры chimera-владения файлом: фронты панелей несут шапку «# Chimera …
+# Сгенерировано <модуль>.py», заглушки — X-Robots-Tag, REALITY — proxy_protocol
+# и /dev/shm/. Файл с чужим vhost'ом (нет ни одного маркера) не трогаем.
+_HTTP2_FILE_MARKERS = ("# Chimera", "Сгенерировано", "X-Robots-Tag",
+                       "proxy_protocol", "/dev/shm/", "xver")
+
+# listen … ssl http2 [proxy_protocol|default_server|…] → выкидываем http2 из
+# listen (группа 2 хвост строки: ';', ' proxy_protocol;', ' default_server;').
+# re.M: паттерн работает и по целому файлу (search в пре-фильтре), и по
+# одной строке (match в цикле правки).
+_LISTEN_SSL_HTTP2_RE = re.compile(
+    r"^(\s*listen\s+[^;]*?)\s+ssl\s+http2\b(.*)$", re.M)
+
+
+def _nginx_version_tuple():
+    """(major, minor, patch) живого nginx или None (не установлен/ошибка)."""
+    core = _core_module()
+    _find = getattr(core, "find_nginx_bin", None)
+    _bin = (_find() if callable(_find) else None) or "/usr/sbin/nginx"
+    try:
+        r = core._run([_bin, "-v"], capture=True, check=False)
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)",
+                      (getattr(r, "stderr", "") or "") + (getattr(r, "stdout", "") or ""))
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+    except Exception:
+        return None
+
+
+def upgrade_vhosts_http2_syntax(apply: bool = True) -> dict:
+    """Идемпотентная миграция ЖИВЫХ vhost'ов на синтаксис `http2 on;`.
+
+    Контекст: параметр `http2` в listen объявлен deprecated начиная с nginx
+    1.25.1 — конфиг работает, но каждый `nginx -t`/reload сыплет варнингом
+    «the "listen ... http2" option is deprecated, use the "http2 on"
+    directive instead». Весь флот сгенерировал vhost'ы во времена
+    дистрибутивных nginx (1.18/1.24), где inline-параметр был единственным
+    вариантом; после перевода нод на nginx.org 1.30.7 (CVE-2026-123633 /
+    CVE-2026-123007, HTTP/2 RCE) живые конфиги продолжают писать старый
+    синтаксис. Переустановка ради косметики не нужна.
+
+    Мигратор (паттерн upgrade_vhosts_hsts, РКН-волна 16.11):
+      • скан sites-enabled (симлинки резолвятся к target'у в
+        sites-available), правятся ТОЛЬКО listen-строки с `ssl http2`
+        (TCP :443/:8444, dual-stack [::], REALITY-сокеты
+        `listen unix:/dev/shm/… ssl http2 proxy_protocol`);
+      • в каждый затронутый server-блок вставляется `http2 on;` после
+        последней listen-строки (с тем же отступом); блоки, где `http2 on;`
+        уже есть, получают только чистку listen — дубль не вставляется;
+      • чужие vhost'ы (нет ни одного маркера _HTTP2_FILE_MARKERS) не
+        трогаются вовсе — о них пишется в отчёт;
+      • гейт версии: nginx < 1.25.1 → полный no-op (там `http2 on;` —
+        unknown directive, а старый синтаксис легален и варнингов не даёт);
+      • перед правкой — бэкап <файл>.bak-http2-<ts> рядом с target'ом;
+      • nginx -t — гейт: провал → полный rollback изменений прогона;
+      • systemctl reload nginx — только при изменениях. Повторный прогон
+        без изменений — no-op (0 вызовов _run, новых бэкапов нет).
+
+    Возвращает {"ok": bool, "changed": [имена файлов], "reloaded": bool,
+                "report": [строки для оператора]}.
+    """
+    core = _core_module()
+    info, warn = core.info, core.warn
+    _run = core._run
+    enabled_dir = Path(core.NGINX_ENABLED_DIR)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    report: list = []
+    changed: list = []
+    originals: dict = {}   # real_path -> исходный текст (для rollback)
+
+    if not enabled_dir.exists():
+        return {"ok": True, "changed": [], "reloaded": False,
+                "report": ["sites-enabled не найден — nginx не установлен?"]}
+
+    # Гейт версии: на nginx < 1.25.1 директивы http2 on; ещё нет.
+    ver = _nginx_version_tuple()
+    if ver is None:
+        return {"ok": True, "changed": [], "reloaded": False,
+                "report": ["nginx не найден/версия не прочиталась — "
+                           "миграция пропущена (ничего не менялось)"]}
+    if ver < (1, 25, 1):
+        return {"ok": True, "changed": [], "reloaded": False,
+                "report": [f"nginx {'.'.join(map(str, ver))} < 1.25.1 — "
+                           "deprecated-синтаксис валиден, миграция не нужна "
+                           "(http2 on; на этой версии — unknown directive)"]}
+
+    for entry in sorted(enabled_dir.iterdir()):
+        if entry.is_dir():
+            continue
+        real = entry
+        try:
+            if entry.is_symlink():
+                real = entry.resolve()
+        except Exception:
+            real = entry
+        if not real.is_file():
+            continue
+        try:
+            text = real.read_text()
+        except Exception:
+            continue
+        if not _LISTEN_SSL_HTTP2_RE.search(text):
+            continue
+        if not any(m in text for m in _HTTP2_FILE_MARKERS):
+            report.append(f"ПРОПУЩЕН (не chimera-конфиг): {real.name} — "
+                          "listen с http2 у чужого vhost'а, правьте вручную")
+            continue
+        lines = text.splitlines()
+        insertions = []          # (индекс, строка) — вставка http2 on;
+        n_fixed_listen = 0
+        for (s, e) in _iter_top_level_server_blocks(text):
+            block_listen_fixes = []
+            for j in range(s, e + 1):
+                m_line = _LISTEN_SSL_HTTP2_RE.match(lines[j])
+                if not m_line:
+                    continue
+                lines[j] = m_line.group(1) + " ssl" + m_line.group(2)
+                block_listen_fixes.append(j)
+            if not block_listen_fixes:
+                continue
+            n_fixed_listen += len(block_listen_fixes)
+            block_text = "\n".join(lines[s:e + 1])
+            if _HTTP2_ON_LINE not in block_text:
+                j_last = block_listen_fixes[-1]
+                indent = lines[j_last][:len(lines[j_last]) - len(lines[j_last].lstrip())]
+                insertions.append((j_last, indent + _HTTP2_ON_LINE))
+        if not n_fixed_listen:
+            continue
+        if not apply:
+            report.append(f"БЫЛО БЫ изменено (dry-run): {real.name} "
+                          f"(listen: {n_fixed_listen}, +http2 on: "
+                          f"{len(insertions)})")
+            continue
+        bak = real.with_name(real.name + f"{_HTTP2_BAK_SUFFIX}-{ts}")
+        try:
+            bak.write_bytes(real.read_bytes())
+        except Exception as exc:
+            warn(f"Бэкап не создан ({real.name}: {exc}) — файл пропущен")
+            # файл уже переписан в lines[] в памяти, но на диск не пишем —
+            # continue достаточно: lines локален для итерации.
+            continue
+        originals[real] = text
+        for j, new_line in sorted(insertions, reverse=True):
+            lines.insert(j + 1, new_line)
+        new_text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+        real.write_text(new_text)
+        changed.append(real.name)
+        report.append(f"{real.name}: listen ssl http2 → ssl "
+                      f"(×{n_fixed_listen}) + http2 on; (×{len(insertions)}), "
+                      f"бэкап {bak.name}")
+
+    if not changed:
+        return {"ok": True, "changed": [], "reloaded": False,
+                "report": report or ["Изменений не требуется: listen без "
+                                     "deprecated-параметра http2 во всех "
+                                     "chimera-vhost'ах"]}
+
+    # nginx -t — гейт; при провале полный rollback
+    _find = getattr(core, "find_nginx_bin", None)
+    _nginx_bin = (_find() if callable(_find) else None) or "/usr/sbin/nginx"
+    r = _run([_nginx_bin, "-t"], capture=True, check=False)
+    if getattr(r, "returncode", 1) != 0:
+        for real, orig in originals.items():
+            try:
+                real.write_text(orig)
+            except Exception:
+                pass
+        err = (getattr(r, "stderr", "") or "")[:200]
+        report.append(f"nginx -t ПРОВАЛ — все изменения откачены: {err}")
+        try:
+            core.log_to_file("ERROR", "upgrade_vhosts_http2_syntax: nginx -t "
+                             f"провалился, rollback: {err}")
+        except Exception:
+            pass
+        return {"ok": False, "changed": [], "reloaded": False,
+                "report": report}
+
+    r2 = _run(["systemctl", "reload", "nginx"], check=False, quiet=True)
+    reloaded = getattr(r2, "returncode", 1) == 0
+    if not reloaded:
+        report.append("WARN: systemctl reload nginx не удался — конфиг "
+                      "валид (nginx -t OK), но продолжает работать старый")
+    else:
+        report.append("nginx перезагружен (reload)")
+    try:
+        core.log_to_file("INFO", f"upgrade_vhosts_http2_syntax: HTTP/2-"
+                         f"синтаксис обновлён в {len(changed)} vhost(ов): "
+                         f"{', '.join(changed)}")
+    except Exception:
+        pass
+    return {"ok": True, "changed": changed, "reloaded": reloaded,
+            "report": report}
+
+
+def do_upgrade_vhosts_http2_interactive() -> None:
+    """Интерактивная миграция HTTP/2-синтаксиса живых vhost'ов (меню 1 → 5e).
+
+    TUI-обёртка над upgrade_vhosts_http2_syntax(): dry-run или применение +
+    человекочитаемый отчёт (изменённые файлы / бэкапы / reload).
+
+    Дополняет семейство обслуживания живой ноды без переустановки
+    (5b-перегенерация, 5c-даунгрейд, 5d-HSTS): владелец 19.11 после
+    перевода флота на nginx.org 1.30.7 — «варнинги listen … http2 is
+    deprecated в генерируемых конфигах сайтов»; генераторы исправлены
+    (panel_nginx_front / nginx_front_portal), этот пункт приводит к ним
+    уже живые конфиги ноды.
+    """
+    core = _core_module()
+    warn = core.warn
+    CYAN, NC, RED, GREEN, YELLOW, DIM = (core.CYAN, core.NC, core.RED,
+                                         core.GREEN, core.YELLOW, core.DIM)
+    ver = _nginx_version_tuple()
+    ver_str = ".".join(map(str, ver)) if ver else "неизвестна"
+    _box_top, _box_row = core._box_top, core._box_row
+    _box_item, _box_back, _box_bottom = (core._box_item, core._box_back,
+                                         core._box_bottom)
+
+    print()
+    _box_top("⚡ HTTP/2-СИНТАКСИС ЖИВЫХ VHOST'ОВ")
+    _box_row()
+    _box_row(f"  nginx ноды: {ver_str} — миграция 'listen … ssl http2;' →")
+    _box_row("  'listen … ssl;' + отдельная директива 'http2 on;'")
+    _box_row("  (deprecated-параметр сыплет варнингами каждый nginx -t;")
+    _box_row("   директива появилась в nginx 1.25.1).")
+    _box_row()
+    _box_row(f"  {DIM}• чистит только chimera-vhost'ы (фронты панелей,{NC}")
+    _box_row(f"    {DIM}заглушки, REALITY-сокеты); чужие — пропуск;{NC}")
+    _box_row(f"  {DIM}• идемпотентно: повторный прогон — no-op;{NC}")
+    _box_row(f"  {DIM}• бэкап каждого файла (.bak-http2-<ts>) рядом с target'ом;{NC}")
+    _box_row(f"  {DIM}• nginx -t гейт: провал → полный rollback изменений;{NC}")
+    _box_row(f"  {DIM}• reload — только при изменениях; nginx < 1.25.1 — no-op.{NC}")
+    _box_row()
+    _box_item("1", f"🔍 Dry-run  {DIM}(показать, что изменится — без записей){NC}")
+    _box_item("2", f"⚡ Применить  {DIM}(бэкап + nginx -t + reload){NC}")
+    _box_row()
+    _box_back()
+    _box_bottom()
+    try:
+        ch = input(f"{CYAN}Выбор:{NC} ").strip()
+    except (KeyboardInterrupt, EOFError):
+        return
+    if ch not in ("1", "2"):
+        return
+
+    apply_changes = ch == "2"
+    try:
+        result = upgrade_vhosts_http2_syntax(apply=apply_changes)
+    except Exception as exc:
+        warn(f"HTTP/2-миграция упала с исключением: {exc}")
+        return
+
+    # ── Экран 2: отчёт ─────────────────────────────────────────────────
+    changed = result.get("changed") or []
+    reloaded = bool(result.get("reloaded"))
+    print()
+    if result.get("ok"):
+        _box_top("⚡ HTTP/2-СИНТАКСИС — ОТЧЁТ")
+        _box_row()
+        if apply_changes:
+            if changed:
+                tail = (", nginx перезагружен" if reloaded else
+                        " (reload не удался — конфиг валиден, продолжает "
+                        "работать прежний)")
+                _box_row(f"  {GREEN}Готово:{NC} синтаксис обновлён в "
+                         f"{GREEN}{len(changed)}{NC} vhost(ах){tail}")
+            else:
+                _box_row(f"  {GREEN}Изменений не требуется:{NC} deprecated-"
+                         "параметра http2 нет ни в одном chimera-vhost'е")
+        else:
+            _box_row("  Dry-run — файлы не менялись:")
+        _box_row()
+        for line in result.get("report") or []:
+            _box_row(f"  {line}")
+    else:
+        _box_top("⚡ HTTP/2-СИНТАКСИС — ПРОВАЛ")
+        _box_row()
+        _box_row(f"  {RED}nginx -t провалился — все изменения откачены.{NC}")
+        _box_row("  Живая конфигурация не тронута (бэкапы сохранены):")
+        _box_row()
+        for line in result.get("report") or []:
+            _box_row(f"  {line}")
+    _box_row()
+    _box_back()
+    _box_bottom()
+
+
 def setup_nginx_temp(domain: Optional[str] = None) -> None:
     """Создаёт временный HTTP:80 vhost для certbot ACME-челленджа.
 
@@ -861,12 +1162,13 @@ def setup_nginx_final(domain: Optional[str] = None,
         try:
             r_ver = _run([_os_nginx_bin, "-v"], capture=True, check=False)
             m_ver = re.search(r'(\d+)\.(\d+)\.(\d+)', r_ver.stderr or r_ver.stdout or "")
-            _os_major = int(m_ver.group(1)) if m_ver else 1
-            _os_minor = int(m_ver.group(2)) if m_ver else 18
+            _os_ver = (int(m_ver.group(1)), int(m_ver.group(2)),
+                       int(m_ver.group(3))) if m_ver else (1, 18, 0)
         except Exception:
-            _os_major, _os_minor = 1, 18
+            _os_ver = (1, 18, 0)
 
-        if _os_major > 1 or (_os_major == 1 and _os_minor >= 25):
+        # http2 on; появился в 1.25.1 (на 1.25.0 — unknown directive)
+        if _os_ver >= (1, 25, 1):
             _os_listen_main = f"listen 127.0.0.1:{SERVER_PORT} ssl;"
             _os_listen_default = f"listen 127.0.0.1:{SERVER_PORT} ssl default_server;"
             _os_http2_line = "    http2 on;"
@@ -875,8 +1177,9 @@ def setup_nginx_final(domain: Optional[str] = None,
             _os_listen_default = f"listen 127.0.0.1:{SERVER_PORT} ssl http2 default_server;"
             _os_http2_line = ""
 
-        # ssl_reject_handshake для default_server (старые nginx → fallback)
-        if _os_major > 1 or (_os_major == 1 and _os_minor >= 19):
+        # ssl_reject_handshake для default_server (появился в 1.19.4;
+        # старые nginx → fallback сертификат + return 444)
+        if _os_ver >= (1, 19, 4):
             _os_default_ssl = "ssl_reject_handshake on;"
         else:
             _os_default_ssl = (
@@ -1022,18 +1325,18 @@ def setup_nginx_final(domain: Optional[str] = None,
         try:
             r_ver = _run([_xhttp_nginx_bin, "-v"], capture=True, check=False)
             m_ver = re.search(r'(\d+)\.(\d+)\.(\d+)', r_ver.stderr or r_ver.stdout or "")
-            _nx_major = int(m_ver.group(1)) if m_ver else 1
-            _nx_minor = int(m_ver.group(2)) if m_ver else 18
+            _nx_ver = (int(m_ver.group(1)), int(m_ver.group(2)),
+                       int(m_ver.group(3))) if m_ver else (1, 18, 0)
         except Exception:
-            _nx_major, _nx_minor = 1, 18
+            _nx_ver = (1, 18, 0)
 
-        if _nx_major > 1 or (_nx_major == 1 and _nx_minor >= 25):
-            # nginx ≥ 1.25: новая директива http2 on;
+        # nginx ≥ 1.25.1: новая директива http2 on; (на 1.25.0 её ещё нет)
+        if _nx_ver >= (1, 25, 1):
             _http2_line = "    http2 on;"
             _listen_tls = f"listen {SERVER_PORT} ssl;"
             _listen_tls_v6 = f"listen [::]:{SERVER_PORT} ssl;" if core.IS_IPV6_AVAILABLE else ""
         else:
-            # nginx < 1.25: http2 указывается в строке listen
+            # nginx < 1.25.1: http2 указывается в строке listen
             _http2_line = ""
             _listen_tls = f"listen {SERVER_PORT} ssl http2;"
             _listen_tls_v6 = f"listen [::]:{SERVER_PORT} ssl http2;" if core.IS_IPV6_AVAILABLE else ""
@@ -1266,17 +1569,18 @@ def setup_nginx_final(domain: Optional[str] = None,
     try:
         r = _run([_nginx_bin, "-v"], capture=True, check=False)
         m = re.search(r'(\d+)\.(\d+)\.(\d+)', r.stderr)
-        nginx_major = int(m.group(1)) if m else 1
-        nginx_minor = int(m.group(2)) if m else 18
-        nginx_ver   = f"{nginx_major}.{nginx_minor}.{m.group(3) if m else 0}"
+        _nx_ver_full = (int(m.group(1)), int(m.group(2)),
+                        int(m.group(3))) if m else (1, 18, 0)
+        nginx_ver = ".".join(str(x) for x in _nx_ver_full)
     except Exception:
-        nginx_major, nginx_minor, nginx_ver = 1, 18, "1.18.0"
+        _nx_ver_full, nginx_ver = (1, 18, 0), "1.18.0"
 
     # === FIX ROOT: xver=1 в классическом REALITY → Xray посылает Proxy Protocol header.
     # Nginx должен иметь proxy_protocol в listen — это согласовано с xver=1.
     # В AWG-режиме xver=0 и Nginx вообще не проксирует на socket (только HTTP→HTTPS),
     # поэтому этот блок выполняется только для классического режима. ===
-    if nginx_major > 1 or (nginx_major == 1 and nginx_minor >= 25):
+    # http2 on; появился в 1.25.1 (на 1.25.0 — unknown directive → nginx -t падает)
+    if _nx_ver_full >= (1, 25, 1):
         listen_main    = f"listen unix:{PARAM_SOCKET_PATH} ssl proxy_protocol;"
         listen_default = f"listen unix:{PARAM_SOCKET_PATH} ssl proxy_protocol default_server;"
         http2_line     = "    http2 on;"
@@ -1298,7 +1602,7 @@ def setup_nginx_final(domain: Optional[str] = None,
     # ВАЖНО: вычисляем строку ЗАРАНЕЕ, отдельной переменной — нельзя класть
     # f-string внутрь другого f-string (тернарник на {PARAM_DOMAIN} ломает
     # парсер на вложенных фигурных скобках, см. CHANGELOG).
-    if nginx_major > 1 or (nginx_major == 1 and nginx_minor >= 19):
+    if _nx_ver_full >= (1, 19, 4):
         default_server_ssl = "ssl_reject_handshake on;"
     else:
         default_server_ssl = (

@@ -143,14 +143,33 @@ def _find_ssl_cert(domain: "Optional[str]" = None) -> "tuple[Optional[Path], Opt
 
 # ── Генерация nginx vhost ────────────────────────────────────────────────────
 
+def _nginx_supports_http2_on() -> bool:
+    """nginx ≥ 1.25.1 → отдельная директива `http2 on;` (см. panel_nginx_front).
+
+    Живой генератор фронтов в Химере один — panel_nginx_front.py (этот
+    модуль делегирует ему установку); тут только переиспользование
+    детекта, чтобы локальный _generate_vhost (API-совместимый) не
+    расходился с общим в выборе синтаксиса HTTP/2.
+    """
+    from chimera.modules.panel_nginx_front import _nginx_supports_http2_on as _impl
+    return _impl()
+
+
 def _generate_vhost(port: int, backend_port: int,
                     cert_path: Path, key_path: Path,
-                    domain: str) -> str:
+                    domain: str, http2_on: bool = False) -> str:
     """Генерирует nginx vhost config.
 
     listener <port> ssl → proxy_pass http://127.0.0.1:<backend_port>
     backend_port — это rest_api web_panel port (8443 по умолчанию).
+
+    http2_on=True (nginx ≥ 1.25.1, см. _nginx_supports_http2_on) —
+    HTTP/2 отдельной директивой `http2 on;` вместо deprecated-параметра
+    в listen (чистый nginx -t на nginx.org-сборках); дефолт False —
+    прежний inline-синтаксис, валидный на всех версиях.
     """
+    listen_line = (f"    listen {port} ssl;\n    http2 on;" if http2_on
+                   else f"    listen {port} ssl http2;")
     return f"""# Chimera — nginx front для User Portal с TLS.
 # Сгенерировано nginx_front_portal.py. НЕ редактировать вручную —
 # изменения будут потеряны при следующем apply.
@@ -174,7 +193,7 @@ server {{
 
 # HTTPS — основной vhost для User Portal.
 server {{
-    listen {port} ssl http2;
+{listen_line}
     server_name {domain};
 
     # TLS — переиспользуем сертификат основного домена.

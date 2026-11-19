@@ -1,4 +1,19 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v20: 340 = 337 + nginx.org-волна 19.11 (марафон по флоту: перевод на
+# nginx.org 1.30.7 после CVE-2026-123633/123007 HTTP/2 RCE + «варнинги
+# listen … http2 is deprecated» владельца): test_nginx_http2_syntax —
+# мигратор upgrade_vhosts_http2_syntax ('listen … ssl http2;' → 'listen …
+# ssl;' + 'http2 on;', порог 1.25.1: на 1.25.0 — unknown directive) +
+# оба генератора фронтов (panel_nginx_front/nginx_front_portal http2_on)
+# + детектор _nginx_supports_http2_on; test_nginx_http2_menu — пункт 5e
+# (dry-run/применить/отмена, отчёты, EOF/Ctrl+C, врезка в _core);
+# test_nginx_updater — модуль nginx_updater: пол CVE (1.30.7/1.31.9/≥1.32),
+# гард конфига (include sites-enabled, user www-data, logrotate), флоу
+# с stateful-моком apt/tar/systemctl (happy 1.24.0→1.30.7, no-op свежего,
+# отказы: кандидат без фикса/нестандартные удаления/не-root/не-Debian,
+# роллбек при провале nginx -t и расхождении listen/server_name), хук
+# offer_upgrade_after_install (уязвимый → Y/n, фиксованый → тихий no-op,
+# EOF/исключение не роняют установку) + врезка 5f.
 # v19: 337 = 335 + split-direction-семейство (кейс Виталия «AWG между
 # двумя своими VPS при блокировке 16k: отправить можем, принять нет» —
 # test_awg_link_probe зонд плеча L0-L2 (handshake/счётчики → шлюз →
@@ -274,9 +289,12 @@ tests.test_network_bench
 tests.test_network_setup
 tests.test_nginx_cdn_masking_config
 tests.test_nginx_cleanup_stale_vhosts
+tests.test_nginx_http2_menu
+tests.test_nginx_http2_syntax
 tests.test_nginx_hsts_menu
 tests.test_nginx_reality_reinstall
 tests.test_nginx_stub_hsts_upgrade
+tests.test_nginx_updater
 tests.test_nginx_watchdog
 tests.test_no_streamup_typo
 tests.test_node_health_monitor

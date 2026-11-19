@@ -4757,6 +4757,18 @@ def do_full_install() -> None:
     else:
         log_to_file("SUCCESS", f"=== Установка завершена успешно за {install_dur}с (Режим {INSTALL_MODE}, {PROTOCOL_MODE}) ===")
 
+        # ── Пост-установочный хук: nginx.org-обновлялка на свежей ноде ──
+        # Дефолтный nginx ставится из репо дистрибутива (Ubuntu 24.04 —
+        # 1.24.0 с открытыми CVE-2026-123633/123007, HTTP/2 RCE). Хук
+        # МОЛЧИТ когда nginx уже фиксован (переустановка поверх живой
+        # ноды) — install-флоу не меняется ни байтом; на чистой ноде
+        # предлагает перевод на nginx.org (меню 1 → 5f — тот же код).
+        try:
+            from chimera.modules.nginx_updater import offer_upgrade_after_install
+            offer_upgrade_after_install()
+        except ImportError:
+            pass  # модуля нет (старое дерево) — не повод ронять установку
+
     # Сигнализируем exit-trap что установка завершена нормально
     global INSTALL_COMPLETED
     INSTALL_COMPLETED = True
@@ -7984,6 +7996,8 @@ def _menu_install_system() -> None:
         _box_item("5b", f"♻️  Перегенерировать конфиг Xray  {DIM}(из state.json; опция выставить minClientVer — гейт для ядер 26.7.x и sing-box/mihomo-клиентов){NC}")
         _box_item("5c", f"⬇️  Даунгрейд ядра Xray  {DIM}(26.7.28 / 26.6.27 / 26.3.27 — конфиг подгоняется под эпоху автоматически; вернуть sing-box-клиентов){NC}")
         _box_item("5d", f"🔒 HSTS-апгрейд живых vhost'ов  {DIM}(nginx: Strict-Transport-Security в заглушки без переустановки — dry-run / применить){NC}")
+        _box_item("5e", f"⚡ HTTP/2-синтаксис живых vhost'ов  {DIM}(nginx ≥ 1.25: 'listen … ssl http2' → 'http2 on;' — nginx -t без deprecation-варнингов; dry-run / применить){NC}")
+        _box_item("5f", f"⬆️  Обновить nginx  {DIM}(свежая сборка из nginx.org: репо + pin 900, Chimera-гарды конфига, верификация слушателей/REALITY-сокета — CVE-2026-123633/123007){NC}")
         _box_item("6", f"🛠️  Аварийное восстановление  {DIM}(из state.json, без переустановки){NC}")
         _box_item("7", "🗑️  Удалить установку")
         _box_item("8", "🧪 Запустить unit-тесты")
@@ -8030,6 +8044,20 @@ def _menu_install_system() -> None:
                 do_upgrade_vhosts_hsts_interactive()
             except ImportError as _e:
                 warn(f"Модуль nginx_setup не найден: {_e}")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "5e":
+            try:
+                from chimera.modules.nginx_setup import do_upgrade_vhosts_http2_interactive
+                do_upgrade_vhosts_http2_interactive()
+            except ImportError as _e:
+                warn(f"Модуль nginx_setup не найден: {_e}")
+            input(f"{BLUE}Нажмите Enter...{NC}")
+        elif ch == "5f":
+            try:
+                from chimera.modules.nginx_updater import do_nginx_upgrade_interactive
+                do_nginx_upgrade_interactive()
+            except ImportError as _e:
+                warn(f"Модуль nginx_updater не найден: {_e}")
             input(f"{BLUE}Нажмите Enter...{NC}")
         elif ch == "6":
             do_emergency_repair()

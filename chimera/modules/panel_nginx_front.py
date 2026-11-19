@@ -308,6 +308,35 @@ def ask_domain(default: "Optional[str]" = None) -> "Optional[str]":
 #  ГЕНЕРАЦИЯ NGINX VHOST
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _nginx_supports_http2_on() -> bool:
+    """True — nginx на ноде ≥ 1.25.1 (отдельная директива `http2 on;`).
+
+    Параметр `http2` в listen объявлен deprecated начиная с 1.25.1: конфиг
+    работает, но каждый `nginx -t`/reload сыплет варнингом «the …http2…
+    option is deprecated, use the "http2 on" directive instead» (замечание
+    владельца 19.11 после перевода флота на nginx.org 1.30.7). На 1.25.0
+    и старее директивы `http2 on;` ЕЩЁ НЕТ (unknown directive → nginx -t
+    падает) — порог именно 1.25.1, не 1.25.
+
+    Любая ошибка детекта (nginx не установлен, таймаут, кривой вывод
+    `-v`) → False: старый listen-синтаксис валиден на ВСЕХ версиях,
+    консервативный дефолт не ломает ни одну ноду (максимум — варнинг).
+    """
+    nginx_bin = shutil.which("nginx")
+    if not nginx_bin:
+        return False
+    try:
+        r = subprocess.run([nginx_bin, "-v"], capture_output=True,
+                           text=True, check=False, timeout=10)
+        m = re.search(r"nginx/(\d+)\.(\d+)\.(\d+)",
+                      (r.stderr or "") + (r.stdout or ""))
+        if not m:
+            return False
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3))) >= (1, 25, 1)
+    except Exception:
+        return False
+
+
 def _generate_vhost(port: int,
                     backend_port: int,
                     cert_path: Path,
@@ -319,6 +348,7 @@ def _generate_vhost(port: int,
                     mcp_proxy: bool = False,
                     long_timeouts: bool = False,
                     dual_stack: bool = False,
+                    http2_on: bool = False,
                     ) -> str:
     """Генерирует nginx vhost config.
 
@@ -341,6 +371,10 @@ def _generate_vhost(port: int,
         «есть ли у ноды глобальный v6» принимает caller: генератор чистый
         (систему не трогает). [::] на v4-only ноде ставить нельзя — nginx
         не принял бы конфиг.
+      http2_on: если True — HTTP/2 отдельной директивой `http2 on;`
+        (nginx ≥ 1.25.1; deprecated listen-параметр не пишем). Решение
+        принимает caller через _nginx_supports_http2_on(): генератор
+        остаётся чистым (версию системы сам не выясняет).
     """
     # WebSocket origin rewrite block
     if websocket_origin_rewrite:
@@ -421,14 +455,26 @@ def _generate_vhost(port: int,
 
     # Dual-stack listen: v4 — всегда; [::] — только по решению caller'а
     # (panel_nginx_front_install: авто-детект глобального IPv6 ноды).
-    listen_v6 = f"\n    listen [::]:{port} ssl http2;" if dual_stack else ""
+    # HTTP/2-синтаксис (19.11, владелец после nginx.org-перевода флота на
+    # 1.30.7): nginx ≥ 1.25.1 — `listen … ssl;` + отдельная `http2 on;`
+    # (deprecated-параметр в listen сыплет варнингами каждый nginx -t);
+    # старые nginx — прежний inline-параметр, единственный для них вариант.
+    if http2_on:
+        _listen_lines = [f"    listen {port} ssl;"]
+        if dual_stack:
+            _listen_lines.append(f"    listen [::]:{port} ssl;")
+        _listen_lines.append("    http2 on;")
+        listen_block = "\n".join(_listen_lines)
+    else:
+        listen_v6 = f"\n    listen [::]:{port} ssl http2;" if dual_stack else ""
+        listen_block = f"    listen {port} ssl http2;{listen_v6}"
 
     return f"""# Chimera — nginx front для {panel_name_slug} с TLS.
 # Сгенерировано panel_nginx_front.py. НЕ редактировать вручную.
 # Управление: TUI → соответствующее меню панели.
 
 server {{
-    listen {port} ssl http2;{listen_v6}
+{listen_block}
     server_name {domain};
 
     ssl_certificate     {cert_path};
@@ -713,6 +759,10 @@ def panel_nginx_front_install(
     else:
         info(f"  {DIM}Dual-stack: глобального IPv6 нет — listen {port} "
              f"только v4{NC}")
+    # HTTP/2-синтаксис по версии nginx (19.11): ≥ 1.25.1 — чистый
+    # `http2 on;` без deprecated-параметра в listen (nginx -t без
+    # варнингов на nginx.org-сборках), старее — прежний inline-вариант.
+    http2_on = _nginx_supports_http2_on()
     vhost = _generate_vhost(
         port=port,
         backend_port=backend_port,
@@ -725,6 +775,7 @@ def panel_nginx_front_install(
         mcp_proxy=mcp_proxy,
         long_timeouts=long_timeouts,
         dual_stack=dual_stack,
+        http2_on=http2_on,
     )
 
     # 4. Запись vhost + symlink.
