@@ -59,6 +59,10 @@ AWGS_BACKUP_DIR:      Path = AWGS_AWG_DIR / "backups"
 # Cascade-файлы (опционально, только при установке каскада)
 AWGS_CASCADE_DIR:     Path = Path("/etc/awg-cascade")
 AWGS_RU_ZONE_FILE:    Path = AWGS_CASCADE_DIR / "ru.zone"
+# Fallback-снимок ru.zone (assets/awg/ru.zone.fallback из дистрибутива
+# копируется сюда) — аварийный seed пустого ipset: пустое множество в
+# '! --match-set' матчит ВСЁ → молчаливый exit-all (инцидент 19.11)
+AWGS_RU_ZONE_FALLBACK_FILE: Path = AWGS_CASCADE_DIR / "ru.zone.fallback"
 AWGS_ROUTING_SCRIPT:  Path = AWGS_CASCADE_DIR / "awg-routing.sh"
 AWGS_IPSET_NAME:      str  = "awg_ru_networks"
 

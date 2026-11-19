@@ -1079,3 +1079,456 @@ class TestCascadeExitAll(unittest.TestCase):
             self.assertTrue(awg_cascade.awgs_cascade_set_exit_all(False))
         st = json.loads(self._state.read_text())
         self.assertFalse(st.get("cascade_exit_all"))
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  ГАРД пустого ipset — инцидент сообщества 19.11: «разделение трафика
+#  не работает, как будто 7-й пункт всегда включен».
+#  Пустое множество в '-m set ! --match-set awg_ru_networks dst' матчит
+#  ВСЁ → весь клиентский трафик через exit, RU-IP нигде не светится —
+#  неотличимо от включённого exit-all. Плюс зеркальный сценарий
+#  «missing set»: правило вообще не добавляется → всё напрямую с entry.
+# ════════════════════════════════════════════════════════════════════════════
+
+class TestRuSplitEmptyIpsetGuard(unittest.TestCase):
+    """ru-split деградация: пустой/отсутствующий ipset awg_ru_networks."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "state.json"
+        self._script = self._tmpdir / "awg-routing.sh"
+        self._ruzone = self._tmpdir / "ru.zone"
+        self._fallback = self._tmpdir / "ru.zone.fallback"
+        self._run_calls = []
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write_state(self, d):
+        self._state.write_text(json.dumps(d))
+
+    def _stateful_core(self, entries_after_restore: int,
+                       restore_rc: int = 0):
+        """core-мок с журналом команд: 'ipset list' отдаёт 0 записей,
+        а после успешного restore — entries_after_restore (симуляция
+        засеивания fallback-снимком)."""
+        core = MagicMock()
+        for attr in ("GREEN", "NC", "RED", "YELLOW", "CYAN", "DIM"):
+            setattr(core, attr, "")
+        for attr in ("_box_top", "_box_row", "_box_sep", "_box_bottom"):
+            setattr(core, attr, MagicMock())
+        core.log_to_file = MagicMock()
+        core.info = MagicMock()
+        core.warn = MagicMock()
+        restored = {"ok": False}
+
+        def _run(cmd, **kwargs):
+            self._run_calls.append(cmd)
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            joined = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if joined.startswith("ipset list"):
+                n = entries_after_restore if restored["ok"] else 0
+                r.returncode = 0
+                r.stdout = f"Name: awg_ru_networks\nNumber of entries: {n}\n"
+            elif joined.startswith("ipset restore"):
+                r.returncode = restore_rc
+                restored["ok"] = (restore_rc == 0)
+                r.stdout = ""
+            elif joined.startswith("ipset create"):
+                r.stdout = ""
+            else:
+                r.stdout = ""
+            return r
+
+        core._run = _run
+        return core
+
+    def _cascade_patches(self):
+        """Патчи путей/состояния в неймспейсе awg_cascade."""
+        return [
+            patch("chimera.modules.awg_state.AWGS_STATE_FILE", self._state),
+            patch.object(awg_cascade_mod(), "AWGS_CASCADE_DIR", self._tmpdir),
+            patch.object(awg_cascade_mod(), "AWGS_ROUTING_SCRIPT", self._script),
+            patch.object(awg_cascade_mod(), "AWGS_RU_ZONE_FILE", self._ruzone),
+            patch.object(awg_cascade_mod(), "AWGS_RU_ZONE_FALLBACK_FILE",
+                         self._fallback),
+            # b4-сплит выключен — чистые формы без b4-исключения
+            patch.object(awg_cascade_mod(), "_awgs_cascade_b4_split_excl",
+                         return_value=""),
+        ]
+
+    # ── download_ru_zone: провал зеркал НЕ затирает рабочий ru.zone ─────
+
+    def test_download_failure_preserves_existing_ru_zone(self):
+        """МИНА (regression): провал всех зеркал писал ПУСТОЙ ru.zone поверх
+        рабочего — после ребута пустой ipset = весь трафик через exit."""
+        from chimera.modules import awg_cascade
+        self._ruzone.write_text("203.0.113.0/24\n198.51.100.0/24\n")
+        core = self._stateful_core(0)
+        patches = self._cascade_patches()
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        with patch.object(awg_cascade, "_core_module", return_value=core), \
+             patch("chimera.modules.download_manager.fetch_package",
+                   return_value=False):
+            self.assertFalse(awg_cascade.awgs_cascade_download_ru_zone())
+        # прежний список цел
+        self.assertEqual(
+            [l for l in self._ruzone.read_text().splitlines() if l.strip()],
+            ["203.0.113.0/24", "198.51.100.0/24"])
+        # и предупреждение честное: список СОХРАНЁН, а не «создан пустой»
+        warned = " ".join(str(c) for c in core.warn.call_args_list)
+        self.assertIn("сохранён прежний", warned)
+
+    def test_download_failure_first_install_no_existing_file(self):
+        """Первая установка без файла и сети: пустой ru.zone (как раньше —
+        контракт load_ipset), но БЕЗ затирания (файла не было)."""
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(0)
+        patches = self._cascade_patches()
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        with patch.object(awg_cascade, "_core_module", return_value=core), \
+             patch("chimera.modules.download_manager.fetch_package",
+                   return_value=False):
+            self.assertFalse(awg_cascade.awgs_cascade_download_ru_zone())
+        self.assertTrue(self._ruzone.exists(),
+                         "пустой ru.zone должен создаваться при его отсутствии")
+        self.assertEqual(self._ruzone.read_text(), "")
+
+    # ── load_ipset: set обязан существовать даже при пустом ru.zone ─────
+
+    def test_load_ipset_empty_file_creates_set(self):
+        """ГАРД «missing set»: пустой ru.zone → set СОЗДАЁТСЯ (пустым) —
+        иначе '-m set'-правила не добавляются вообще и весь клиентский
+        трафик уходит напрямую с entry (каскад молча не каскадирует)."""
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(0)
+        with patch.object(awg_cascade, "_core_module", return_value=core), \
+             patch.object(awg_cascade, "AWGS_RU_ZONE_FILE", self._ruzone):
+            self._ruzone.write_text("")
+            self.assertFalse(awg_cascade.awgs_cascade_load_ipset())
+        cmds = [" ".join(c) for c in self._run_calls]
+        self.assertTrue(
+            any(c.startswith("ipset create awg_ru_networks") and c.endswith("-exist")
+                for c in cmds),
+            f"нет 'ipset create -exist' при пустом ru.zone: {cmds}")
+
+    def test_load_ipset_missing_file_creates_set(self):
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(0)
+        with patch.object(awg_cascade, "_core_module", return_value=core), \
+             patch.object(awg_cascade, "AWGS_RU_ZONE_FILE", self._ruzone):
+            self.assertFalse(awg_cascade.awgs_cascade_load_ipset())
+        cmds = [" ".join(c) for c in self._run_calls]
+        self.assertTrue(any(c.startswith("ipset create awg_ru_networks")
+                            for c in cmds))
+
+    # ── entries / seed ───────────────────────────────────────────────────
+
+    def test_ipset_entries_parse(self):
+        """Парсер: число сетей из 'Number of entries:', 0 при отсутствии."""
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(8652)
+        with patch.object(awg_cascade, "_core_module", return_value=core):
+            self.assertEqual(awg_cascade.awgs_cascade_ipset_entries(), 0)
+        # реальный вывод с записями
+        core2 = self._stateful_core(0)
+        core2._run = MagicMock(return_value=MagicMock(
+            returncode=0, stdout="Number of entries: 11482\n", stderr=""))
+        with patch.object(awg_cascade, "_core_module", return_value=core2):
+            self.assertEqual(awg_cascade.awgs_cascade_ipset_entries(), 11482)
+        # set отсутствует
+        core3 = self._stateful_core(0)
+        core3._run = MagicMock(return_value=MagicMock(
+            returncode=1, stdout="", stderr="ipset v7: The set cannot be found"))
+        with patch.object(awg_cascade, "_core_module", return_value=core3):
+            self.assertEqual(awg_cascade.awgs_cascade_ipset_entries(), 0)
+
+    def test_seed_if_empty_uses_fallback_snapshot(self):
+        """Лестница seed: ru.zone пуст → fallback-снимок → 11482 сетей,
+        INFO-лог про устаревший снимок; ERROR НЕ пишется."""
+        from chimera.modules import awg_cascade
+        self._fallback.write_text("# снимок\n203.0.113.0/24\n198.51.100.0/24\n")
+        core = self._stateful_core(11482)
+        patches = self._cascade_patches()
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        with patch.object(awg_cascade, "_core_module", return_value=core):
+            n = awg_cascade.awgs_cascade_ipset_seed_if_empty()
+        self.assertEqual(n, 11482)
+        cmds = [" ".join(c) for c in self._run_calls]
+        self.assertTrue(any(c.startswith("ipset restore") for c in cmds),
+                        f"нет restore из fallback: {cmds}")
+        logged = " ".join(str(c) for c in core.log_to_file.call_args_list)
+        self.assertIn("fallback-снимком", logged)
+        self.assertNotIn("ERROR", logged)
+
+    def test_seed_if_empty_all_sources_failed(self):
+        """Всё недоступно: ERROR с дословным симптомом «как пункт 7» +
+        set создаётся хотя бы пустым (правила должны ставиться)."""
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(0, restore_rc=1)
+        patches = self._cascade_patches()
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        with patch.object(awg_cascade, "_core_module", return_value=core):
+            self.assertEqual(awg_cascade.awgs_cascade_ipset_seed_if_empty(), 0)
+        cmds = [" ".join(c) for c in self._run_calls]
+        self.assertTrue(any(c.startswith("ipset create awg_ru_networks")
+                            for c in cmds),
+                        "set не создан при полном провале источников")
+        errors = [c for c in core.log_to_file.call_args_list
+                  if c.args and c.args[0] == "ERROR"]
+        self.assertTrue(errors, "нет ERROR-лога при пустом ipset")
+        self.assertIn("пункт 7", " ".join(str(c) for c in errors))
+
+    def test_seed_if_empty_noop_when_populated(self):
+        """Непустой set: seed — no-op (ни restore, ни ERROR)."""
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(0)
+        core._run = MagicMock(return_value=MagicMock(
+            returncode=0, stdout="Number of entries: 8652\n", stderr=""))
+        with patch.object(awg_cascade, "_core_module", return_value=core):
+            self.assertEqual(awg_cascade.awgs_cascade_ipset_seed_if_empty(), 8652)
+        self.assertEqual(self._run_calls, [])
+
+    # ── apply_iptables: гарды вживую ─────────────────────────────────────
+
+    def test_apply_iptables_split_ensures_set_before_rules(self):
+        """Split-режим: 'ipset create -exist' ДО '-m set'-правил (иначе
+        mark-правило не добавится — сценарий «missing set»)."""
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(0, restore_rc=1)
+        patches = self._cascade_patches()
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        self._write_state({})
+        with patch.object(awg_cascade, "_core_module", return_value=core):
+            awg_cascade._awgs_cascade_apply_iptables("172.16.61.0/24")
+        cmds = [" ".join(c) for c in self._run_calls]
+        create_idx = next((i for i, c in enumerate(cmds)
+                           if c.startswith("ipset create awg_ru_networks")), None)
+        first_set_rule = next((i for i, c in enumerate(cmds)
+                               if "match-set awg_ru_networks" in c
+                               and ("-A " in c or " -C " in c)), None)
+        self.assertIsNotNone(create_idx, f"нет ipset create: {cmds}")
+        self.assertIsNotNone(first_set_rule,
+                             f"нет '-m set'-правила: {cmds}")
+        self.assertLess(create_idx, first_set_rule,
+                        "ipset create обязан идти ДО '-m set'-правил")
+        # гард пустого ipset: entries==0 → seed попытался восстановить
+        self.assertTrue(any(c.startswith("ipset list") for c in cmds))
+        errors = [c for c in core.log_to_file.call_args_list
+                  if c.args and c.args[0] == "ERROR"]
+        self.assertTrue(errors, "пустой ipset в split-режиме не залогирован")
+
+    def test_apply_iptables_exit_all_no_seed(self):
+        """exit-all: ipset в маршрутизации не участвует — seed не зовётся
+        (ни 'ipset list', ни ERROR-лога)."""
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(0, restore_rc=1)
+        patches = self._cascade_patches()
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        self._write_state({"cascade_exit_all": True})
+        with patch.object(awg_cascade, "_core_module", return_value=core):
+            awg_cascade._awgs_cascade_apply_iptables("172.16.61.0/24")
+        cmds = [" ".join(c) for c in self._run_calls]
+        self.assertFalse(any(c.startswith("ipset list") for c in cmds),
+                         f"exit-all зовёт seed: {cmds}")
+        # ru-split-ошибок нет (ERROR про table 2000 — другой, легитимный
+        # для мока без маршрутов, гард)
+        errors = [c for c in core.log_to_file.call_args_list
+                  if c.args and c.args[0] == "ERROR" and "ru-split" in str(c)]
+        self.assertFalse(errors, f"exit-all пишет ru-split ERROR: {errors}")
+
+    # ── boot-скрипт: гард 1.5 + seed из fallback ─────────────────────────
+
+    def test_routing_script_contains_empty_ipset_guard(self):
+        """Гард 1.5 в скрипте: подсчёт entries, seed из ru.zone.fallback,
+        logger-warning; есть в ОБЕИХ формах (split и exit-all)."""
+        from chimera.modules import awg_cascade
+        for state, tag in (({}, "split"), ({"cascade_exit_all": True},
+                                           "exit-all")):
+            patches = self._cascade_patches()
+            self._write_state(state)
+            for p in patches:
+                p.start()
+            try:
+                awg_cascade._awgs_cascade_create_routing_script("172.16.61.0/24")
+            finally:
+                for p in patches:
+                    p.stop()
+            s = self._script.read_text()
+            self.assertIn("Number of entries: //p", s, f"[{tag}] нет подсчёта")
+            self.assertIn("ru.zone.fallback", s, f"[{tag}] нет seed из fallback")
+            self.assertIn("[ -s ", s, f"[{tag}] нет проверки -s fallback")
+            self.assertIn("logger -p daemon.warning -t awg-cascade",
+                          s, f"[{tag}] нет logger-варнинга")
+            self.assertIn("пункт 7", s, f"[{tag}] варнинг без симптома")
+
+    def test_routing_script_guard_before_mark_rules(self):
+        """Гард 1.5 стоит ДО раздела 2.1 (mark-правило): пустой ipset
+        засеивается раньше, чем правило начнёт матчить всё подряд."""
+        from chimera.modules import awg_cascade
+        patches = self._cascade_patches()
+        self._write_state({})
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        awg_cascade._awgs_cascade_create_routing_script("172.16.61.0/24")
+        s = self._script.read_text()
+        guard_idx = s.index("1.5 ГАРД пустого ipset")
+        mark_idx = s.index("iptables -t mangle -A PREROUTING -i awg0")
+        self.assertLess(guard_idx, mark_idx,
+                        "гард 1.5 обязан идти ДО mark-правила 2.1")
+
+    # ── update_ru_zone (cron/пункт 3): самолечение ───────────────────────
+
+    def test_update_ru_zone_seeds_when_empty(self):
+        """После обновления set пуст (restore провалился) → seed
+        поднимает его fallback-снимком, INFO с числом сетей."""
+        from chimera.modules import awg_cascade
+        self._fallback.write_text("# снимок\n203.0.113.0/24\n")
+        core = self._stateful_core(11482)
+        patches = self._cascade_patches()
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        with patch.object(awg_cascade, "_core_module", return_value=core), \
+             patch.object(awg_cascade, "awgs_cascade_download_ru_zone",
+                          return_value=True), \
+             patch.object(awg_cascade, "awgs_cascade_load_ipset",
+                          return_value=False):
+            awg_cascade.awgs_cascade_update_ru_zone()
+        cmds = [" ".join(c) for c in self._run_calls]
+        self.assertTrue(any(c.startswith("ipset restore") for c in cmds),
+                        f"seed не пытался restore: {cmds}")
+        logged = " ".join(str(c) for c in core.log_to_file.call_args_list)
+        self.assertIn("11482", logged)
+        errors = [c for c in core.log_to_file.call_args_list
+                  if c.args and c.args[0] == "ERROR"]
+        self.assertFalse(errors, f"seed удался, но есть ERROR: {errors}")
+
+    # ── статус-экран: красный блок «как будто пункт 7» ───────────────────
+
+    def _status_state(self, extra=None):
+        st = {"cascade_role": "entry",
+              "cascade_peer_host": "1.2.3.4",
+              "cascade_peer_port": 51820,
+              "cascade_subnet": "172.16.61.0/24"}
+        if extra:
+            st.update(extra)
+        return st
+
+    def test_status_empty_ipset_split_red_warning(self):
+        """Split-режим + пустой ipset → красный блок с дословным
+        симптомом юзера («выглядит как пункт 7») и лечением."""
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(0, restore_rc=1)
+        state = self._status_state()
+        with patch.object(awg_cascade, "_core_module", return_value=core), \
+             patch.object(awg_cascade, "awgs_state_load", return_value=state), \
+             patch("builtins.print"):
+            awg_cascade._awgs_cascade_status()
+        rows = " || ".join(str(c.args[0]) for c in core._box_row.call_args_list
+                           if c.args)
+        self.assertIn("ПУСТ / не загружен", rows)
+        self.assertIn("пункт 7", rows)
+        self.assertIn("RU-сплит ФАКТИЧЕСКИ НЕ РАБОТАЕТ", rows)
+        self.assertIn("пункт 3", rows)
+
+    def test_status_empty_ipset_exit_all_no_red_block(self):
+        """exit-all + пустой ipset — законное состояние (set не участвует
+        в маршрутизации): без красного блока RU-сплита."""
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(0, restore_rc=1)
+        state = self._status_state({"cascade_exit_all": True})
+        with patch.object(awg_cascade, "_core_module", return_value=core), \
+             patch.object(awg_cascade, "awgs_state_load", return_value=state), \
+             patch("builtins.print"):
+            awg_cascade._awgs_cascade_status()
+        rows = " || ".join(str(c.args[0]) for c in core._box_row.call_args_list
+                           if c.args)
+        self.assertIn("ПУСТ / не загружен", rows)
+        self.assertNotIn("RU-сплит ФАКТИЧЕСКИ НЕ РАБОТАЕТ", rows)
+
+    def test_status_blanket_mark_rule_diagnosed(self):
+        """Диагностика формы: blanket-марка (без RU-исключения) в
+        split-режиме → красная строка с лечением (restart юнита)."""
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(8652)
+        # set непустой, но в mangle висит blanket-правило
+        def _run(cmd, **kw):
+            self._run_calls.append(cmd)
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            joined = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if joined.startswith("ipset list"):
+                r.stdout = "Number of entries: 8652\n"
+            elif "mangle" in joined and "-S" in joined:
+                r.stdout = ("-A PREROUTING -i awg0 -j MARK "
+                            "--set-xmark 0x8200/0xffffffff\n")
+            else:
+                r.stdout = ""
+            return r
+
+        core._run = _run
+        state = self._status_state()
+        with patch.object(awg_cascade, "_core_module", return_value=core), \
+             patch.object(awg_cascade, "awgs_state_load", return_value=state), \
+             patch("builtins.print"):
+            awg_cascade._awgs_cascade_status()
+        rows = " || ".join(str(c.args[0]) for c in core._box_row.call_args_list
+                           if c.args)
+        self.assertIn("НЕ в split-форме", rows)
+        self.assertIn("restart awg-cascade-routing", rows)
+
+    def test_status_split_form_mark_rule_ok(self):
+        """Чистая split-форма (с '! --match-set awg_ru_networks') —
+        диагностика молчит."""
+        from chimera.modules import awg_cascade
+        core = self._stateful_core(8652)
+
+        def _run(cmd, **kw):
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            joined = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if joined.startswith("ipset list"):
+                r.stdout = "Number of entries: 8652\n"
+            elif "mangle" in joined and "-S" in joined:
+                r.stdout = ("-A PREROUTING -i awg0 -m set ! --match-set "
+                            "awg_ru_networks dst -j MARK "
+                            "--set-xmark 0x8200/0xffffffff\n")
+            else:
+                r.stdout = ""
+            return r
+
+        core._run = _run
+        state = self._status_state()
+        with patch.object(awg_cascade, "_core_module", return_value=core), \
+             patch.object(awg_cascade, "awgs_state_load", return_value=state), \
+             patch("builtins.print"):
+            awg_cascade._awgs_cascade_status()
+        rows = " || ".join(str(c.args[0]) for c in core._box_row.call_args_list
+                           if c.args)
+        self.assertNotIn("НЕ в split-форме", rows)
+
+
+def awg_cascade_mod():
+    """Ленивый импорт модуля под тест (после _setup_core_in_sysmodules)."""
+    from chimera.modules import awg_cascade
+    return awg_cascade

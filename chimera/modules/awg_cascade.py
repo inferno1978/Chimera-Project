@@ -32,7 +32,8 @@ import time
 from pathlib import Path
 
 from .awg_constants import (
-    AWGS_CASCADE_DIR, AWGS_RU_ZONE_FILE, AWGS_ROUTING_SCRIPT,
+    AWGS_CASCADE_DIR, AWGS_RU_ZONE_FILE, AWGS_RU_ZONE_FALLBACK_FILE,
+    AWGS_ROUTING_SCRIPT,
     AWGS_IPSET_NAME, AWGS_CASCADE_FWMARK, AWGS_CASCADE_FWMARK_LEGACY,
     AWGS_B4_EXEMPT_BIT,
     AWGS_CRON_RU_UPDATE, AWGS_CRON_RU_UPDATE_SCRIPT, AWGS_SYSTEMD_CASCADE,
@@ -105,42 +106,180 @@ def awgs_cascade_download_ru_zone() -> bool:
             info("ru.zone загружен")
         return True
 
-    # Если ничего не вышло — создаём пустой файл (будет обновлён cron'ом)
-    warn("Все источники недоступны — создан пустой ru.zone (обновится cron'ом)")
+    # Если ничего не вышло — прежний НЕПУСТОЙ ru.zone НЕ трогаем.
+    # МИНА (инцидент 19.11): раньше сюда писался пустой файл — он
+    # затирал рабочий список, и после ближайшего ребута boot-скрипт
+    # грузил пустой ipset: '-m set ! --match-set awg_ru_networks'
+    # по ПУСТОМУ множеству матчит ВСЁ → весь клиентский трафик через
+    # exit (RU-сплит молча деградировал в exit-all). Пустой файл
+    # создаём только при его полном отсутствии (первая установка).
+    _kept = 0
+    try:
+        if AWGS_RU_ZONE_FILE.exists():
+            _kept = sum(1 for l in AWGS_RU_ZONE_FILE.read_text().splitlines()
+                        if l.strip() and not l.startswith("#"))
+    except Exception:
+        _kept = 0
+    if _kept > 0:
+        warn(f"Все источники недоступны — сохранён прежний ru.zone "
+             f"({_kept} сетей); повторная попытка — cron'ом (вс 03:00) "
+             f"или пунктом 3 меню каскада")
+        return False
+    warn("Все источники недоступны — ru.zone НЕ загружен (RU-сплит "
+         "подстрахует fallback-снимок; повторная попытка — cron'ом "
+         "или пунктом 3 меню каскада)")
     AWGS_RU_ZONE_FILE.write_text("")
     return False
+
+
+def awgs_cascade_ipset_entries() -> int:
+    """Число сетей в ipset awg_ru_networks (0 — если пуст/отсутствует)."""
+    core = _core_module()
+    r = core._run(["ipset", "list", AWGS_IPSET_NAME],
+                  capture=True, check=False, quiet=True)
+    if r.returncode != 0:
+        return 0
+    m = re.search(r"Number of entries:\s+(\d+)", r.stdout or "")
+    return int(m.group(1)) if m else 0
+
+
+def _awgs_cascade_ensure_ipset() -> None:
+    """ipset awg_ru_networks обязан СУЩЕСТВОВАТЬ до установки правил.
+
+    Два зеркальных сценария отказа (инцидент 19.11):
+      • set ОТСУТСТВУЕТ → '-m set'-правила не добавляются вообще →
+        весь клиентский трафик напрямую с entry (каскад молча не
+        каскадирует);
+      • set СУЩЕСТВУЕТ, но ПУСТ → '! --match-set' матчит ВСЁ → весь
+        клиентский трафик через exit (RU-сплит ведёт себя как
+        включённый пункт 7 «весь трафик через exit»).
+    Здесь лечится первый (set создаётся хотя бы пустым); второй —
+    awgs_cascade_ipset_seed_if_empty().
+    """
+    core = _core_module()
+    core._run(["ipset", "create", AWGS_IPSET_NAME, "hash:net", "family", "inet",
+               "hashsize", "4096", "maxelem", "65536", "-exist"],
+              check=False, quiet=True)
+
+
+def _awgs_cascade_restore_ipset_from(path: Path) -> bool:
+    """Заливает ipset из файла-списка CIDR (атомарно через restore).
+
+    Общий механизм для ru.zone и fallback-снимка: create -exist +
+    add -exist по строкам (без '#' и пустых)."""
+    core = _core_module()
+    try:
+        lines = [l.strip() for l in path.read_text().splitlines()
+                 if l.strip() and not l.startswith("#")]
+    except Exception:
+        return False
+    if not lines:
+        return False
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".ipset", delete=False) as tmp:
+        tmp.write(f"create {AWGS_IPSET_NAME} hash:net family inet "
+                  f"hashsize 4096 maxelem 65536 -exist\n")
+        for line in lines:
+            tmp.write(f"add {AWGS_IPSET_NAME} {line} -exist\n")
+        tmp_path = tmp.name
+    try:
+        r = core._run(["ipset", "restore", "-exist", "-file", tmp_path],
+                      capture=True, check=False, quiet=True)
+        return r.returncode == 0
+    except Exception:
+        return False
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def awgs_cascade_install_fallback_snapshot() -> bool:
+    """Копирует assets/awg/ru.zone.fallback → /etc/awg-cascade/ru.zone.fallback.
+
+    Снимок ставится рядом с awg-routing.sh (детерминированный путь для
+    boot-скрипта) при каждой перегенерации routing-скрипта — живые
+    серверы получают его после первого же toggle/ре-сета каскада.
+    """
+    try:
+        src = (Path(__file__).resolve().parent.parent.parent
+               / "assets" / "awg" / "ru.zone.fallback")
+        if not src.is_file():
+            return False
+        AWGS_CASCADE_DIR.mkdir(parents=True, exist_ok=True)
+        dst = AWGS_RU_ZONE_FALLBACK_FILE
+        if not dst.exists() or dst.read_text() != src.read_text():
+            dst.write_text(src.read_text())
+            dst.chmod(0o644)
+        return True
+    except Exception:
+        return False
+
+
+def awgs_cascade_ipset_seed_if_empty() -> int:
+    """ГАРД пустого ipset: наполнить список RU-сетей, вернуть итог.
+
+    Пустой ipset при выключенном пункте 7 = молчаливый exit-all:
+    '-m set ! --match-set awg_ru_networks dst' по ПУСТОМУ множеству
+    матчит ВСЁ, весь клиентский трафик уходит через exit (RU-сайты
+    видят exit-IP; со стороны неотличимо от включённого exit-all —
+    инцидент сообщества 19.11: «разделение трафика не работает, как
+    будто 7-й пункт всегда включен»). Лестница: (1) перечитать
+    ru.zone (файл мог появиться позже), (2) fallback-снимок из
+    дистрибутива (устаревший список лучше пустого), (3) set создаётся
+    хотя бы пустым (правила '-m set' обязаны ставиться) + ERROR в
+    лог — молчать нельзя.
+    """
+    core = _core_module()
+    n = awgs_cascade_ipset_entries()
+    if n > 0:
+        return n
+    # (1) свежий ru.zone
+    if (AWGS_RU_ZONE_FILE.exists()
+            and AWGS_RU_ZONE_FILE.stat().st_size > 0
+            and _awgs_cascade_restore_ipset_from(AWGS_RU_ZONE_FILE)):
+        n = awgs_cascade_ipset_entries()
+        if n > 0:
+            core.log_to_file("INFO",
+                             f"ru-split: ipset восстановлен из ru.zone ({n} сетей)")
+            return n
+    # (2) fallback-снимок (установленная копия → asset дистрибутива)
+    for src in (AWGS_RU_ZONE_FALLBACK_FILE,
+                Path(__file__).resolve().parent.parent.parent
+                / "assets" / "awg" / "ru.zone.fallback"):
+        if src.is_file() and _awgs_cascade_restore_ipset_from(src):
+            n = awgs_cascade_ipset_entries()
+            if n > 0:
+                core.log_to_file("INFO",
+                                 f"ru-split: ipset засеян fallback-снимком "
+                                 f"({n} сетей, {src.name}) — обновите ru.zone "
+                                 f"пунктом 3, снимок устареет")
+                return n
+    # (3) set обязан существовать (сценарий «missing set») + громкий ERROR
+    _awgs_cascade_ensure_ipset()
+    core.log_to_file(
+        "ERROR",
+        f"ru-split: ipset {AWGS_IPSET_NAME} ПУСТ — весь клиентский трафик "
+        "идёт через exit: RU-сплит ведёт себя как включённый пункт 7 "
+        "«весь трафик через exit», хотя он выключен. Лечение: меню "
+        "каскада → пункт 3 (обновить ru.zone) или положите /root/ru.zone "
+        "и повторите пункт 3")
+    return 0
 
 
 def awgs_cascade_load_ipset() -> bool:
     """Загружает ru.zone в ipset (атомарно через restore)."""
     core = _core_module()
     if not AWGS_RU_ZONE_FILE.exists() or AWGS_RU_ZONE_FILE.stat().st_size == 0:
+        # set создаём даже при пустом файле — '-m set'-правила каскада
+        # обязаны ставиться (иначе сценарий «missing set»: весь
+        # клиентский трафик напрямую с entry, каскад молча обходится)
+        _awgs_cascade_ensure_ipset()
         core.log_to_file("WARN", "awgs_cascade_load_ipset: ru.zone пуст")
         return False
-
-    # Создаём временный restore-файл
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".ipset", delete=False) as tmp:
-        tmp.write(f"create {AWGS_IPSET_NAME} hash:net family inet hashsize 4096 maxelem 65536 -exist\n")
-        for line in AWGS_RU_ZONE_FILE.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                tmp.write(f"add {AWGS_IPSET_NAME} {line} -exist\n")
-        tmp_path = tmp.name
-
-    try:
-        r = core._run(["ipset", "restore", "-exist", "-file", tmp_path],
-                      capture=True, check=False)
-        if r.returncode != 0:
-            core.log_to_file("WARN", f"awgs_cascade_load_ipset: {r.stderr}")
-            return False
+    if _awgs_cascade_restore_ipset_from(AWGS_RU_ZONE_FILE):
         core.log_to_file("INFO", f"ipset {AWGS_IPSET_NAME} загружен")
         return True
-    except Exception as e:
-        core.log_to_file("ERROR", f"awgs_cascade_load_ipset: {e}")
-        return False
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    core.log_to_file("WARN", "awgs_cascade_load_ipset: restore провалился")
+    return False
 
 
 # ============================================================================
@@ -307,15 +446,27 @@ def awgs_cascade_setup_awg0(
     info("Загрузка ru.zone в ipset...")
     awgs_cascade_download_ru_zone()
     awgs_cascade_load_ipset()
-    # пустой ipset = весь клиентский трафик уйдёт НАПРЯМУЮ
-    # с entry-сервера (mangle MARK не сработает — правило ссылается на
-    # несуществующий set и не добавится) — каскад молча не каскадирует.
-    # Проверяем и предупреждаем ЯВНО (E2E: у юзера именно так и было).
-    r = core._run(["ipset", "list", AWGS_IPSET_NAME], capture=True, check=False)
-    if r.returncode != 0 or "Number of entries: 0" in (r.stdout or ""):
-        warn(f"ipset {AWGS_IPSET_NAME} пуст/отсутствует — ru.zone не загружен!")
-        warn("Без ru.zone НЕ-RU трафик клиентов пойдёт напрямую с этого "
-             "сервера, а не через AWG1. Проверьте /etc/awg-cascade/ru.zone.")
+    # ГАРД пустого ipset (инцидент сообщества 19.11: «разделение
+    # трафика не работает, как будто 7-й пункт всегда включен»).
+    # Два зеркальных сценария — прежний комментарий описывал только
+    # первый и вводил в заблуждение:
+    #   • set ОТСУТСТВУЕТ → '-m set'-правила не добавляются → весь
+    #     клиентский трафик НАПРЯМУЮ с entry (каскад молча не
+    #     каскадирует; E2E: у юзера именно так и было);
+    #   • set СУЩЕСТВУЕТ, но ПУСТ → '! --match-set' по пустому
+    #     множеству матчит ВСЁ → весь клиентский трафик ЧЕРЕЗ EXIT,
+    #     RU-IP нигде не светится — неотличимо от включённого пункта 7.
+    # Лечим оба: seed (ru.zone → fallback-снимок) + set существует.
+    _entries = awgs_cascade_ipset_seed_if_empty()
+    if _entries == 0:
+        warn(f"ipset {AWGS_IPSET_NAME} ПУСТ — RU-сплит работать НЕ БУДЕТ:")
+        warn("  весь клиентский трафик пойдёт через exit (RU-сайты увидят")
+        warn("  exit-IP, Ozon/2ip поднимут флаг «включён VPN») — это")
+        warn("  выглядит как включённый пункт 7, хотя он выключен.")
+        warn("  Лечение: меню каскада → пункт 3 (обновить ru.zone) или")
+        warn("  положите файл /root/ru.zone и повторите пункт 3.")
+    else:
+        info(f"ipset {AWGS_IPSET_NAME}: {_entries} сетей")
 
     # 4. Применяем iptables-маршрутизацию
     info("Применение iptables-маршрутизации...")
@@ -565,6 +716,13 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
     На entry MASQUERADE v6 -o awg1 переписывает src на v6-адрес awg1
     (fd66:66:<okt3>::X) — зеркало v4-дизайна каскада.
     """
+    # ГАРД «missing set» (инцидент 19.11): set обязан существовать ДО
+    # установки '-m set'-правил — без него mark-правило не добавится
+    # вообще, весь клиентский трафик уйдёт напрямую с entry (каскад
+    # молча не каскадирует; сценарий, обратный пустому ipset). До ветки
+    # LB: диспетчер awg_lb матчит по тому же awg_ru_networks.
+    _awgs_cascade_ensure_ipset()
+
     # LB-режим: каскадный MARK-путь не ставим — трафик идёт через
     # диспетчер awg_lb (awg_cascade_lb.lb_dispatcher_install)
     try:
@@ -651,6 +809,14 @@ def _awgs_cascade_apply_iptables(exit_subnet: str, subnet_v6: str = "") -> bool:
         core.log_to_file("INFO",
                          "cascade: exit-all — весь клиентский v4 через exit "
                          "(RU-сети тоже, blanket mark-форма)")
+    else:
+        # ГАРД пустого ipset (инцидент 19.11): пустое множество в
+        # '! --match-set' матчит ВСЁ — RU-сплит ведёт себя как
+        # включённый пункт 7. Сеем (ru.zone → fallback-снимок) и
+        # громко логируем; при наполнении set'а та же форма правила
+        # оживает БЕЗ переустановки правил (самолечение).
+        if awgs_cascade_ipset_entries() == 0:
+            awgs_cascade_ipset_seed_if_empty()
 
     # Policy routing: marked-трафик → через awg1
     # КРИТИЧЕСКИЙ фикс — `ip route add default via {gw} dev awg1
@@ -769,8 +935,37 @@ def _awgs_cascade_create_routing_script(exit_subnet: str,
     (-C || -A) и on-link маршрут для table 2000 (см. apply_iptables).
     """
     AWGS_CASCADE_DIR.mkdir(parents=True, exist_ok=True)
+    # fallback-снимок — рядом со скриптом (детерминированный путь для
+    # гарда 1.5 ниже); живые серверы получают его при каждой
+    # перегенерации скрипта (setup/toggle/смена exit)
+    awgs_cascade_install_fallback_snapshot()
     exit_base = exit_subnet.split("/")[0].rsplit(".", 1)[0]
     exit_gw = f"{exit_base}.1"
+
+    # 1.5 ГАРД пустого ipset (инцидент сообщества 19.11: «разделение
+    # трафика не работает, как будто 7-й пункт всегда включен»):
+    # '-m set ! --match-set' по ПУСТОМУ множеству матчит ВСЁ → весь
+    # клиентский трафик через exit. Сеем fallback-снимок; не помогло —
+    # громкий warning в журнал (молчать нельзя: со стороны это
+    # неотличимо от включённого exit-all).
+    _IPSET_GUARD = f"""# 1.5 ГАРД пустого ipset: пустое множество в '! --match-set'
+# матчит ВСЁ → весь клиентский трафик через exit (инцидент 19.11).
+# Сеем fallback-снимок; не помогло — warning в журнал.
+_n=$(ipset list {AWGS_IPSET_NAME} 2>/dev/null | sed -n 's/^Number of entries: //p')
+[ -z "$_n" ] && _n=0
+if [ "$_n" -eq 0 ] && [ -s "{AWGS_RU_ZONE_FALLBACK_FILE}" ]; then
+    grep -vE '^#|^$|;' "{AWGS_RU_ZONE_FALLBACK_FILE}" | sed "s/^/add {AWGS_IPSET_NAME} /" | ipset restore -exist 2>/dev/null || true
+    _n=$(ipset list {AWGS_IPSET_NAME} 2>/dev/null | sed -n 's/^Number of entries: //p')
+    [ -z "$_n" ] && _n=0
+fi
+if [ "$_n" -eq 0 ]; then
+    echo "awg-cascade: WARNING: ipset {AWGS_IPSET_NAME} пуст — RU-сплит не работает:" >&2
+    echo "awg-cascade: весь клиентский трафик идёт через exit (выглядит как включённый пункт 7)." >&2
+    echo "awg-cascade: Лечение: меню каскада → пункт 3 (обновить ru.zone) или /root/ru.zone." >&2
+    logger -p daemon.warning -t awg-cascade "ru-split degraded: ipset {AWGS_IPSET_NAME} empty — all client traffic via exit" 2>/dev/null || true
+fi
+
+"""
 
     # B4-сплит — форма mark-правила/nft-таблицы зависит от его
     # состояния (скрипт перегенерируется при вкл/выкл сплита и смене exit)
@@ -872,8 +1067,7 @@ ipset create {AWGS_IPSET_NAME} hash:net family inet hashsize 4096 maxelem 65536 
 if [ -f "{AWGS_RU_ZONE_FILE}" ]; then
     grep -vE '^#|^$|;' "{AWGS_RU_ZONE_FILE}" | sed "s/^/add {AWGS_IPSET_NAME} /" | ipset restore -exist 2>/dev/null || true
 fi
-{_B4_SPLIT_IPSET_BLOCK}
-"""
+{_B4_SPLIT_IPSET_BLOCK}{_IPSET_GUARD}"""
             script = (head + _b4s.routing_nft_block()
                       + _lbm.lb_routing_script_text()
                       + '\necho "AWG Cascade routing (LB) started"\n')
@@ -896,8 +1090,7 @@ ipset create {AWGS_IPSET_NAME} hash:net family inet hashsize 4096 maxelem 65536 
 if [ -f "{AWGS_RU_ZONE_FILE}" ]; then
     grep -vE '^#|^$|;' "{AWGS_RU_ZONE_FILE}" | sed "s/^/add {AWGS_IPSET_NAME} /" | ipset restore -exist 2>/dev/null || true
 fi
-{_B4_SPLIT_IPSET_BLOCK}
-# 2. iptables правила (идентичны live-набору _awgs_cascade_apply_iptables)
+{_B4_SPLIT_IPSET_BLOCK}{_IPSET_GUARD}# 2. iptables правила (идентичны live-набору _awgs_cascade_apply_iptables)
 # 2.1 ГЛАВНЫЙ ФИКС: маркируем КЛИЕНТСКИЙ трафик в PREROUTING
 #     (ДО route decision — метка в FORWARD ставилась ПОСЛЕ маршрутизации,
 #     транзит уходил в main → DROP; метка в OUTPUT маркировала серверный
@@ -1077,7 +1270,22 @@ def awgs_cascade_update_ru_zone() -> bool:
     # Пересоздаём ipset
     core._run(["ipset", "destroy", AWGS_IPSET_NAME],
               check=False, quiet=True)
-    return awgs_cascade_load_ipset()
+    ok = awgs_cascade_load_ipset()
+    # ГАРД пустого ipset (инцидент 19.11): после обновления set
+    # обязан быть непустым — пустое множество в '! --match-set'
+    # матчит ВСЁ (молчаливый exit-all). Сеем fallback-снимком.
+    n = awgs_cascade_ipset_entries()
+    if n == 0:
+        n = awgs_cascade_ipset_seed_if_empty()
+    if n == 0:
+        core.log_to_file("ERROR",
+                         "ru-split: ipset пуст после обновления — весь "
+                         "клиентский трафик через exit (см. пункт 3 "
+                         "меню каскада)")
+    else:
+        core.log_to_file("INFO",
+                         f"ru-split: ipset {AWGS_IPSET_NAME}: {n} сетей")
+    return ok
 
 
 # ============================================================================
@@ -2399,7 +2607,8 @@ def _awgs_cascade_status() -> None:
     _box_row = core._box_row
     _box_sep = core._box_sep
     _box_bottom = core._box_bottom
-    GREEN, NC, RED, DIM, CYAN = core.GREEN, core.NC, core.RED, core.DIM, core.CYAN
+    GREEN, NC, RED, DIM, CYAN, YELLOW = (core.GREEN, core.NC, core.RED,
+                                         core.DIM, core.CYAN, core.YELLOW)
 
     state = awgs_state_load()
     role = state.get("cascade_role", "")
@@ -2445,15 +2654,46 @@ def _awgs_cascade_status() -> None:
         # остаётся загруженным — мгновенный откат режима)
         _ipset_note = (f" {DIM}(не участвует в маршрутизации — exit-all){NC}"
                        if awgs_cascade_exit_all(state) else "")
-        r = core._run(["ipset", "list", AWGS_IPSET_NAME],
-                      capture=True, check=False)
-        if r.returncode == 0:
-            import re
-            m = re.search(r"Number of entries:\s+(\d+)", r.stdout)
-            n = m.group(1) if m else "?"
-            _box_row(f"  ipset {AWGS_IPSET_NAME}: {GREEN}{n} сетей{NC}{_ipset_note}")
+        _n = awgs_cascade_ipset_entries()
+        if _n > 0:
+            _col = GREEN if _n >= 100 else YELLOW
+            _box_row(f"  ipset {AWGS_IPSET_NAME}: {_col}{_n} сетей{NC}{_ipset_note}")
+            if _n < 100:
+                _box_row(f"  {YELLOW}⚠ подозрительно мало сетей (<100) — "
+                         f"ru.zone неполный, обновите (пункт 3){NC}")
         else:
-            _box_row(f"  ipset {AWGS_IPSET_NAME}: {RED}не загружен{NC}")
+            _box_row(f"  ipset {AWGS_IPSET_NAME}: {RED}ПУСТ / не загружен{NC}")
+            if not awgs_cascade_exit_all(state):
+                # Инцидент 19.11: пустое множество в '! --match-set'
+                # матчит ВСЁ — весь клиентский трафик через exit,
+                # неотличимо от включённого пункта 7. Говорим прямо.
+                _box_row(f"  {RED}⚠ RU-сплит ФАКТИЧЕСКИ НЕ РАБОТАЕТ: весь клиентский{NC}")
+                _box_row(f"  {RED}трафик идёт через exit (RU-сайты видят exit-IP) —{NC}")
+                _box_row(f"  {RED}выглядит, как будто пункт 7 включён, хотя он выключен.{NC}")
+                _box_row(f"  {RED}Причина: ipset пуст (ru.zone не загружен). Лечение:{NC}")
+                _box_row(f"  {RED}пункт 3 — обновить ru.zone, или положите /root/ru.zone.{NC}")
+
+        # Диагностика формы mark-правила (split-режим, без LB): в mangle
+        # PREROUTING awg0-марка обязана нести '! --match-set
+        # awg_ru_networks'; blanket-хвост (конкурирующая марка от
+        # прежнего режима/версии) = весь трафик через exit (инцидент 19.11)
+        if not awgs_cascade_exit_all(state):
+            try:
+                from .awg_cascade_lb import lb_is_on
+                _lb_on = lb_is_on()
+            except Exception:
+                _lb_on = False
+            if not _lb_on:
+                r = core._run(["iptables", "-t", "mangle", "-S", "PREROUTING"],
+                              capture=True, check=False)
+                _bad = [l for l in (r.stdout or "").splitlines()
+                        if "-i awg0" in l and "-j MARK" in l
+                        and AWGS_IPSET_NAME not in l]
+                if _bad:
+                    _box_row(f"  {RED}⚠ mark-правило НЕ в split-форме (без RU-исключения):{NC}")
+                    _box_row(f"  {RED}{' '.join(_bad[0].split())}{NC}")
+                    _box_row(f"  {RED}→ весь клиентский трафик маркируется → exit. Лечение:{NC}")
+                    _box_row(f"  {RED}systemctl restart awg-cascade-routing{NC}")
 
         # Выход к AWG1
         _box_row(f"  Exit host: {state.get('cascade_peer_host', '?')}")
