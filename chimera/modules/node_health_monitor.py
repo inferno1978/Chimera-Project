@@ -683,6 +683,12 @@ def do_health_monitor_menu() -> None:
                     rtt_str   = "-"
                     lc_str    = "-"
                     reason    = ""
+                    # Гард (инцидент 21.11, скрин [CRITICAL]): у ноды нет
+                    # записи в health-стейте → up сбрасывается здесь же —
+                    # строка причины ниже (кейс №9) читает его безусловно;
+                    # без сброса на первой прочерк-ноде UnboundLocalError,
+                    # у последующих — stale-up из прошлой итерации.
+                    up        = None
                 _box_row(_box_narrow(
                     f"  {host:<26} {stc}{st:<7}{NC} {ms_str:>9} {rtt_str:>8}  {lc_str}"))
                 # Подстрока причины для DOWN/DEGR (кейс №9): вердикт без

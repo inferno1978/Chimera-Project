@@ -628,5 +628,97 @@ class TestHmCheckCli(unittest.TestCase):
                          _signal.SIG_DFL)
 
 
+class TestMenuRenderNoHealthEntry(unittest.TestCase):
+    """Регресс fix 21.11: рендер таблицы меню при нодах БЕЗ записи в
+    health-стейте. Строка причины «кейс №9» (if up is False and reason:)
+    читала up безусловно: на первой прочерк-ноде — UnboundLocalError
+    (инцидент-скрин [CRITICAL]), у последующих — stale-up из прошлой
+    итерации. Гард: up = None в else-ветке цикла отрисовки."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._state = self._tmpdir / "state.json"
+        self._health = self._tmpdir / "node-health-state.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write_state(self, nodes):
+        self._state.write_text(json.dumps({"chain_nodes": nodes}),
+                               encoding="utf-8")
+
+    def _render(self):
+        """Headless-прогон do_health_monitor_menu: input -> "" (выход после
+        первого кадра), os.system -> no-op, stdout в буфер."""
+        import contextlib
+        import io
+        from chimera.modules import node_health_monitor as nhm
+        buf = io.StringIO()
+        with patch("chimera.modules.node_health_monitor.STATE_FILE",
+                   self._state), \
+             patch("chimera.modules.node_health_monitor.HEALTH_STATE",
+                   self._health), \
+             patch("chimera.modules.node_health_monitor.is_monitor_installed",
+                   return_value=False), \
+             patch("os.system", return_value=0), \
+             patch("builtins.input", return_value=""), \
+             contextlib.redirect_stdout(buf):
+            nhm.do_health_monitor_menu()
+        return buf.getvalue()
+
+    def test_first_node_without_health_entry_no_crash(self):
+        # Сценарий скрина: монитор не активен, health-стейт отсутствует →
+        # у всех нод прочерки; БЕЗ гарда — UnboundLocalError на первой.
+        self._write_state([
+            {"host": "node-a.example", "port": 443},
+            {"host": "node-b.example", "port": 443},
+        ])
+        out = self._render()
+        self.assertIn("node-a.example", out)
+        self.assertIn("node-b.example", out)
+        self.assertIn("не активен", out)
+
+    def test_mixed_health_entries_no_leak(self):
+        # Прочерк-нода ПЕРВОЙ, за ней DOWN с reason: строка причины
+        # обязана появиться ровно один раз (нет протечки up/reason).
+        self._write_state([
+            {"host": "node-a.example", "port": 443},
+            {"host": "node-b.example", "port": 443},
+        ])
+        self._health.write_text(json.dumps({
+            "node-b.example:443": {
+                "up": False, "ms": 0.0, "rtt": 120.0,
+                "reason": "DNS на exit", "last_check": 1732147200,
+            },
+        }), encoding="utf-8")
+        out = self._render()
+        self.assertEqual(out.count("DNS на exit"), 1)
+        self.assertEqual(out.count("туннель жив, домены не ходят"), 1)
+
+    def test_all_nodes_with_health_state(self):
+        # Контроль: полный health-стейт — прежний рендер не регрессировал
+        # (UP-нода без причины, DEGR-нода с причиной).
+        self._write_state([
+            {"host": "node-a.example", "port": 443},
+            {"host": "node-b.example", "port": 443},
+        ])
+        self._health.write_text(json.dumps({
+            "node-a.example:443": {
+                "up": True, "ms": 90.0, "rtt": 40.0,
+                "reason": "", "last_check": 1732147200,
+            },
+            "node-b.example:443": {
+                "up": False, "ms": 0.0, "rtt": 120.0,
+                "reason": "DNS на exit", "last_check": 1732147200,
+            },
+        }), encoding="utf-8")
+        out = self._render()
+        self.assertIn("UP", out)
+        self.assertIn("DEGR", out)
+        self.assertEqual(out.count("DNS на exit"), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
