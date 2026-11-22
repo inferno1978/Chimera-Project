@@ -1,4 +1,22 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v23: 400 = 367 + 33 (твик «Гео · IP» вкладки «Пользователи» — запрос
+# владельца «показ IP, страны, города и флага страны на вкладке
+# пользователи, как мой твик, который при обновлениях удалять нельзя»:
+# новый файл test_wpp_user_geo (+23: seen-записи подписок — sub:/dev:
+# с хэшем X-HWID, мусорный IP не пишется, prune старых визитов, файл
+# 0600; парсинг access.log(+.1) — email→IP, пропуск observatory/
+# outbound/DNS/легаси-без-from, IPv4-mapped, свежее побеждает, кэш
+# 30 с; client_geo — подписка берёт самое свежее из token-seen/
+# device-seen/access-log-email, прямые VLESS — по email, MTProto/AWG/
+# primary — честное «нет данных»; гео-кэш hit — сеть не дёргается,
+# негативный TTL — не ретраится; pending + фоновый refresh;
+# refresh_geo_async — неблокирующий, дебаунс, пустой список не плодит
+# поток; users_ui — колонка «Гео · IP» с флагом/страной/городом/IP,
+# «нет данных», OpenFlux-прочерк, geo_payload_for = первичная
+# отрисовка байт-в-байт) + test_wpp_nodes_geo_cache (+10, ЗАПИСАН
+# В МАНИФЕСТ ПОСЛЕ ФАКТА: коммит 197eb13 (фикс вкладки «Ноды» 21.7 с)
+# добавил файл с +10 тестами, но не внёс его в v22-манифест —
+# test_tests_index был красный; теперь манифест полон).
 # v22: 367 = 340 + 27 (HWID-подписки WPP v2.9.1 в порте Chimera — давний
 # запрос владельца «одним VLESS-ключом мог пользоваться один человек,
 # как в коммерческих панелях через HWID»: новый файл
@@ -457,8 +475,10 @@ tests.test_wdtt_webdav_mirrors
 tests.test_webdav_tunnel
 tests.test_wpp_awg_adapters
 tests.test_wpp_hwid_subscriptions
+tests.test_wpp_nodes_geo_cache
 tests.test_wpp_portal_mieru
 tests.test_wpp_upstream_sync
+tests.test_wpp_user_geo
 tests.test_xhttp_cdn_masking
 tests.test_xhttp_extra
 tests.test_xhttp_path_gen

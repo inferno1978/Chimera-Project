@@ -41,9 +41,10 @@ from chimera.modules.wpp_subscriptions import (issue as _subscriptions_issue,
     mutate as _subscriptions_mutate, SubscriptionError as _WppSubscriptionError)
 from chimera.modules.wpp_subscriptions import PREFIX as SUB_PREFIX
 from chimera.modules.wpp_panel_extras import preview_document
-from chimera.modules.wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui, admin_tools_section, openflux_import_uri
+from chimera.modules.wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui, admin_tools_section, openflux_import_uri, geo_payload_for
 from chimera.modules import wpp_metrics as server_metrics
 from chimera.modules import wpp_update as web_updates
+from chimera.modules import wpp_user_geo
 from chimera.modules import wpp_components as components
 from chimera.modules import wpp_nodes as node_api
 from chimera.modules import wpp_openflux as openflux
@@ -1207,17 +1208,24 @@ class Handler(BaseHTTPRequestHandler):
         if path==PANEL_PATH+'/clients-state':
             profiles=[{'id':'primary','name':'Основной WEB Proxy','secret':primary(),'protocol':'web','enabled':True,'backend_port':443}]+users()
             records=client_records(subscription_registry(),profiles,traffic(),DOMAIN,proxy_link)
+            # Chimera-твик: гео-колонка — живое обновление через опрос (30 с).
+            # Рендер из кэшей; гео-резолв уезжает в фон (никогда не в рендере).
+            geo_map=wpp_user_geo.client_geo(subscription_registry(),profiles)
+            geo=geo_payload_for([r['id'] for r in records],geo_map,PANEL_PATH)
             clients=[{'id':r['id'],'name':r['name'],'kind':r['kind'],'enabled':r['enabled'],
-                'protocols':r['protocols'],'devices':r['devices'],'limit':r['limit'],**r['totals']} for r in records]
+                'protocols':r['protocols'],'devices':r['devices'],'limit':r['limit'],'geo':geo.get(r['id']),**r['totals']} for r in records]
             clients.extend({'id':'openflux-'+p['id'],'name':p.get('name','OpenFlux'),'kind':'openflux',
-                'enabled':bool(p.get('enabled',True)),'protocols':['openflux'],'devices':0,'limit':0,
+                'enabled':bool(p.get('enabled',True)),'protocols':['openflux'],'devices':0,'limit':0,'geo':None,
                 'up':0,'down':0,'active':bool(p.get('active',False))} for p in openflux.profile_states())
             self.send_json({'clients':clients})
             return
 
         if path==PANEL_PATH+"/users":
             profiles=[{"id":"primary","name":"Основной WEB Proxy","secret":primary(),"protocol":"web","enabled":True,"backend_port":443}]+users()
-            body=users_ui(subscription_registry(),profiles,traffic(),PANEL_PATH,DOMAIN,self.csrf(),proxy_link,openflux.profile_states())
+            # Chimera-твик «Гео · IP»: карта {id: {ip,ts,cc,country,city,pending}}
+            # из кэшей (seen + geo + access.log); резолв недостающего гео —
+            # в фон (stale-while-revalidate), рендер вкладки в сеть не ходит.
+            body=users_ui(subscription_registry(),profiles,traffic(),PANEL_PATH,DOMAIN,self.csrf(),proxy_link,openflux.profile_states(),client_geo=wpp_user_geo.client_geo(subscription_registry(),profiles))
             self.send_html(layout("Клиенты",body,"users")); return
         if path==PANEL_PATH+"/nodes":
             # Refresh nodes.json from chimera's cascade in the background:
@@ -1809,7 +1817,8 @@ class Handler(BaseHTTPRequestHandler):
     def serve_subscription(self,token):
         if not re.fullmatch(r"[a-f0-9]{64}",token):
             self.send_data("Not found",404); return
-        if not allow_subscription_request(client_id(self)):
+        remote_ip=client_id(self)
+        if not allow_subscription_request(remote_ip):
             self.send_data("Слишком много запросов. Повторите через минуту.",429,headers={"Retry-After":"60"}); return
         if not SUB_FETCH_SLOTS.acquire(blocking=False):
             self.send_data("Сервис занят. Повторите позже.",503,headers={"Retry-After":"15"}); return
@@ -1819,6 +1828,14 @@ class Handler(BaseHTTPRequestHandler):
                                if s.get("enabled") and secrets.compare_digest(str(s.get("token","")),token)),None)
             if subscription is None:
                 self.send_data("Not found",404); return
+            # Chimera-твик: последний визит подписки/устройства (IP, время, UA) —
+            # источник «Гео · IP» на вкладке «Пользователи». Тихо глотает ошибки:
+            # выдача подписки важнее гео-твика.
+            try:
+                wpp_user_geo.record_subscription_seen(token, remote_ip,
+                    self.headers.get("User-Agent",""), self.headers.get("X-HWID",""))
+            except Exception:
+                pass
             if "text/html" in self.headers.get("Accept",""):
                 # v2.9.1: публичный read-only дашборд при открытии ссылки в
                 # браузере — QR, устройства, трафик, управление устройством
