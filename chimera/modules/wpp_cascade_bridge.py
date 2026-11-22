@@ -4,10 +4,12 @@ chimera/modules/wpp_cascade_bridge.py
 ────────────────────────────────────────────────────────────────────────────────
 Bridge: chimera's cascade nodes (state.json chain_nodes) → WPP nodes.json.
 
-Определяет РЕАЛЬНОЕ местоположение нод через IP геолокацию (ip-api.com).
-Кэширует результат в nodes.json чтобы не дёргать API на каждый рендер.
+Определяет РЕАЛЬНОЕ местоположение нод через IP геолокацию (ip-api.com →
+fallback ipinfo.io). Кэширует результат в nodes.json чтобы не дёргать API
+на каждый рендер (успешный резолв — 7 дней, неудачный — час).
 
-Вызывается перед рендерингом /nodes страницы.
+Вызывается перед рендерингом /nodes страницы (с v2.9.1+ — в фоне, см.
+wpp_panel_web._refresh_nodes_async: рендер идёт мгновенно из кэша).
 """
 from __future__ import annotations
 
@@ -29,7 +31,15 @@ if str(_ROOT) not in sys.path:
 STATE_FILE    = Path("/var/lib/xray-installer/state.json")
 NODES_FILE    = Path("/var/lib/xray-installer/nodes.json")
 LOCATION_FILE = Path("/var/lib/xray-installer/location.json")
-GEO_CACHE_TTL = 7 * 86400  # 7 дней — IP не меняются часто
+GEO_CACHE_TTL = 7 * 86400     # 7 дней — IP не меняются часто (успешный резолв)
+# Неудачный резолв (пустой город / «UN») ретраится не чаще раза в час: без
+# негативного TTL каждый рендер вкладки «Ноды» заново жал гео-API с таймаутами
+# (~5 с на ноду — инцидент 22.11: вкладка открывалась 21.7 с).
+GEO_NEGATIVE_TTL = 3600
+# ip-api.com недоступен из РФ-сегмента (HTTP:80, блокируется); при недоступности
+# каждый lookup сжигал полный 5-секундный timeout ДО фолбэка на ipinfo.io.
+# 2.5 с достаточно: живые ответы ip-api приходят за <300 мс.
+GEO_PRIMARY_TIMEOUT = 2.5
 
 # WPP node country names (ISO 3166-1 alpha-2 → Russian name)
 # Совпадает с wpp_nodes.py COUNTRY_NAMES для консистентности
@@ -109,7 +119,7 @@ def _geolocate_ip(ip: str) -> dict:
     try:
         url = f"http://ip-api.com/json/{ip}?fields=countryCode,country,city&lang=ru"
         req = urllib.request.Request(url, headers={"User-Agent": "chimera-cascade-bridge/1.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=GEO_PRIMARY_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         cc = data.get("countryCode", "UN")
         country = data.get("country", "Не указано")
@@ -129,7 +139,7 @@ def _geolocate_ipinfo(ip: str) -> dict:
     try:
         url = f"https://ipinfo.io/{ip}/json"
         req = urllib.request.Request(url, headers={"User-Agent": "chimera-cascade-bridge/1.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         cc = data.get("country", "UN")
         city_en = data.get("city", "") or ""
@@ -159,18 +169,30 @@ def _geolocate_host(host: str, cached: dict | None = None) -> dict:
     Falls back to ipinfo.io if ip-api.com returns empty city.
     """
     now = int(time.time())
-    # Check cache — only return if BOTH country_code AND a real city are present.
-    # Cached "—" city means previous lookup failed — treat as cache miss and retry.
-    if cached and cached.get("geo_time") and now - cached.get("geo_time", 0) < GEO_CACHE_TTL:
+    if cached and cached.get("geo_time"):
+        age = now - cached.get("geo_time", 0)
+        # BUGFIX (инцидент 22.11, вкладка «Ноды» 21.7 с): город в nodes.json
+        # хранится в поле "name" (его же читает nodes_ui), а кэш-чтение искало
+        # "city" — вечный промах, полный резолв на каждый рендер. Читаем
+        # каноничное "name" c fallback на "city" (старый внутренний формат).
+        city = cached.get("city") or cached.get("name") or ""
         cc = cached.get("country_code", "")
-        city = cached.get("city", "")
-        if cc and not _is_empty_city(city):
+        if cc and not _is_empty_city(city) and 0 <= age < GEO_CACHE_TTL:
             return {
                 "country_code":  cc,
                 "country_name":  cached.get("country_name", "Не указано"),
                 "city":          city,
             }
-    
+        # Негативный кэш: недавний неудачный резолв (пустой город) — не дёргаем
+        # гео-API на каждый рендер, ретрай не чаще GEO_NEGATIVE_TTL.
+        # age=0 валиден (запись только что); geo_time из будущего (age<0,
+        # убежавшие часы) — промах, безопасный ретрай.
+        if 0 <= age < GEO_NEGATIVE_TTL:
+            return {
+                "country_code":  cc or "UN",
+                "country_name":  cached.get("country_name", "Не указано"),
+                "city":          "" if _is_empty_city(city) else city,
+            }
     # Resolve hostname to IP
     ip = _resolve_ip(host)
     if not ip:

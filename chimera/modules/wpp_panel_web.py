@@ -178,6 +178,36 @@ def login_failed(client):
         LOGIN_FAILURES_GLOBAL.append(now)
 def login_succeeded(client):
     with LOGIN_LOCK: LOGIN_FAILURES.pop(client,None)
+# ─── Фоновый refresh nodes.json (stale-while-revalidate) ───────────────────
+# Инцидент 22.11: вкладка «Ноды» открывалась 21.7 с — GET /panel/nodes
+# синхронно прогонял геолокацию всех нод (ip-api.com из РФ недоступен →
+# полный 5-с таймаут на ноду + фолбэк ipinfo.io). Теперь рендер идёт
+# мгновенно из кэша (nodes.json), а гео-refresh работает в daemon-потоке.
+_NODES_REFRESH_LOCK=threading.Lock()
+_NODES_REFRESH_LAST=0.0
+_NODES_REFRESH_MIN_INTERVAL=60.0  # дебаунс: не чаще раза в минуту
+
+def _refresh_nodes_async() -> bool:
+    """Планирует фоновый refresh_nodes_file(). Неблокирующий, дебаунс 60 с.
+
+    Возвращает True, если refresh реально запланирован (дебаунс не сработал).
+    Ошибки внутри refresh_nodes_file не всплывают наружу (он сам ловит их
+    и пишет в stderr) — рендер вкладки от них не зависит.
+    """
+    global _NODES_REFRESH_LAST
+    now=time.time()
+    with _NODES_REFRESH_LOCK:
+        if now-_NODES_REFRESH_LAST < _NODES_REFRESH_MIN_INTERVAL:
+            return False
+        _NODES_REFRESH_LAST=now
+    try:
+        from chimera.modules.wpp_cascade_bridge import refresh_nodes_file
+        threading.Thread(target=refresh_nodes_file,daemon=True,
+                         name="wpp-nodes-geo-refresh").start()
+        return True
+    except Exception as exc:
+        print("cascade bridge refresh failed:",exc,file=sys.stderr,flush=True)
+        return False
 def load():
     try:
         with open(DATA,encoding="utf-8") as f: return json.load(f)
@@ -1190,12 +1220,10 @@ class Handler(BaseHTTPRequestHandler):
             body=users_ui(subscription_registry(),profiles,traffic(),PANEL_PATH,DOMAIN,self.csrf(),proxy_link,openflux.profile_states())
             self.send_html(layout("Клиенты",body,"users")); return
         if path==PANEL_PATH+"/nodes":
-            # Refresh nodes.json from chimera's cascade before rendering
-            try:
-                from chimera.modules.wpp_cascade_bridge import refresh_nodes_file
-                refresh_nodes_file()
-            except Exception as exc:
-                print("cascade bridge refresh failed:",exc,file=sys.stderr,flush=True)
+            # Refresh nodes.json from chimera's cascade in the background:
+            # вкладка рендерится мгновенно из кэша (stale-while-revalidate),
+            # геолокация догоняет в фоне и видна при следующем заходе.
+            _refresh_nodes_async()
             body=nodes_ui([node_api.public_node(n) for n in node_api.load_nodes(NODES_FILE)],
                           node_api.load_location(LOCATION_FILE),node_api.make_connection_token(DOMAIN,API_KEY),PANEL_PATH,self.csrf())
             self.send_html(layout("Ноды",body,"nodes")); return
