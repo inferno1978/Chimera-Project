@@ -55,15 +55,51 @@ def protocols(value):
     return list(dict.fromkeys(value))
 
 
+def connection_specs(value, fallback_protocols=None):
+    """Validate the inbound list stored on a client subscription."""
+    if value is None:
+        value=[{'id':('vless-direct' if p=='vless' else 'hysteria-primary'),
+                'name':('VLESS XHTTP · напрямую' if p=='vless' else 'Hysteria2 · основной'),
+                'protocol':p} for p in protocols(fallback_protocols or ['vless','hysteria'])]
+    if not isinstance(value,list) or not value or len(value)>16:
+        raise SubscriptionError('Выберите от 1 до 16 подключений клиента.')
+    result=[]; seen=set()
+    for raw in value:
+        if not isinstance(raw,dict): raise SubscriptionError('Некорректное подключение клиента.')
+        cid=str(raw.get('id',''))
+        protocol=str(raw.get('protocol',''))
+        if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{2,63}',cid) or protocol not in ('vless','hysteria'):
+            raise SubscriptionError('Подписки поддерживают подключения VLESS и Hysteria2.')
+        if cid in seen: continue
+        seen.add(cid)
+        item={'id':cid,'name':clean_name(raw.get('name','Подключение')),'protocol':protocol}
+        if protocol=='vless' and isinstance(raw.get('cdn'),dict): item['cdn']=copy.deepcopy(raw['cdn'])
+        result.append(item)
+    if not result: raise SubscriptionError('Выберите хотя бы одно подключение.')
+    return result
+
+
+def normalize_account(sub):
+    specs=connection_specs(sub.get('connections'),sub.get('protocols',['vless','hysteria']))
+    sub['connections']=specs
+    sub['protocols']=list(dict.fromkeys(item['protocol'] for item in specs))
+    # Existing subscriptions gain seamless client-side failover without a
+    # token/key rotation.  It can be disabled in the client editor.
+    sub['failover_enabled']=bool(sub.get('failover_enabled',True))
+    return sub
+
+
 def drop_profiles(data, sid, did=None):
     data['users'] = [u for u in data['users'] if not (
         u.get('subscription_id') == sid and (did is None or u.get('device_id') == did))]
 
 
 def provision(data, sub, device):
-    for protocol in sub['protocols']:
+    normalize_account(sub)
+    for connection in sub['connections']:
+        protocol=connection['protocol']; connection_id=connection['id']
         if any(u.get('subscription_id') == sub['id'] and u.get('device_id') == device['id']
-               and u['protocol'] == protocol for u in data['users']):
+               and u.get('connection_id') == connection_id for u in data['users']):
             continue
         if sum(bool(u.get('subscription_id')) for u in data['users']) >= MAX_PROFILES:
             raise SubscriptionError('Достигнут общий лимит профилей подписок.', 503, 'capacity')
@@ -74,9 +110,12 @@ def provision(data, sub, device):
             'id': uid, 'name': sub['name'] + ' / ' + device['name'],
             'protocol': protocol, 'enabled': sub['enabled'], 'secret': str(uuid.uuid4()),
             'backend_port': ports[protocol],
+            'connection_id': connection_id,
             'subscription_id': sub['id'], 'device_id': device['id'],
             'created_at': int(time.time()),
         }
+        if protocol=='vless' and isinstance(connection.get('cdn'),dict):
+            profile['cdn']=copy.deepcopy(connection['cdn'])
         data['users'].append(profile)
 
 
@@ -87,10 +126,13 @@ def mutate(data, request):
     if operation == 'create':
         if len(accounts(data)) >= MAX_ACCOUNTS:
             raise SubscriptionError('Достигнут лимит подписок.')
+        specs=connection_specs(request.get('connections'),request.get('protocols'))
         sub = {'id': secrets.token_hex(8), 'token': secrets.token_hex(32),
                'name': clean_name(request.get('name', '')), 'enabled': True,
-               'max_devices': limits(request.get('max_devices', 1)),
-               'protocols': protocols(request.get('protocols')), 'devices': [],
+               'max_devices': limits(request.get('max_devices', 0)),
+               'failover_enabled': bool(request.get('failover_enabled',True)),
+               'connections':specs,
+               'protocols':list(dict.fromkeys(item['protocol'] for item in specs)), 'devices': [],
                'created_at': int(time.time())}
         accounts(data).append(sub)
     else:
@@ -110,9 +152,14 @@ def mutate(data, request):
                 raise SubscriptionError('Сначала отзовите лишние устройства, затем уменьшите лимит.')
             sub['name'] = clean_name(request.get('name', sub['name']))
             sub['max_devices'] = limit
-            sub['protocols'] = protocols(request.get('protocols', sub['protocols']))
+            if 'failover_enabled' in request:
+                sub['failover_enabled'] = bool(request['failover_enabled'])
+            specs=connection_specs(request.get('connections'),sub.get('protocols')) if 'connections' in request else connection_specs(sub.get('connections'),request.get('protocols',sub.get('protocols')))
+            sub['connections']=specs
+            sub['protocols']=list(dict.fromkeys(item['protocol'] for item in specs))
+            selected={item['id'] for item in specs}
             data['users'] = [u for u in data['users'] if u.get('subscription_id') != sub['id']
-                             or u['protocol'] in sub['protocols']]
+                             or u.get('connection_id') in selected]
             for device in sub['devices']:
                 if not device.get('revoked'):
                     provision(data, sub, device)
@@ -131,10 +178,16 @@ def mutate(data, request):
             sub['token'] = secrets.token_hex(32)
             sub['devices'] = []
             drop_profiles(data, sub['id'])
-        elif operation in ('revoke', 'allow'):
+        elif operation in ('revoke', 'allow', 'rename-device'):
             device = next((d for d in sub['devices'] if d['id'] == request.get('device_id')), None)
             if device is None:
                 raise SubscriptionError('Устройство не найдено.', 404, 'not_found')
+            if operation == 'rename-device':
+                device['name'] = clean_name(request.get('name',''),40)
+                for user in data['users']:
+                    if user.get('subscription_id') == sub['id'] and user.get('device_id') == device['id']:
+                        user['name'] = sub['name'] + ' / ' + device['name']
+                return data, {'ok': True, 'id': sub['id']}
             drop_profiles(data, sub['id'], device['id'])
             if operation == 'revoke':
                 device['revoked'] = True
@@ -174,14 +227,18 @@ def issue(data, request):
         if len(sub['devices']) >= 100:
             raise SubscriptionError('Нужна ротация подписки: слишком много отозванных устройств.', 403, 'device_limit')
         did = secrets.token_hex(8)
+        suggested=str(request.get('device_name','')).strip()
+        if not suggested or len(suggested)>40 or any(ord(c)<32 for c in suggested):
+            suggested='Устройство ' + did[:6]
         device = {'id': did, 'hwid_hash': digest,
-                  'name': 'Общий профиль' if digest == 'shared' else 'Устройство ' + did[:6],
+                  'name': 'Общий профиль' if digest == 'shared' else suggested,
                   'created_at': int(time.time()), 'last_seen': 0, 'revoked': False}
         sub['devices'].append(device)
         provision(data, sub, device)
     device['last_seen'] = int(time.time())
     users = [u for u in data['users'] if u.get('subscription_id') == sub['id']
              and u.get('device_id') == device['id'] and u.get('enabled', True)]
-    if len(users) != len(sub['protocols']):
+    normalize_account(sub)
+    if len(users) != len(sub['connections']):
         raise SubscriptionError('Профили устройства повреждены. Обратитесь к администратору.', 503, 'storage')
     return data, {'ok': True, 'name': sub['name'], 'limited': bool(sub['max_devices']), 'users': users}

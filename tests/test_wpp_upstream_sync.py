@@ -3,16 +3,18 @@
 tests/test_wpp_upstream_sync.py
 
 Регрессия синхронизации WPP с апстримом POLESNIESOVETI12/web-panel-proxy
-v2.4.3 (2026-10-14, upstream воскрес после удаления).
+v2.9.1 (2026-11-22; до этого — v2.4.3 от 2026-10-14).
 
-Проверяет, что 3-way merge не сломал ни chimera-твики, ни апстримные
-изменения v2.4.3:
+Проверяет, что синк не сломал ни chimera-твики, ни апстримные изменения
+v2.9.1 (подписочный стек: connections-модель, failover, rename-device,
+device_name из UA, публичный дашборд подписки):
   • версии синхронизированы (wpp_ui.VERSION == wpp_packages.WPP_FRONT_VERSION)
   • chimera-твики живы (FINGERPRINTS, admin-блоки, chimera-пути)
-  • апстримные фичи v2.4.3 живы (MAX/oneme, openflux_import_uri, mkstemp,
-    _timestamp, multi-source геолокация, _action_lock)
+  • апстримные фичи v2.9.1 живы (MAX/oneme, openflux_import_uri, mkstemp,
+    _timestamp, multi-source геолокация, _action_lock, connection_specs)
   • mirror ladder: наш GitLab первичен, upstream codeload — второй
-  • vendored tarball v2.4.3 лежит в репо
+  • vendored tarball v2.9.1 лежит в репо
+  • подписочный стек: wpp_subscriptions == upstream v2.9.1, дашборд на месте
 """
 import base64
 import inspect
@@ -29,17 +31,17 @@ sys.path.insert(0, str(ROOT))
 from chimera.modules import (  # noqa: E402
     wpp_components, wpp_metrics, wpp_mirrors, wpp_nodes,
     wpp_openflux, wpp_packages, wpp_panel_extras, wpp_panel_web, wpp_ui,
-    wpp_update,
+    wpp_update, wpp_subscriptions, wpp_subscription_dashboard,
 )
 
 
 class TestVersionsInSync(unittest.TestCase):
     def test_version_constants(self):
-        self.assertEqual(wpp_ui.VERSION, "2.4.3")
-        self.assertEqual(wpp_packages.WPP_FRONT_VERSION, "2.4.3")
+        self.assertEqual(wpp_ui.VERSION, "2.9.1")
+        self.assertEqual(wpp_packages.WPP_FRONT_VERSION, "2.9.1")
 
     def test_vendored_tarball_present(self):
-        tarball = ROOT / "vendor" / "wpp-front" / "web-panel-proxy-v2.4.3.tar.gz"
+        tarball = ROOT / "vendor" / "wpp-front" / "web-panel-proxy-v2.9.1.tar.gz"
         self.assertTrue(tarball.exists(), f"missing {tarball}")
         self.assertGreater(tarball.stat().st_size, wpp_packages.WPP_TARBALL_MIN_SIZE)
         with tarball.open("rb") as fh:
@@ -76,7 +78,7 @@ class TestChimeraTweaksSurvived(unittest.TestCase):
 
 
 class TestUpstream243Features(unittest.TestCase):
-    """Апстримные изменения v2.4.3 обязаны присутствовать."""
+    """Апстримные изменения v2.4.3 (пережили синк v2.9.1) обязаны присутствовать."""
 
     def test_openflux_import_uri_yandex(self):
         uri = wpp_ui.openflux_import_uri({
@@ -133,24 +135,63 @@ class TestUpstream243Features(unittest.TestCase):
         self.assertIn("fcntl", src)
 
     def test_panel_extras_dropped_unused_import(self):
-        # v2.4.3 убрал неиспользуемый import base64
+        # v2.4.3 убрал неиспользуемый import base64 (в v2.9.1 не вернулся)
         src = inspect.getsource(wpp_panel_extras)
         self.assertNotIn("import base64", src)
+
+
+class TestUpstream291SubscriptionStack(unittest.TestCase):
+    """Подписочный стек v2.9.1 (connections/failover/dashboard/rename)."""
+
+    def test_subscriptions_module_is_upstream_v291(self):
+        # wpp_subscriptions — FF (в Chimera был идентичен v2.4.3): значит,
+        # обязан совпадать с апстримом v2.9.1 и иметь connections-модель.
+        for attr in ("connection_specs", "normalize_account"):
+            self.assertTrue(callable(getattr(wpp_subscriptions, attr, None)), attr)
+        src = inspect.getsource(wpp_subscriptions)
+        self.assertIn("rename-device", src)
+        self.assertIn("failover_enabled", src)
+        self.assertIn("device_name", src)
+
+    def test_connection_specs_fallback_from_protocols(self):
+        # v2.9.1: подписки без connections получают дефолтные подключения
+        # из protocols — так chimera-форма (только vless) остаётся валидной.
+        specs = wpp_subscriptions.connection_specs(None, ["vless"])
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0]["id"], "vless-direct")
+        self.assertEqual(specs[0]["protocol"], "vless")
+
+    def test_subscription_dashboard_module(self):
+        self.assertTrue(callable(getattr(wpp_subscription_dashboard, "render", None)))
+        html = wpp_subscription_dashboard.render(
+            {"id": "s", "name": "N", "enabled": True, "max_devices": 1,
+             "protocols": ["vless"], "devices": []}, [], {})
+        self.assertIn("N", html)
+
+    def test_panel_web_inprocess_subscription_manager(self):
+        # MANAGER="" (внешнего бинарника нет): менеджер подписок — in-process,
+        # с мостом в user_lifecycle и откатом.
+        src = inspect.getsource(wpp_panel_web.ctl_subscription)
+        self.assertIn("_sync_subscription_users", src)
+        self.assertNotIn("subprocess.run", src)
+        self.assertTrue(callable(getattr(wpp_panel_web, "_sync_subscription_users", None)))
+        self.assertTrue(callable(getattr(wpp_panel_web, "subscription_dashboard_token", None)))
+        self.assertTrue(callable(getattr(wpp_panel_web, "subscription_device_name", None)))
 
 
 class TestMirrorLadder(unittest.TestCase):
     def test_ladder_order(self):
         urls = wpp_mirrors.front_mirror_urls(
-            "web-panel-proxy-v2.4.3.tar.gz", version="2.4.3")
+            "web-panel-proxy-v2.9.1.tar.gz", version="2.9.1")
         self.assertEqual(len(urls), 12)
         # 1) наш GitLab raw — первичный
         self.assertIn("gitlab.com/netwalker071778/chimera-project", urls[0])
-        self.assertIn("web-panel-proxy-v2.4.3.tar.gz", urls[0])
+        self.assertIn("web-panel-proxy-v2.9.1.tar.gz", urls[0])
         # 2) оживший апстрим codeload — канонический fallback
         self.assertEqual(
             urls[1],
             "https://codeload.github.com/POLESNIESOVETI12/web-panel-proxy"
-            "/tar.gz/refs/tags/v2.4.3")
+            "/tar.gz/refs/tags/v2.9.1")
         # наш мёртвый GitHub (shadow-ban) после апстрима
         self.assertIn("raw.githubusercontent.com/inferno1978", urls[2])
 

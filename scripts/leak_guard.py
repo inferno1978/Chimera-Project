@@ -300,6 +300,10 @@ PATH_ALLOW_PREFIXES = (
     "vendor/b4/",
     "chimera/modules/_vendor/",
     "vless_installer/",  # легаси-копия установщика (сверяется отдельными аудитами)
+    # Публичные дата-ассеты (не секреты): fallback-снимок ru.zone — 11482
+    # документированных сетей RIPE-реестра (коммит 08e6aad, awg-cascade RU-сплит);
+    # персональных адресов нет, это зеркальная копия публичного списка.
+    "assets/awg/ru.zone.fallback",
 )
 
 

@@ -1,4 +1,22 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v22: 367 = 340 + 27 (HWID-подписки WPP v2.9.1 в порте Chimera — давний
+# запрос владельца «одним VLESS-ключом мог пользоваться один человек,
+# как в коммерческих панелях через HWID»: новый файл
+# test_wpp_hwid_subscriptions (+23: wpp_subscriptions v2.9.1 —
+# connections-фолбэк из protocols, лимит устройств, HWID-хэши с salt по
+# подписке, revoke/allow/rename-device/rotate/переход 0↔лимита;
+# in-process ctl_subscription без внешнего panelctl (MANAGER="") с
+# мостом в user_lifecycle — полный HWID-лайфцикл: fetch(hwid) →
+# per-device UUID в users.json через add_user, device_limit → мост не
+# дергается, revoke → remove_user, rename → remove+add с тем же uuid
+# (ссылка клиента не меняется), toggle → block/unblock, rotate/delete →
+# снос профилей; откат моста инверсиями при сбое — DATA не сохраняется
+# (runtime-сначала-DB-потом), rename-провал восстанавливает юзера;
+# users()-адаптер аннотирует живых wppsub-юзеров метаданными подписки
+# без дубликатов; serve-хелперы UA→device_name, HMAC-токен дашборда,
+# slug-sanitize email) + test_wpp_upstream_sync +4 (v2.9.1: версии
+# 2.9.1/tarball, подписочный стек — connection_specs-фолбэк,
+# дашборд-модуль, in-process-менеджер без subprocess).
 # v21: 340 (без новых файлов — расширение test_awg_cascade: +17 тестов
 # класса TestRuSplitEmptyIpsetGuard, инцидент сообщества 19.11 «разделение
 # трафика не работает, как будто 7-й пункт всегда включен»): пустое
@@ -438,6 +456,7 @@ tests.test_wdtt
 tests.test_wdtt_webdav_mirrors
 tests.test_webdav_tunnel
 tests.test_wpp_awg_adapters
+tests.test_wpp_hwid_subscriptions
 tests.test_wpp_portal_mieru
 tests.test_wpp_upstream_sync
 tests.test_xhttp_cdn_masking

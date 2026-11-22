@@ -135,19 +135,18 @@ def location(value):
     value = value if isinstance(value, dict) else {}
     code = str(value.get('country_code', 'UN')).upper()
     if code == 'UN':
-        return {'country_code': 'UN', 'country_name': 'Сервер', 'name': clean_text(value.get('name', 'Основная локация'), 'Локация')}
+        return {'country_code': 'UN', 'country_name': 'Сервер', 'name': 'Сервер'}
     flag(code)
-    return {'country_code': code, 'country_name': clean_text(value.get('country_name'), 'Страна'),
-            'name': clean_text(value.get('name'), 'Локация')}
+    country = clean_text(value.get('country_name') or COUNTRY_NAMES.get(code) or code, 'Страна')
+    # Keep the legacy name key for API compatibility, but locations are now
+    # intentionally country-only. Existing city/custom values are ignored.
+    return {'country_code': code, 'country_name': country, 'name': country}
 
 
 def location_prefix(value):
     value = location(value)
     icon = '🌐' if value['country_code'] == 'UN' else flag(value['country_code'])
-    parts = [icon, value['country_name']]
-    if value['name'] and value['name'].casefold() != value['country_name'].casefold():
-        parts.append(value['name'])
-    return ' '.join(parts[:2]) + (' · ' + parts[2] if len(parts) > 2 else '')
+    return icon + ' ' + value['country_name']
 
 
 def load_location(path):
@@ -225,13 +224,12 @@ def detect_location(current=None, timeout=8):
                 continue
             code = _country_code(data.get(code_key) or data.get('country'))
             if code:
-                candidates.append((code, _optional_location_text(data.get(name_key)),
-                                   _optional_location_text(data.get('city'))))
+                candidates.append((code, _optional_location_text(data.get(name_key))))
         except (OSError, ValueError, TypeError, json.JSONDecodeError, urllib.error.URLError):
             continue
 
     counts = {}
-    for code, _country, _city in candidates:
+    for code, _country in candidates:
         counts[code] = counts.get(code, 0) + 1
 
     # Two agreeing GeoIP providers are accepted.  With only one answer, the
@@ -252,9 +250,7 @@ def detect_location(current=None, timeout=8):
 
     matching = [item for item in candidates if item[0] == code]
     country = COUNTRY_NAMES.get(code) or next((item[1] for item in matching if item[1]), 'Страна')
-    city = next((item[2] for item in matching if item[2]), '')
-    name = CITY_NAMES.get(city, city) if city else country
-    return location({'country_code': code, 'country_name': country, 'name': name})
+    return location({'country_code': code, 'country_name': country})
 
 
 def load_nodes(path):
@@ -366,6 +362,8 @@ def add_node(path, request_data):
     loc = location(status.get('location'))
     node = {'id': secrets.token_hex(8), 'url': url, 'token': token, **loc, 'enabled': True}
     node['version'] = str(status.get('version', ''))[:32]
+    node['capabilities'] = [value for value in status.get('capabilities', [])
+                            if isinstance(value, str) and len(value) < 64]
     nodes.append(node)
     save_nodes(path, nodes)
     return public_node(node)

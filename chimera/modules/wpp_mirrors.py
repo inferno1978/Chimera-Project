@@ -14,9 +14,12 @@ Mirror ladder для скачивания тарбола WPP-фронтенда.
   6-11. gh-proxy зеркала upstream'а
   12. прямой GitHub archive endpoint (upstream)
 
-Tarball source: вендорен в chimera repo at vendor/wpp-front/ (v2.4.3).
+Tarball source: вендорен в chimera repo at vendor/wpp-front/ (v2.9.1).
 Первоначально — полная копия upstream v2.4.2 release artifacts с server 1,
 сохранённая до исчезновения upstream repo (конец сентября 2026).
+2026-11-22: вендорится upstream v2.9.1 (sha256 73762188…a4ff623, 37.7 MB —
+большие ассеты: mieru/mita, mtproxy-bootstrap, caddy+naive, preset-картинки).
+v2.4.3 удалён из vendor/ — остаётся в git-истории для rollback.
 """
 from __future__ import annotations
 

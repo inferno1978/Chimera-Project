@@ -2,7 +2,7 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **340** (гейт-манифест: **340**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **341** (гейт-манифест: **341**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
 ## AmneziaWG (transport Mode B + standalone 2.0) (34)
@@ -195,6 +195,24 @@
 | [`test_singbox_vless_ws_cdn_fix2.py`](../tests/test_singbox_vless_ws_cdn_fix2.py) | Тесты для v4.23.2 — 4 продакшн-фикса из v4.23.1: | ✓ |
 | [`test_singbox_vless_ws_cdn_fix3.py`](../tests/test_singbox_vless_ws_cdn_fix3.py) | Тесты для v4.23.3 — 2 фикса порядка операций: | ✓ |
 
+## WPP: веб-панели и REST API (13)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_admin_panel.py`](../tests/test_admin_panel.py) | Smoke-тест для chimera/modules/admin_panel.py. | ✓ |
+| [`test_admin_whitelist_geo_dns.py`](../tests/test_admin_whitelist_geo_dns.py) | : регрессионные тесты двух инцидентов. | ✓ |
+| [`test_librechat.py`](../tests/test_librechat.py) | Unit-тесты для chimera/modules/librechat.py (LibreChat — AI-чат панель). | ✓ |
+| [`test_panel_nginx_front_input.py`](../tests/test_panel_nginx_front_input.py) | Регрессионные тесты инцидента 29.08.2026 (прод, vds-old): | ✓ |
+| [`test_panel_nginx_front_v6.py`](../tests/test_panel_nginx_front_v6.py) | Dual-stack listen (v4+[::]) nginx-фронтов панелей — инцидент 15.11: | ✓ |
+| [`test_rest_api.py`](../tests/test_rest_api.py) | Unit-тесты для chimera/modules/rest_api.py — функции генерации | ✓ |
+| [`test_rest_api_auth.py`](../tests/test_rest_api_auth.py) | Unit-тесты для auth-функций из chimera/modules/rest_api.py | ✓ |
+| [`test_rest_api_web_panel_firewall.py`](../tests/test_rest_api_web_panel_firewall.py) | Тесты для ufw-управления веб-панелью (admin + user portal) в rest_api.py. | ✓ |
+| [`test_triple_panel.py`](../tests/test_triple_panel.py) | Unit-тесты для chimera/modules/triple_panel.py + triple_panel_web.py. | ✓ |
+| [`test_wpp_awg_adapters.py`](../tests/test_wpp_awg_adapters.py) | tests/test_wpp_awg_adapters.py — адаптеры rest_api-стиля для WPP-хендлера. | ✓ |
+| [`test_wpp_hwid_subscriptions.py`](../tests/test_wpp_hwid_subscriptions.py) | HWID-подписки WPP в порте Chimera (v2.9.1): «один ключ = один человек». | ✓ |
+| [`test_wpp_portal_mieru.py`](../tests/test_wpp_portal_mieru.py) | tests/test_wpp_portal_mieru.py — вкладка Mieru + «Подключение: все протоколы». | ✓ |
+| [`test_wpp_upstream_sync.py`](../tests/test_wpp_upstream_sync.py) | Регрессия синхронизации WPP с апстримом POLESNIESOVETI12/web-panel-proxy | ✓ |
+
 ## Фрагментация TLS (fragment-стек) (13)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -212,23 +230,6 @@
 | [`test_fragment_stats.py`](../tests/test_fragment_stats.py) | Unit-тесты для chimera/modules/fragment_stats.py. | ✓ |
 | [`test_fragment_watchdog.py`](../tests/test_fragment_watchdog.py) | Unit-тесты для chimera/modules/fragment_watchdog.py. | ✓ |
 | [`test_server_fragment.py`](../tests/test_server_fragment.py) | Unit-тесты для chimera/modules/server_fragment.py (v4.28+, Task 24 / 24-5b). | ✓ |
-
-## WPP: веб-панели и REST API (12)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_admin_panel.py`](../tests/test_admin_panel.py) | Smoke-тест для chimera/modules/admin_panel.py. | ✓ |
-| [`test_admin_whitelist_geo_dns.py`](../tests/test_admin_whitelist_geo_dns.py) | : регрессионные тесты двух инцидентов. | ✓ |
-| [`test_librechat.py`](../tests/test_librechat.py) | Unit-тесты для chimera/modules/librechat.py (LibreChat — AI-чат панель). | ✓ |
-| [`test_panel_nginx_front_input.py`](../tests/test_panel_nginx_front_input.py) | Регрессионные тесты инцидента 29.08.2026 (прод, vds-old): | ✓ |
-| [`test_panel_nginx_front_v6.py`](../tests/test_panel_nginx_front_v6.py) | Dual-stack listen (v4+[::]) nginx-фронтов панелей — инцидент 15.11: | ✓ |
-| [`test_rest_api.py`](../tests/test_rest_api.py) | Unit-тесты для chimera/modules/rest_api.py — функции генерации | ✓ |
-| [`test_rest_api_auth.py`](../tests/test_rest_api_auth.py) | Unit-тесты для auth-функций из chimera/modules/rest_api.py | ✓ |
-| [`test_rest_api_web_panel_firewall.py`](../tests/test_rest_api_web_panel_firewall.py) | Тесты для ufw-управления веб-панелью (admin + user portal) в rest_api.py. | ✓ |
-| [`test_triple_panel.py`](../tests/test_triple_panel.py) | Unit-тесты для chimera/modules/triple_panel.py + triple_panel_web.py. | ✓ |
-| [`test_wpp_awg_adapters.py`](../tests/test_wpp_awg_adapters.py) | tests/test_wpp_awg_adapters.py — адаптеры rest_api-стиля для WPP-хендлера. | ✓ |
-| [`test_wpp_portal_mieru.py`](../tests/test_wpp_portal_mieru.py) | tests/test_wpp_portal_mieru.py — вкладка Mieru + «Подключение: все протоколы». | ✓ |
-| [`test_wpp_upstream_sync.py`](../tests/test_wpp_upstream_sync.py) | Регрессия синхронизации WPP с апстримом POLESNIESOVETI12/web-panel-proxy | ✓ |
 
 ## Клиентские ссылки/конфиги (12)
 

@@ -17,6 +17,8 @@ if str(_ROOT) not in _sys.path:
 import base64
 import hashlib
 import hmac
+import copy
+import fcntl
 import html
 import ipaddress
 import json
@@ -29,10 +31,14 @@ import sys
 import grp
 import threading
 import time
+from contextlib import contextmanager
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 from collections import defaultdict, deque
+from chimera.modules import wpp_subscription_dashboard
+from chimera.modules.wpp_subscriptions import (issue as _subscriptions_issue,
+    mutate as _subscriptions_mutate, SubscriptionError as _WppSubscriptionError)
 from chimera.modules.wpp_subscriptions import PREFIX as SUB_PREFIX
 from chimera.modules.wpp_panel_extras import preview_document
 from chimera.modules.wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui, admin_tools_section, openflux_import_uri
@@ -189,24 +195,45 @@ def users():
     """Returns all users from chimera as WPP profiles.
     Reads VLESS users from /etc/xray/users.json AND MTProto users from
     /etc/telemt/telemt.toml — combines them into one list.
+
+    Подписочные per-device профили (WPP HWID-модель): живут в users.json как
+    обычные chimera-юзеры (мост _sync_subscription_users в ctl_subscription),
+    а их метаданные (subscription_id/device_id/connection_id) берутся из
+    DATA-реестра по совпадению secret==uuid — ровно один profile на живого
+    юзера, дубликатов не создаём.
     """
     profiles = []
+    # --- WPP-подписочные профили из DATA (metadata-only lookup) ---
+    sub_profiles=[]
+    try:
+        registry=_subscriptions_defaults(load()).get("users", [])
+        sub_profiles=[u for u in registry if isinstance(u,dict) and u.get("subscription_id")]
+    except Exception:
+        sub_profiles=[]
+    sub_by_secret={}
+    for u in sub_profiles:
+        secret=str(u.get("secret","") or "")
+        if secret: sub_by_secret[secret]=u
     # --- VLESS users from /etc/xray/users.json ---
     try:
         with open(USERS,encoding="utf-8") as f:
             data=json.load(f)
             raw = data if isinstance(data,list) else data.get("users",[])
             for u in raw:
+                uuid_value = str(u.get("uuid") or u.get("id") or "")
+                owner = sub_by_secret.get(uuid_value)
                 profiles.append({
-                    "id":              str(u.get("uuid") or u.get("id") or ""),
+                    "id":              uuid_value,
                     "name":            str(u.get("name") or u.get("email") or ""),
                     "protocol":        "vless",
                     "enabled":         not u.get("disabled") and not u.get("blocked"),
-                    "secret":          str(u.get("uuid") or ""),
+                    "secret":          uuid_value,
                     "backend_port":    443,
                     "username":        str(u.get("email","")).split("@")[0],
                     "email":           str(u.get("email","")),
-                    "subscription_id": None,
+                    "subscription_id": (owner or {}).get("subscription_id"),
+                    "device_id":       (owner or {}).get("device_id",""),
+                    "connection_id":   (owner or {}).get("connection_id",""),
                     "created_at":      0,
                     "device_secrets":  None,
                 })
@@ -249,11 +276,81 @@ def users():
     except Exception:
         pass
     return profiles
+_XRAY_STATS_CACHE = {"ts": 0.0, "emails": {}}
+_XRAY_STATS_CACHE_TTL = 10.0
+
+def _xray_user_counters(email):
+    """(up, down) счётчики одного email из Xray Stats API — тем же
+    паттерном, что traffic_tracking._query_user_traffic_bytes (по одному
+    направлению за вызов, парсинг '"value": N'). RAW-значения сбрасываются
+    при рестарте xray; для лимитов/истории есть accumulated-механика
+    traffic_accounting — здесь дисплейные числа."""
+    up=down=0
+    try:
+        try:
+            from chimera import _core as core
+        except Exception:
+            core=None
+        xray_bin=str(getattr(core,"XRAY_BIN","/usr/local/bin/xray") or "/usr/local/bin/xray")
+        port=int(getattr(core,"XRAY_STATS_API_PORT",10085) or 10085)
+        for direction in ("uplink","downlink"):
+            try:
+                r=subprocess.run([xray_bin,"api","statsquery",
+                                  "--server=127.0.0.1:%d"%port,
+                                  "--pattern=user>>>%s>>>traffic>>>%s"%(email,direction)],
+                                 capture_output=True,text=True,timeout=8)
+            except (OSError,subprocess.TimeoutExpired):
+                continue
+            if r.returncode: continue
+            for line in r.stdout.splitlines():
+                m=re.search(r'"value"\s*:\s*"?(\d+)"?', line)
+                if m:
+                    if direction=="uplink": up+=int(m.group(1))
+                    else: down+=int(m.group(1))
+    except Exception:
+        return (0,0)
+    return (up,down)
+
+def _subscription_stats(user_list):
+    """Per-device счётчики для подписочных профилей через Xray Stats API.
+
+    Подписочные профили — это живые chimera-юзеры с per-device UUID:
+    счётчики читаются по email (user>>>{email}>>>traffic>>>{up,down}).
+    Кэш 10s (traffic() зовётся из нескольких мест рендера страницы);
+    при сбое запроса — нули (fallback-распределение делает traffic()).
+    Возвращает {profile_id(uuid): {"up","down"}}.
+    """
+    wanted={}
+    for u in user_list:
+        if u.get("subscription_id") and u.get("email"):
+            wanted[str(u["id"])]=str(u["email"])
+    if not wanted:
+        return {}
+    now=time.time()
+    cached=_XRAY_STATS_CACHE["emails"]
+    emails=[e for e in wanted.values() if e not in cached]
+    if emails or now-_XRAY_STATS_CACHE["ts"]>=_XRAY_STATS_CACHE_TTL:
+        for email in emails:
+            try:
+                cached[email]=_xray_user_counters(email)
+            except Exception:
+                cached[email]=(0,0)
+        _XRAY_STATS_CACHE["ts"]=now
+    result={}
+    for pid,email in wanted.items():
+        up,down=cached.get(email,(0,0))
+        result[pid]={"up":int(up or 0),"down":int(down or 0)}
+    return result
+
 def traffic():
     """Per-user traffic dict {user_id: {up, down, service_active, last_change}}.
     Reads aggregated totals from wpp_metrics.json and distributes across users.
     In original WPP, this read from traffic.json with per-user data.
     Chimera stores aggregated totals in wpp_metrics.json (collected by timer).
+
+    Подписочные профили получают РЕАЛЬНЫЕ per-device счётчики из Xray
+    Stats API (по email) — не равное распределение; при сбое запроса
+    fallback на распределение как раньше.
     """
     try:
         with open(TRAFFIC,encoding="utf-8") as f:
@@ -267,13 +364,19 @@ def traffic():
         # track per-user traffic in a file, only aggregated via Xray Stats API)
         user_list=users()
         n=len(user_list) or 1
+        sub_stats=_subscription_stats(user_list)
         result={}
         for u in user_list:
             uid=u.get("id","")
             if uid:
+                stats=sub_stats.get(uid)
+                if stats is not None:
+                    up,down=stats["up"],stats["down"]
+                else:
+                    up,down=total_up//n,total_down//n
                 result[uid]={
-                    "up": total_up//n,
-                    "down": total_down//n,
+                    "up": up,
+                    "down": down,
                     "service_active": fresh and u.get("enabled",True),
                     "last_change": now,
                 }
@@ -621,17 +724,222 @@ def subscription_registry():
             return data.get("subscriptions",[]) if isinstance(data,dict) else []
     except (FileNotFoundError, Exception):
         return []
-def ctl_subscription(request):
-    # Tokens and hardware identifiers never appear in process arguments.
+
+# ─── ПОДПИСКИ (HWID) — in-process менеджер вместо внешнего panelctl ────────
+# Upstream WPP дергает привилегированный бинарник web-proxy-panelctl
+# (ctl_subscription → subprocess с JSON в stdin). В порте Chimera менеджер
+# не устанавливается (MANAGER=""), поэтому v2.9.1 выполняет операции
+# подписок in-process: чистые переходы состояний — wpp_subscriptions.
+# mutate/issue, а привязку per-device профилей к живому Xray делает мост
+# _sync_subscription_users() → user_lifecycle (users.json → config.json →
+# рестарт xray). Семантика менеджера сохранена: DATA не сохраняется, пока
+# runtime-компоненты не приняли изменения; при сбое — откат.
+
+_PANEL_DATA_LOCK = threading.RLock()
+
+@contextmanager
+def _panel_data_locked():
+    """Сериализация доступа к DATA-файлу: threading.RLock (внутри процесса,
+    ThreadingHTTPServer) + fcntl (межпроцессно — TUI/CLI одновременно).
+    """
+    _PANEL_DATA_LOCK.acquire()
     try:
-        r=subprocess.run([MANAGER,"subscription"],input=json.dumps(request),stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE,text=True,timeout=180)
-        if not r.returncode:
-            value=json.loads(r.stdout)
-            if isinstance(value,dict): return value
-    except (OSError,subprocess.TimeoutExpired,ValueError):
+        Path(DATA).parent.mkdir(parents=True, exist_ok=True)
+        lock_path = DATA + ".lock"
+        lock = open(lock_path, "a+", encoding="ascii")
+        try:
+            os.chmod(lock_path, 0o600)
+            try: fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            except OSError: pass
+            yield
+        finally:
+            try: fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            except OSError: pass
+            lock.close()
+    finally:
+        _PANEL_DATA_LOCK.release()
+
+def _subscriptions_defaults(d):
+    """Приводит DATA-файл к контракту wpp_subscriptions v2.9.1
+    (users/subscriptions/traffic + санитария протоколов)."""
+    d.setdefault("users", [])
+    d.setdefault("subscriptions", [])
+    d.setdefault("traffic", {})
+    for sub in d["subscriptions"]:
+        # v2.4.3-подписки: protocols уже есть; connections появятся при
+        # первом mutate/issue (normalize_account строит дефолты из protocols).
+        supported = [p for p in sub.get("protocols", []) if p in ("vless", "hysteria")]
+        sub["protocols"] = supported or ["vless"]
+        sub.setdefault("max_devices", 0)
+        sub.setdefault("devices", [])
+        sub.setdefault("enabled", True)
+    return d
+
+def subscription_device_name(user_agent):
+    value=str(user_agent or "").lower()
+    if "android" in value: return "Android"
+    if any(x in value for x in ("iphone","ipad","ios")): return "iPhone / iPad"
+    if "windows" in value: return "Windows"
+    if any(x in value for x in ("macintosh","mac os")): return "macOS"
+    if "linux" in value: return "Linux"
+    return "Устройство"
+
+def subscription_dashboard_token(token):
+    return hmac.new(SESSION_KEY, b"subscription-dashboard:"+str(token).encode(), hashlib.sha256).hexdigest()
+
+_CONNECTION_LABELS = {
+    "vless-direct": "VLESS XHTTP · напрямую",
+    "hysteria-primary": "Hysteria2 · основной",
+}
+
+def proxy_connection_name(profile, fallback):
+    """Имя подключения для ссылки подписки. Upstream v2.9.1 берет его из
+    реестра connections (per-connection routing); в Chimera реестра нет —
+    дефолтным connection_id из wpp_subscriptions назначены статические
+    подписи."""
+    return _CONNECTION_LABELS.get(str(profile.get("connection_id", "") or ""), fallback)
+
+def _profile_email(profile):
+    """Стабильный email профиля подписки в chimera users.json (канонический
+    идентификатор юзера; wppsub-префикс отличает машинные профили от людей)."""
+    sid=str(profile.get("subscription_id","") or "")
+    did=str(profile.get("device_id","") or "")
+    cid=str(profile.get("connection_id","") or profile.get("protocol","") or "")
+    slug=re.sub(r"[^a-z0-9_-]+","-",cid.lower()).strip("-") or "x"
+    return f"wppsub-{sid}-{did}-{slug}@wpp.local"
+
+def _profile_key(profile):
+    return (str(profile.get("subscription_id","")),
+            str(profile.get("device_id","")),
+            str(profile.get("connection_id","") or profile.get("protocol","")))
+
+def _subscription_owned(profile):
+    return bool(profile.get("subscription_id"))
+
+def _sync_subscription_users(before, after):
+    """Мост wpp-подписок → chimera: дифф профилей применяется через
+    user_lifecycle (users.json + xray config + рестарт).
+
+      added   → add_user(uuid_str=secret)   [новый per-device UUID]
+      removed → remove_user                  [revoke/rotate/delete/смена 0↔N]
+      enabled → block_user / unblock_user   [toggle подписки]
+      renamed → remove+add с тем же uuid    [имя устройства/подписки —
+                                           ссылка клиента не меняется]
+
+    Вызывается под _panel_data_locked(). На любом сбое инверсией откатывает
+    уже применённые операции и рейзит — DATA-файл НЕ сохраняется
+    (семантика upstream-менеджера: runtime сначала, DB потом).
+    """
+    from chimera.modules import user_lifecycle
+    before_map={}
+    for u in before:
+        if _subscription_owned(u): before_map[_profile_key(u)]=u
+    after_map={}
+    for u in after:
+        if _subscription_owned(u): after_map[_profile_key(u)]=u
+    added=[after_map[k] for k in after_map.keys()-before_map.keys()]
+    removed=[before_map[k] for k in before_map.keys()-after_map.keys()]
+    changed=[(before_map[k], after_map[k]) for k in (before_map.keys() & after_map.keys())
+             if before_map[k]!=after_map[k]]
+    applied=[]  # callables-инверсии для откката
+    def _add(profile, name=None):
+        email=_profile_email(profile)
+        r=user_lifecycle.add_user(email=email, protocols=["vless"],
+                                  uuid_str=str(profile.get("secret","") or ""),
+                                  name=name or str(profile.get("name","") or "") or None)
+        if not r.get("success"):
+            raise RuntimeError("add_user failed for "+email+": "+"; ".join(r.get("errors",[])) or "unknown")
+        applied.append(lambda: user_lifecycle.remove_user(email=email, protocols=["vless"]))
+    def _remove(profile, keep_name=None):
+        email=_profile_email(profile)
+        r=user_lifecycle.remove_user(email=email, protocols=["vless"])
+        if not r.get("success"):
+            raise RuntimeError("remove_user failed for "+email+": "+"; ".join(r.get("errors",[])) or "unknown")
+        applied.append(lambda: user_lifecycle.add_user(email=email, protocols=["vless"],
+                                                       uuid_str=str(profile.get("secret","") or ""),
+                                                       name=keep_name or str(profile.get("name","") or "")))
+    def _block(profile, reason):
+        email=_profile_email(profile)
+        if not user_lifecycle.block_user(email=email, reason=reason, protocols=["vless"]).get("success"):
+            raise RuntimeError("block_user failed for "+email)
+        applied.append(lambda: user_lifecycle.unblock_user(email=email, protocols=["vless"]))
+    def _unblock(profile):
+        email=_profile_email(profile)
+        if not user_lifecycle.unblock_user(email=email, protocols=["vless"]).get("success"):
+            raise RuntimeError("unblock_user failed for "+email)
+        applied.append(lambda: user_lifecycle.block_user(email=email, reason="wpp_subscription", protocols=["vless"]))
+    try:
+        with user_lifecycle.batch_context():
+            for profile in removed: _remove(profile)
+            for profile in added:  _add(profile)
+            for old, new in changed:
+                if old.get("name","")!=new.get("name",""):
+                    # канонический uuid сохраняется — ссылка клиента не меняется;
+                    # переименование = remove+add, затем enabled-флаг ниже
+                    # гарантирует корректное состояние блокировки
+                    _remove(new, keep_name=old.get("name","") if old.get("name","") else None)
+                    _add(new)
+                if bool(old.get("enabled",True))!=bool(new.get("enabled",True)):
+                    if new.get("enabled",True): _unblock(new)
+                    else: _block(new, "wpp_subscription")
+    except Exception as exc:
+        # Откат уже применённых операций (инверсии в обратном порядке).
+        for undo in reversed(applied):
+            try: undo()
+            except Exception as undo_exc:
+                print("subscription rollback step failed:", type(undo_exc).__name__, str(undo_exc),
+                      file=sys.stderr, flush=True)
+        raise
+
+def _snapshot_profile_traffic(after, before_users):
+    """Заморозка последних известных счётчиков удалённых профилей в
+    DATA['traffic'] (аналог manager.collect_traffic: история не теряется
+    при отзыве устройства)."""
+    try:
+        state=traffic()
+        for u in before_users:
+            if not _subscription_owned(u): continue
+            pid=str(u.get("secret","") or "")
+            counters=state.get(pid)
+            if isinstance(counters,dict) and counters.get("up",0)+counters.get("down",0)>0:
+                after.setdefault("traffic",{})[pid]=counters
+    except Exception:
         pass
-    return {"ok":False,"status":503,"message":"Менеджер занят или недоступен. Повторите позже."}
+
+def ctl_subscription(request):
+    """In-process менеджер подписок (замена upstream web-proxy-panelctl).
+
+    Схема upstream v2.9.1: load → mutate/issue → при изменении users:
+    XRAY_TLS_SYNC + collect_traffic + sync_firewall + sync_xray + save;
+    при сбое — восстановление runtime из before и отказ от save. Порт:
+    load(DATA) → mutate/issue → при изменении профилей мост
+    _sync_subscription_users (это и есть sync_xray; per-profile портов
+    в chimera нет — один VLESS XHTTP на 443, firewall не нужен) →
+    _snapshot_profile_traffic → save(DATA). Токены и HWID не покидают
+    процесс (upstream передавал их бинарнику через stdin — не argv;
+    здесь даже spawn нет).
+    """
+    try:
+        with _panel_data_locked():
+            data=_subscriptions_defaults(load())
+            before_users=copy.deepcopy(data.get("users", []))
+            operation=str(request.get("operation",""))
+            after, result=(_subscriptions_issue if operation=="fetch" else _subscriptions_mutate)(
+                copy.deepcopy(data), request)
+            after_users=after.get("users", [])
+            if after_users!=before_users:
+                _sync_subscription_users(before_users, after_users)
+                _snapshot_profile_traffic(after, before_users)
+                save(after)
+            elif after!=data:
+                # metadata-only (devices last_seen, имена) — runtime не трогаем
+                save(after)
+            return result
+    except _WppSubscriptionError as exc:
+        return {"ok":False, "status":int(exc.status), "code":str(exc.code), "message":str(exc)}
+    except Exception:
+        return {"ok":False, "status":503, "code":"backend",
+                "message":"Не удалось применить подписку. Проверьте Xray на сервере."}
 def ctl_manager_json(command,request):
     r=subprocess.run([MANAGER,command],input=json.dumps(request),stdout=subprocess.PIPE,
                      stderr=subprocess.PIPE,text=True,timeout=180)
@@ -978,6 +1286,37 @@ class Handler(BaseHTTPRequestHandler):
             wpp_admin_extras.handle_post(self, path)
             return
 
+        # v2.9.1: публичное управление устройством из браузерного дашборда
+        # подписки (rename/revoke). Токен = HMAC(session_key, токен подписки)
+        # — та же семейства секретов, что CSRF; guard Sec-Fetch-Site против
+        # кросс-сайтовых POST'ов.
+        public_device=re.fullmatch(re.escape(SUB_PREFIX)+r"([a-f0-9]{64})/device-action",path)
+        if public_device:
+            token=public_device.group(1)
+            if self.headers.get("X-WPP-Dashboard","")!="1" or self.headers.get("Sec-Fetch-Site","") not in ("","none","same-origin"):
+                self.send_json({"ok":False,"message":"Недействительный запрос. Обновите страницу."},403); return
+            try: form=self.form(4096)
+            except (ValueError,UnicodeDecodeError):
+                self.send_json({"ok":False,"message":"Некорректный запрос."},400); return
+            if not secrets.compare_digest(form.get("token",""),subscription_dashboard_token(token)):
+                self.send_json({"ok":False,"message":"Срок действия страницы завершён. Обновите её."},403); return
+            subscription=next((s for s in subscription_registry()
+                               if s.get("enabled") and secrets.compare_digest(str(s.get("token","")),token)),None)
+            if subscription is None:
+                self.send_json({"ok":False,"message":"Подписка недоступна."},404); return
+            if not int(subscription.get("max_devices",0) or 0):
+                self.send_json({"ok":False,"message":"У общей подписки нет отдельных устройств."},400); return
+            operation=form.get("operation","")
+            if operation not in ("rename-device","revoke"):
+                self.send_json({"ok":False,"message":"Недопустимая операция."},400); return
+            request={"operation":operation,"id":subscription.get("id",""),"device_id":form.get("device_id","")}
+            if operation=="rename-device": request["name"]=form.get("name","")
+            result=ctl_subscription(request)
+            if result.get("ok"):
+                if operation=="revoke": purge_remote_profiles_async(subscription,request["device_id"])
+                self.send_json({"ok":True}); return
+            self.send_json({"ok":False,"message":result.get("message","Изменение не применено.")},int(result.get("status",400))); return
+
         if path.startswith(node_api.API_PREFIX+"/"):
             if not self.api_auth(): return
             try:
@@ -1183,7 +1522,7 @@ class Handler(BaseHTTPRequestHandler):
                 create_error("Укажите имя длиной от 1 до 80 символов."); return
             if kind=="subscription":
                 result=ctl_subscription({"operation":"create","name":name,"max_devices":form.get("max_devices","2"),
-                                         "protocols":[p for p in ("vless","hysteria") if form.get(p)=="1"]})
+                                         "protocols":["vless"]})
                 if not result.get("ok"):
                     create_error(result.get("message","Ошибка создания подписки"),int(result.get("status",400))); return
             elif kind in ("web","mtproto","vless","hysteria","awg20","awg31"):
@@ -1278,16 +1617,22 @@ class Handler(BaseHTTPRequestHandler):
         if path==PANEL_PATH+"/subscription-action":
             async_action=self.headers.get("X-WPP-Async","")=="1"
             request={k:form[k] for k in ("operation","id","device_id","name","max_devices") if k in form}
-            if request.get("operation") not in ("create","update","toggle","rotate","delete","revoke","allow"):
+            if request.get("operation") not in ("create","update","toggle","rotate","delete","revoke","allow","rename-device"):
                 self.send_html("Недопустимая операция",400); return
             if request["operation"] in ("create","update"):
-                request["protocols"]=[p for p in ("vless","hysteria") if form.get(p)=="1"]
+                # Chimera-подписки — VLESS XHTTP only: per-device секреты
+                # врезаются в единый VLESS-инбаунд. Hysteria2 в Chimera —
+                # общий пароль (без per-user модели), пер-девайсные H2-ключи
+                # невозможны, поэтому в форму не предлагается.
+                request["protocols"]=["vless"]
+            if request["operation"]=="rename-device" and request.get("device_id"):
+                request["name"]=form.get("device_name",form.get("name",""))
             previous=next((s for s in subscription_registry() if s.get("id")==request.get("id")),None)
             result=ctl_subscription(request)
             if result.get("ok"):
                 if request["operation"] in ("update","delete","rotate","toggle"):
                     purge_remote_profiles_async(previous)
-                elif request["operation"]=="revoke":
+                elif request["operation"] in ("revoke","rename-device"):
                     purge_remote_profiles_async(previous,request.get("device_id"))
                 if async_action: self.send_json({"ok":True})
                 else: self.redirect("/users")
@@ -1441,12 +1786,53 @@ class Handler(BaseHTTPRequestHandler):
         if not SUB_FETCH_SLOTS.acquire(blocking=False):
             self.send_data("Сервис занят. Повторите позже.",503,headers={"Retry-After":"15"}); return
         try:
-            # Reject unknown URLs before spawning any privileged helper.
-            if not any(s.get("enabled") and secrets.compare_digest(s["token"],token) for s in subscription_registry()):
+            # Reject unknown URLs before touching the subscription registry.
+            subscription=next((s for s in subscription_registry()
+                               if s.get("enabled") and secrets.compare_digest(str(s.get("token","")),token)),None)
+            if subscription is None:
                 self.send_data("Not found",404); return
             if "text/html" in self.headers.get("Accept",""):
-                self.send_data("Добавьте эту ссылку как подписку в клиент. Для ограниченной подписки нужен X-HWID (Happ).",200); return
-            result=ctl_subscription({"operation":"fetch","token":token,"hwid":self.headers.get("X-HWID","")})
+                # v2.9.1: публичный read-only дашборд при открытии ссылки в
+                # браузере — QR, устройства, трафик, управление устройством
+                # через /device-action (POST ниже, токен = HMAC сессии).
+                subscription_url="https://"+DOMAIN+SUB_PREFIX+token
+                try:
+                    qr_data="data:image/png;base64,"+base64.b64encode(qr_png_bytes(subscription_url)).decode()
+                except Exception:
+                    qr_data=""
+                dashboard_profiles=users()
+                config_items=[]
+                if not int(subscription.get("max_devices",0) or 0):
+                    labels={"vless":"VLESS","hysteria":"Hysteria2"}
+                    local_name=node_api.location_prefix(node_api.load_location(LOCATION_FILE))
+                    seen_connections=set()
+                    for profile in dashboard_profiles:
+                        connection_id=str(profile.get("connection_id",""))
+                        protocol=profile.get("protocol")
+                        if (profile.get("subscription_id")!=subscription.get("id") or not profile.get("enabled",True)
+                                or protocol not in labels or not connection_id or connection_id in seen_connections):
+                            continue
+                        try:
+                            name=local_name+" · "+proxy_connection_name(profile,labels[protocol])
+                            link=proxy_link(protocol,profile["secret"],profile["backend_port"],name,profile.get("username",""))
+                            config_qr="data:image/png;base64,"+base64.b64encode(qr_png_bytes(link)).decode()
+                            config_items.append({"connection_id":connection_id,"link":link,"qr":config_qr})
+                            seen_connections.add(connection_id)
+                        except Exception:
+                            continue
+                try:
+                    with open(LOGO,"rb") as logo_stream:
+                        logo_data="data:image/png;base64,"+base64.b64encode(logo_stream.read()).decode()
+                except OSError:
+                    logo_data=""
+                action_url=SUB_PREFIX+token+"/device-action"
+                action_token=subscription_dashboard_token(token)
+                self.send_html(wpp_subscription_dashboard.render(
+                    subscription,dashboard_profiles,traffic(),subscription_url,qr_data,
+                    config_items,logo_data,action_url,action_token)); return
+            result=ctl_subscription({"operation":"fetch","token":token,
+                                     "hwid":self.headers.get("X-HWID",""),
+                                     "device_name":subscription_device_name(self.headers.get("User-Agent",""))})
             if not result.get("ok"):
                 headers={"X-Hwid-Active":"true","subscription-always-hwid-enable":"true"}
                 if result.get("code")=="hwid_required": headers["X-Hwid-Not-Supported"]="true"
@@ -1454,7 +1840,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_data(result.get("message","Подписка недоступна"),int(result.get("status",503)),headers=headers); return
             labels={"vless":"VLESS","hysteria":"Hysteria2"}
             local_name=node_api.location_prefix(node_api.load_location(LOCATION_FILE))
-            lines=[proxy_link(u["protocol"],u["secret"],u["backend_port"],local_name+" · "+labels[u["protocol"]],u.get("username","")) for u in result["users"]]
+            lines=[proxy_link(u["protocol"],u["secret"],u["backend_port"],
+                              local_name+" · "+proxy_connection_name(u,labels[u["protocol"]]),
+                              u.get("username","")) for u in result["users"]]
             if result["users"]:
                 first=result["users"][0]
                 remote_id=federation_id(first.get("subscription_id",""),first.get("device_id",""))
@@ -1468,8 +1856,10 @@ class Handler(BaseHTTPRequestHandler):
                     except node_api.NodeError as exc:
                         print("node subscription sync failed:",node.get("url"),str(exc),file=sys.stderr,flush=True)
             state=traffic()
-            up=sum(int(state.get(u["id"],{}).get("up",0)) for u in result["users"])
-            down=sum(int(state.get(u["id"],{}).get("down",0)) for u in result["users"])
+            # подписочные профили замостились в users.json с id=uuid(=secret):
+            # счётчики живут под ключом secret, не под hex8 из DATA
+            up=sum(int(state.get(u.get("secret",""),{}).get("up",0)) for u in result["users"])
+            down=sum(int(state.get(u.get("secret",""),{}).get("down",0)) for u in result["users"])
             headers={"profile-title":"base64:"+base64.b64encode(result["name"].encode()).decode(),"profile-update-interval":"6",
                      "subscription-userinfo":f"upload={up}; download={down}; total=0; expire=0"}
             if result["limited"]: headers.update({"X-Hwid-Active":"true","subscription-always-hwid-enable":"true"})

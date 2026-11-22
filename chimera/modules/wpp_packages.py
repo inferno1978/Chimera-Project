@@ -57,10 +57,19 @@ STAGING_DIR  = STATE_DIR / "wpp_panel_staging"  # atomic-swap staging
 # bump при изменениях API-контракта между wpp_panel.py и wpp_panel_web.py.
 # 2.4.3: синхронизация с ожившим апстримом (POLESNIESOVETI12/web-panel-proxy
 # v2.4.3, MIT) — 3-way merge с сохранением всех chimera-твиков.
-WPP_FRONT_VERSION = "2.4.3"
+# 2.9.1: синхронизация с апстримом v2.9.1 (2026-11-22): подписочный стек
+# (wpp_subscriptions: connections-модель, failover, device_name из UA,
+# rename-device; новый wpp_subscription_dashboard — публичный дашборд
+# подписки для браузера) + HWID-интеграция in-process (см. wpp_panel_web:
+# ctl_subscription без внешнего менеджера, мост в user_lifecycle — per-device
+# UUID попадают в chimera users.json и xray inbound). FF-модули
+# (firewall/nodes/openflux) идентичны апстриму. wpp_update — 3-way
+# (chimera VERSION-путь сохранён).
+WPP_FRONT_VERSION = "2.9.1"
 
-# Минимальный размер тарбола (v2.4.2 ~ 500 KB; с локализацией ~ 1 MB).
-# Меньше 200 KB — почти наверняка HTML-редирект CDN или 404 страница.
+# Минимальный размер тарбола (v2.9.1 ~ 37.7 MB — большие ассеты: mieru/mita,
+# mtproxy-bootstrap, caddy+naive, preset-картинки, awg-routing-guide.mp4;
+# v2.4.3 был ~ 12.5 MB). Меньше 200 KB — почти наверняка HTML-редирект CDN.
 WPP_TARBALL_MIN_SIZE = 200_000
 
 # Subpath внутри тарбола: <repo>-<tag>/panel/public/ — нет, у WPP файлы
