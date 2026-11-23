@@ -112,6 +112,7 @@ from chimera.modules.honeypot      import do_manage_honeypot
 from chimera.modules.port_knocking import do_manage_port_knocking
 from chimera.modules.icmp_gate     import do_manage_icmp_gate
 from chimera.modules.fail2ban_manager import do_manage_fail2ban
+from chimera.modules.rkn_guard import do_manage_rkn_guard
 from chimera.modules.scheduler     import render_scheduler_menu
 from chimera.modules.updater       import do_manage_update, update_hint_line
 from chimera.modules.warp          import do_manage_warp
@@ -9704,6 +9705,7 @@ def _menu_security() -> None:
         _box_item("IP", f"📦 ipset Persist  {DIM}(восстановление ipset при reboot){NC}")
         _box_item("FG", f"🧯 FW Guard  {DIM}(авто-восстановление правил ufw/ipset/iptables){NC}")
         _box_item("IB", f"🚫 IP-Бан  {DIM}(iptables/ipset: IP / подсеть / диапазон / ASN){NC}")
+        _box_item("RG", f"🚫 rkn-guard  {DIM}(подсети РКН/ТСПУ/СКИПА — DROP на входе){NC}")
         _box_item("FB", f"🛡️  Fail2ban  {DIM}(банит за подбор пароля / лишние запросы){NC}")
         _box_item("CL", f"🔗 Кластер Exit Nodes  {DIM}(все Exit Nodes по SSH){NC}")
         _box_item("9", f"🔒 Мониторинг certbot renew  {DIM}(алерт при истечении){NC}")
@@ -9771,6 +9773,8 @@ def _menu_security() -> None:
             do_manage_fw_guard()
         elif ch.lower() == "ib":
             do_manage_ipban()
+        elif ch.lower() == "rg":
+            do_manage_rkn_guard()
         elif ch.lower() == "fb":
             do_manage_fail2ban()
         elif ch.lower() == "cl":

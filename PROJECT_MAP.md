@@ -90,6 +90,7 @@
 | `fail2ban_setup.py` | Конфигурация Fail2ban (jail для xray-reality/sshd/nginx) + Xray watchdog (systemd timer каждые 2 мин) |
 | `fail2ban_manager.py` | Управление fail2ban jail'ами через меню |
 | `ipban.py` | Ручной ban/unban IP-адресов через меню |
+| `rkn_guard.py` | rkn-guard — DROP входящих от подсетей РКН/ТСПУ/СКИПА/сканеров (порт Flecksis/rkn-guard v4.0.x в TUI): iptables+ipset/UFW-интеграция (дефолт) либо nftables/firewalld; списки (5 базовых + доп. источники), расписание (таймер → main.py --rkn-update), ручные баны, исключения, статистика дропов, панель rkn-guard-panel (issue/revoke), обновление бинарника (релизы/исходники), слияние /etc/ipset.conf (защита химерных секций от затирания) |
 | `icmp_gate.py` | ICMP Gate — маскировка пинга: echo-запросы только доверенным (роли exit/entry), остальным DROP «хоста нет»; ufw-блок в before.rules или raw-правила с тегом + rules.v4/v6; PMTUD-типы защищены валидатором |
 | `ipset_persist.py` | Сохранение ipset правил после ребута (systemd unit) |
 | `fw_guard.py` | FW Guard — авто-восстановление правил ufw/ipset/iptables (systemd timer, снапшот «как до сбоя») |

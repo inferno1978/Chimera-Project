@@ -97,6 +97,14 @@ if "--update-as-direct" in sys.argv:
     _as_direct_cli_update()
     sys.exit(0)
 
+# --- RKN-Guard: обновление списков подсетей по таймеру ---
+if "--rkn-update" in sys.argv:
+    if os.geteuid() != 0:
+        print("ERROR: требуются права root", file=sys.stderr)
+        sys.exit(1)
+    from chimera.modules.rkn_guard import rkn_cli_update
+    sys.exit(rkn_cli_update())
+
 # --- Сброс SQLite-кэша ASN-префиксов ---
 if "--clear-asn-cache" in sys.argv:
     idx = sys.argv.index("--clear-asn-cache")
