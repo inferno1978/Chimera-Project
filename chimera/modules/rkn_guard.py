@@ -899,6 +899,23 @@ def rkn_cli_update() -> int:
 # ═════════════════════════════════════════════════════════════════════════════
 #  РАСПИСАНИЕ (режимы как в апстриме; юниты — НАШИ, с merge-компенсацией)
 # ═════════════════════════════════════════════════════════════════════════════
+def _rg_main_py() -> Path:
+    """Путь к main.py — надёжно (argv[0] может быть '-' при stdin-запуске)."""
+    try:
+        cand = Path(sys.argv[0]).resolve()
+        if cand.name == "main.py" and cand.exists():
+            return cand
+    except Exception:
+        pass
+    # __file__ = <root>/chimera/modules/rkn_guard.py → root
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        cand = parent / "main.py"
+        if cand.exists():
+            return cand
+    return Path("/opt/chimera/main.py")
+
+
 def _rg_schedule_normalize(mode: str, value: str) -> str:
     """Валидация и нормализация расписания; бросает ValueError."""
     mode = (mode or "").strip().lower()
@@ -969,7 +986,7 @@ def _rg_schedule_set(mode: str, value: str = "") -> bool:
         _success("Автообновление списков отключено")
         return True
 
-    script_path = Path(sys.argv[0]).resolve()
+    script_path = _rg_main_py()
     RG_SERVICE_PATH.write_text(f"""[Unit]
 Description=rkn-guard — обновление списков подсетей (Chimera)
 Wants=network-online.target
