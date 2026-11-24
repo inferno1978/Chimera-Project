@@ -2,7 +2,7 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **344** (гейт-манифест: **344**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **345** (гейт-манифест: **345**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
 ## AmneziaWG (transport Mode B + standalone 2.0) (34)
@@ -374,6 +374,19 @@
 | [`test_node_health_monitor.py`](../tests/test_node_health_monitor.py) | Unit-тесты для chimera/modules/node_health_monitor.py. | ✓ |
 | [`test_smart_balancer.py`](../tests/test_smart_balancer.py) | Unit-тесты для chimera/modules/smart_balancer.py. | ✓ |
 
+## Зеркала и апстримы (8)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_entry_mirrors.py`](../tests/test_entry_mirrors.py) | Unit-тесты для chimera/modules/entry_mirrors.py. | ✓ |
+| [`test_entry_mirrors_ui_smoke.py`](../tests/test_entry_mirrors_ui_smoke.py) | UI-smoke стилизации Entry Mirrors (продолжение кейса стилизации TUI, окт.2026). | ✓ |
+| [`test_github_mirrors.py`](../tests/test_github_mirrors.py) | Unit-тесты для chimera/modules/github_mirrors.py. | ✓ |
+| [`test_openflux.py`](../tests/test_openflux.py) | Unit-тесты для chimera/modules/openflux.py. | ✓ |
+| [`test_stale_mirror_guard.py`](../tests/test_stale_mirror_guard.py) | (stale-mirror-guard): защита от устаревших кэшей зеркал при установке Xray. | ✓ |
+| [`test_turn_mirrors.py`](../tests/test_turn_mirrors.py) | Unit-тесты для chimera/modules/turn_mirrors.py и turn_packages.py. | ✓ |
+| [`test_upstream_awg_sync.py`](../tests/test_upstream_awg_sync.py) | Unit-тесты для chimera/scripts/upstream_awg_sync.py (дев-инструмент синка | ✓ |
+| [`test_upstream_updates.py`](../tests/test_upstream_updates.py) | Unit-тесты для chimera/modules/upstream_updates.py + layout-probe | ✓ |
+
 ## Подписки (subscription) (8)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -410,18 +423,6 @@
 | [`test_dnscrypt_dynamic_pool.py`](../tests/test_dnscrypt_dynamic_pool.py) | Unit + integration тесты (динамический пул DNSCrypt): | ✓ |
 | [`test_dnscrypt_selector.py`](../tests/test_dnscrypt_selector.py) | Unit-тесты для chimera/modules/dnscrypt_selector.py. | ✓ |
 | [`test_dnscrypt_setup.py`](../tests/test_dnscrypt_setup.py) | Unit-тесты для chimera/modules/dnscrypt_setup.py. | ✓ |
-
-## Зеркала и апстримы (7)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_entry_mirrors.py`](../tests/test_entry_mirrors.py) | Unit-тесты для chimera/modules/entry_mirrors.py. | ✓ |
-| [`test_entry_mirrors_ui_smoke.py`](../tests/test_entry_mirrors_ui_smoke.py) | UI-smoke стилизации Entry Mirrors (продолжение кейса стилизации TUI, окт.2026). | ✓ |
-| [`test_github_mirrors.py`](../tests/test_github_mirrors.py) | Unit-тесты для chimera/modules/github_mirrors.py. | ✓ |
-| [`test_openflux.py`](../tests/test_openflux.py) | Unit-тесты для chimera/modules/openflux.py. | ✓ |
-| [`test_stale_mirror_guard.py`](../tests/test_stale_mirror_guard.py) | (stale-mirror-guard): защита от устаревших кэшей зеркал при установке Xray. | ✓ |
-| [`test_turn_mirrors.py`](../tests/test_turn_mirrors.py) | Unit-тесты для chimera/modules/turn_mirrors.py и turn_packages.py. | ✓ |
-| [`test_upstream_updates.py`](../tests/test_upstream_updates.py) | Unit-тесты для chimera/modules/upstream_updates.py + layout-probe | ✓ |
 
 ## Cloudflare WARP (7)
 

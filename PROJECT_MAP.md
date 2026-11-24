@@ -383,9 +383,16 @@ Standalone AmneziaWG 2.0 — отдельный VPN-протокол (не за�
 | `awg_backup.py` | Backup/Restore с rollback при ошибке |
 | `awg_cascade.py` | Каскад AWG0 (вход, РФ) ↔ AWG1 (выход, зарубеж) + split-routing по RU-сетям |
 | `awg_cascade_lb.py` | **LB-балансировка мульти-exit каскада (меню [6]):** все туннели awg1..awgN одновременно + диспетчер awg_lb (mangle PREROUTING, connmark save/restore — устоявшиеся соединения не мигрируют). ↴
-| `awg_diagnose.py` | Diagnostic + carrier-compare (kernel/sysctl/UFW/service/tunnel) |
+| `awg_diagnose.py` | Diagnostic + carrier-compare (kernel/sysctl/UFW/service/tunnel) + **секция «Коллизии длин (S1-S4)»** (синк bivlked v6.3.1+): живые параметры против совпадения длин пакетов данных с init/response/cookie-рукопожатиями (молчаная потеря части трафика, доля по ширине H-диапазона), S4=16 (признак голого WireGuard), S1-S4=12 при H1 от нуля; wg-quick-парсер `_awgs_parse_listen_port` (комментарий/регистр/последняя строка) |
 | `awg_uninstall.py` | Полное удаление (с сохранением backup'ов опционально) |
 | `awg_net_common.py` | Общий сетевой слой для AWG-модулей: NAT/MASQUERADE + sysctl + iptables-idempotency. ↴
+
+**Синк с апстримом:** база порта — bivlked/amneziawg-installer v5.18.4; волны фиксов
+переносятся вручную (порт bash→Python, не форк) с маркером `AWGS_UPSTREAM_SYNCED_TAG` в
+`awg_constants.py` (текущий: v6.3.9). Автотрекинг новых релизов — дев-скрипт
+`chimera/scripts/upstream_awg_sync.py` (git ls-remote против маркера, секции CHANGELOG,
+классификация изменённых файлов по модулям-целям Химеры, `--apply-ru-zone` для механического
+обновления ru.zone-снимка). Тег fallback-снимка ru.zone согласован с автором (v6.2.2, 8664 подсети).
 
 **Дополнительно:** `awg_rest_api.py` (REST API хендлеры для веб-панели) — см. секцию 22.
 

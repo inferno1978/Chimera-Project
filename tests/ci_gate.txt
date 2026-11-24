@@ -1,3 +1,31 @@
+# v27: 471 = 452 + 19 (feat(sync): upstream-watcher — автотрекинг релизов
+# bivlked/amneziawg-installer. Химера — ПЕРЕПИСАННЫЙ порт (bash → Python),
+# git-merge апстрима невозможен в принципе; скрипт автоматизирует всё, что
+# автоматизируется: НОВЫЙ ФАЙЛ tests/test_upstream_awg_sync.py (+19) к
+# дев-скрипту chimera/scripts/upstream_awg_sync.py — git ls-remote --tags
+# против маркера AWGS_UPSTREAM_SYNCED_TAG (единая точка правды в
+# awg_constants.py, теперь v6.3.9); при новых тегах: секции CHANGELOG.md
+# апстрима по диапазону, shallow-clone + git diff --name-status между
+# тегами, классификация файлов по модулям-целям Химеры (cascade/ru.zone →
+# auto: --apply-ru-zone качает/валидирует/заменяет assets/awg/
+# ru.zone.fallback + бампит тег AWGS_RU_ZONE_FALLBACK_GH; install_/
+# awg_common/manage → порт-анализ в awg_*.py; docs/tests/signing/бинарные
+# ассеты → ignore; неизвестное → порт с пометкой), отчёт + --report PATH +
+# --json; exit-коды 0/1/2 (1 = есть обновления — для cron/CI). Тесты
+# офлайн на фикстурах: parse_tag/tags_after (семвер-порядок v6.10.0 >
+# v6.3.9 > v6.3.10 по tuple, не-семверные arm-packages/v4.0 — мимо;
+# диапазоны и пустые), extract_changelog_sections (формат '## [X.Y.Z]'
+# апстрима, только запрошенные версии, отсутствующая → пусто),
+# classify_path (ru.zone → auto; cascade/* → порт в awg_cascade*; три
+# core-скрипта → порт; README/ADVANCED/CASCADE/docs/signing/tests/KEYS →
+# ignore; logo.jpg → ignore по бинарному суффиксу; неизвестное → порт с
+# «глянуть вручную»), validate_ru_zone (валидный 8100-подсетный снимок;
+# мусорная строка; < 8000 подсетей — битый/неполный; не-UTF-8),
+# render_report (up-to-date; needs_port + вердикты в тексте;
+# ru_zone_changed → подсказка --apply-ru-zone), контракт маркера
+# (AWGS_UPSTREAM_SYNCED_TAG — семвер v-prefixed, скрипт и константа
+# согласны) и полнота FILE_TARGETS по трём core-скриптам + cascade.
+# Модулей в манифесте 344 → 345.)
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
 # v26: 452 = 428 + 24 (fix(awg): синк-волна апстрима bivlked v6.3.0-v6.3.9
 # — пять фиксов портом: (1) генератор обфускации — коллизии длин пакетов
@@ -529,6 +557,7 @@ tests.test_ui_restyle_batch3_smoke
 tests.test_uninstall_dns_alive
 tests.test_uninstall_nginx_safety
 tests.test_updater
+tests.test_upstream_awg_sync
 tests.test_upstream_updates
 tests.test_user_fp_manager
 tests.test_user_ip_whitelist
