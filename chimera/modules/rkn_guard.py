@@ -33,6 +33,12 @@ AS НЕ затронуты, дом-клиенты проходят.
     правило в начало цепочки — установка падает «SCANNERS-BLOCK is not
     the first rule». Обёртка _rg_cli_mutate_ufw_safe сама переставляет
     jump на 1-е место и повторяет операцию (fast-path, без reload).
+    Усугубляющий фактор (доп. от <blw>): раздутый ruleset — ~63k
+    индивидуальных DROP от стороннего пер-IP бана; на nf_tables каждый
+    вызов iptables обрабатывает ruleset целиком → reload/verify
+    медленные, окно гонки широкое (после чистки мусора вставало).
+    Поэтому диагностика повторного провала включает подсчёт правил
+    (iptables-save | grep -c '^-A') — десятки тысяч = чужой мусор.
   • восстановление при ребуте: antiscan-ipset-restore.service
     (ipset restore -exist -f /etc/ipset.conf, Before=ufw.service) +
     antiscan-move-rules.service (перестановка jump на 1-е место)
@@ -735,9 +741,12 @@ def _rg_cli_mutate_ufw_safe(args: list, timeout: int = 900,
                  "повторного ufw reload)")
     else:
         _warn("Повтор тоже не прошёл — на ноде постоянный конфликт за "
-              "ufw-before-input (внешняя система перегенерирует правила). "
-              "Диагностика: iptables -w -S ufw-before-input | head -5; "
-              "grep -n SCANNERS-BLOCK /etc/ufw/before.rules | head -3")
+              "ufw-before-input (внешняя система перегенерирует правила "
+              "или ruleset раздут). Диагностика: iptables -w -S "
+              "ufw-before-input | head -5; iptables-save | grep -c "
+              "'^-A' — всего правил (тысячи — мусор от сторонних "
+              "пер-IP банов); grep -n SCANNERS-BLOCK /etc/ufw/before.rules "
+              "| head -3")
     return r2
 
 
@@ -947,9 +956,11 @@ def _rg_install_flow(st: dict, interactive: bool = True) -> bool:
         if _RG_FIRST_RULE_ERR in (r.stderr or "") + (r.stdout or ""):
             _err("UFW-конфликт не разрешился автоматически. Проверьте, кто "
                  "держит правила в начале ufw-before-input (антидос/"
-                 "телеметрия хостера):\n  iptables -w -S ufw-before-input "
-                 "| head -5\n  grep -n SCANNERS-BLOCK /etc/ufw/before.rules "
-                 "| head -3")
+                 "телеметрия хостера) и не раздут ли ruleset:\n"
+                 "  iptables -w -S ufw-before-input | head -5\n"
+                 "  iptables-save | grep -c '^-A'   # всего правил; "
+                 "десятки тысяч — мусор от пер-IP банов\n"
+                 "  grep -n SCANNERS-BLOCK /etc/ufw/before.rules | head -3")
         return False
 
     if logging_on:

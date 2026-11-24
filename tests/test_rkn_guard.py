@@ -311,6 +311,7 @@ class TestCliMutateUfwSafe(_RGBase):
         r = rg._rg_cli_mutate_ufw_safe(["full"])
         self.assertEqual((r.returncode, len(calls)), (1, 2))
         self.assertIn("постоянный конфликт", self._out.getvalue())
+        self.assertIn("iptables-save | grep -c", self._out.getvalue())
 
 
 if __name__ == "__main__":
