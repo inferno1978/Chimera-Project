@@ -82,28 +82,15 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 # ── Цвета ─────────────────────────────────────────────────────────────────────
-def _detect_colors() -> dict:
-    _light = os.environ.get("VLESS_THEME", "").lower() == "light"
-    if sys.stdout.isatty():
-        if _light:
-            return dict(
-                RED='\033', GREEN='\033', YELLOW='\033',
-                CYAN='\033', BLUE='\033', BOLD='\033',
-                DIM='\033', WHITE='\033', NC='\033',
-            )
-        else:
-            return dict(
-                RED='\033', GREEN='\033', YELLOW='\033',
-                CYAN='\033', BLUE='\033', BOLD='\033',
-                DIM='\033', WHITE='\033', NC='\033',
-            )
-    return {k: '' for k in ('RED', 'GREEN', 'YELLOW', 'CYAN', 'BLUE',
-                            'BOLD', 'DIM', 'WHITE', 'NC')}
-
-_C = _detect_colors()
-RED    = _C['RED'];   GREEN  = _C['GREEN'];  YELLOW = _C['YELLOW']
-CYAN   = _C['CYAN'];  BLUE   = _C['BLUE'];   BOLD   = _C['BOLD']
-DIM    = _C['DIM'];   WHITE  = _C['WHITE'];  NC     = _C['NC']
+# Канон: импорт из box_renderer (единый источник полноценных ANSI-кодов).
+# Локальная копия с голым ESC-байтом ('\033' без [0;31m) ломала и рамки, и
+# текст: _wcslen не срезает голый ESC (фантомная ширина → правая ║ ехала
+# лесенкой), а терминалы клиентов глотали ESC+следующий символ как начало
+# escape-последовательности — «Выбор»→«ыбор», «Порт»→«орт», «v4.0.1»→
+# «4.0.1» (инцидент 24.11, скрин владельца).
+from chimera.modules.box_renderer import (
+    RED, GREEN, YELLOW, CYAN, BLUE, BOLD, DIM, WHITE, NC,
+)
 
 # ── Пути и константы ──────────────────────────────────────────────────────────
 RG_BIN               = Path("/usr/local/bin/rkn-guard")
@@ -1769,7 +1756,7 @@ def do_manage_rkn_guard() -> None:
             _box_row(f"  {DIM}before.rules, восстановление ipset при ребуте).{NC}")
             _box_sep()
         else:
-            _box_item("1", "📊 Статистика и журналы  (друпы, топ атакующих)")
+            _box_item("1", "📊 Статистика и журналы  (дропы, топ атакующих)")
             _box_item("2", "📋 Списки подсетей  (базовые 5 + доп. источники)")
             _box_item("3", "🔄 Обновить списки сейчас  (без сброса счётчиков)")
             _box_item("4", "⏰ Расписание автообновления  (часы/МСК-времена/выкл)")
