@@ -1,4 +1,23 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v24: 421 = 400 + 21 (fix rkn-guard: UFW-jump авторековери — кейс <blw>
+# 24.11, переустановка на ноде с внешним антидосом падала FTL «Не
+# удалось сохранить правила iptables error="ufw-before-input:
+# SCANNERS-BLOCK is not the first rule»": после `ufw reload` verify
+# бинарника требует, чтобы jump был ПЕРВЫМ -A-правилом живой цепочки,
+# а внешняя система (антидос/телеметрия хостера, длинный список
+# drop-all) успевает вставить своё правило в начало между reload и
+# verify. Новый файл test_rkn_guard (+21: _rg_ufw_first_rule — нет
+# цепочки None/пуста ''/первое -A с пропуском -N/-P как в verify
+# бинарника; _rg_ufw_jump_conflicts — норма/чужое-первым/отсутствующее
+# семейство v6-off не конфликт/отсутствующий jump/пустая цепочка;
+# _rg_repair_ufw_jump — перестановка на 1-е место с дедупом дублей,
+# вставка отсутствующего jump, оба семейства, без мутаций когда всё
+# ок, без нашей цепочки → False и чужие правила не тронуты;
+# _rg_cli_mutate_ufw_safe — успех без повтора/рековери+повтор/чужая
+# ошибка без повтора/рековери невозможен/повтор тоже упал — через
+# фейковые iptables-таблицы; сам фикс в rkn_guard.py: обёртка
+# диагностирует, переставляет jump и повторяет full/update один раз —
+# файлы не изменились, бинарник идёт fast-path без reload).
 # v23: 400 = 367 + 33 (твик «Гео · IP» вкладки «Пользователи» — запрос
 # владельца «показ IP, страны, города и флага страны на вкладке
 # пользователи, как мой твик, который при обновлениях удалять нельзя»:
@@ -369,6 +388,7 @@ tests.test_rest_api
 tests.test_rest_api_auth
 tests.test_rest_api_web_panel_firewall
 tests.test_ripe_file_age
+tests.test_rkn_guard
 tests.test_routing_rules
 tests.test_ru_subnets
 tests.test_satellite_bindings

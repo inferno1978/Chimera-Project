@@ -14,18 +14,25 @@ rkn-guard ставится на ноду как вендорный инстру�
 сканеры РКН/СКИПА подключаются к открытым портам и пробуют рукопожатия.
 rkn-guard дропает SYN от известных подсетей на входе: сканер видит «хост
 не отвечает», признаков прокси нет. Списки прицельные (5 базовых,
-~4.4k CIDR): гос-сети, ручные сканеры (195.209.123.0/24 и семейство),
+~4.4k CIDR): гос-сети, ручные сканеры (195.209.123.x и семейство),
 СКИПА-пойнты, ТСПУ-оборудование (109.124.x), CyberOK — потребительские
 AS НЕ затронуты, дом-клиенты проходят.
 
 Механика (iptables-бэкенд — дефолт, вся Химера на iptables/ipset):
-  • сеты ipset  SCANNERS-BLOCK-V4 / SCANNERS-BLOCK-V6 (hash:net)
+  • сеты ipset  SCANNERS-BLOCK-V4 / SCANNERS-BLOCK-V6 (hash:net,
+    лимит 65536 подсетей на семейство — проверка бинарника)
   • цепочка      SCANNERS-BLOCK (filter): ESTABLISHED,RELATED return →
     [LOG rate 10/min] → DROP по match-set src; при активном UFW цепочка
     вешается в ufw-before-input ЧЕРЕЗ managed-блок в /etc/ufw/before.rules
     («# SCANNERS-BLOCK chain - managed by antiscan»), при неактивном —
     первой строкой INPUT; счётчики дропов не сбрасываются при update
     (сеты меняются swap'ом, правила не пересоздаются)
+  • UFW-jump авторековери (кейс <blw> 24.11): после `ufw reload` бинарник
+    требует, чтобы jump был ПЕРВЫМ правилом живой ufw-before-input; если
+    внешняя система (антидос/телеметрия хостера) успевает вставить своё
+    правило в начало цепочки — установка падает «SCANNERS-BLOCK is not
+    the first rule». Обёртка _rg_cli_mutate_ufw_safe сама переставляет
+    jump на 1-е место и повторяет операцию (fast-path, без reload).
   • восстановление при ребуте: antiscan-ipset-restore.service
     (ipset restore -exist -f /etc/ipset.conf, Before=ufw.service) +
     antiscan-move-rules.service (перестановка jump на 1-е место)
@@ -605,6 +612,136 @@ def _rg_cli_mutate(args: list, timeout: int = 900,
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  UFW-JUMP: АВТОРЕКОВЕРИ «SCANNERS-BLOCK is not the first rule»
+#  (кейс <blw> 24.11: переустановка на ноде с внешним антидосом)
+# ═════════════════════════════════════════════════════════════════════════════
+#  Механика бага: бинарник после `ufw reload` верифицирует ЖИВУЮ цепочку
+#  (verifyUFWJumps: первое -A-правило `iptables -S ufw-before-input` должно
+#  быть ровно `-A ufw-before-input -j SCANNERS-BLOCK`). Managed-блок в
+#  /etc/ufw/before.rules при этом корректен (insertUFWBlock всегда ставит
+#  его перед первым правилом файла). Если внешняя система на ноде
+#  (антидос/телеметрия хостера, длинный список drop-all, конкурирующая
+#  вставка `iptables -I ufw-before-input …`) успевает положить своё правило
+#  в начало живой цепочки между reload и verify — установка падает FTL,
+#  хотя файл в порядке: «Не удалось сохранить правила iptables
+#  error="ufw-before-input: SCANNERS-BLOCK is not the first rule"».
+#
+#  Рекавери: переставить jump на 1-е место ЖИВОЙ цепочки (v4+v6) и
+#  повторить операцию ОДИН раз — файлы не изменились, поэтому бинарник
+#  идёт по fast-path (без нового reload) и verify завершается успешно.
+# ═════════════════════════════════════════════════════════════════════════════
+_RG_UFW_CHAINS = (
+    # (binary, ufw-цепочка) — как в verifyUFWJumps бинарника.
+    ("iptables",  "ufw-before-input"),
+    ("ip6tables", "ufw6-before-input"),
+)
+_RG_FIRST_RULE_ERR = "is not the first rule"
+
+
+def _rg_ufw_first_rule(binary: str, chain: str) -> "str | None":
+    """Первое -A-правило живой цепочки; None — цепочка не существует.
+
+    Разбор как в verify бинарника: строки -N/-P пропускаются; '' — цепочка
+    есть, но пуста.
+    """
+    r = _run([binary, "-w", "-S", chain], capture=True, timeout=15)
+    if r.returncode != 0:
+        return None
+    for l in (r.stdout or "").splitlines():
+        l = l.strip()
+        if l.startswith("-A "):
+            return l
+    return ""
+
+
+def _rg_ufw_jump_conflicts() -> list:
+    """[(binary, chain, first)] — семейства, где jump стоит не первым.
+
+    Отсутствующее семейство (нет ufw6-before-input на v6-off ноде)
+    конфликтом НЕ считается.
+    """
+    out = []
+    for binary, chain in _RG_UFW_CHAINS:
+        first = _rg_ufw_first_rule(binary, chain)
+        if first is None:
+            continue
+        if first != f"-A {chain} -j {_RGN_CHAIN}":
+            out.append((binary, chain, first))
+    return out
+
+
+def _rg_repair_ufw_jump() -> bool:
+    """Перестановка jump SCANNERS-BLOCK на 1-е место живой ufw-цепочки.
+
+    Только существующие пары цепочек (ufw-before-* + SCANNERS-BLOCK): все
+    вхождения jump удаляются (мог продублироваться), чистый jump
+    вставляется `-I <chain> 1`; чужие правила не трогаются. Возвращает
+    True, если после ремонта во всех существующих семействах jump первый
+    (или конфликта не было).
+    """
+    for binary, chain in _RG_UFW_CHAINS:
+        if _rg_ufw_first_rule(binary, chain) is None:
+            continue  # семейства нет (v6-off) — не наша забота
+        if _run([binary, "-w", "-S", _RGN_CHAIN], capture=True,
+                timeout=10).returncode != 0:
+            continue  # нашей цепочки нет — повтор full создаст её сам
+        want = f"-A {chain} -j {_RGN_CHAIN}"
+        if _rg_ufw_first_rule(binary, chain) == want:
+            continue  # уже порядок
+        for _ in range(20):  # снять ВСЕ вхождения jump (дубли)
+            if _run([binary, "-w", "-D", chain, "-j", _RGN_CHAIN],
+                    quiet=True).returncode != 0:
+                break
+        if _run([binary, "-w", "-I", chain, "1", "-j", _RGN_CHAIN],
+                quiet=True).returncode != 0:
+            _warn(f"{binary}: не удалось вставить jump в {chain}")
+        else:
+            _log("INFO", f"UFW jump repair: {binary} {chain} → позиция 1")
+    conflicts = _rg_ufw_jump_conflicts()
+    if conflicts:
+        for binary, chain, first in conflicts:
+            _log("WARN", f"UFW jump repair: {binary} {chain} всё ещё "
+                         f"начинается с {first or '— (пусто)'}")
+        return False
+    return True
+
+
+def _rg_cli_mutate_ufw_safe(args: list, timeout: int = 900,
+                            label: str = "") -> subprocess.CompletedProcess:
+    """Мутирующая операция + авторековери UFW-jump (кейс <blw> 24.11).
+
+    При падении с «is not the first rule»: показать, что реально стоит
+    первым в живых ufw-цепочках, переставить jump (см.
+    _rg_repair_ufw_jump) и повторить операцию ОДИН раз — идемпотентно
+    (full/update повторяемы, сеты меняются swap'ом, счётчики живы).
+    """
+    r = _rg_cli_mutate(args, timeout=timeout, label=label)
+    combined = (r.stderr or "") + (r.stdout or "")
+    if r.returncode == 0 or _RG_FIRST_RULE_ERR not in combined:
+        return r
+    _warn("UFW: verify бинарника упал — jump SCANNERS-BLOCK не первое "
+          "правило живой ufw-before-input (чужие правила в начале цепочки: "
+          "антидос/телеметрия). Чиню позицию и повторяю…")
+    for binary, chain, first in _rg_ufw_jump_conflicts():
+        _info(f"  {binary} -S {chain}: первым стоит "
+              f"{first or '— (цепочка пуста)'}")
+    if not _rg_repair_ufw_jump():
+        _warn("Переставить jump не удалось — см. диагностику ниже")
+        return r
+    _info("Переставил jump на 1-е место; повторяю операцию rkn-guard…")
+    r2 = _rg_cli_mutate(args, timeout=timeout)
+    if r2.returncode == 0:
+        _success("Повтор успешен: правила сохранены (fast-path, без "
+                 "повторного ufw reload)")
+    else:
+        _warn("Повтор тоже не прошёл — на ноде постоянный конфликт за "
+              "ufw-before-input (внешняя система перегенерирует правила). "
+              "Диагностика: iptables -w -S ufw-before-input | head -5; "
+              "grep -n SCANNERS-BLOCK /etc/ufw/before.rules | head -3")
+    return r2
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  BIN: СКАЧИВАНИЕ (зеркала), ВЕРСИЯ АПСТРИМА, СБОРКА ИЗ ИСТОЧНИКОВ
 # ═════════════════════════════════════════════════════════════════════════════
 def _rg_arch() -> str:
@@ -800,13 +937,19 @@ def _rg_install_flow(st: dict, interactive: bool = True) -> bool:
     if logging_on:
         args += ["--enable-logging"]
 
-    r = _rg_cli_mutate(
+    r = _rg_cli_mutate_ufw_safe(
         args, timeout=900,
         label=f"Применяю списки и правила ({backend}, "
               f"{len(urls)} базовых источника)…")
     if r.returncode != 0:
         tail = "\n".join(((r.stderr or "") + (r.stdout or "")).splitlines()[-12:])
         _err("rkn-guard full не завершился:\n" + tail)
+        if _RG_FIRST_RULE_ERR in (r.stderr or "") + (r.stdout or ""):
+            _err("UFW-конфликт не разрешился автоматически. Проверьте, кто "
+                 "держит правила в начале ufw-before-input (антидос/"
+                 "телеметрия хостера):\n  iptables -w -S ufw-before-input "
+                 "| head -5\n  grep -n SCANNERS-BLOCK /etc/ufw/before.rules "
+                 "| head -3")
         return False
 
     if logging_on:
@@ -846,8 +989,9 @@ def _rg_update_now(interactive: bool = True) -> int:
     args = ["update", "--managed-lists", "--sources-file", str(RG_SOURCES_FILE)]
     for u in urls:
         args += ["--urls", u]
-    r = _rg_cli_mutate(args, timeout=900,
-                       label="Обновляю списки подсетей (счётчики атак сохраняются)…")
+    r = _rg_cli_mutate_ufw_safe(
+        args, timeout=900,
+        label="Обновляю списки подсетей (счётчики атак сохраняются)…")
     if r.returncode == 2:
         _warn("Обновление завершено с ошибками части источников — для них "
               "взяты последние корректные копии из кэша")

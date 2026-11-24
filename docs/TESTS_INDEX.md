@@ -2,7 +2,7 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **343** (гейт-манифест: **343**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **344** (гейт-манифест: **344**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
 ## AmneziaWG (transport Mode B + standalone 2.0) (34)
@@ -330,6 +330,21 @@
 | [`test_system_deps.py`](../tests/test_system_deps.py) | Unit-тесты для chimera/modules/system_deps.py. | ✓ |
 | [`test_system_doctor.py`](../tests/test_system_doctor.py) | Unit-тесты для chimera/modules/system_doctor.py. | ✓ |
 
+## Прочее (10)
+
+| Тест | Что покрывает (первая строка докстринга) | ci_gate |
+|---|---|---|
+| [`test_custom_outbounds.py`](../tests/test_custom_outbounds.py) | Unit-тесты для chimera/modules/custom_outbounds.py. | ✓ |
+| [`test_custom_outbounds_freedom.py`](../tests/test_custom_outbounds_freedom.py) | Unit-тесты freedom-ветки кастомных outbound'ов (chimera/modules/custom_outbounds.py). | ✓ |
+| [`test_exit_traffic_watcher.py`](../tests/test_exit_traffic_watcher.py) | Unit-тесты для chimera/modules/exit_traffic_watcher.py. | ✓ |
+| [`test_rkn_guard.py`](../tests/test_rkn_guard.py) | Unit-тесты для chimera/modules/rkn_guard.py — UFW-jump авторековери. | ✓ |
+| [`test_routing_rules.py`](../tests/test_routing_rules.py) | Unit-тесты для chimera/modules/routing_rules.py. | ✓ |
+| [`test_smartdns_firewall.py`](../tests/test_smartdns_firewall.py) | Unit-тесты для chimera/modules/smartdns_firewall.py — firewall-слоя | ✓ |
+| [`test_smartdns_module.py`](../tests/test_smartdns_module.py) | Unit-тесты для chimera/modules/smartdns.py — оркестратора SmartDNS-ноды. | ✓ |
+| [`test_smartdns_port_registry.py`](../tests/test_smartdns_port_registry.py) | Unit-тесты для bind_ip-расширения port_registry (режим companion SmartDNS: | ✓ |
+| [`test_smartdns_stack.py`](../tests/test_smartdns_stack.py) | Unit-тесты для chimera/modules/smartdns_stack.py — компонентного слоя | ✓ |
+| [`test_v6_adaptive.py`](../tests/test_v6_adaptive.py) | Unit-тесты v6-adaptive watcher (chimera/modules/v6_adaptive.py). | ✓ |
+
 ## Установка/конфиг Xray (10)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
@@ -358,20 +373,6 @@
 | [`test_failover.py`](../tests/test_failover.py) | Unit-тесты для chimera/modules/failover.py. | ✓ |
 | [`test_node_health_monitor.py`](../tests/test_node_health_monitor.py) | Unit-тесты для chimera/modules/node_health_monitor.py. | ✓ |
 | [`test_smart_balancer.py`](../tests/test_smart_balancer.py) | Unit-тесты для chimera/modules/smart_balancer.py. | ✓ |
-
-## Прочее (9)
-
-| Тест | Что покрывает (первая строка докстринга) | ci_gate |
-|---|---|---|
-| [`test_custom_outbounds.py`](../tests/test_custom_outbounds.py) | Unit-тесты для chimera/modules/custom_outbounds.py. | ✓ |
-| [`test_custom_outbounds_freedom.py`](../tests/test_custom_outbounds_freedom.py) | Unit-тесты freedom-ветки кастомных outbound'ов (chimera/modules/custom_outbounds.py). | ✓ |
-| [`test_exit_traffic_watcher.py`](../tests/test_exit_traffic_watcher.py) | Unit-тесты для chimera/modules/exit_traffic_watcher.py. | ✓ |
-| [`test_routing_rules.py`](../tests/test_routing_rules.py) | Unit-тесты для chimera/modules/routing_rules.py. | ✓ |
-| [`test_smartdns_firewall.py`](../tests/test_smartdns_firewall.py) | Unit-тесты для chimera/modules/smartdns_firewall.py — firewall-слоя | ✓ |
-| [`test_smartdns_module.py`](../tests/test_smartdns_module.py) | Unit-тесты для chimera/modules/smartdns.py — оркестратора SmartDNS-ноды. | ✓ |
-| [`test_smartdns_port_registry.py`](../tests/test_smartdns_port_registry.py) | Unit-тесты для bind_ip-расширения port_registry (режим companion SmartDNS: | ✓ |
-| [`test_smartdns_stack.py`](../tests/test_smartdns_stack.py) | Unit-тесты для chimera/modules/smartdns_stack.py — компонентного слоя | ✓ |
-| [`test_v6_adaptive.py`](../tests/test_v6_adaptive.py) | Unit-тесты v6-adaptive watcher (chimera/modules/v6_adaptive.py). | ✓ |
 
 ## Подписки (subscription) (8)
 
