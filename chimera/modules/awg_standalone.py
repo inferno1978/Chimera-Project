@@ -266,6 +266,49 @@ def _awgs_apt_install(pkg: str) -> bool:
     return False
 
 
+# ── Серия PPA amnezia/ppa для codename хоста ────────────────────────────────
+# Маппинг исключений (канон из bivlked): Debian — серий Debian в PPA нет,
+# якорим на LTS; EOL non-LTS Ubuntu — на noble (DKMS соберётся под текущее
+# ядро). Прочие codename — нативно, ВКЛЮЧАЯ неизвестные маппингу (новые
+# релизы Ubuntu): PPA amnezia публикует серии в темп релизов — resolute
+# (26.04) в PPA с 14.09.2026 (userspace ee0f0a9, dkms 63ed35d — те же
+# исходники, что в noble, поддержка протокола 3.1 паритетна), stonking
+# (26.10) — параллельно с остальными сериями. Хардкод noble в фолбэке (до
+# 26.04) означал: свежий LTS навсегда пинится на серию прошлой LTS.
+# Доступность серии для codename вне _AWGS_PPA_TRUSTED проверяет probe в
+# awgs_install_dkms (недоступна → якорь noble + WARN); bash-зеркало той же
+# семантики для удалённых нод — _manual_ppa_cmd в awg_transport (ЭТАП 3).
+_AWGS_PPA_SERIES_MAP = {
+    # Debian
+    "bookworm": "focal",
+    "trixie":   "noble",
+    # Ubuntu LTS
+    "focal":    "focal",
+    "jammy":    "jammy",
+    "noble":    "noble",
+    "resolute": "resolute",
+    # Ubuntu non-LTS → якорь noble (DKMS соберётся под текущее ядро)
+    "oracular": "noble",
+    "plucky":   "noble",
+    "questing": "noble",
+}
+# Codename'ы, чья серия в PPA гарантирована (нативные LTS + якорные
+# исключения Debian) — probe доступности для них не нужен.
+_AWGS_PPA_TRUSTED = ("focal", "jammy", "noble", "resolute", "bookworm", "trixie")
+
+
+def awgs_ppa_series(codename: str) -> str:
+    """Серия PPA amnezia/ppa для codename хоста (маппинг + нативный фолбэк).
+
+    Исключения — _AWGS_PPA_SERIES_MAP (Debian и EOL non-LTS → якорные
+    LTS-серии PPA); всё остальное, включая неизвестные маппингу codename
+    (новые релизы Ubuntu), — нативная серия: доступность для codename вне
+    _AWGS_PPA_TRUSTED проверяет probe в awgs_install_dkms (недоступна →
+    якорь noble + WARN).
+    """
+    return _AWGS_PPA_SERIES_MAP.get(codename, codename)
+
+
 def awgs_install_dkms() -> bool:
     """
     Устанавливает amneziawg-tools + DKMS kernel module через PPA amnezia/ppa.
@@ -340,24 +383,15 @@ def awgs_install_dkms() -> bool:
         core.info(f"wg доступен: {wg_check.stdout.strip()}")
 
     # ── Шаг 2: PPA amnezia/ppa (правильный!) ────────────────────────────────
-    # Маппинг codename на поддерживаемый PPA (как в bivlked)
-    ppa_mapping = {
-        # Debian
-        "bookworm": "focal",
-        "trixie":   "noble",
-        # Ubuntu LTS
-        "focal":    "focal",
-        "jammy":    "jammy",
-        "noble":    "noble",
-        # Ubuntu non-LTS → fallback на noble (DKMS соберётся под текущее ядро)
-        "oracular": "noble",
-        "plucky":   "noble",
-        "questing": "noble",
-    }
-    ppa_codename = ppa_mapping.get(codename, "noble")
+    # Серия PPA — единая точка правды awgs_ppa_series: маппинг исключений
+    # (Debian/EOL non-LTS) + нативный фолбэк (неизвестный codename → своя
+    # серия, не хардкод noble).
+    ppa_codename = awgs_ppa_series(codename)
 
-    # Для non-LTS Ubuntu проверяем доступность PPA, fallback на noble
-    if codename not in ("focal", "jammy", "noble", "bookworm", "trixie"):
+    # Probe доступности серии: codename вне доверенных (_AWGS_PPA_TRUSTED:
+    # нативные LTS + якоря Debian) — стучимся в живой PPA; серия недоступна
+    # (релиз только вышел, PPA ещё не собрал) → якорь noble + WARN
+    if codename not in _AWGS_PPA_TRUSTED:
         core.info(f"Проверка доступности PPA Amnezia для '{ppa_codename}'...")
         r = core._run(
             ["curl", "-fsI", "--max-time", "15", "--retry", "2", "--retry-delay", "5",

@@ -854,6 +854,42 @@ def _awg_systemd_unit_text(xray_uid: int) -> str:
     )
 
 
+def _manual_ppa_cmd() -> str:
+    """bash-команда ЭТАПа 3 ensure_amneziawg_ready: ручное добавление PPA.
+
+    Серию PPA определяем НА ЦЕЛЕВОМ хосте — этап исполняется и удалённо
+    через ssh, os-release локальной ноды тут ни при чём. Семантика —
+    bash-зеркало awgs_ppa_series из awg_standalone: Debian и EOL non-LTS
+    → якорные LTS-серии PPA; известные Ubuntu-серии (incl. resolute/26.04,
+    PPA публикует с 14.09.2026) — нативно; неизвестный/новый codename —
+    нативно, если серия есть в PPA (probe), иначе якорь noble. До фикса
+    серия была хардкодом noble — на 26.04 глубокий fallback пинил бы
+    пакеты серии 24.04. Недоступный/отсутствующий curl → якорь noble
+    (fail-safe, как probe в awgs_install_dkms).
+    """
+    return (
+        "S=''; . /etc/os-release 2>/dev/null || true; S=${VERSION_CODENAME:-}; "
+        "case \"$S\" in "
+        "bookworm) S=focal ;; "
+        "trixie|oracular|plucky|questing) S=noble ;; "
+        "focal|jammy|noble|resolute) : ;; "
+        "*) [ -n \"$S\" ] && curl -fsI --max-time 15 "
+        "\"https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu/dists/$S/Release\" "
+        ">/dev/null 2>&1 || S=noble ;; "
+        "esac; "
+        # Импортируем GPG-ключ репозитория
+        "gpg --no-default-keyring "
+        "  --keyring /usr/share/keyrings/amnezia-ppa.gpg "
+        "  --keyserver keyserver.ubuntu.com "
+        "  --recv-keys 57290828 2>/dev/null && "
+        # Прописываем репозиторий с привязкой к keyring (серия — $S)
+        "echo \"deb [signed-by=/usr/share/keyrings/amnezia-ppa.gpg] "
+        "  https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu $S main\" "
+        "  > /etc/apt/sources.list.d/amnezia-ppa.list && "
+        "echo MANUAL_PPA_OK || echo MANUAL_PPA_FAIL"
+    )
+
+
 def ensure_amneziawg_ready(remote_host: str = None, ssh_fn=None) -> None:
     """
     Подготавливает систему к работе с AmneziaWG:
@@ -1016,19 +1052,7 @@ def ensure_amneziawg_ready(remote_host: str = None, ssh_fn=None) -> None:
     # =========================================================================
     info(f"AWG {_where} ЭТАП 3: ручное добавление репозитория PPA в sources.list...")
 
-    r_mppa = _exec(
-        # Импортируем GPG-ключ репозитория
-        "gpg --no-default-keyring "
-        "  --keyring /usr/share/keyrings/amnezia-ppa.gpg "
-        "  --keyserver keyserver.ubuntu.com "
-        "  --recv-keys 57290828 2>/dev/null && "
-        # Прописываем репозиторий с привязкой к keyring
-        "echo 'deb [signed-by=/usr/share/keyrings/amnezia-ppa.gpg] "
-        "  https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu noble main' "
-        "  > /etc/apt/sources.list.d/amnezia-ppa.list && "
-        "echo MANUAL_PPA_OK || echo MANUAL_PPA_FAIL",
-        capture=True, check=False,
-    )
+    r_mppa = _exec(_manual_ppa_cmd(), capture=True, check=False)
 
     if "MANUAL_PPA_OK" in (r_mppa.stdout or ""):
         r_inst2 = _exec(

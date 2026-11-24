@@ -876,5 +876,56 @@ class TestAwgsAptAutoRepair(unittest.TestCase):
         self.assertNotIn(["dpkg", "--configure", "-a"], ran_cmds)
 
 
+class TestAwgsPpaSeriesResolution(unittest.TestCase):
+    """Серия PPA amnezia/ppa: resolute — нативно, неизвестный codename — нативно.
+
+    Подготовка к миграции флота на Ubuntu 26.04: PPA amnezia публикует
+    resolute-серию с 14.09.2026 (userspace ee0f0a9, dkms 63ed35d — те
+    же исходники, что в noble; поддержка протокола 3.1 паритетна). До
+    фикса неизвестный маппингу codename падал в хардкод noble — свежий
+    LTS навсегда пинился бы на серию прошлой LTS.
+    """
+
+    def test_mapping_exceptions_and_native_lts(self):
+        """Маппинг: LTS нативно (incl. resolute), Debian/EOL non-LTS — якоря."""
+        from chimera.modules.awg_standalone import awgs_ppa_series
+        self.assertEqual(awgs_ppa_series("focal"), "focal")
+        self.assertEqual(awgs_ppa_series("jammy"), "jammy")
+        self.assertEqual(awgs_ppa_series("noble"), "noble")
+        self.assertEqual(awgs_ppa_series("resolute"), "resolute")
+        self.assertEqual(awgs_ppa_series("bookworm"), "focal")
+        self.assertEqual(awgs_ppa_series("trixie"), "noble")
+        self.assertEqual(awgs_ppa_series("oracular"), "noble")
+        self.assertEqual(awgs_ppa_series("plucky"), "noble")
+        self.assertEqual(awgs_ppa_series("questing"), "noble")
+
+    def test_unknown_codename_native_not_noble(self):
+        """Неизвестный codename → своя серия, НЕ хардкод noble.
+
+        stonking (26.10) — реально публикуемая серия PPA; quantal —
+        древний EOL, которого в PPA нет (probe в awgs_install_dkms
+        честно свалит его на якорь noble, но РЕШЕНИЕ серии — нативное).
+        """
+        from chimera.modules.awg_standalone import awgs_ppa_series
+        self.assertEqual(awgs_ppa_series("stonking"), "stonking")
+        self.assertEqual(awgs_ppa_series("quantal"), "quantal")
+
+    def test_resolute_trusted_probe_skipped(self):
+        """resolute в доверенных: probe доступности на 26.04 не дёргается."""
+        from chimera.modules import awg_standalone
+        self.assertIn("resolute", awg_standalone._AWGS_PPA_TRUSTED,
+                      "resolute обязан быть в доверенных — серия "
+                      "подтверждена в PPA, probe не нужен")
+
+    def test_probe_targets_resolved_series_noble_anchor(self):
+        """probe стучится в РЕШЁННУЮ серию (не хардкод); якорь noble —
+        аварийный фолбэк probe (серия недоступна → noble + WARN)."""
+        src = (_PROJECT_ROOT / "chimera" / "modules"
+               / "awg_standalone.py").read_text()
+        self.assertIn("dists/{ppa_codename}/Release", src)
+        self.assertIn("if codename not in _AWGS_PPA_TRUSTED:", src)
+        self.assertIn('ppa_codename = "noble"', src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

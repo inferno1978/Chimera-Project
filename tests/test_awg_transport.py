@@ -818,5 +818,44 @@ class TestMultinodeWatchdogCanon(unittest.TestCase):
         self.assertEqual(r.returncode, 0, f"bash -n: {r.stderr}")
 
 
+class TestManualPpaSuiteResolution(unittest.TestCase):
+    """ЭТАП 3 ensure_amneziawg_ready (ручной PPA-fallback): серия PPA — по
+    os-release ЦЕЛЕВОГО хоста, не хардкод noble.
+
+    Этап исполняется и удалённо через ssh — серия обязана определяться
+    на целевой ноде (os-release локальной ноды тут ни при чём). До фикса
+    хардкод noble пинил бы 26.04 (resolute; в PPA с 14.09.2026) на
+    пакеты серии 24.04.
+    """
+
+    def test_suite_resolved_on_target_host(self):
+        """Серия из os-release целевого хоста; echo пишет динамическую $S."""
+        from chimera.modules import awg_transport
+        cmd = awg_transport._manual_ppa_cmd()
+        self.assertIn(". /etc/os-release", cmd)
+        self.assertIn("${VERSION_CODENAME:-}", cmd)
+        self.assertIn("ubuntu $S main", cmd)
+        # нативные серии и якоря — bash-зеркало awgs_ppa_series
+        self.assertIn("bookworm) S=focal", cmd)
+        self.assertIn("focal|jammy|noble|resolute", cmd)
+        # неизвестный codename: probe нативной серии, недоступна → noble
+        self.assertIn("|| S=noble", cmd)
+
+    def test_no_hardcoded_noble_series(self):
+        """Регресс: хардкод noble-серии («ubuntu noble main») исчез."""
+        from chimera.modules import awg_transport
+        cmd = awg_transport._manual_ppa_cmd()
+        self.assertNotIn("ubuntu noble main", cmd)
+        self.assertEqual(cmd.count("ppa/ubuntu $S main"), 1)
+
+    def test_bash_syntax_ok(self):
+        """Собранная команда — валидный bash (контракт кавычек)."""
+        import subprocess as _sp
+        from chimera.modules import awg_transport
+        r = _sp.run(["bash", "-n", "-c", awg_transport._manual_ppa_cmd()],
+                    capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, f"bash -n: {r.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

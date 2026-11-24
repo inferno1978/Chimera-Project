@@ -1,4 +1,17 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v25: 428 = 421 + 7 (fix(awg): PPA-серия resolute (26.04) + нативный
+# фолбэк неизвестных codename вместо хардкода noble — подготовка к
+# миграции флота на Ubuntu 26.04; PPA amnezia/ppa публикует resolute-
+# серию с 14.09.2026, userspace ee0f0a9 / dkms 63ed35d — те же
+# исходники, что в noble, поддержка протокола 3.1 паритетна. Без новых
+# файлов — расширение test_awg_standalone (+4: awgs_ppa_series —
+# маппинг-исключения и нативные LTS incl. resolute; неизвестный codename
+# → своя серия, НЕ noble — stonking/quantal; resolute в
+# _AWGS_PPA_TRUSTED — probe не дёргается; probe стучится в решённую
+# серию dists/{ppa_codename}, якорь noble сохранён) и test_awg_transport
+# (+3: _manual_ppa_cmd — серия ручного PPA-fallback ЭТАПа 3 по os-release
+# ЦЕЛЕВОГО хоста; регресс-ассерт «ubuntu noble main» исчез; bash -n
+# контракт кавычек). Модулей в манифесте по-прежнему 344.)
 # v24: 421 = 400 + 21 (fix rkn-guard: UFW-jump авторековери — кейс <blw>
 # 24.11, переустановка на ноде с внешним антидосом падала FTL «Не
 # удалось сохранить правила iptables error="ufw-before-input:
