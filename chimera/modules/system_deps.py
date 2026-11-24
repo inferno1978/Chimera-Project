@@ -132,6 +132,19 @@ _PKG_TO_CMDS: dict[str, list[str]] = {}
 for _c, (_a, _d) in _CMD_TO_PKG.items():
     _PKG_TO_CMDS.setdefault(_a, []).append(_c)
 
+# Опции dpkg для НЕинтерактивных установок (порт bivlked v6.3.7, инцидент
+# #409): если файл настроек пакета на сервере правили/удаляли (классика —
+# /etc/cloud/cloud.cfg у cloud-init), dpkg при обновлении спрашивает, какую
+# версию оставить, а DEBIAN_FRONTEND=noninteractive и -y на этот вопрос НЕ
+# отвечают — установка висла вечно. --force-confdef: dpkg берёт ответ по
+# умолчанию, если он есть; --force-confold: иначе оставляет ТЕКУЩИЙ файл
+# (удалённый остаётся удалённым). Тот же канон уже используется в
+# nginx_updater / system_doctor / awg_standalone (_AWGS_DPKG_OPTS).
+_DPKG_NONINTERACTIVE_OPTS = [
+    "-o", "Dpkg::Options::=--force-confdef",
+    "-o", "Dpkg::Options::=--force-confold",
+]
+
 
 def _init_pkg_mgr() -> None:
     """Определяет пакетный менеджер (apt/dnf) и сохраняет его в core.PKG_MGR."""
@@ -152,7 +165,7 @@ def _pkg_install(*pkgs: str) -> None:
     _run = core._run
     PKG_MGR = getattr(core, "PKG_MGR", "apt")
     if PKG_MGR == "apt":
-        _run(["apt-get", "install", "-y", "-q", *pkgs],
+        _run(["apt-get", "install", "-y", "-q", *_DPKG_NONINTERACTIVE_OPTS, *pkgs],
              env={"DEBIAN_FRONTEND": "noninteractive"}, check=False, quiet=True)
     else:
         _run(["dnf", "install", "-y", "-q", *pkgs], check=False, quiet=True)
@@ -316,7 +329,7 @@ def _smart_recover(exc: FileNotFoundError) -> bool:
         info(f"Устанавливаю {install_pkg}...")
         try:
             if PKG_MGR == "apt":
-                _run(["apt-get", "install", "-y", "-q", install_pkg],
+                _run(["apt-get", "install", "-y", "-q", *_DPKG_NONINTERACTIVE_OPTS, install_pkg],
                      env={"DEBIAN_FRONTEND": "noninteractive"}, check=False, quiet=True)
             else:
                 _run(["dnf", "install", "-y", "-q", install_pkg], check=False, quiet=True)
@@ -577,7 +590,8 @@ def ensure_startup_dependencies() -> None:
 
         import subprocess as _sp_deps
         cmd_deps = (
-            ["apt-get", "install", "-y", "--no-install-recommends", *missing_sys]
+            ["apt-get", "install", "-y", "--no-install-recommends",
+             *_DPKG_NONINTERACTIVE_OPTS, *missing_sys]
             if PKG_MGR == "apt"
             else ["dnf", "install", "-y", *missing_sys]
         )

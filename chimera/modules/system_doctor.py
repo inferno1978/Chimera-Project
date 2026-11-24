@@ -1750,6 +1750,7 @@ def fix_updates_pending(ctx: DoctorCtx):
         return False, f"apt-get update rc={u.returncode}"
     g = _run(["/bin/sh", "-c",
               "DEBIAN_FRONTEND=noninteractive apt-get -y "
+              "-o Dpkg::Options::=--force-confdef "
               "-o Dpkg::Options::=--force-confold full-upgrade"], timeout=3600)
     if g.returncode != 0:
         return False, f"full-upgrade rc={g.returncode}: {g.stderr[:200]}"

@@ -355,6 +355,78 @@ class TestQrSavePng(unittest.TestCase):
             result = awg_qr.awgs_qr_save_png("content", png_path)
             self.assertTrue(result)
 
+class TestExportPeerStaleCleanup(unittest.TestCase):
+    """Чистка старых QR/.vpnuri при экспорте (порт bivlked v6.3.6).
+
+    При неудачной регенерации QR/vpn:// рядом с новым .conf оставался
+    прежний {name}_qr.png/.vpnuri с КОНФИГОМ СТАРЫХ (уже отозванных
+    regen'ом) ключей — юзер сканирует мёртвый QR. Теперь несобранный
+    артефакт отсутствует, а его поле в возвращаемом dict = None.
+    """
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._keys_dir = self._tmpdir / "keys"
+        self._keys_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _stale_files(self, name="alice"):
+        return (self._keys_dir / f"{name}_qr.png",
+                self._keys_dir / f"{name}_qr_conf.png",
+                self._keys_dir / f"{name}.vpnuri")
+
+    def test_failed_png_removes_stale_files(self):
+        """qrencode недоступен → старые PNG/.vpnuri удалены, png_path=None."""
+        from chimera.modules import awg_qr
+        for f in self._stale_files():
+            f.write_text("STALE-OLD-KEYS")
+        with patch.object(awg_qr, "AWGS_KEYS_DIR", self._keys_dir), \
+             patch("chimera.modules.awg_state.awgs_state_load",
+                   return_value=_server_state()), \
+             patch("chimera._core._run",
+                   return_value=MagicMock(returncode=1, stdout="", stderr="")):
+            result = awg_qr.awgs_qr_export_peer(_peer(), show_terminal=False)
+        # Старые PNG с мёртвыми ключами удалены (несобранный артефакт
+        # отсутствует — v6.3.6-семантика)
+        for f in self._stale_files()[:2]:
+            self.assertFalse(f.exists(), msg=f"{f.name} не удалён")
+        # Несобранные артефакты = None
+        self.assertIsNone(result["png_path"])
+        self.assertIsNone(result["png_conf_path"])
+        # .vpnuri перезаписан СВЕЖИМ (не старый секрет)
+        self.assertIsNotNone(result["uri_path"])
+        self.assertTrue(result["uri_path"].exists())
+        self.assertNotEqual(result["uri_path"].read_text(),
+                            "STALE-OLD-KEYS\n")
+
+    def test_successful_export_rewrites_all(self):
+        """qrencode есть → PNG пересоздан, старого содержимого нет."""
+        from chimera.modules import awg_qr
+        for f in self._stale_files():
+            f.write_text("STALE-OLD-KEYS")
+
+        def fake_run(cmd, **kw):
+            if cmd[:1] == ["which"] and cmd[1:2] == ["qrencode"]:
+                return MagicMock(returncode=0, stdout="/usr/bin/qrencode",
+                                 stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch.object(awg_qr, "AWGS_KEYS_DIR", self._keys_dir), \
+             patch("chimera.modules.awg_state.awgs_state_load",
+                   return_value=_server_state()), \
+             patch("chimera._core._run", side_effect=fake_run):
+            result = awg_qr.awgs_qr_export_peer(_peer(), show_terminal=False)
+        # qrencode-мок не пишет файл — важен вердикт True и отсутствие
+        # старого содержимого (файл удалён в начале экспорта)
+        self.assertIsNotNone(result["png_path"])
+        self.assertNotEqual(result["png_path"].read_bytes()
+                            if result["png_path"].exists() else b"",
+                            b"STALE-OLD-KEYS")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

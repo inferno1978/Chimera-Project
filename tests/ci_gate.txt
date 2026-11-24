@@ -1,4 +1,49 @@
 # tests/ci_gate.txt — гейт-манифест CI Химеры.
+# v26: 452 = 428 + 24 (fix(awg): синк-волна апстрима bivlked v6.3.0-v6.3.9
+# — пять фиксов портом: (1) генератор обфускации — коллизии длин пакетов
+# (S4 != 16 — признак голого WireGuard по кратности длины; выбор S4 без
+# совпадения длин с init/response/cookie-рукопожатиями — молчаная потеря
+# части пакетов данных, разбор Г2.14 у автора; S3 != S2+28 — response/
+# cookie) в ОБОИХ местах генерации (awgs_presets_generate +
+# awgs_generate_full_manual_params, явные overrides уважаются) +
+# diagnose-секция «Коллизии длин (S1-S4)» для живых конфигов (доля потерь
+# по ширине H-диапазона, S1-S4=12+H1-от-нуля — теряются все, CPA != 0
+# скип) с рецептом ротации; (2) PPA-probe различает HTTP-коды (5xx =
+# сбой Launchpad, а НЕ «серии нет» — инцидент I#68 23.11: 503 уводил
+# 26.04 в пакеты серии noble; awgs_ppa_probe_decide: 2xx → keep, 5xx →
+# keep_outage, 404/пусто → noble) + то же в bash-зеркале _manual_ppa_cmd
+# ЭТАПа 3 (curl -w %{http_code} + case 2??|5??); (3) dpkg
+# --force-confdef/--force-confold во всех НЕинтерактивных apt/dpkg
+# AWG-установки (_AWGS_DPKG_OPTS, 8 сайтов incl. ретрай после ремонта;
+# инцидент #409: вопрос dpkg о конфиг-файле вешал установку вечно) +
+# system_deps (_pkg_install/_smart_recover/ensure_startup_dependencies
+# — _DPKG_NONINTERACTIVE_OPTS, dnf-ветка не тронута) + system_doctor
+# (пара confdef+confold вместо одинокого confold); (4) regen/экспорт
+# чистит старые {name}_qr.png/.vpnuri с ОТЗЫВАННЫМИ ключами до
+# перезаписи (порт v6.3.6) — несобранный артефакт отсутствует, поле
+# в dict = None, WARN с рецептом повтора; (5) ListenPort-парсинг
+# wg-quick-семантики (_awgs_parse_listen_port: комментарий после
+# значения, ключ в любом регистре, ПОСЛЕДНЯЯ строка побеждает,
+# «51820=x» не порт). Без новых файлов — расширения: test_awg_presets
+# +4 (формулы _awgs_size_collisions init/response/cookie +
+# init-128-исключение; _awgs_pick_s4 свойство «никогда 16 и без
+# коллизий» на 300 наборах; генератор-свойство на всех пресетах обеих
+# версий; full-manual свойство + override s4=16 уважается),
+# test_awg_diagnose +10 (ListenPort: комментарий/регистр/последняя-
+# побеждает/51820=x/отсутствие/ведущий-ноль; warnings: чистые
+# параметры/S4=16/response-коллизия с долей потерь/CPA-ненулевой-скип/
+# S1-S4=12+H1-от-нуля), test_awg_standalone +3 (матрица
+# awgs_ppa_probe_decide 2xx/5xx/404/000/пусто/с-пробелами; контракт
+# HTTP-кода вместо кода возврата curl; dpkg-опции в константе и во всех
+# сайтах установки + регресс «голого» install), test_awg_transport +2
+# (контракт команды probe case 2??|5??/исчезновение -fsI; E2E
+# fake-os-release+мок-curl/gpg: 503 и 200 держат серию stonking, 404 и
+# пусто → noble), test_awg_qr +2 (qrencode недоступен → старые PNG
+# удалены/png_path=None/.vpnuri свежий; успешный экспорт → PNG-вердикт
+# True без старого содержимого), test_system_deps +3 (dpkg-опции в argv
+# _pkg_install ДО пакетов; dnf-ветка без dpkg-опций; system_doctor
+# full-upgrade несёт пару confdef+confold). Модулей в манифесте
+# по-прежнему 344.)
 # v25: 428 = 421 + 7 (fix(awg): PPA-серия resolute (26.04) + нативный
 # фолбэк неизвестных codename вместо хардкода noble — подготовка к
 # миграции флота на Ubuntu 26.04; PPA amnezia/ppa публикует resolute-

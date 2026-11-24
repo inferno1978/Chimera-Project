@@ -221,9 +221,9 @@ def _awgs_apt_repair() -> bool:
     core.warn("Сломанные зависимости apt — запускаю авто-восстановление "
               "(dpkg --configure -a + apt --fix-broken)...")
     _awgs_apt_lock_heal()  # лок может держать полусобранный dpkg-процесс
-    core._run(["dpkg", "--configure", "-a"],
+    core._run(["dpkg", "--configure", "-a", *_AWGS_DPKG_OPTS],
               capture=True, check=False, quiet=True)
-    r = core._run(["apt-get", "--fix-broken", "install", "-y"],
+    r = core._run(["apt-get", "--fix-broken", "install", "-y", *_AWGS_DPKG_OPTS],
                   capture=True, check=False, quiet=True)
     if r.returncode != 0:
         core.log_to_file("WARN",
@@ -246,7 +246,7 @@ def _awgs_apt_install(pkg: str) -> bool:
     проверяется код возврата apt).
     """
     core = _core_module()
-    r = core._run(["apt-get", "install", "-y", pkg],
+    r = core._run(["apt-get", "install", "-y", *_AWGS_DPKG_OPTS, pkg],
                   capture=True, check=False, quiet=True)
     if r.returncode == 0:
         return True
@@ -257,7 +257,7 @@ def _awgs_apt_install(pkg: str) -> bool:
     if ("Unmet dependencies" in err or "fix-broken" in err
             or "unmet dependencies" in err.lower()):
         _awgs_apt_repair()
-        r2 = core._run(["apt-get", "install", "-y", pkg],
+        r2 = core._run(["apt-get", "install", "-y", *_AWGS_DPKG_OPTS, pkg],
                        capture=True, check=False, quiet=True)
         if r2.returncode == 0:
             core.success(f"Пакет {pkg} установлен после авто-восстановления apt")
@@ -296,6 +296,21 @@ _AWGS_PPA_SERIES_MAP = {
 # исключения Debian) — probe доступности для них не нужен.
 _AWGS_PPA_TRUSTED = ("focal", "jammy", "noble", "resolute", "bookworm", "trixie")
 
+# Опции dpkg для НЕинтерактивных вызовов apt/dpkg (порт bivlked v6.3.7,
+# инцидент #409): если файл настроек пакета на сервере правили или удаляли
+# (классика — /etc/cloud/cloud.cfg у cloud-init), dpkg при обновлении
+# спрашивает, какую версию оставить, а DEBIAN_FRONTEND=noninteractive и -y
+# на этот вопрос НЕ отвечают — установка висла вечно (с терминалом) или
+# падала (без). --force-confdef: dpkg берёт ответ по умолчанию, если он
+# есть; --force-confold: иначе оставляет ТЕКУЩИЙ файл (удалённый остаётся
+# удалённым). Применяются ко всем вызовам, которые ставят/удаляют пакеты
+# и к dpkg --configure -a (при удалении apt тоже донастраивает
+# отложенные пакеты).
+_AWGS_DPKG_OPTS = [
+    "-o", "Dpkg::Options::=--force-confdef",
+    "-o", "Dpkg::Options::=--force-confold",
+]
+
 
 def awgs_ppa_series(codename: str) -> str:
     """Серия PPA amnezia/ppa для codename хоста (маппинг + нативный фолбэк).
@@ -307,6 +322,26 @@ def awgs_ppa_series(codename: str) -> str:
     якорь noble + WARN).
     """
     return _AWGS_PPA_SERIES_MAP.get(codename, codename)
+
+
+def awgs_ppa_probe_decide(http_code: str) -> str:
+    """Вердикт probe доступности PPA-серии по HTTP-коду (порт bivlked
+    v6.3.9 _ppa_probe_suite, инцидент I#68 23.11.2026 — сбой Launchpad).
+
+      "keep"           — 2xx: у PPA есть сборка для этой серии;
+      "keep_outage"    — 5xx: PPA ответил, но сломан — это сбой Launchpad,
+                         а НЕ отсутствие пакетов; подмена на noble поставила
+                         бы сборку для чужой версии Ubuntu, серия остаётся;
+      "fallback"       — 404/прочее/пусто (нет ответа, нет curl): серии в
+                         PPA нет → якорь noble (DKMS соберёт модуль под
+                         текущее ядро) — fail-safe.
+    """
+    code = (http_code or "").strip()
+    if code.startswith("2"):
+        return "keep"
+    if code.startswith("5"):
+        return "keep_outage"
+    return "fallback"
 
 
 def awgs_install_dkms() -> bool:
@@ -369,7 +404,7 @@ def awgs_install_dkms() -> bool:
     else:
         # Ubuntu — linux-headers-generic работает на всех arch
         headers_pkg = "linux-headers-generic"
-    r = core._run(["apt-get", "install", "-y", headers_pkg],
+    r = core._run(["apt-get", "install", "-y", *_AWGS_DPKG_OPTS, headers_pkg],
                   capture=True, check=False, quiet=True)
     if r.returncode != 0:
         core.log_to_file("WARN", f"apt install {headers_pkg}: {r.stderr[-300:]}")
@@ -389,17 +424,43 @@ def awgs_install_dkms() -> bool:
     ppa_codename = awgs_ppa_series(codename)
 
     # Probe доступности серии: codename вне доверенных (_AWGS_PPA_TRUSTED:
-    # нативные LTS + якоря Debian) — стучимся в живой PPA; серия недоступна
-    # (релиз только вышел, PPA ещё не собрал) → якорь noble + WARN
+    # нативные LTS + якоря Debian) — стучимся в живой PPA. Порт семантики
+    # bivlked v6.3.9 (_ppa_probe_suite, инцидент I#68 23.11.2026 — сбой
+    # Launchpad): HTTP-КОД, а не код возврата curl —
+    #   2xx — у PPA есть сборка для этой версии, серия остаётся;
+    #   5xx — PPA ответил, но сломан: это сбой Launchpad, а НЕ отсутствие
+    #         пакетов; подмена на noble тогда поставила бы сборку для чужой
+    #         версии Ubuntu, поэтому серия остаётся, а недоступный PPA
+    #         покажет apt update ниже;
+    #   404 — PPA не публикует серию → якорь noble (DKMS соберёт модуль
+    #         под текущее ядро);
+    #   прочее/пусто (нет ответа, нет curl) → noble, fail-safe как раньше.
     if codename not in _AWGS_PPA_TRUSTED:
         core.info(f"Проверка доступности PPA Amnezia для '{ppa_codename}'...")
         r = core._run(
-            ["curl", "-fsI", "--max-time", "15", "--retry", "2", "--retry-delay", "5",
+            ["curl", "-sI", "-o", "/dev/null", "-w", "%{http_code}",
+             "--max-time", "15", "--retry", "2", "--retry-delay", "5",
              f"https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu/dists/{ppa_codename}/Release"],
-            capture=True, check=False,
+            capture=True, check=False, quiet=True,
         )
-        if r.returncode != 0:
-            core.warn(f"PPA Amnezia не публикует пакеты для '{ppa_codename}' — переключаюсь на 'noble'")
+        code = (r.stdout or "").strip()
+        verdict = awgs_ppa_probe_decide(code)
+        if verdict == "keep_outage":
+            core.warn(f"PPA Amnezia ответил на проверку для '{ppa_codename}' "
+                      f"кодом {code}: это сбой Launchpad, а не отсутствие "
+                      f"пакетов — серия '{ppa_codename}' остаётся; если PPA "
+                      f"недоступен, это покажет обновление списков пакетов "
+                      f"ниже")
+        elif verdict == "fallback":
+            if code == "404":
+                core.warn(f"PPA Amnezia не публикует пакеты для "
+                          f"'{ppa_codename}' (HTTP 404)")
+            else:
+                core.warn(f"PPA Amnezia не ответил на проверку для "
+                          f"'{ppa_codename}' (код {code or 'нет'}), считаю, "
+                          f"что сборки для этой версии нет")
+            core.warn("Переключаюсь на 'noble': DKMS соберёт модуль под "
+                      "текущее ядро")
             ppa_codename = "noble"
 
     core.info(f"PPA codename: {ppa_codename} (маппинг из {codename})")
@@ -543,7 +604,7 @@ def awgs_install_dkms() -> bool:
         # Устанавливаем amneziawg-tools + amneziawg-dkms + wireguard-tools
         core.info("Установка пакетов amneziawg-tools + amneziawg-dkms...")
         r = core._run(
-            ["apt-get", "install", "-y",
+            ["apt-get", "install", "-y", *_AWGS_DPKG_OPTS,
              "amneziawg-tools", "amneziawg-dkms", "wireguard-tools", "qrencode"],
             capture=True, check=False,  # 10 мин на DKMS-сборку
         )
@@ -566,7 +627,7 @@ def awgs_install_dkms() -> bool:
                 if _awgs_apt_repair():
                     core.info("Ретраим установку amneziawg после ремонта apt...")
                     r2 = core._run(
-                        ["apt-get", "install", "-y",
+                        ["apt-get", "install", "-y", *_AWGS_DPKG_OPTS,
                          "amneziawg-tools", "amneziawg-dkms",
                          "wireguard-tools", "qrencode"],
                         capture=True, check=False,
@@ -901,7 +962,7 @@ def awgs_generate_keys() -> tuple:
     if not awg_path and not wg_path:
         core.warn("Ни awg, ни wg не найдены — устанавливаем wireguard-tools...")
         core._run(["apt-get", "update", "-y"], check=False, quiet=True)
-        core._run(["apt-get", "install", "-y", "wireguard-tools"],
+        core._run(["apt-get", "install", "-y", *_AWGS_DPKG_OPTS, "wireguard-tools"],
                   check=False, quiet=True)
         wg_path = core._run(["which", "wg"], capture=True, check=False).stdout.strip()
 

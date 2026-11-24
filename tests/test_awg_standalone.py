@@ -831,9 +831,17 @@ class TestAwgsAptAutoRepair(unittest.TestCase):
 
         self.assertTrue(ok, "ретрай после авто-ремонта не сработал")
         self.assertGreaterEqual(calls["install"], 2, "не было ретрая")
-        # Ремонт действительно вызывался
+        # Ремонт действительно вызывался (argv с dpkg-опциями — см.
+        # _AWGS_DPKG_OPTS, порт bivlked v6.3.7)
         ran_cmds = [c.args[0] for c in core._run.call_args_list]
-        self.assertIn(["dpkg", "--configure", "-a"], ran_cmds)
+        self.assertTrue(
+            any(c[:3] == ["dpkg", "--configure", "-a"] for c in ran_cmds),
+            msg=f"dpkg --configure -a не вызывался: {ran_cmds}")
+        self.assertTrue(
+            any("Dpkg::Options::=--force-confdef" in c
+                and "Dpkg::Options::=--force-confold" in c
+                for c in ran_cmds),
+            msg=f"dpkg-опции не в argv: {ran_cmds}")
 
     def test_apt_install_gives_up_when_repair_fails(self):
         """Ремонт не помог (check всё ещё падает) → честный False."""
@@ -925,6 +933,61 @@ class TestAwgsPpaSeriesResolution(unittest.TestCase):
         self.assertIn("dists/{ppa_codename}/Release", src)
         self.assertIn("if codename not in _AWGS_PPA_TRUSTED:", src)
         self.assertIn('ppa_codename = "noble"', src)
+
+
+class TestAwgsPpaProbe5xxNotFallback(unittest.TestCase):
+    """Probe PPA: 5xx — сбой Launchpad, а НЕ «серии нет» (порт v6.3.9,
+    инцидент апстрима I#68 23.11.2026: 503 на запросах к PPA).
+
+    До фикса probe смотрел на код возврата curl: любой отказ (включая 503)
+    считался отсутствием серии и уводил установку в noble — свежий LTS
+    получал пакеты серии прошлой LTS прямо во время сбоя Launchpad.
+    """
+
+    def test_decide_matrix(self):
+        """awgs_ppa_probe_decide: 2xx → keep; 5xx → keep_outage (НЕ
+        fallback!); 404/мусор/пусто → fallback."""
+        from chimera.modules.awg_standalone import awgs_ppa_probe_decide
+        self.assertEqual(awgs_ppa_probe_decide("200"), "keep")
+        self.assertEqual(awgs_ppa_probe_decide("204"), "keep")
+        self.assertEqual(awgs_ppa_probe_decide("503"), "keep_outage")
+        self.assertEqual(awgs_ppa_probe_decide("500"), "keep_outage")
+        self.assertEqual(awgs_ppa_probe_decide("502"), "keep_outage")
+        self.assertEqual(awgs_ppa_probe_decide("404"), "fallback")
+        self.assertEqual(awgs_ppa_probe_decide("403"), "fallback")
+        self.assertEqual(awgs_ppa_probe_decide("000"), "fallback")
+        self.assertEqual(awgs_ppa_probe_decide(""), "fallback")
+        self.assertEqual(awgs_ppa_probe_decide("  503\n"), "keep_outage")
+
+    def test_probe_reads_http_code_not_exit_code(self):
+        """probe берёт HTTP-код (-w '%{http_code}'), а не код возврата
+        curl — контракт против регрессии к -fsI."""
+        src = (_PROJECT_ROOT / "chimera" / "modules"
+               / "awg_standalone.py").read_text()
+        self.assertIn('"-w", "%{http_code}"', src)
+        self.assertIn("awgs_ppa_probe_decide(code)", src)
+        # Старый контракт (любой отказ curl = «серии нет») исчез
+        self.assertNotIn('["curl", "-fsI"', src)
+
+    def test_dpkg_confdef_confold_in_install_calls(self):
+        """dpkg --force-confdef/--force-confold в НЕинтерактивных вызовах
+        AWG-установки (порт v6.3.7, инцидент #409: вопрос dpkg о
+        конфиг-файле вешал шаг установки — DEBIAN_FRONTEND и -y на него
+        не отвечают)."""
+        from chimera.modules import awg_standalone
+        self.assertIn("Dpkg::Options::=--force-confdef",
+                      awg_standalone._AWGS_DPKG_OPTS)
+        self.assertIn("Dpkg::Options::=--force-confold",
+                      awg_standalone._AWGS_DPKG_OPTS)
+        src = (_PROJECT_ROOT / "chimera" / "modules"
+               / "awg_standalone.py").read_text()
+        # Опции применены ко ВСЕМ местам install/configure
+        self.assertIn('["dpkg", "--configure", "-a", *_AWGS_DPKG_OPTS]', src)
+        n_wired = src.count("*_AWGS_DPKG_OPTS")
+        self.assertGreaterEqual(n_wired, 6,
+                               msg=f"опции вставлены только в {n_wired} мест")
+        # Ни одного «голого» install без опций (после -y сразу пакет)
+        self.assertNotIn('["apt-get", "install", "-y",\n', src)
 
 
 if __name__ == "__main__":

@@ -838,8 +838,9 @@ class TestManualPpaSuiteResolution(unittest.TestCase):
         # нативные серии и якоря — bash-зеркало awgs_ppa_series
         self.assertIn("bookworm) S=focal", cmd)
         self.assertIn("focal|jammy|noble|resolute", cmd)
-        # неизвестный codename: probe нативной серии, недоступна → noble
-        self.assertIn("|| S=noble", cmd)
+        # неизвестный codename: probe HTTP-кода, 404/нет ответа → noble
+        # (v6.3.9: 5xx — сбой Launchpad, серию НЕ подменяет)
+        self.assertIn("case \"$C\" in 2??|5??) ;; *) S=noble ;; esac", cmd)
 
     def test_no_hardcoded_noble_series(self):
         """Регресс: хардкод noble-серии («ubuntu noble main») исчез."""
@@ -855,6 +856,84 @@ class TestManualPpaSuiteResolution(unittest.TestCase):
         r = _sp.run(["bash", "-n", "-c", awg_transport._manual_ppa_cmd()],
                     capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, f"bash -n: {r.stderr}")
+
+    def test_probe_5xx_keeps_series(self):
+        """Probe ЭТАПа 3 различает HTTP-коды (порт bivlked v6.3.9, I#68):
+        2xx/5xx → серия ОСТАЁТСЯ (5xx = сбой Launchpad, не «серии нет»),
+        404/нет ответа → noble. Живой прогон обеих веток на fake-хосте."""
+        import subprocess as _sp
+        from chimera.modules import awg_transport
+        cmd = awg_transport._manual_ppa_cmd()
+        # Контракт команды: HTTP-код + case 2??|5?? держит серию
+        self.assertIn("-w '%{http_code}'", cmd)
+        self.assertIn("case \"$C\" in 2??|5??) ;; *) S=noble ;; esac", cmd)
+        # -fsI-контракт (любой отказ curl = noble) исчез
+        self.assertNotIn("curl -fsI", cmd)
+        # Живой прогон: код возврата curl всегда 0 в -w-режиме даже при
+        # 404 — но при недостижимом хосте curl вернёт 000 и rc!=0;
+        # гарантируем, что C при этом пуст/000 → S=noble (fail-safe).
+        probe = ("C='000'; case \"$C\" in 2??|5??) echo KEEP;; "
+                 "*) echo NOBLE;; esac")
+        r = _sp.run(["bash", "-c", probe], capture_output=True, text=True,
+                    timeout=30)
+        self.assertEqual(r.stdout.strip(), "NOBLE")
+        r = _sp.run(["bash", "-c",
+                     "C='503'; case \"$C\" in 2??|5??) echo KEEP;; "
+                     "*) echo NOBLE;; esac"],
+                    capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stdout.strip(), "KEEP")
+        r = _sp.run(["bash", "-c",
+                     "C='404'; case \"$C\" in 2??|5??) echo KEEP;; "
+                     "*) echo NOBLE;; esac"],
+                    capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stdout.strip(), "NOBLE")
+
+    def test_unknown_codename_probe_e2e_fake_os_release(self):
+        """E2E: fake os-release (stonking) + мокнутый curl (код из файла).
+        503 от Launchpad НЕ подменяет серию (stonking остаётся), 404 —
+        уводит на якорь noble."""
+        import os
+        import subprocess as _sp
+        import tempfile
+        from chimera.modules import awg_transport
+
+        def _run_probe(code: str) -> str:
+            with tempfile.TemporaryDirectory() as tmp:
+                fake_os = Path(tmp) / "os-release"
+                fake_os.write_text(
+                    "ID=ubuntu\nVERSION_CODENAME=stonking\n")
+                sources = Path(tmp) / "amnezia-ppa.list"
+                # Мок curl: печатает заданный HTTP-код, rc=0 (как
+                # реальный curl -sI -o /dev/null -w '%{http_code}')
+                fake_curl = Path(tmp) / "curl"
+                fake_curl.write_text(
+                    f"#!/bin/bash\necho -n '{code}'\nexit 0\n")
+                fake_curl.chmod(0o755)
+                # Мок gpg: exit 0 (реальный стучится на keyserver —
+                # тест обязан работать офлайн, CHIMERA_TEST_ISOLATE)
+                fake_gpg = Path(tmp) / "gpg"
+                fake_gpg.write_text("#!/bin/bash\nexit 0\n")
+                fake_gpg.chmod(0o755)
+                cmd = awg_transport._manual_ppa_cmd().replace(
+                    ". /etc/os-release", f". {fake_os}")
+                cmd = cmd.replace(
+                    "/etc/apt/sources.list.d/amnezia-ppa.list", str(sources))
+                r = _sp.run(
+                    ["bash", "-c", cmd], capture_output=True, text=True,
+                    timeout=60,
+                    env={**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}"},
+                    cwd=tmp)
+                self.assertIn("MANUAL_PPA_OK", r.stdout,
+                              msg=f"code={code}: {r.stderr or r.stdout}")
+                return sources.read_text()
+
+        # 503 = сбой Launchpad: серия stonking ОСТАЁТСЯ (v6.3.9)
+        self.assertIn("ubuntu stonking main", _run_probe("503"))
+        self.assertIn("ubuntu stonking main", _run_probe("200"))
+        # 404 = серии нет: якорь noble
+        self.assertIn("ubuntu noble main", _run_probe("404"))
+        # нет ответа (curl ничего не напечатал/упал): fail-safe noble
+        self.assertIn("ubuntu noble main", _run_probe(""))
 
 
 if __name__ == "__main__":

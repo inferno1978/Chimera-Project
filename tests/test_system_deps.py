@@ -193,6 +193,60 @@ class TestSmartRecoverFilesystemError(unittest.TestCase):
         self.assertIn("КОМАНДА НЕ НАЙДЕНА", out)
         self.assertIn("xray", out)
 
+class TestPkgInstallDpkgOpts(unittest.TestCase):
+    """_pkg_install несёт dpkg --force-confdef/--force-confold (порт
+    bivlked v6.3.7, инцидент #409).
+
+    Если файл настроек пакета на сервере правили/удаляли (классика —
+    /etc/cloud/cloud.cfg у cloud-init), dpkg при обновлении задаёт
+    интерактивный вопрос, на который DEBIAN_FRONTEND=noninteractive и -y
+    не отвечают — установка висла вечно. Опции заставляют dpkg брать
+    ответ по умолчанию либо оставлять текущий файл.
+    """
+
+    def setUp(self):
+        _setup_core()
+
+    def test_opts_in_apt_install_argv(self):
+        from chimera.modules import system_deps
+        captured = {}
+        fake_core = sys.modules["chimera._core"]
+        with patch.object(fake_core, "PKG_MGR", "apt"), \
+             patch.object(fake_core, "_run",
+                          side_effect=lambda cmd, **kw: captured.setdefault(
+                              "cmd", cmd) or MagicMock(returncode=0)):
+            system_deps._pkg_install("qrencode", "curl")
+        cmd = captured["cmd"]
+        self.assertIn("install", cmd)
+        # Обе опции в argv ДО пакетов
+        self.assertIn("-o", cmd)
+        self.assertIn("Dpkg::Options::=--force-confdef", cmd)
+        self.assertIn("Dpkg::Options::=--force-confold", cmd)
+        self.assertLess(cmd.index("Dpkg::Options::=--force-confdef"),
+                        cmd.index("qrencode"))
+        self.assertEqual(cmd.count("Dpkg::Options::=--force-confdef"), 1)
+
+    def test_dnf_path_unaffected(self):
+        """dnf-системы dpkg-опций не получают (их нет в argv)."""
+        from chimera.modules import system_deps
+        captured = {}
+        fake_core = sys.modules["chimera._core"]
+        with patch.object(fake_core, "PKG_MGR", "dnf"), \
+             patch.object(fake_core, "_run",
+                          side_effect=lambda cmd, **kw: captured.setdefault(
+                              "cmd", cmd) or MagicMock(returncode=0)):
+            system_deps._pkg_install("qrencode")
+        self.assertIn("dnf", captured["cmd"])
+        self.assertNotIn("Dpkg::Options::=--force-confdef", captured["cmd"])
+
+    def test_system_doctor_full_upgrade_carries_pair(self):
+        """system_doctor: full-upgrade несёт ПАРУ confdef+confold (до
+        фикса был только confold)."""
+        src = (_PROJECT_ROOT / "chimera" / "modules"
+               / "system_doctor.py").read_text()
+        self.assertIn("Dpkg::Options::=--force-confdef", src)
+        self.assertIn("Dpkg::Options::=--force-confold", src)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

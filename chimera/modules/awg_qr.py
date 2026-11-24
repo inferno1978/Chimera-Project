@@ -372,6 +372,25 @@ def awgs_qr_export_peer(peer: dict, show_terminal: bool = True) -> dict:
         # но возможно с некорректными правами (админ должен заметить в логе).
         core.log_to_file("WARNING", f"chmod 0o700 failed for {AWGS_KEYS_DIR}: {e}")
 
+    # 0.5 Чистка СТАРЫХ артефактов экспорта до перезаписи (порт bivlked
+    # v6.3.6): при неудачной регенерации QR/.vpnuri (например, длинный
+    # список маршрутов не влезает в QR, нет qrencode) рядом с новым .conf
+    # оставался прежний {name}_qr.png/.vpnuri с КОНФИГОМ СТАРЫХ
+    # (уже отозванных regen'ом) ключей — юзер сканирует мёртвый QR,
+    # а секрет лежит в экспорт-папке мёртвым грузом. Теперь несобранный
+    # артефакт отсутствует, а его поле в возвращаемом dict = None.
+    # .conf не трогаем: он перезаписывается ниже атомарно (write_text),
+    # а его генерация не падает по внешним причинам.
+    for _stale in (AWGS_KEYS_DIR / f"{name}_qr.png",
+                   AWGS_KEYS_DIR / f"{name}_qr_conf.png",
+                   AWGS_KEYS_DIR / f"{name}.vpnuri"):
+        try:
+            if _stale.exists():
+                _stale.unlink()
+        except OSError as e:
+            core.log_to_file("WARNING",
+                             f"не удалось удалить старый экспорт {_stale}: {e}")
+
     # 1. .conf файл
     conf_path = awgs_qr_save_client_conf(peer, server_state)
 
@@ -397,26 +416,38 @@ def awgs_qr_export_peer(peer: dict, show_terminal: bool = True) -> dict:
     # 4. PNG с QR из vpn:// URI (с -l L для длинных URI, как в bivlked)
     png_vpnuri_path = AWGS_KEYS_DIR / f"{name}_qr.png"
     png_vpnuri_ok = awgs_qr_save_png(vpn_uri, png_vpnuri_path)
+    if not png_vpnuri_ok:
+        # v6.3.6-семантика: файла нет (старый удалён выше) — говорим, как
+        # повторить, а не молча оставляем юзеру мёртвый QR старых ключей.
+        core.log_to_file(
+            "WARNING",
+            f"QR ({png_vpnuri_path.name}) не собран — повторите экспорт/QR "
+            f"после установки qrencode (apt install qrencode) или с меньшим "
+            f"списком маршрутов")
 
     # 5. PNG с QR из .conf файла (всегда помещается)
     png_conf_path = AWGS_KEYS_DIR / f"{name}_qr_conf.png"
+    png_conf_ok = False
     if conf_path and conf_path.exists():
-        awgs_qr_save_png(conf_path.read_text(), png_conf_path)
+        png_conf_ok = awgs_qr_save_png(conf_path.read_text(), png_conf_path)
 
     # 6. Сохраняем vpn:// URI в файл
-    uri_path = AWGS_KEYS_DIR / f"{name}.vpnuri"
+    uri_path = None
     try:
+        uri_path = AWGS_KEYS_DIR / f"{name}.vpnuri"
         uri_path.write_text(vpn_uri + "\n")
         uri_path.chmod(0o600)
-    except Exception as e:
-        # .vpnuri содержит приватный ключ + PSK в vpn:// URI — тихий провал
-        # chmod недопустим, логируем WARNING.
-        core.log_to_file("WARNING", f"chmod 0o600 failed for {uri_path}: {e}")
+    except OSError as e:
+        # .vpnuri содержит приватный ключ + PSK — тихий провал записи
+        # недопустим, логируем WARNING; в возвращаемом dict — None
+        # (файла нет: старый удалён в начале экспорта).
+        core.log_to_file("WARNING", f"запись {uri_path} не удалась: {e}")
+        uri_path = None
 
     return {
         "conf_path":       conf_path,
         "vpn_uri":         vpn_uri,
         "uri_path":        uri_path,
         "png_path":        png_vpnuri_path if png_vpnuri_ok else None,
-        "png_conf_path":   png_conf_path,
+        "png_conf_path":   png_conf_path if png_conf_ok else None,
     }

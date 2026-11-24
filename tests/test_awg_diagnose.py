@@ -735,5 +735,102 @@ class TestDiagnoseFull(unittest.TestCase):
             mock_cc.assert_called_once_with("mobile")
 
 
+class TestParseListenPort(unittest.TestCase):
+    """_awgs_parse_listen_port — wg-quick-семантика (порт bivlked v6.3.2)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    def test_comment_after_value(self):
+        """ListenPort = 51820 # ... — комментарий отбрасывается."""
+        from chimera.modules.awg_diagnose import _awgs_parse_listen_port
+        conf = "[Interface]\nListenPort = 51820 # смена порта 24.11\n"
+        self.assertEqual(_awgs_parse_listen_port(conf), 51820)
+
+    def test_case_insensitive_key(self):
+        from chimera.modules.awg_diagnose import _awgs_parse_listen_port
+        self.assertEqual(
+            _awgs_parse_listen_port("listenport = 443\n"), 443)
+
+    def test_last_line_wins(self):
+        """Несколько ListenPort — побеждает последняя (так применяет
+        конфиг движок)."""
+        from chimera.modules.awg_diagnose import _awgs_parse_listen_port
+        conf = "ListenPort = 51820\nListenPort = 39743\n"
+        self.assertEqual(_awgs_parse_listen_port(conf), 39743)
+
+    def test_invalid_value_not_a_port(self):
+        """'51820=x' и прочий мусор — не порт: строка пропускается."""
+        from chimera.modules.awg_diagnose import _awgs_parse_listen_port
+        self.assertIsNone(_awgs_parse_listen_port("ListenPort = 51820=x\n"))
+        self.assertIsNone(_awgs_parse_listen_port("ListenPort =\n"))
+
+    def test_missing_directive_and_leading_zero(self):
+        """Директивы нет → None; ведущий ноль — валидный порт (08080)."""
+        from chimera.modules.awg_diagnose import _awgs_parse_listen_port
+        self.assertIsNone(_awgs_parse_listen_port("[Interface]\nMTU = 1280\n"))
+        self.assertEqual(
+            _awgs_parse_listen_port("ListenPort = 08080\n"), 8080)
+
+
+class TestSizeCollisionWarnings(unittest.TestCase):
+    """awgs_diag_size_collision_warnings — живые конфиги (v6.3.1+)."""
+
+    def setUp(self):
+        _setup_core_in_sysmodules()
+
+    @staticmethod
+    def _params(**over):
+        base = {
+            "jc": 4, "jmin": 40, "jmax": 70,
+            "s1": 100, "s2": 50, "s3": 30, "s4": 4,
+            "h1": "1000000-2000000", "h2": "3000000-4000000",
+            "h3": "5000000-6000000", "h4": "7000000-8000000",
+            "i1": "", "content_padding_addition": 0,
+        }
+        base.update(over)
+        return base
+
+    def test_clean_params_no_warnings(self):
+        from chimera.modules.awg_diagnose import awgs_diag_size_collision_warnings
+        # 100/50/30/4 — коллизий нет (см. TestSizeCollisions в presets)
+        self.assertEqual(awgs_diag_size_collision_warnings(self._params()), [])
+
+    def test_s4_16_warns(self):
+        from chimera.modules.awg_diagnose import awgs_diag_size_collision_warnings
+        warns = awgs_diag_size_collision_warnings(self._params(s4=16))
+        self.assertEqual(len(warns), 1)
+        self.assertIn("S4 = 16", warns[0])
+        self.assertIn("WireGuard", warns[0])
+
+    def test_response_collision_warns_with_share(self):
+        from chimera.modules.awg_diagnose import (
+            awgs_diag_size_collision_warnings)
+        # response p=80 при s2=24, s4=4; широкий H2 (доля > 0.1%)
+        warns = awgs_diag_size_collision_warnings(
+            self._params(s2=24, h2="0-429496729"))  # ~10% диапазона
+        self.assertEqual(len(warns), 1)
+        self.assertIn("65-80 байт", warns[0])
+        self.assertIn("рукопожатия", warns[0])
+        self.assertIn("%", warns[0])
+
+    def test_cpa_nonzero_skips_check(self):
+        from chimera.modules.awg_diagnose import awgs_diag_size_collision_warnings
+        # CPA != 0: длины данных меняет ContentPaddingAddition — проверка
+        # не нужна (как в апстриме)
+        self.assertEqual(
+            awgs_diag_size_collision_warnings(
+                self._params(s4=16, content_padding_addition=64)),
+            [])
+
+    def test_h1_zero_and_s1_minus_s4_12_warns(self):
+        from chimera.modules.awg_diagnose import awgs_diag_size_collision_warnings
+        warns = awgs_diag_size_collision_warnings(
+            self._params(s1=16, s4=4, h1="0-1000"))
+        # 16-4=12 + H1 с нулём: пакеты 113-128 байт теряются все
+        self.assertTrue(any("113-128" in w for w in warns),
+                        msg=f"нет 113-128 в {warns}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

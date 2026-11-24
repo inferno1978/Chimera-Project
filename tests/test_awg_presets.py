@@ -1134,5 +1134,90 @@ class TestPresetsGenerateCpsI1(unittest.TestCase):
                 self.assertTrue(ok, msg=f"preset {name}: {err}")
 
 
+class TestSizeCollisions(unittest.TestCase):
+    """Коллизии длин пакетов — порт генератора/диагностики bivlked v6.3.1+.
+
+    Пакеты данных, чья длина совпадает с init/response/cookie рукопожатием,
+    молча теряются (Г2.14); S4=16 — признак голого WireGuard по кратности
+    длины; S3=S2+28 — совпадение размеров response/cookie.
+    """
+
+    def test_size_collisions_formulas(self):
+        """_awgs_size_collisions: формулы init/response/cookie (порт
+        awg_common.sh:2659)."""
+        from chimera.modules.awg_presets import _awgs_size_collisions
+        # Чистый набор: ни одна длина не совпала
+        self.assertEqual(_awgs_size_collisions(100, 50, 30, 4), [])
+        # response: p = S2 - S4 + 60 = 24 - 4 + 60 = 80 (80 % 16 == 0)
+        self.assertIn(("response", 80),
+                      _awgs_size_collisions(100, 24, 30, 4))
+        # init: p = S1 - S4 + 116 = 32 - 4 + 116 = 144 (144 % 16 == 0)
+        self.assertIn(("init", 144),
+                      _awgs_size_collisions(32, 50, 30, 4))
+        # cookie: p = S3 - S4 + 32 = 52 - 4 + 32 = 80 (80 % 16 == 0)
+        self.assertIn(("cookie", 80),
+                      _awgs_size_collisions(100, 50, 52, 4))
+        # init 128 исключён (S1 - S4 = 12): эту длину занимает обычный
+        # WireGuard-трафик, приёмник отбрасывает по содержимому до H
+        self.assertEqual(_awgs_size_collisions(16, 50, 30, 4), [])
+        # p < 32 (init/response) и p < 48 (cookie) — не совпадения
+        self.assertEqual(_awgs_size_collisions(40, 10, 20, 30), [])
+
+    def test_pick_s4_never_16_never_colliding(self):
+        """_awgs_pick_s4: 16 исключена всегда, коллизий нет — свойство
+        на серии случайных наборов S1-S3 (обе версии диапазонов)."""
+        from chimera.modules.awg_presets import (
+            _awgs_pick_s4, _awgs_size_collisions)
+        rng = random.Random(20261124)
+        for _ in range(300):
+            s1, s2, s3 = (rng.randint(0, 150), rng.randint(0, 150),
+                          rng.randint(0, 64))
+            lo, hi = rng.choice([(0, 32), (12, 27), (4, 27), (16, 16)])
+            s4 = _awgs_pick_s4(s1, s2, s3, lo, hi)
+            self.assertNotEqual(s4, 16)
+            self.assertEqual(
+                _awgs_size_collisions(s1, s2, s3, s4), [],
+                msg=f"S4={s4} коллидирует при S1..S3={s1}/{s2}/{s3}")
+
+    def test_presets_generate_collision_free(self):
+        """Генератор пресетов (обе версии): S3 != S2+28, S4 != 16 и без
+        коллизий длин — свойство на всех пресетах."""
+        from chimera.modules.awg_presets import (
+            awgs_presets_generate, awgs_presets_list,
+            _awgs_size_collisions)
+        for name in awgs_presets_list():
+            for ver in ("2.0", "3.1"):
+                for _ in range(25):
+                    p = awgs_presets_generate(name, protocol_version=ver)
+                    self.assertNotEqual(
+                        p["s3"], p["s2"] + 28,
+                        msg=f"{name}/{ver}: S3=S2+28 (response/cookie)")
+                    self.assertNotEqual(p["s4"], 16,
+                                        msg=f"{name}/{ver}: S4=16")
+                    self.assertEqual(
+                        _awgs_size_collisions(p["s1"], p["s2"], p["s3"],
+                                              p["s4"]),
+                        [], msg=f"{name}/{ver}: коллизия длин")
+
+    def test_full_manual_collision_free_and_overrides_respected(self):
+        """Full-manual генератор: те же гарантии; явный override S4=16
+        уважается (юзер осознанно выбрал — гард только на случайной гене)."""
+        from chimera.modules.awg_presets import (
+            awgs_generate_full_manual_params, _awgs_size_collisions)
+        for _ in range(50):
+            p = awgs_generate_full_manual_params()
+            self.assertNotEqual(p["s3"], p["s2"] + 28)
+            self.assertNotEqual(p["s4"], 16)
+            self.assertEqual(
+                _awgs_size_collisions(p["s1"], p["s2"], p["s3"], p["s4"]),
+                [])
+        p31 = awgs_generate_full_manual_params(protocol_version="3.1")
+        self.assertNotEqual(p31["s4"], 16)
+        # Overrides — как есть
+        ov = awgs_generate_full_manual_params(overrides={"s4": 16, "s3": 30})
+        self.assertEqual(ov["s4"], 16)
+        self.assertEqual(ov["s3"], 30)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

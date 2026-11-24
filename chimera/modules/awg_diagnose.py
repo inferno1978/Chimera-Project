@@ -167,14 +167,41 @@ def _diag_live_subnet() -> str:
     return ""
 
 
+def _awgs_parse_listen_port(conf_text: str):
+    """ListenPort из текста конфига — КАК его применяет AmneziaWG/wg-quick
+    (порт bivlked v6.3.2, manage_amneziawg.sh):
+
+      • ключ в любом регистре (listenport = ...);
+      • комментарий после значения отбрасывается
+        (ListenPort = 51820 # ...);
+      • при нескольких строках ListenPort побеждает ПОСЛЕДНЯЯ (так
+        применяет конфиг движок — setconf спускается по строкам);
+      • «51820=x» и прочее нечисловое — не порт, строка пропускается;
+      • строки без '=' не рассматриваются.
+
+    Возвращает int или None (директивы нет / все некорректны).
+    """
+    port = None
+    for line in (conf_text or "").splitlines():
+        s = line.split("#", 1)[0].strip()      # inline-комментарий
+        if "=" not in s:
+            continue
+        key, _, val = s.partition("=")
+        if key.strip().lower() != "listenport":
+            continue
+        val = val.strip()
+        if val.isdigit():                      # '51820=x' / '' — мимо
+            port = int(val)                    # последняя валидная побеждает
+    return port
+
+
 def _diag_live_port() -> int:
     """ListenPort из живого awg0.conf (fallback при утерянном state;
-    0 — конфига нет/не распарсилась)."""
+    0 — конфига нет/директивы нет). Парсинг — wg-quick-семантика
+    (_awgs_parse_listen_port: комментарий, регистр, последняя строка)."""
     try:
-        for line in AWGS_SERVER_CONF.read_text().splitlines():
-            s = line.strip()
-            if s.startswith("ListenPort") and "=" in s:
-                return int(s.split("=", 1)[1].strip())
+        parsed = _awgs_parse_listen_port(AWGS_SERVER_CONF.read_text())
+        return parsed if parsed is not None else 0
     except Exception:
         pass
     return 0
@@ -434,6 +461,125 @@ def _diag_carrier_compare(carrier: str) -> dict:
     return awgs_presets_compare_with_carrier(params, carrier)
 
 
+# ── Коллизии длин пакетов (порт bivlked awg_common.sh, v6.3.1+) ─────────────
+
+def _parse_h_range(h_value) -> tuple:
+    """H-значение (диапазон 'N-M' или одиночный int) → (lo, hi) | None."""
+    hv = str(h_value or "").strip()
+    m = re.match(r"^(\d+)-(\d+)$", hv)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if hi >= lo:
+            return (lo, hi)
+        return (hi, lo)
+    if hv.isdigit():
+        v = int(hv)
+        return (v, v)
+    return None
+
+
+def awgs_diag_size_collision_warnings(params: dict) -> list:
+    """Проверка S1-S4 живого конфига на коллизии длин пакетов (v6.3.1+).
+
+    Порт диагностики bivlked (awg_common.sh, разбор Г2.14 8 oct 2026):
+      • пакеты данных, чья длина совпадает с init/response/cookie
+        рукопожатием, молча теряются — доля зависит от ширины H-диапазона
+        соответствующего сообщения (показываем >= 0.1%);
+      • S4 = 16 — длина пакетов данных кратна 16 всегда, как у обычного
+        WireGuard (признак виден);
+      • S1 - S4 = 12 при H1, начинающемся с 0, — пакеты 113-128 байт
+        теряются все (на проверяемом месте нулевая половина счётчика).
+
+    При ненулевом ContentPaddingAddition (3.1) длину данных меняет CPA и
+    коллизии длин не работают — проверка пропускается (как в апстриме).
+
+    Возвращает список строк-предупреждений (пустой — всё чисто).
+    """
+    def _int(k):
+        try:
+            v = params.get(k)
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    warnings: list = []
+    cpa = params.get("content_padding_addition")
+    try:
+        cpa_nonzero = int(cpa) != 0
+    except (TypeError, ValueError):
+        cpa_nonzero = False
+    if cpa_nonzero:
+        # CPA != 0: длинный паддинг 3.1 меняет длины пакетов данных —
+        # совпадения с рукопожатиями не строятся, проверка не нужна.
+        return warnings
+
+    from .awg_presets import _awgs_size_collisions
+    s1, s2, s3, s4 = (_int("s1"), _int("s2"), _int("s3"), _int("s4"))
+    if None in (s1, s2, s3, s4):
+        return warnings
+
+    fix = ("Обновите параметры обфускации (ротация в меню AWG) и раздайте "
+           "клиентам перевыпущенные конфиги — S-параметры обязаны "
+           "совпадать на сервере и клиентах.")
+
+    # S4 = 16 — признак голого WireGuard по кратности длины (v6.3.1)
+    if s4 == 16:
+        warnings.append(
+            f"S4 = 16: длина пакетов данных (S4 + 32 + 16k) кратна 16 при "
+            f"любом k — как у обычного WireGuard, признак длины виден "
+            f"цензору (S1-S4 = {s1}/{s2}/{s3}/{s4}). {fix}")
+
+    h_map = (("init", "h1", "инициацией"),
+             ("response", "h2", "ответом"),
+             ("cookie", "h3", "cookie-ответом"))
+    for cls, h_key, name in h_map:
+        hr = _parse_h_range(params.get(h_key))
+        if hr is None:
+            continue
+        lo, hi = hr
+        for c_cls, p in _awgs_size_collisions(s1, s2, s3, s4):
+            if c_cls != cls:
+                continue
+            share = (hi - lo + 1) * 100.0 / 4294967296
+            if share < 0.1:
+                continue
+            note = ""
+            if cls == "response" and p == 64:
+                note = (" На проверяемом месте у таких пакетов лежит номер "
+                        "получателя, он постоянен на сессию: в части сессий "
+                        "теряются все такие пакеты, в остальных ни одного.")
+            warnings.append(
+                f"Пакеты данных с внутренним размером {p - 15}-{p} байт по "
+                f"длине совпадают с {name} рукопожатия (S1-S4 = "
+                f"{s1}/{s2}/{s3}/{s4}): каждая сторона в среднем молча "
+                f"теряет около {share:.2f}% таких пакетов.{note} {fix}")
+
+    # S1 - S4 = 12 + H1 с нулём в начале диапазона: пакеты 113-128 байт
+    # совпадают с инициацией, на проверяемом месте — нулевая половина
+    # счётчика, теряются ВСЕ такие пакеты (разбор Г2.14 в апстриме).
+    hr1 = _parse_h_range(params.get("h1"))
+    if (s1 - s4 == 12 and hr1 is not None and hr1[0] == 0):
+        warnings.append(
+            f"Пакеты данных с внутренним размером 113-128 байт по длине "
+            f"совпадают с инициацией рукопожатия, а H1 начинается с 0 "
+            f"(S1-S4 = {s1}/{s2}/{s3}/{s4}): на проверяемом месте у них "
+            f"нулевая половина счётчика, и каждая сторона теряет все такие "
+            f"пакеты. {fix}")
+
+    return warnings
+
+
+def _diag_size_collisions() -> dict:
+    """Секция полного отчёта: коллизии длин S1-S4 живого конфига."""
+    state = awgs_state_load()
+    params = state.get("params", {})
+    warns = awgs_diag_size_collision_warnings(params)
+    if warns:
+        return {"status": "WARN", "warnings": warns}
+    return {"status": "OK",
+            "warnings": ["Коллизий длин пакетов нет (S1-S4 проверены)"]}
+
+
 def _diag_protocol_version() -> dict:
     """диагностика версии протокола (2.0 / 3.1).
 
@@ -537,6 +683,9 @@ def awgs_diagnose_full(carrier: str = "") -> dict:
         "service":       _diag_service(),
         "nat_routing":   _diag_nat_routing(),
         "tunnel":        _diag_tunnel(),
+        # Коллизии длин S1-S4 (порт диагностики bivlked v6.3.1+): молчаная
+        # потеря части пакетов данных при неудачном наборе параметров.
+        "size_collisions": _diag_size_collisions(),
     }
 
     if carrier:
@@ -692,6 +841,14 @@ def do_awg_diagnose_menu() -> None:
             icon = "❌"
             color = RED
         _box_row(f"    {icon} {color}{c['name']}{NC}: {c['msg']}")
+    _box_sep()
+
+    # Size collisions (S1-S4, порт диагностики bivlked v6.3.1+)
+    sc = report.get("size_collisions") or {}
+    _box_row(f"  {BOLD}Коллизии длин (S1-S4):{NC}")
+    for w in sc.get("warnings", []):
+        icon = "⚠️" if sc.get("status") == "WARN" else "✅"
+        _box_row(f"    {icon} {DIM}{w}{NC}" if sc.get("status") == "OK" else f"    {icon} {w}")
     _box_sep()
 
     # Carrier compare (если выбран)

@@ -864,8 +864,10 @@ def _manual_ppa_cmd() -> str:
     PPA публикует с 14.09.2026) — нативно; неизвестный/новый codename —
     нативно, если серия есть в PPA (probe), иначе якорь noble. До фикса
     серия была хардкодом noble — на 26.04 глубокий fallback пинил бы
-    пакеты серии 24.04. Недоступный/отсутствующий curl → якорь noble
-    (fail-safe, как probe в awgs_install_dkms).
+    пакеты серии 24.04. Probe различает HTTP-коды (порт bivlked v6.3.9,
+    инцидент I#68 — сбой Launchpad): 2xx/5xx → серия ОСТАЁТСЯ (5xx = сбой
+    Launchpad, а не отсутствие сборки — подмена поставила бы пакеты чужой
+    версии), 404/нет ответа/нет curl → якорь noble (fail-safe).
     """
     return (
         "S=''; . /etc/os-release 2>/dev/null || true; S=${VERSION_CODENAME:-}; "
@@ -873,9 +875,12 @@ def _manual_ppa_cmd() -> str:
         "bookworm) S=focal ;; "
         "trixie|oracular|plucky|questing) S=noble ;; "
         "focal|jammy|noble|resolute) : ;; "
-        "*) [ -n \"$S\" ] && curl -fsI --max-time 15 "
+        "*) if [ -n \"$S\" ]; then "
+        "C=$(curl -sI -o /dev/null -w '%{http_code}' --max-time 15 "
         "\"https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu/dists/$S/Release\" "
-        ">/dev/null 2>&1 || S=noble ;; "
+        "2>/dev/null) || C=''; "
+        "case \"$C\" in 2??|5??) ;; *) S=noble ;; esac; "
+        "else S=noble; fi ;; "
         "esac; "
         # Импортируем GPG-ключ репозитория
         "gpg --no-default-keyring "
