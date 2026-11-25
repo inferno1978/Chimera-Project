@@ -43,6 +43,11 @@ qWDTT — WireGuard over TURN Tunnel.
   • Создаёт systemd-сервис wdtt.service с After=network-online.target
   • Настраивает NAT через iptables (MASQUERADE для wdtt0)
   • Открывает UDP-порт 56000 в iptables
+  • rkn-guard-compat (кейс 25.11): при активном RKN-Guard добавляет
+    исключения для TURN-реле ВК на udp/<dtls_port> — их хостинг-подсети
+    (90.156.232.x, 95.163.32.x) в списке «AS-сети ТСПУ» C24Be, без
+    исключения дропается шаг DTLS у клиентов
+    (см. rkn_guard.rkn_sync_wdtt_exceptions)
   • Генерирует qwdtt:// ссылку и .conf файл для клиента
   • Управление паролями: создание, список, удаление, статус устройств
   • Показывает гайд по использованию qWDTT
@@ -972,6 +977,16 @@ def _run_install_inner() -> None:
     _ipt_add_masquerade()
     proto_ipt_persist()
     print(f"  {GREEN}✓{NC}  {fw_tool}: UDP {dtls_port} открыт, NAT настроен.")
+
+    # 4b. rkn-guard-compat (кейс 25.11): TURN-реле ВК сидят в подсетях
+    # списка «AS-сети ТСПУ» (C24Be) — активный RKN-Guard дропает их
+    # DTLS-пакеты на udp/<dtls_port> ДО ufw-user-allow, у клиентов
+    # зависает шаг DTLS. Добираем исключения (проход до списков).
+    try:
+        from chimera.modules.rkn_guard import rkn_sync_wdtt_exceptions
+        rkn_sync_wdtt_exceptions(interactive=True)
+    except Exception as _e:
+        print(f"  {YELLOW}⚠{NC}  rkn-guard compat: {_e}")
 
     # 5. Systemd
     _install_service(dtls_port, wg_port, main_pass, admin_id, bot_token)

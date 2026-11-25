@@ -39,6 +39,16 @@ AS НЕ затронуты, дом-клиенты проходят.
     медленные, окно гонки широкое (после чистки мусора вставало).
     Поэтому диагностика повторного провала включает подсчёт правил
     (iptables-save | grep -c '^-A') — десятки тысяч = чужой мусор.
+  • qWDTT-compat (инцидент 25.11, лог+скрин): клиенты qWDTT приходят на
+    ноду не напрямую, а ЧЕРЕЗ TURN-реле ВК (хостинг-подсети 90.156.232.x
+    и 95.163.32.x), а они — в списке «AS-сети ТСПУ» (C24Be) → SCANNERS-
+    BLOCK дропал их DTLS-пакеты на udp/56000 ДО ufw-user-allow, у
+    клиентов зависал шаг DTLS (16 повторов, «не завершился за 10 с»).
+    rkn_sync_wdtt_exceptions() добывает TURN-реле из журналов дропов
+    (DPT=порт wdtt) и добавляет исключения вендора (RETURN до списков,
+    /etc/rkn-guard/exceptions.json). Автозапуски: установка rkn-guard,
+    таймер --rkn-update, установка qWDTT (wdtt.py); ручные — пункт W меню
+    исключений и экран «Последние события» статистики.
   • восстановление при ребуте: antiscan-ipset-restore.service
     (ipset restore -exist -f /etc/ipset.conf, Before=ufw.service) +
     antiscan-move-rules.service (перестановка jump на 1-е место)
@@ -121,6 +131,7 @@ RG_LOG_V4            = Path("/var/log/iptables-scanners-ipv4.log")
 RG_LOG_V6            = Path("/var/log/iptables-scanners-ipv6.log")
 RG_AGGREGATE_CSV     = Path("/var/log/iptables-scanners-aggregate.csv")
 RG_LOG_FILE          = Path("/var/log/chimera.log")
+RG_WDTT_STATE        = Path("/var/lib/xray-installer/wdtt.json")     # state qWDTT
 
 # Общий с Химерой ipset-персистенс (см. _rg_ipset_conf_merge):
 IPSET_CONF           = Path("/etc/ipset.conf")
@@ -984,6 +995,13 @@ def _rg_install_flow(st: dict, interactive: bool = True) -> bool:
     _success("rkn-guard установлен и активен")
     _tg_notify_event("rkn_guard_install",
                      f"backend={backend}, списков={len(urls)}, лог={logging_on}")
+
+    # qWDTT-compat (кейс 25.11): при повторной установке журнал дропов
+    # жив — добираем исключения TURN-реле ВК на udp/<порт wdtt>
+    try:
+        rkn_sync_wdtt_exceptions(interactive=interactive)
+    except Exception as e:
+        _warn(f"qWDTT-compat sync пропущен: {e}")
     return True
 
 
@@ -1035,6 +1053,14 @@ def rkn_cli_update() -> int:
         return 0
     rc = _rg_update_now(interactive=False)
     print(f"rkn-guard update rc={rc}")
+    # qWDTT-compat (кейс 25.11): журнал дропов пополняется при живом
+    # трафике qWDTT — таймер подхватывает новые TURN-реле автоматически
+    try:
+        added = rkn_sync_wdtt_exceptions(interactive=False)
+        if added:
+            print(f"qWDTT-compat: {added} исключений TURN добавлено")
+    except Exception as e:
+        print(f"qWDTT-compat пропущен: {e}", file=sys.stderr)
     return rc
 
 
@@ -1457,11 +1483,16 @@ def _rg_menu_exceptions() -> None:
         _box_sep()
         _box_item("A", "Добавить исключение")
         _box_item("D", "Удалить исключение")
+        _box_item("W", "Автофикс qWDTT: TURN-реле из журнала дропов → исключения")
         _box_back()
         _box_bottom()
         ch = _input(f"{CYAN}Выбор: {NC}").lower()
         if ch in ("q", ""):
             return
+        if ch == "w":
+            rkn_sync_wdtt_exceptions(interactive=True)
+            time.sleep(1)
+            continue
         if ch == "a":
             ip = _input("IP источника: ")
             proto = _input("Протокол (tcp/udp): ", "tcp").lower()
@@ -1488,6 +1519,119 @@ def _rg_menu_exceptions() -> None:
             else:
                 _err((r.stderr or "")[:200])
             time.sleep(1)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  СОВМЕСТИМОСТЬ RKN-GUARD ↔ qWDTT (инцидент 25.11: qWDTT падал на DTLS)
+# ═════════════════════════════════════════════════════════════════════════════
+def _rg_wdtt_port() -> int:
+    """UDP-порт wdtt-сервера (DTLS) из его state; 0 — qWDTT не установлен.
+
+    State-путь берём из самого модуля wdtt (одиночный источник правды);
+    при провале импорта — публичный путь-контракт напрямую.
+    """
+    try:
+        from chimera.modules.wdtt import _MODULE_STATE as _wdtt_state
+    except Exception:
+        _wdtt_state = RG_WDTT_STATE
+    try:
+        st = json.loads(_wdtt_state.read_text())
+        if isinstance(st, dict) and st.get("installed"):
+            p = int(st.get("dtls_port") or 56000)
+            if 1 <= p <= 65535:
+                return p
+    except Exception:
+        pass
+    return 0
+
+
+def _rg_wdtt_turn_sources(port: int, tail: int = 8000) -> list[str]:
+    """SRC-адреса TURN-реле ВК, задропанные на udp/<port> (журналы дропов).
+
+    Формат строки (rsyslog): «… ANTISCAN-v4: IN=ens3 … SRC=<ip> …
+    PROTO=UDP SPT=35068 DPT=<port> LEN=177». Loopback chk-*-пробы вендора
+    отфильтрованы (SRC=127.0.0.1/::1), порядок — по первому появлению.
+    """
+    srcs: dict[str, None] = {}
+    port_s = str(port)
+    for path in (RG_LOG_V4, RG_LOG_V6):
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines()[-tail:]:
+            if f"DPT={port_s}" not in line or "PROTO=UDP" not in line:
+                continue
+            m = re.search(r"\bSRC=([0-9A-Fa-f:.]+)", line)
+            ip = m.group(1) if m else ""
+            if ip and ip not in ("127.0.0.1", "::1"):
+                srcs.setdefault(ip, None)
+    return list(srcs)[:32]
+
+
+def _rg_exceptions_list() -> list[tuple[str, str, int]]:
+    """Текущие исключения вендора: [(ip, proto, port)]."""
+    r = _rg_run(["exceptions", "list"], timeout=30)
+    out: list[tuple[str, str, int]] = []
+    for line in (r.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[1] in ("tcp", "udp") and parts[2].isdigit():
+            out.append((parts[0], parts[1], int(parts[2])))
+    return out
+
+
+def rkn_sync_wdtt_exceptions(interactive: bool = True) -> int:
+    """qWDTT-compat: исключения TURN-реле ВК на udp/<порт wdtt> (кейс 25.11).
+
+    Клиенты qWDTT приходят на ноду через TURN-реле ВК (хостинг-подсети
+    90.156.232.x и 95.163.32.x) — а они в списке «AS-сети ТСПУ» (C24Be).
+    Включение rkn-guard дропало их DTLS-пакеты на входе
+    ДО ufw-user-allow → у клиентов зависал шаг DTLS (16 повторов, «не
+    завершился за 10 с»), qWDTT переставал работать. Исключение вендора
+    (RETURN до списков) возвращает qWDTT, не ослабляя защиту остальных
+    портов: TURN-реле получает доступ ТОЛЬКО к DTLS-порту wdtt, всё
+    остальное дропается как раньше.
+
+    TURN-реле добываются из журналов дропов (DPT=udp-порт wdtt) — источник
+    само-исцеляющийся: первый коннект после включения rkn-guard попадёт
+    в журнал дропов, автозапуски подхватят его и добавят исключение
+    (установка rkn-guard / таймер --rkn-update / установка qWDTT).
+    Возвращает число добавленных исключений.
+    """
+    if not _rg_installed() or not _rg_rules_active():
+        return 0
+    port = _rg_wdtt_port()
+    if not port:
+        return 0
+    turn_srcs = _rg_wdtt_turn_sources(port)
+    if not turn_srcs:
+        if interactive:
+            _info(f"qWDTT-compat: дропов на udp/{port} в журнале нет — "
+                  f"исключения не нужны")
+        return 0
+    existing = set(_rg_exceptions_list())
+    added = 0
+    for ip in turn_srcs:
+        if (ip, "udp", port) in existing:
+            continue
+        r = _rg_run(["exceptions", "add", ip, "udp", str(port)], timeout=60)
+        if r.returncode == 0:
+            added += 1
+            if interactive:
+                _success(f"Исключение: {ip} udp/{port}")
+        else:
+            _warn(f"Исключение {ip} udp/{port} не добавилось: "
+                  + ((r.stderr or r.stdout or "")[:120]))
+    if added:
+        _log("INFO", f"qWDTT-compat: {added} исключений TURN udp/{port}")
+        if interactive:
+            _success(f"qWDTT-compat: {added} исключений — TURN-реле ВК "
+                     f"проходят к udp/{port}")
+    elif interactive:
+        covered = sum(1 for ip in turn_srcs if (ip, "udp", port) in existing)
+        _info(f"qWDTT-compat: TURN-реле ({covered}) уже в исключениях "
+              f"udp/{port}")
+    return added
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1547,6 +1691,20 @@ def _rg_menu_stats() -> None:
                     _warn("Журнал пуст — дропов с логированием ещё не было")
             except OSError:
                 _warn("Журнал отсутствует")
+            # qWDTT-compat (кейс 25.11): дропы на udp/<порт wdtt> — это
+            # TURN-реле ВК из ТСПУ-подсетей; чиним прямо отсюда, пока
+            # юзер смотрит журнал дропов
+            _port = _rg_wdtt_port()
+            if _port:
+                _hits = _rg_wdtt_turn_sources(_port, tail=200)
+                if _hits:
+                    print()
+                    _warn(f"qWDTT: дропы на udp/{_port} — TURN-реле ВК "
+                          f"({', '.join(_hits[:4])}"
+                          f"{'…' if len(_hits) > 4 else ''}) в подсетях "
+                          f"«AS-сетей ТСПУ» — шаг DTLS у клиентов зависает")
+                    if _confirm("Добавить исключения (проход до списков)?", True):
+                        rkn_sync_wdtt_exceptions(interactive=True)
             input(f"{BLUE}Нажмите Enter…{NC}")
         elif ch == "l":
             r = _rg_run(["setup-logging"], timeout=300)
@@ -1879,6 +2037,12 @@ def do_manage_rkn_guard() -> None:
         exc_n = _rg_exceptions_count() if installed else 0
         panel_str = (f"{GREEN}привязана{NC}" if _rg_panel_bound()
                      else f"{DIM}нет{NC}") if installed else "—"
+        # qWDTT-compat (кейс 25.11): строка только при установленном qWDTT
+        _wdtt_port = _rg_wdtt_port()
+        wdtt_exc_n = 0
+        if installed and _wdtt_port:
+            wdtt_exc_n = sum(1 for _ip, _pr, _p in _rg_exceptions_list()
+                             if _pr == "udp" and _p == _wdtt_port)
 
         print()
         _box_top("🛡️  RKN-GUARD  •  ПОДСЕТИ РКН/ТСПУ/СКИПА/СКАНЕРОВ — DROP НА ВХОДЕ")
@@ -1898,6 +2062,9 @@ def do_manage_rkn_guard() -> None:
             _box_row(f"  Автообновление:  {sched_str}")
             _box_row(f"  Ручных банов:    {manual_n}   "
                      f"{DIM}исключений: {exc_n}{NC}")
+            if _wdtt_port:
+                _box_row(f"  qWDTT-compat:    {CYAN}{wdtt_exc_n}{NC} исключений "
+                         f"TURN {DIM}(udp/{_wdtt_port}){NC}")
             _box_row(f"  Панель (Win):    {panel_str}")
             _box_row(f"  {DIM}Установлен: {st.get('installed_at', '')}{NC}")
         _box_sep()
