@@ -12,7 +12,13 @@ Unit-тесты для chimera/modules/dpi_censor_check.py.
      • _version_key — семвер-ключ (числа как числа, v-префикс, rc-суффиксы)
      • _parse_entry_version / _vendor_version — версия с диска
      • _installed_copy — активная копия = новейшая из (вендорная, runtime)
-     • _fetch_latest_lsremote — парсинг git ls-remote (4.0.10 > 4.0.9!)
+     • _fetch_latest_lsremote — парсинг git ls-remote (4.0.10 > 4.0.9!),
+       pre-release теги (v5.0.0-alpha.N) не предлагаются
+     • _tarball_urls / _gh_proxy_hosts — лестница зеркал tarball:
+       codeload → gh-прокси (2 формы на хост) → github archive,
+       реестр GITHUB_PROXY_HOSTS из github_mirrors.py с фолбэком
+     • _download_tarball — перебор зеркал: SSL-перехват/HTML-заглушка
+       одного зеркала не провал обновления; gzip-магика + размер
      • _latest_upstream_version — кэш (TTL успеха/неудачи, force, фолбэк)
      • _update_available / _version_rows / _update_item_label — UI-логика
      • _download_and_install — runtime-установка без git-дерева,
@@ -25,6 +31,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -425,6 +432,33 @@ class TestFetchLatestLsremote(unittest.TestCase):
     def test_nonzero_exit_returns_empty(self):
         r = SimpleNamespace(returncode=128, stdout="", stderr="fatal")
         with patch.object(self.m.subprocess, "run", return_value=r):
+            self.assertEqual(self.m._fetch_latest_lsremote(), "")
+
+    def test_prerelease_tags_skipped_stable_wins(self):
+        """Кейс 26.11.2026: апстрим тегами v5.0.0-alpha.N (числом старше
+        stable v4.2.4) отравлял фолбэк — предлагалась альфа. Теперь
+        pre-release не участвуют — семантика GitHub /releases/latest."""
+        out = (
+            "a09d03b\trefs/tags/v5.0.0-alpha.21\n"
+            "a09d03b\trefs/tags/v5.0.0-alpha.21^{}\n"
+            "ee41b1\trefs/tags/v5.0.0-alpha.4\n"
+            "ab12cd\trefs/tags/v4.2.4\n"
+            "ab12cd\trefs/tags/v4.2.4^{}\n"
+            "823640\trefs/tags/v4.1.0\n"
+            "5a1e2f\trefs/tags/v4.2.4-rc1\n"
+            "6b2f3a\trefs/tags/v4.1.0-beta2\n"
+            "7c3d4e\trefs/tags/2024-halloween\n"
+        )
+        with self._fake_run(out):
+            self.assertEqual(self.m._fetch_latest_lsremote(), "4.2.4")
+
+    def test_only_prerelease_tags_returns_empty(self):
+        """Стабильных нет вовсе — честное «неизвестно», а не альфа."""
+        out = (
+            "a09d03b\trefs/tags/v5.0.0-alpha.21\n"
+            "ee41b1\trefs/tags/v5.0.0-alpha.4\n"
+        )
+        with self._fake_run(out):
             self.assertEqual(self.m._fetch_latest_lsremote(), "")
 
 
@@ -989,23 +1023,154 @@ class TestOfferUpdateBeforeLaunch(unittest.TestCase):
         self.assertEqual(install.call_count, 0)
 
 
-class TestCodeloadUrl(unittest.TestCase):
-    """_codeload_url — URL tarball апстрима."""
+class TestTarballUrls(unittest.TestCase):
+    """_tarball_urls — лестница зеркал tarball (прод-кейс 25.11.2026:
+    codeload перехвачен ТСПУ, self-signed сертификат — обновление
+    падало на ЕДИНСТВЕННОМ прямом URL; теперь codeload → gh-прокси →
+    github archive)."""
 
     def setUp(self):
         self.m = _mod()
 
-    def test_format(self):
-        url = self.m._codeload_url("4.1.0")
-        self.assertEqual(
-            url,
-            "https://codeload.github.com/Runnin4ik/dpi-detector/"
-            "tar.gz/refs/tags/v4.1.0",
-        )
+    def test_ladder_order_and_count(self):
+        """Порядок: codeload → прокси (2 формы на хост) → github archive."""
+        urls = self.m._tarball_urls("4.2.4")
+        hosts = self.m._gh_proxy_hosts()
+        expected_first = ("https://codeload.github.com/Runnin4ik/dpi-detector/"
+                          "tar.gz/refs/tags/v4.2.4")
+        archive = ("https://github.com/Runnin4ik/dpi-detector/"
+                   "archive/refs/tags/v4.2.4.tar.gz")
+        self.assertEqual(urls[0], expected_first)
+        self.assertEqual(urls[-1], archive)
+        # 1 codeload + 2*прокси + 1 archive
+        self.assertEqual(len(urls), 1 + 2 * len(hosts) + 1)
+        # обе формы на каждый хост
+        for h in hosts:
+            self.assertIn(f"https://{h}/{archive}", urls)
+            self.assertIn(f"https://{h}/?url={archive}", urls)
+        # порядок: после codeload идут формы первого хоста
+        self.assertEqual(urls[1], f"https://{hosts[0]}/{archive}")
 
     def test_v_prefix_normalized(self):
-        self.assertEqual(self.m._codeload_url("v4.1.0"),
-                         self.m._codeload_url("4.1.0"))
+        self.assertEqual(self.m._tarball_urls("v4.2.4"),
+                         self.m._tarball_urls("4.2.4"))
+
+    def test_registry_is_shared_github_mirrors(self):
+        """Реестр прокси — единый GITHUB_PROXY_HOSTS из github_mirrors.py
+        (централизованная чистка мёртвых хостов), не локальная копия."""
+        from chimera.modules.github_mirrors import GITHUB_PROXY_HOSTS
+        self.assertEqual(self.m._gh_proxy_hosts(), list(GITHUB_PROXY_HOSTS))
+
+    def test_registry_fallback_on_dead_import(self):
+        """Импорт реестра упал — хардкод-фолбэк на 3 проверенных хоста."""
+        real_import = __import__
+
+        def broken_import(name, *a, **kw):
+            if "github_mirrors" in name:
+                raise ImportError("no module")
+            return real_import(name, *a, **kw)
+
+        with patch("builtins.__import__", side_effect=broken_import):
+            hosts = self.m._gh_proxy_hosts()
+        self.assertEqual(hosts, ["ghproxy.net", "gh-proxy.com", "gh.llkk.cc"])
+
+
+class TestDownloadTarballMirrors(unittest.TestCase):
+    """_download_tarball — перебор зеркал: SSL-перехват первого не провал."""
+
+    def setUp(self):
+        self.m = _mod()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.dest = self.tmp / "upstream.tar.gz"
+        # валидный gzip-тарбалл: магика + размер > 1 КБ (несжимаемые
+        # данные — gzip повторяющихся байт сжался бы до ~40 байт и
+        # триггерил бы «подозрительно мал»)
+        import gzip as _gzip
+        self.payload = _gzip.compress(os.urandom(4096))
+
+    def _resp(self, body: bytes) -> MagicMock:
+        resp = MagicMock()
+        resp.read.return_value = body
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        return resp
+
+    def test_ssl_fail_on_codeload_falls_to_second_mirror(self):
+        """Прод-кейс: codeload = SSL self-signed → зеркало gh-прокси качает."""
+        ssl_err = Exception(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+            "self-signed certificate")
+        responses = [ssl_err, self._resp(self.payload)]
+        with patch.object(self.m.urllib.request, "urlopen",
+                           side_effect=responses) as ur, \
+             redirect_stdout(io.StringIO()) as buf:
+            ok = self.m._download_tarball("4.2.4", self.dest)
+        self.assertTrue(ok)
+        self.assertEqual(ur.call_count, 2)
+        # первый URL — codeload, второй — прокси/path-форма
+        urls = [c.args[0].full_url for c in ur.call_args_list]
+        self.assertIn("codeload.github.com", urls[0])
+        self.assertNotIn("codeload.github.com", urls[1])
+        self.assertEqual(self.dest.read_bytes(), self.payload)
+
+    def test_html_error_page_rejected_next_mirror_used(self):
+        """Прокси отдал 200-OK с HTML-заглушкой — магика gzip отсекает."""
+        html = b"<!DOCTYPE html><html>proxy error page</html>" * 40
+        responses = [self._resp(html), self._resp(self.payload)]
+        with patch.object(self.m.urllib.request, "urlopen",
+                          side_effect=responses) as ur, \
+             redirect_stdout(io.StringIO()):
+            ok = self.m._download_tarball("4.2.4", self.dest)
+        self.assertTrue(ok)
+        self.assertEqual(ur.call_count, 2)
+        self.assertEqual(self.dest.read_bytes(), self.payload)
+
+    def test_tiny_gzip_rejected(self):
+        """Валидный gzip, но 200 байт — «подозрительно мал», дальше по лестнице."""
+        import gzip as _gzip
+        tiny = _gzip.compress(b"nope")
+        responses = [self._resp(tiny), self._resp(self.payload)]
+        with patch.object(self.m.urllib.request, "urlopen",
+                          side_effect=responses) as ur, \
+             redirect_stdout(io.StringIO()):
+            ok = self.m._download_tarball("4.2.4", self.dest)
+        self.assertTrue(ok)
+        self.assertEqual(ur.call_count, 2)
+
+    def test_all_mirrors_fail_prints_every_reason(self):
+        errs = [Exception("boom-1"), Exception("boom-2"), Exception("boom-3"),
+                Exception("boom-4"), Exception("boom-5"), Exception("boom-6"),
+                Exception("boom-7"), Exception("boom-8")]
+        buf = io.StringIO()
+        with patch.object(self.m.urllib.request, "urlopen",
+                          side_effect=errs), redirect_stdout(buf):
+            ok = self.m._download_tarball("4.2.4", self.dest)
+        self.assertFalse(ok)
+        self.assertFalse(self.dest.exists())
+        out = buf.getvalue()
+        self.assertIn("ни с одного зеркала", out)
+        self.assertIn("boom-8", out)
+
+    def test_first_mirror_ok_is_quiet(self):
+        """Успех на первом зеркале — без «зеркало N» строк (как раньше)."""
+        buf = io.StringIO()
+        with patch.object(self.m.urllib.request, "urlopen",
+                          return_value=self._resp(self.payload)), \
+             redirect_stdout(buf):
+            ok = self.m._download_tarball("4.2.4", self.dest)
+        self.assertTrue(ok)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_failover_prints_which_mirror_helped(self):
+        """Успех НЕ на первом — юзер видит, какое зеркало помогло."""
+        ssl_err = Exception("SSL fail")
+        buf = io.StringIO()
+        with patch.object(self.m.urllib.request, "urlopen",
+                          side_effect=[ssl_err, self._resp(self.payload)]), \
+             redirect_stdout(buf):
+            ok = self.m._download_tarball("4.2.4", self.dest)
+        self.assertTrue(ok)
+        self.assertIn("зеркало 2", buf.getvalue())
 
 
 if __name__ == "__main__":

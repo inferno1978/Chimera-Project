@@ -35,13 +35,22 @@ chimera/modules/dpi_censor_check.py
       • при КАЖДОМ входе в меню Химера смотрит, какая версия установлена,
         и (тихо, с кэшем) проверяет последнюю на GitHub:
         GitHub API /releases/latest → фолбэк git ls-remote --tags
-        (API бывает rate-limited, ls-remote — нет);
+        (API бывает rate-limited, ls-remote — нет). Оба пути отдают
+        только СТАБИЛЬНЫЕ релизы: pre-release теги апстрима
+        (v5.0.0-alpha.N с осени 2026) не предлагаются — семантика
+        GitHub /releases/latest;
       • запуск всегда идёт из АКТИВНОЙ копии — новейшей из двух:
           1) вендорная _vendor/dpi_detector/ — офлайн-фолбэк, часть
              git-дерева, обновляется только вместе с Химерой;
           2) runtime-копия /var/lib/xray-installer/dpi-detector/<версия>/
-             — скачивается с codeload.github.com при обновлении
-             (пункт [4] меню или предложение перед запуском теста);
+             — скачивается при обновлении (пункт [4] меню или предложение
+             перед запуском теста) с ЛЕСТНИЦЫ зеркал:
+             codeload.github.com → 3 GitHub-прокси (GITHUB_PROXY_HOSTS
+             из github_mirrors.py, по 2 формы на хост) → github archive.
+             Прод-кейс 25.11.2026 (RU-entry): прямой codeload перехва-
+             тывается ТСПУ с подменой сертификата (SSL: CERTIFICATE-
+             VERIFY_FAILED: self-signed) — обновление не должно падать
+             из-за единственного домена;
       • git-дерево при runtime-обновлении НЕ трогается (никаких конфликтов
         с git pull) — tarball распаковывается в .staging-<v>, финальный
         каталог появляется одним rename, старые версии подчищаются;
@@ -113,6 +122,7 @@ _LATEST_CACHE_TTL = 5 * 60
 _LATEST_RETRY_TTL = 10 * 60
 _LATEST_TIMEOUT   = 6      # сек, GitHub API (шапка меню не должна подвисать)
 _LSREMOTE_TIMEOUT = 10     # сек, git ls-remote (фолбэк без API)
+_DOWNLOAD_TIMEOUT = 60     # сек на ОДНО зеркало лестницы (~2 MB tarball)
 
 # Что НЕ копируем из tarball апстрима в runtime-копию — тот же список
 # исключений, что и при вендоринге (см. VENDOR_INFO.md):
@@ -316,6 +326,13 @@ def _fetch_latest_lsremote(timeout: float = _LSREMOTE_TIMEOUT) -> str:
     Строки вида '<sha>\trefs/tags/v4.1.0'; аннотированные теги дают
     дополнительную строку '<sha>\trefs/tags/v4.1.0^{}' — пропускаем.
     Максимум ищем семвер-ключом (см. _version_key), не строкой.
+
+    Pre-release теги (v5.0.0-alpha.N, rc/beta/dev) и мусор ПРОПУСКА-
+    ЕМСЯ — как это делает GitHub /releases/latest. Кейс 26.11.2026:
+    апстрим разродился 18-ю альфа-тегами v5.0.0-alpha.*; численно
+    (5,0,0)-alpha старше stable v4.2.4, и без фильтра фолбэк пред-
+    лагал «обновиться до v5.0.0-alpha.21» при мёртвом API, навсегда
+    сажая юзера на альфу (обратно на v4.2.4 он уже «не обновляется»).
     """
     try:
         r = subprocess.run(
@@ -337,6 +354,9 @@ def _fetch_latest_lsremote(timeout: float = _LSREMOTE_TIMEOUT) -> str:
             continue
         v = tag.lstrip("vV")
         key = _version_key(v)
+        if key[1] != 1:
+            # pre-release (rc/beta/alpha/dev) или мусор — не предлагаем
+            continue
         if best_key is None or key > best_key:
             best, best_key = v, key
     return best if best_key else ""
@@ -379,33 +399,100 @@ def _update_available(installed: str, latest: str) -> str:
 #  СКАЧИВАНИЕ И УСТАНОВКА RUNTIME-КОПИИ (git-дерево НЕ трогаем)
 # ══════════════════════════════════════════════════════════════════════════
 
-def _codeload_url(version: str) -> str:
+def _gh_proxy_hosts() -> List[str]:
+    """GitHub-прокси хосты — ЕДИНЫЙ реестр из github_mirrors.py.
+
+    Ленивый импорт с хардкод-фолбэком: реестр GITHUB_PROXY_HOSTS
+    вычищается централизованно по мере смерти хостов (NOTE 2026-08
+    в github_mirrors.py: из 7 хостов живы 3) — этот модуль получает
+    обновления реестра бесплатно, вместе с остальной Химерой.
+    """
+    try:
+        from chimera.modules.github_mirrors import GITHUB_PROXY_HOSTS
+        if GITHUB_PROXY_HOSTS:
+            return list(GITHUB_PROXY_HOSTS)
+    except Exception:
+        pass
+    return ["ghproxy.net", "gh-proxy.com", "gh.llkk.cc"]
+
+
+def _tarball_urls(version: str) -> List[str]:
+    """Лестница URL tarball апстрима (по убыванию приоритета).
+
+    Прод-кейс 25.11.2026 (RU-entry): прямой codeload.github.com пере-
+    хватывается ТСПУ с подменой сертификата — urllib падает
+    SSL: CERTIFICATE_VERIFY_FAILED (self-signed certificate), обнов-
+    ление не проходит, хотя api.github.com жив. Остальной установщик
+    для этого качает через лестницы зеркал (wdtt_mirrors, webdav_
+    mirrors, wpp_mirrors…) — этот модуль был единственным без неё.
+
+    Порядок:
+      1. codeload.github.com tar.gz/refs/tags/<tag> (канонический);
+      2. GitHub-прокси (GITHUB_PROXY_HOSTS), по 2 формы на хост:
+         path-форма https://<host>/<archive-url> и query-форма
+         https://<host>/?url=<archive-url>;
+      3. прямой github.com archive/refs/tags/<tag>.tar.gz.
+
+    gh-прокси НЕ проксируют codeload.github.com — оборачивается
+    github archive-URL (тот же tarball, тот же корень 'dpi-detector-<v>/'
+    — 'v'-префикс GitHub снимает в обоих случаях).
+    """
     v = str(version).strip().lstrip("vV")
-    return f"https://codeload.github.com/{_UPSTREAM_REPO}/tar.gz/refs/tags/v{v}"
+    tag = f"v{v}"
+    urls = [f"https://codeload.github.com/{_UPSTREAM_REPO}/tar.gz/refs/tags/{tag}"]
+    archive = f"https://github.com/{_UPSTREAM_REPO}/archive/refs/tags/{tag}.tar.gz"
+    for host in _gh_proxy_hosts():
+        urls.append(f"https://{host}/{archive}")
+        urls.append(f"https://{host}/?url={archive}")
+    urls.append(archive)
+    return urls
 
 
 def _download_tarball(version: str, dest: Path) -> bool:
-    """Скачивает tar.gz апстрима в dest. ~2 MB (включая images/, их не копируем)."""
-    url = _codeload_url(version)
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "chimera-installer/5.0"})
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            data = resp.read()
-    except Exception as e:
-        _log("ERROR", f"скачивание {url}: {e}")
-        print(f"{RED}[ERR]{NC} Не удалось скачать {url}")
-        print(f"{DIM}{e}{NC}")
-        return False
-    if len(data) < 1024:
-        _log("ERROR", f"tarball подозрительно мал: {len(data)} байт")
-        print(f"{RED}[ERR]{NC} Tarball подозрительно мал — обновление отменено.")
-        return False
-    try:
-        dest.write_bytes(data)
-    except Exception as e:
-        _log("ERROR", f"запись {dest}: {e}")
-        return False
-    return True
+    """Скачивает tar.gz апстрима в dest (~2 MB) по лестнице зеркал.
+
+    Перебирает _tarball_urls() по очереди: SSL-перехват/таймаут/HTML-
+    заглушка одного зеркала — не провал обновления, а повод взять
+    следующее. Валидация ответа: gzip-магика (\x1f\x8b — прокси любят
+    отдавать 200-OK c HTML error-страницей вместо архива) и минимальный
+    размер. Печать: тихо при первом зеркале, «зеркало N: <host> — OK»
+    при откате на запасное (юзер видит, ЧТО помогло), все причины —
+    в /var/log/chimera.log и в итоговом отчёте при полном провале.
+    """
+    from urllib.parse import urlparse
+
+    errors: List[str] = []
+    for i, url in enumerate(_tarball_urls(version), 1):
+        host = urlparse(url).netloc
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "chimera-installer/5.0"})
+            with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT) as resp:
+                data = resp.read()
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"
+            _log("WARN", f"зеркало {i} ({host}) {url}: {reason}")
+            errors.append(f"{host}: {reason}")
+            continue
+        if not data.startswith(b"\x1f\x8b") or len(data) < 1024:
+            reason = ("не gzip-архив (HTML-заглушка?)"
+                      if not data.startswith(b"\x1f\x8b")
+                      else f"подозрительно мал: {len(data)} байт")
+            _log("ERROR", f"зеркало {i} ({host}) {url}: {reason} ({len(data)} байт)")
+            errors.append(f"{host}: {reason}")
+            continue
+        try:
+            dest.write_bytes(data)
+        except Exception as e:
+            _log("ERROR", f"запись {dest}: {e}")
+            return False
+        if i > 1:
+            print(f"{DIM}  зеркало {i} ({host}) — OK{NC}")
+        return True
+    print(f"{RED}[ERR]{NC} Не удалось скачать tarball ни с одного зеркала:")
+    for e in errors:
+        print(f"{DIM}  {e}{NC}")
+    return False
 
 
 def _extract_tarball(tar_path: Path, dest_dir: Path) -> Optional[Path]:
@@ -717,7 +804,7 @@ def _do_update_action(installed: str) -> None:
         _box_bottom()
         input(f"\n{BLUE}Нажмите Enter...{NC}")
         return
-    print(f"{CYAN}Скачиваю v{upd} с codeload.github.com (~2 MB)...{NC}")
+    print(f"{CYAN}Скачиваю v{upd} (~2 MB): codeload → gh-прокси → github...{NC}")
     ok, msg = _download_and_install(upd)
     print()
     if ok:
