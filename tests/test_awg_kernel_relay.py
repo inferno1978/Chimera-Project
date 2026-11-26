@@ -21,12 +21,19 @@ Unit-тесты kernel-relay — одного туннеля + userspace UDP-р�
      конфликт портов/адресов)
   6. relay_health_tick: off / ok / relaunch:boot (restore_on_boot) /
      lost (без restore) / recovered / pending-N / rollback (fail-limit)
+     + hold-N (fail_action=notify_only — удержание без отката: фичареквест
+     Виталия 26.11 «уведомлять, но не откатывать»; TG-срез по спаму —
+     ОДНО hold на переходе предела; awg_relay_recovered при оживании)
   7. Интеграция: пункт 9 «AWG-релей» в меню каскада (текст-контракт +
      порядок пунктов), верхний уровень модуля без chimera-импортов
      (worker запускается python3 -I), меню выходит по Q
   8. Watchdog-юниты: wrapper PYTHONPATH-safe, svc/timer содержимое
   9. Матрица зонда: one-way-out/stream-cut упоминают релей (снятие
      противоречия «кейс Виталия → split-direction», релиз 19.11)
+ 10. fail_action: нормализация (мусор → rollback), хранение в state при
+     enable, промпт _relay_fail_action_ask, пункт меню 7 + диагностика→8,
+     контракт активации (спрос при включении), события awg_relay_* в
+     tg_bot (иконка + титул + тумблер меню — класс кейса окт.2026 №8)
 """
 from __future__ import annotations
 
@@ -426,6 +433,32 @@ class TestEnableDisable(_RelayTest):
                 self.assertFalse(ok)
                 self.assertIn("внешний маршрут", why)
 
+    def test_enable_stores_fail_action(self):
+        # фичареквест Виталия 26.11: notify_only сохраняется в state-боксе
+        current = ["192.0.2.10:51820"]
+        active = ["active"]
+        launch_calls, saved = self._patched(current, active)
+        with tempfile.TemporaryDirectory() as td, \
+                patch.object(self.awg_constants, "AWGS_RELAY_ROOT", Path(td)):
+            ok, why = self.mod.relay_enable(
+                self._cfg(fail_action="notify_only"))
+            self.assertTrue(ok, why)
+        box = saved[0]["kernel_relay"]
+        self.assertEqual(box["fail_action"], "notify_only")
+
+    def test_enable_normalizes_garbage_fail_action(self):
+        # чужое значение → безопасный rollback (честная обратная
+        # совместимость: старые state-боксы без поля ведут себя как раньше)
+        current = ["192.0.2.10:51820"]
+        active = ["active"]
+        launch_calls, saved = self._patched(current, active)
+        with tempfile.TemporaryDirectory() as td, \
+                patch.object(self.awg_constants, "AWGS_RELAY_ROOT", Path(td)):
+            ok, why = self.mod.relay_enable(self._cfg(fail_action="banana"))
+            self.assertTrue(ok, why)
+        box = saved[0]["kernel_relay"]
+        self.assertEqual(box["fail_action"], "rollback")
+
 
 # ── 6. relay_health_tick (лестница watchdog) ───────────────────────────────
 
@@ -622,6 +655,182 @@ class TestLinkProbeAdvice(_RelayTest):
         from chimera.modules.awg_link_probe import LINK_PATTERNS
         rec = LINK_PATTERNS["stream-cut"]["recommendation"]
         self.assertIn("AWG-релей", rec)
+
+
+# ── 10. fail_action: notify-only watchdog (фичареквест Виталия 26.11) ──────
+
+class TestFailActionNorm(_RelayTest):
+    def test_norm_matrix(self):
+        # валидные значения проходят; мусор/пусто/None/не-строка →
+        # безопасный rollback (обратная совместимость старых боксов)
+        f = self.mod._fail_action_norm
+        self.assertEqual(f("notify_only"), "notify_only")
+        self.assertEqual(f("rollback"), "rollback")
+        self.assertEqual(f(None), "rollback")
+        self.assertEqual(f(""), "rollback")
+        self.assertEqual(f("banana"), "rollback")
+        self.assertEqual(f(1), "rollback")
+
+
+class TestHealthTickNotifyOnly(_RelayTest):
+    """notify-only: лестница исчерпана — откат НЕ происходит, режим
+    на удержании (hold-N); TG-срез по спаму (одно hold на переходе
+    предела, дальше тишина); оживание — awg_relay_recovered."""
+
+    def _box(self, **kw):
+        base = dict(
+            enabled=True, iface="awg1", unit="chimera-awg-relay-X.service",
+            addr="198.51.100.7", peer="192.0.2.10", kernel=52840,
+            ports={"loop": 5001, "tx": 51001, "rx": 443,
+                   "remote_tx": 51002, "remote_rx": 443},
+            preset="dns-fixed", prelude_hex=_PILOT_HEX,
+            refresh=0, restore_on_boot=False, fail_count=0,
+        )
+        base.update(kw)
+        return base
+
+    def _tick(self, box, probe, probe2):
+        """Тик с записью в /run и захватом моков (notify/state/disable)."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "awg1.json").write_text(
+                json.dumps({"iface": "awg1", "unit": "u.service",
+                            "identity": [1, 2, "k"],
+                            "old": "192.0.2.10:51820",
+                            "target": "127.0.0.1:5001"}))
+            with ExitStack() as st:
+                st.enter_context(patch.object(
+                    self.awg_constants, "AWGS_RELAY_ROOT", root))
+                mocks = {}
+                for name, val in [
+                    ("relay_state_get", MagicMock(return_value=box)),
+                    ("relay_iface_probe",
+                     MagicMock(side_effect=[probe, probe2])),
+                    ("unit_status", MagicMock(return_value="active")),
+                    ("relay_relaunch", MagicMock(return_value=(True, ""))),
+                    ("relay_disable", MagicMock()),
+                    ("relay_enable", MagicMock(return_value=(True, ""))),
+                    ("_relay_state_update", MagicMock(return_value=True)),
+                    ("_notify", MagicMock()),
+                    ("_time_sleep_wrapper", MagicMock()),
+                ]:
+                    p = patch.object(self.mod, name, val)
+                    mocks[name] = p.start()
+                    st.callback(p.stop)
+                return self.mod.relay_health_tick(), mocks
+
+    _alive = {"up": True, "handshake_age": 10, "tx": 1, "rx": 1}
+    _dead = {"up": True, "handshake_age": 9999, "tx": 1, "rx": 1}
+
+    def test_hold_at_limit_no_rollback(self):
+        # 3-я неудача (fail_count=2 → fail=3): hold-3, relay_disable НЕ
+        # вызван, TG: ОДНО awg_relay_hold (переход предела)
+        res, m = self._tick(self._box(fail_count=2,
+                                      fail_action="notify_only"),
+                            self._dead, self._dead)
+        self.assertEqual(res, "hold-3")
+        m["relay_disable"].assert_not_called()
+        events = [c.args[0] for c in m["_notify"].call_args_list]
+        self.assertEqual(events, ["awg_relay_hold"])
+        m["_relay_state_update"].assert_called_once()
+
+    def test_hold_beyond_limit_is_silent(self):
+        # долгий простой (fail_count=7 → hold-8): TG-тишина (hold уже
+        # сообщил), откат по-прежнему не происходит, счётчик растёт
+        res, m = self._tick(self._box(fail_count=7,
+                                      fail_action="notify_only"),
+                            self._dead, self._dead)
+        self.assertEqual(res, "hold-8")
+        m["relay_disable"].assert_not_called()
+        m["_notify"].assert_not_called()
+        m["_relay_state_update"].assert_called_once()
+
+    def test_hold_below_limit_notifies_dir_dead(self):
+        # до предела — по-попыточные уведомления (паритет rollback-режима)
+        res, m = self._tick(self._box(fail_count=0,
+                                      fail_action="notify_only"),
+                            self._dead, self._dead)
+        self.assertEqual(res, "hold-1")
+        m["relay_disable"].assert_not_called()
+        events = [c.args[0] for c in m["_notify"].call_args_list]
+        self.assertEqual(events, ["awg_relay_dir_dead"])
+
+    def test_recovered_after_hold(self):
+        # напарник вернулся после удержания: ok + awg_relay_recovered
+        # (ответ на hold-уведомление обязан быть) + fail_count обнулён
+        res, m = self._tick(self._box(fail_count=7,
+                                      fail_action="notify_only"),
+                            self._alive, self._alive)
+        self.assertEqual(res, "ok")
+        events = [c.args[0] for c in m["_notify"].call_args_list]
+        self.assertEqual(events, ["awg_relay_recovered"])
+
+    def test_rollback_mode_recovery_is_silent(self):
+        # rollback: события восстановления нет (протекание notify_only в
+        # чужой режим = прежний класс молчаливой семантики)
+        res, m = self._tick(self._box(fail_count=7), self._alive,
+                            self._alive)
+        self.assertEqual(res, "ok")
+        m["_notify"].assert_not_called()
+
+    def test_rollback_explicit_unchanged(self):
+        # явный rollback: прежняя лестница — авто-откат на пределе
+        res, m = self._tick(self._box(fail_count=2, fail_action="rollback"),
+                            self._dead, self._dead)
+        self.assertEqual(res, "rollback")
+        m["relay_disable"].assert_called_once()
+        events = [c.args[0] for c in m["_notify"].call_args_list]
+        self.assertEqual(events, ["awg_relay_dir_dead"])
+
+
+class TestFailActionTui(_RelayTest):
+    def test_fail_action_ask_mapping(self):
+        # 1 → rollback; 2 → notify_only; Q/мусор → текущий из бокса
+        with patch("builtins.input", side_effect=["1"]):
+            self.assertEqual(self.mod._relay_fail_action_ask({}),
+                             "rollback")
+        with patch("builtins.input", side_effect=["2"]):
+            self.assertEqual(self.mod._relay_fail_action_ask({}),
+                             "notify_only")
+        with patch("builtins.input", side_effect=["x"]):
+            self.assertEqual(
+                self.mod._relay_fail_action_ask(
+                    {"fail_action": "notify_only"}),
+                "notify_only")
+        with patch("builtins.input", side_effect=[""]):
+            self.assertEqual(self.mod._relay_fail_action_ask({}),
+                             "rollback")
+
+    def test_menu_item7_and_diag8(self):
+        # текст-контракт меню: новый п.7 (watchdog-откат), диагностика → 8
+        src = (_PROJECT_ROOT / "chimera" / "modules"
+               / "awg_kernel_relay.py").read_text(encoding="utf8")
+        self.assertIn('_box_item("7", "Watchdog-откат: '
+                      'уведомить+откат / ТОЛЬКО уведомить")', src)
+        self.assertIn('_box_item("8", "Диагностика: journalctl юнита + '
+                      'awg show")', src)
+        self.assertLess(src.find('_box_item("7"'), src.find('_box_item("8"'))
+
+    def test_activation_asks_fail_action(self):
+        # активация спрашивает поведение watchdog и несёт его в cfg
+        # (запрос владельца: выбор «уведомлять И катать / только
+        # уведомлять» совместно с активацией)
+        src = (_PROJECT_ROOT / "chimera" / "modules"
+               / "awg_kernel_relay.py").read_text(encoding="utf8")
+        self.assertIn("fail_action = _relay_fail_action_ask(box)", src)
+        self.assertIn("fail_action=fail_action)", src)
+
+    def test_tgbot_covers_relay_events(self):
+        # класс кейса окт.2026 №8: события должны иметь иконку, титул и
+        # тумблер меню (3 вхождения ключа: icons + titles + ev_keys)
+        src = (_PROJECT_ROOT / "chimera" / "modules"
+               / "tg_bot.py").read_text(encoding="utf8")
+        for ev in ("awg_relay_on", "awg_relay_dir_dead", "awg_relay_off",
+                   "awg_relay_hold", "awg_relay_recovered"):
+            self.assertGreaterEqual(src.count(f'"{ev}"'), 3, ev)
+        self.assertIn('"AWG-релей: лестница исчерпана — держим без '
+                      'отката"', src)
+        self.assertIn('"AWG-релей: флоу ожил после удержания"', src)
 
 
 if __name__ == "__main__":

@@ -333,6 +333,18 @@ AWGS_RELAY_ROOT: Path = Path("/run/chimera-kernel-relay")
 # (rekey ~2 мин + keepalive 25 с рецепта пилота освежают живой линк).
 AWGS_RELAY_STALE_SEC: int = 300
 AWGS_RELAY_FAIL_LIMIT: int = 3
+# Поведение watchdog при исчерпании relaunch-лестницы (фичареквест
+# Виталия 26.11: «уведомлять, но не откатывать на прямой эндпоинт.
+# Смысл: я и так знаю, что прямой не заработает, но в случае отключения
+# или долгой перезагрузки одного из узлов потом ещё и режим работы
+# восстанавливать надо будет»):
+#   rollback    — уведомить + авто-откат на прямой endpoint (умолчание,
+#                 прежнее поведение; обратная совместимость state-боксов);
+#   notify_only — только уведомить (awg_relay_hold, один раз на переходе
+#                 предела) БЕЗ отката: режим держится, relaunch продолжается
+#                 каждую минуту, напарник вернётся — флоу оживёт сам
+#                 (awg_relay_recovered).
+AWGS_RELAY_FAIL_ACTIONS: tuple = ("rollback", "notify_only")
 AWGS_RELAY_WATCHDOG_SEC: int = 60
 # Файлы watchdog (канон awg-split-direction: wrapper + svc + timer).
 AWGS_RELAY_SCRIPT: Path = Path("/usr/local/sbin/awg-kernel-relay-watchdog.sh")

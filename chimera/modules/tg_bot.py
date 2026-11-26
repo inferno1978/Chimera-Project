@@ -278,6 +278,15 @@ def tg_notify_event(event: str, detail: str = "") -> None:
         "awg_split_on":        "↔️",   # режим включён (e2e верифицирована)
         "awg_split_dir_dead":  "🩹",   # плечо умирало, рестарт спас
         "awg_split_off":       "↩️",   # авто-откат на штатный awg1
+        # kernel-relay AWG-каскада (awg_kernel_relay.py; один туннель +
+        # userspace UDP-релей, кейс Виталия — двусторонний кат; релизы
+        # 26.11 шли без иконок — класс бага кейса окт.2026 №8; notify-only
+        # (фичареквест Виталия 26.11): hold/recovered — удержание без отката)
+        "awg_relay_on":        "🛰️",   # релей включён (endpoint → loop)
+        "awg_relay_dir_dead":  "🚑",   # флоу умирал, relaunch спас/не помог
+        "awg_relay_off":       "↩️",   # выключен (вручную/авто-откат/ребут)
+        "awg_relay_hold":      "⏸️",   # notify-only: лестница исчерпана, держим
+        "awg_relay_recovered": "🔌",   # notify-only: флоу ожил после удержания
         # Naive-каскад: минимальный upstream-watcher (exit_traffic_watcher,
         # мультитранспортность 11.11.2026 — проба upstream Entry→Exit)
         "naive_upstream_down":     "📴",  # Naive: upstream недоступен
@@ -2474,6 +2483,18 @@ def do_manage_telegram() -> None:
             "relay_failover": "SmartBalancer: failover via-релея (объезд)",
             "cascade_lb_change": "VLESS-каскад: изменён состав балансировки",
             "awg_failover":   "AWG-каскад: failover ноды",
+            # split-direction / kernel-relay AWG-каскада (события
+            # существовали с релизов 19.11/26.11, но не были видны в меню
+            # — класс кейса окт.2026 №8; kernel-relay: hold/recovered —
+            # режимы notify-only watchdog'а, фичареквест Виталия 26.11)
+            "awg_split_on":        "AWG-split: режим включён",
+            "awg_split_dir_dead":  "AWG-split: плечо умирало (рестарт)",
+            "awg_split_off":       "AWG-split: авто-откат на штатный awg1",
+            "awg_relay_on":        "AWG-релей: режим включён",
+            "awg_relay_dir_dead":  "AWG-релей: флоу умирал (relaunch)",
+            "awg_relay_off":       "AWG-релей: выключен (откат/вручную)",
+            "awg_relay_hold":      "AWG-релей: лестница исчерпана — держим без отката",
+            "awg_relay_recovered": "AWG-релей: флоу ожил после удержания",
             # наблюдатель переключений exit-нод (exit_switch_watcher.py)
             "exit_set_change": "Наблюдатель: состав ротации exit-нод изменён",
             "exit_switch":    "Наблюдатель: режимное переключение (нода/стратегия/pin)",
@@ -2639,6 +2660,11 @@ def do_manage_telegram() -> None:
                        "steal_report","steal_alert",
                        # переключения exit-нод/каскадов (кейс окт.2026 №8)
                        "node_connect","relay_failover","cascade_lb_change",
+                       # split/kernel-relay AWG-каскада (кейс №8: были без
+                       # тумблеров; kernel-relay + hold/recovered — 26.11)
+                       "awg_split_on","awg_split_dir_dead","awg_split_off",
+                       "awg_relay_on","awg_relay_dir_dead","awg_relay_off",
+                       "awg_relay_hold","awg_relay_recovered",
                        "awg_failover","exit_set_change","exit_switch",
                        "exit_ip_change","exit_snapshot",
                        "traffic_dominant_change","traffic_snapshot",
@@ -2675,6 +2701,14 @@ def do_manage_telegram() -> None:
                 "SmartBalancer: смена активной exit-ноды",
                 "SmartBalancer: failover via-релея",
                 "VLESS-каскад: состав балансировки изменён",
+                "AWG-split: режим включён",
+                "AWG-split: плечо умирало (рестарт)",
+                "AWG-split: авто-откат на штатный awg1",
+                "AWG-релей: режим включён",
+                "AWG-релей: флоу умирал (relaunch)",
+                "AWG-релей: выключен (откат/вручную)",
+                "AWG-релей: лестница исчерпана — держим без отката",
+                "AWG-релей: флоу ожил после удержания",
                 "AWG-каскад: failover ноды",
                 "Наблюдатель: состав ротации изменён",
                 "Наблюдатель: режимное переключение",

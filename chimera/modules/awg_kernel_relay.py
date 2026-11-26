@@ -54,7 +54,11 @@ Kernel-relay: ОДИН туннель + userspace UDP-релей (обход д�
     (пере-сеять флоу при простое; 0 = выкл).
   • Watchdog (минутный тик, канон awg-split-direction): handshake-флоу
     жив (rekey+keepalive) → дёшево; юнит/флоу умер → relaunch юнита;
-    N неудач подряд → авто-откат на прямой endpoint + TG.
+    N неудач подряд → авто-откат на прямой endpoint + TG — ЛИБО, по
+    выбору оператора (fail_action=notify_only, фичареквест Виталия
+    26.11 «уведомлять, но не откатывать»), только TG-уведомление без
+    отката: режим держится, relaunch продолжается каждую минуту,
+    напарник вернётся — флоу оживёт сам.
   • Автовосстановление после ребута — ОПЦИЯ (default off, честные
     границы канона: transient-юниты и /run-записи не переживают ребут).
 
@@ -62,6 +66,10 @@ Kernel-relay: ОДИН туннель + userspace UDP-релей (обход д�
   awg_relay_on        — релей включён (endpoint → loop)
   awg_relay_dir_dead  — флоу умирал, relaunch спас / не помог (попытка N)
   awg_relay_off       — выключен (вручную / авто-откат / потерян после ребута)
+  awg_relay_hold      — notify-only: лестница relaunch исчерпана, откат
+                        отключён — режим на удержании (один раз)
+  awg_relay_recovered — notify-only: флоу ожил после удержания
+                        (напарник вернулся)
 """
 from __future__ import annotations
 
@@ -416,6 +424,17 @@ def relay_is_on(state: Optional[dict] = None) -> bool:
     return bool(relay_state_get(state).get("enabled"))
 
 
+def _fail_action_norm(value) -> str:
+    """Нормализация fail_action — поведения watchdog при исчерпании
+    relaunch-лестницы (AWGS_RELAY_FAIL_ACTIONS).
+
+    Чужие/отсутствующие значения → «rollback» — честная обратная
+    совместимость старых state-боксов (без поля = прежний откат).
+    """
+    from .awg_constants import AWGS_RELAY_FAIL_ACTIONS
+    return value if value in AWGS_RELAY_FAIL_ACTIONS else "rollback"
+
+
 def _relay_state_update(mutate) -> bool:
     """Read-modify-write бокса с честным результатом сохранения (канон
     register_exit FIX 09.11: молчаливая потеря = враньё success)."""
@@ -593,6 +612,7 @@ def relay_enable(cfg: dict) -> tuple:
         "prelude_hex": cfg["prelude"],
         "refresh": int(cfg.get("refresh") or 0),
         "restore_on_boot": bool(cfg.get("restore_on_boot")),
+        "fail_action": _fail_action_norm(cfg.get("fail_action")),
         "fail_count": 0,
         "applied_at": _now_iso(),
     }))
@@ -748,6 +768,9 @@ def relay_health_tick() -> str:
       recovered      — флоу умирал, relaunch юнита спас
       pending-N      — после relaunch флоу всё ещё мёртв (неудача N/LIMIT)
       rollback       — лестница исчерпана: авто-откат на прямой endpoint
+      hold-N         — notify-only (fail_action): лестница исчерпана, откат
+                       отключён — режим на удержании, relaunch продолжается
+                       (напарник вернётся — флоу оживёт, TG сообщит)
     """
     from .awg_constants import (AWGS_RELAY_ROOT, AWGS_RELAY_FAIL_LIMIT)
     core = _core_module()
@@ -807,7 +830,19 @@ def relay_health_tick() -> str:
     probe = relay_iface_probe(iface)
 
     if unit_alive and relay_handshake_alive(probe):
-        if int(box.get("fail_count") or 0):
+        prev_fail = int(box.get("fail_count") or 0)
+        if prev_fail:
+            # notify-only: флоу ожил ПОСЛЕ удержания (напарник вернулся)
+            # — сообщаем восстановление: hold-уведомление было, ответ на
+            # него обязан быть, иначе владелец вечно гадает, ожил линк
+            # или нет (rollback-режиму это не нужно — там режима уже нет).
+            if (prev_fail >= AWGS_RELAY_FAIL_LIMIT
+                    and _fail_action_norm(box.get("fail_action"))
+                    == "notify_only"):
+                _notify("awg_relay_recovered",
+                        f"AWG kernel-relay: флоу ОЖИЛ ({iface}) после "
+                        f"удержания ({prev_fail} неудач) — handshake "
+                        f"свеж, режим не откатывался (notify-only)")
             _relay_state_update(lambda b: b.update({"fail_count": 0}))
         return "ok"
 
@@ -827,10 +862,37 @@ def relay_health_tick() -> str:
         return "recovered"
 
     fail = int(box.get("fail_count") or 0) + 1
+    action = _fail_action_norm(box.get("fail_action"))
     core.log_to_file(
         "ERROR",
         f"relay_health_tick: флоу мёртв после relaunch ({why}), "
-        f"неудача #{fail}/{AWGS_RELAY_FAIL_LIMIT}")
+        f"неудача #{fail}/{AWGS_RELAY_FAIL_LIMIT}"
+        + (" [notify-only: держим]" if action == "notify_only" else ""))
+
+    if action == "notify_only":
+        # Фичареквест Виталия (26.11): «уведомлять, но не откатывать» —
+        # прямой endpoint в кейсах двусторонней блокировки всё равно
+        # мёртв, а откат после ребута/долгого простоя напарника требовал
+        # бы ручного восстановления режима. Держим: relaunch продолжается
+        # каждую минуту (новый юнит = свежий DPI-бюджет флоу), напарник
+        # вернётся — handshake оживёт сам. TG-срез по спаму: до предела —
+        # dir_dead по попытке (как в rollback), на переходе предела —
+        # ОДНО hold-уведомление, дальше — тишина (долгий простой на 6 часов
+        # не должен стоить 360 уведомлений).
+        if fail == AWGS_RELAY_FAIL_LIMIT:
+            _notify("awg_relay_hold",
+                    f"AWG kernel-relay: relaunch-лестница исчерпана "
+                    f"({why}, {iface}) — ОТКАТ ОТКЛЮЧЁН (режим «только "
+                    f"уведомлять»): ДЕРЖУ режим, relaunch продолжается "
+                    f"каждую минуту; напарник вернётся — флоу оживёт сам")
+        elif fail < AWGS_RELAY_FAIL_LIMIT:
+            _notify("awg_relay_dir_dead",
+                    f"AWG kernel-relay: флоу мёртв ({why}), relaunch НЕ "
+                    f"помог (попытка {fail}/{AWGS_RELAY_FAIL_LIMIT}, "
+                    f"{iface})")
+        _relay_state_update(lambda b: b.update({"fail_count": fail}))
+        return f"hold-{fail}"
+
     _notify("awg_relay_dir_dead",
             f"AWG kernel-relay: флоу мёртв ({why}), relaunch НЕ помог "
             f"(попытка {fail}/{AWGS_RELAY_FAIL_LIMIT}, {iface})")
@@ -1022,6 +1084,10 @@ def _relay_status_screen() -> None:
              + (f"{GREEN}есть{NC}" if st.get("record") else f"{RED}нет{NC}"))
     _box_row(f"  Watchdog: "
              + (f"{GREEN}active{NC}" if st.get("watchdog") else f"{DIM}off{NC}"))
+    _box_row(f"  Откат watchdog: "
+             + ("уведомить + авто-откат" if _fail_action_norm(
+                   box.get("fail_action")) == "rollback"
+               else f"{GREEN}ТОЛЬКО уведомить (без отката){NC}"))
     if box.get("fail_count"):
         _box_row(f"  Неудач watchdog: {RED}{box['fail_count']}{NC}")
     _box_bottom()
@@ -1045,6 +1111,8 @@ def _relay_plan_box(cfg: dict) -> None:
     _box_row(f"  {GREEN}remote_rx:{NC}        {cfg['remote_rx']}  ← ваш rx")
     _box_row(f"  {GREEN}Прелюдия:{NC}         тот же пресет "
              f"«{cfg.get('preset', 'dns-fixed')}»")
+    _box_row(f"  {DIM}Watchdog-откат: выбрать тот же режим при включении "
+             f"на напарнике (п.1 спросит){NC}")
     _box_row()
     _box_row(f"  {DIM}Напарник будет слать:{NC}")
     _box_row(f"  {GREEN}его tx → ваш rx:{NC}   {cfg['remote_tx']} → "
@@ -1103,6 +1171,50 @@ def _relay_prelude_ask(box: dict) -> dict:
         refresh = 0
     return {"preset": preset, "domain": domain, "hex_data": hex_data,
             "refresh": refresh}
+
+
+def _relay_fail_action_ask(box: dict) -> str:
+    """Промпт поведения watchdog при исчерпании relaunch-лестницы.
+
+    Фичареквест Виталия (26.11): «уведомлять, но не откатывать на прямой
+    эндпоинт. Смысл: я и так знаю, что прямой не заработает, но в случае
+    отключения или долгой перезагрузки одного из узлов потом ещё и режим
+    работы восстанавливать надо будет». Возвращает «rollback» либо
+    «notify_only»; умолчание — текущее из state (дальше «rollback»);
+    Q/мусор — текущий без изменений.
+    """
+    core = _core_module()
+    _box_top, _box_row, _box_item, _box_desc, _box_bottom = (
+        core._box_top, core._box_row, core._box_item, core._box_desc,
+        core._box_bottom)
+    CYAN, GREEN, DIM, NC = core.CYAN, core.GREEN, core.DIM, core.NC
+    cur = _fail_action_norm(box.get("fail_action"))
+    print()
+    _box_top("WATCHDOG • ПОВЕДЕНИЕ ПРИ ИСЧЕРПАНИИ ЛЕСТНИЦЫ")
+    _box_row()
+    _box_desc("3 неудачи relaunch подряд (флоу мёртв, юнит поднимался) —")
+    _box_desc("дальше два честных поведения:")
+    _box_row()
+    for key, entry in [
+        ("1", ("rollback", "Уведомить + АВТО-ОТКАТ на прямой endpoint "
+                            "(по умолчанию)")),
+        ("2", ("notify_only", "ТОЛЬКО уведомить, БЕЗ отката — держать "
+                              "режим, relaunch продолжается каждую минуту")),
+        ("Q", ("", "оставить текущий")),
+    ]:
+        mark = f" {GREEN}[текущий: {cur}]{NC}" if entry[0] == cur else ""
+        _box_item(key, entry[1] + mark)
+    _box_row()
+    _box_desc("«Только уведомлять» — для кейсов, где прямой endpoint всё")
+    _box_desc("равно мёртв (двусторонний кат): откат снял бы режим, и после")
+    _box_desc("ребута/долгого простоя напарника восстанавливать руками.")
+    _box_desc("Напарник вернётся — флоу оживёт сам, TG сообщит.")
+    _box_bottom()
+    try:
+        ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ch = ""
+    return {"1": "rollback", "2": "notify_only"}.get(ch, cur)
 
 
 def _relay_enable_interactive() -> None:
@@ -1183,6 +1295,8 @@ def _relay_enable_interactive() -> None:
         warn(f"Прелюдия: {exc}")
         return
 
+    fail_action = _relay_fail_action_ask(box)
+
     confirm = core._box_ask(
         f"Включить релей: {iface} {old} → 127.0.0.1:{loop} "
         f"(tx {addr}:{tx} → {host}:{remote_rx})? [y/N]", "").lower()
@@ -1195,7 +1309,8 @@ def _relay_enable_interactive() -> None:
                preset=preset, domain=prelude_cfg.get("domain", ""),
                hex_data=prelude_cfg.get("hex_data", ""),
                refresh=refresh,
-               restore_on_boot=bool(box.get("restore_on_boot")))
+               restore_on_boot=bool(box.get("restore_on_boot")),
+               fail_action=fail_action)
     ok, reason = relay_enable(cfg)
     if not ok:
         warn(f"Не удалось: {reason}")
@@ -1271,6 +1386,11 @@ def do_manage_awg_kernel_relay() -> None:
                      f"{state_box.get('preset', '?')}"
                      + (f" (refresh {state_box.get('refresh')} c)"
                         if state_box.get("refresh") else ""))
+            _box_row("  Watchdog-откат: "
+                     + ("уведомить + авто-откат"
+                        if _fail_action_norm(
+                            state_box.get("fail_action")) == "rollback"
+                        else f"{GREEN}ТОЛЬКО уведомить (без отката){NC}"))
         else:
             _box_row(f"  {DIM}Релей не настроен на этой ноде{NC}")
         _box_row()
@@ -1282,7 +1402,12 @@ def do_manage_awg_kernel_relay() -> None:
         _box_item("4", "Прелюдия: пресет / домен / hex / refresh-интервал")
         _box_item("5", "Watchdog: включить/выключить (health-тик в минуту)")
         _box_item("6", "Автовосстановление после ребута: вкл/выкл")
-        _box_item("7", "Диагностика: journalctl юнита + awg show")
+        _box_item("7", "Watchdog-откат: уведомить+откат / ТОЛЬКО уведомить")
+        _box_desc("Поведение при исчерпании relaunch-лестницы (3 неудачи): "
+                  "откат")
+        _box_desc("на прямой endpoint либо удержание режима — фичареквест "
+                  "кейса")
+        _box_item("8", "Диагностика: journalctl юнита + awg show")
         _box_item("Q", "Назад")
         _box_bottom()
         try:
@@ -1359,6 +1484,21 @@ def do_manage_awg_kernel_relay() -> None:
                     warn("State НЕ сохранён (см. лог)")
             input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch == "7":
+            box = relay_state_get()
+            cur = _fail_action_norm(box.get("fail_action"))
+            new = _relay_fail_action_ask(box)
+            if new == cur:
+                info("Режим watchdog-отката не менялся")
+            elif _relay_state_update(lambda b: b.update(
+                    {"fail_action": new})):
+                success("Watchdog-откат: "
+                        + ("уведомить + авто-откат" if new == "rollback"
+                           else "ТОЛЬКО уведомить (без отката)")
+                                                + " — вступает в силу со следующего тика (минута)")
+            else:
+                warn("State НЕ сохранён (см. лог)")
+            input(f"{core.BLUE}Нажмите Enter...{NC}")
+        elif ch == "8":
             _relay_diagnose()
             input(f"{core.BLUE}Нажмите Enter...{NC}")
         elif ch in ("q", ""):
