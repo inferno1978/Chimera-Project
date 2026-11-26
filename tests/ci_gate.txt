@@ -1,3 +1,25 @@
+# v28: 494 = 471 + 23 (feat(awg): kernel-relay — один туннель + userspace
+# UDP-релей, обход ДВУСТОРОННЕЙ блокировки 16к (кейс Виталия, FAQ
+# AWG_KERNEL_RELAY). Split-direction (п.8) при двустороннем кате бессилен:
+# даже handshake'ы двух туннелей не сходятся (нужен встречный обмен).
+# НОВЫЙ ФАЙЛ tests/test_awg_kernel_relay.py (+23) к модулю
+# chimera/modules/awg_kernel_relay.py (меню каскада → п.9): kernel AWG
+# endpoint → 127.0.0.1:loop, релей держит два wire-флоу и СЕЕТ каждый
+# первой DNS-датаграммой (прелеюдия; DPI классифицирует флоу по первому
+# пакету — белый список). Пресеты: dns-fixed (побайтово боевой пилот),
+# dns-rand, custom-domain, custom-hex, none + refresh-интервал.
+# Guarded-откат endpoint (identity/endpoint-сверка), атомарная публикация
+# os.link, EPERM-семантика (датаграмма/прелюдия), watchdog-лестница
+# (relaunch юнита → pending-N → авто-откат, restore_on_boot опцией),
+# TG awg_relay_on/dir_dead/off. Тесты: прелюдии (побайтово пилот,
+# txid, метки, hex/none, отказы), pump на настоящих loopback-сокетах,
+# EPERM-денайлы, guarded-restore матрица, enable/disable лестница
+# (переключение endpoint, откат при провале юнита, конфликт портов,
+# lo-маршрут), health_tick (off/ok/recovered/pending/rollback/lost/
+# relaunch:boot), интеграция меню п.9 + stdlib-only верхний уровень
+# (worker запускается python3 -I), watchdog-юниты, LINK_PATTERNS
+# one-way-out/stream-cut упоминают релей (снятие противоречия релиза
+# 19.11). Модулей в манифесте 345 → 346.)
 # v27: 471 = 452 + 19 (feat(sync): upstream-watcher — автотрекинг релизов
 # bivlked/amneziawg-installer. Химера — ПЕРЕПИСАННЫЙ порт (bash → Python),
 # git-merge апстрима невозможен в принципе; скрипт автоматизирует всё, что
@@ -282,6 +304,7 @@ tests.test_awg_diagnose
 tests.test_awg_expires
 tests.test_awg_hw_tuning
 tests.test_awg_i2i5_mimicry
+tests.test_awg_kernel_relay
 tests.test_awg_link_probe
 tests.test_awg_install_fixes
 tests.test_awg_ipv6_dualstack

@@ -2,10 +2,10 @@
 
 > Сгенерировано `scripts/tests_index.py` (миграция 2026-10-29). Плоский layout tests/ — намеренный: 299+ файлов считают `_PROJECT_ROOT = Path(__file__).resolve().parent.parent`, ci_gate.txt хранит module-пути `tests.test_*`, ci_suite.sh full строит список через `ls tests/test_*.py` — перенос в подкаталоги = правка ~300 файлов без функциональной выгоды. Навигация — этот индекс.
 
-Всего тест-модулей: **345** (гейт-манифест: **345**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
+Всего тест-модулей: **346** (гейт-манифест: **346**; каждый test_*.py обязан быть в tests/ci_gate.txt — сверяется tests/test_tests_index.py).
 
 
-## AmneziaWG (transport Mode B + standalone 2.0) (34)
+## AmneziaWG (transport Mode B + standalone 2.0) (35)
 
 | Тест | Что покрывает (первая строка докстринга) | ci_gate |
 |---|---|---|
@@ -25,6 +25,7 @@
 | [`test_awg_i2i5_mimicry.py`](../tests/test_awg_i2i5_mimicry.py) | Unit-тесты автозаполнения I2-I5 (сверка с генератором ARCHITECT, Task 31): | ✓ |
 | [`test_awg_install_fixes.py`](../tests/test_awg_install_fixes.py) | Юнит-тесты фиксов (E2E fi1 2026-10-03): | ✓ |
 | [`test_awg_ipv6_dualstack.py`](../tests/test_awg_ipv6_dualstack.py) | Unit-тесты для IPv6-интеграции AWG. | ✓ |
+| [`test_awg_kernel_relay.py`](../tests/test_awg_kernel_relay.py) | Unit-тесты kernel-relay — одного туннеля + userspace UDP-релея (кейс | ✓ |
 | [`test_awg_link_probe.py`](../tests/test_awg_link_probe.py) | Unit-тесты зонда плеча каскада и классификатора паттернов среды | ✓ |
 | [`test_awg_net_common.py`](../tests/test_awg_net_common.py) | Unit-тесты для chimera/modules/awg_net_common.py. | ✓ |
 | [`test_awg_peers.py`](../tests/test_awg_peers.py) | Unit-тесты для chimera/modules/awg_peers.py. | ✓ |

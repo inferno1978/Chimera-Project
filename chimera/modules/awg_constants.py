@@ -316,6 +316,29 @@ AWGS_SPLIT_ENTRY_SVC: Path = Path("/etc/systemd/system/awg-split-entry-routing.s
 AWGS_SPLIT_EXIT_SCRIPT: Path = AWGS_CASCADE_DIR / "awg-split-exit.sh"
 AWGS_SPLIT_EXIT_SVC: Path = Path("/etc/systemd/system/awg-split-exit-routing.service")
 
+# ── Kernel-relay: один туннель + userspace UDP-релей (обход 16к) ─────────────
+# Кейс Виталия (FAQ AWG_KERNEL_RELAY §1): ДВУСТОРОННИЙ кат ~16к убивает даже
+# handshake'ы двух туннелей — split-direction бессилен (нет двустороннего
+# обмена для согласования ключей). Релей НЕ добавляет второй туннель: kernel
+# AWG общается с релеем на localhost (127.0.0.1:loop), релей держит ДВА
+# отдельных wire-флоу (tx/rx) и СЕЕТ каждый первой валидной DNS-датаграммой
+# (прелеюдией) — DPI классифицирует флоу по первому пакету, WG-трафик едет
+# по «белому» флоу. Модуль: awg_kernel_relay.py, меню каскада → п.9.
+AWGS_RELAY_STATE_KEY: str = "kernel_relay"
+# Runtime-каталог guarded-отката (tmpfs: живёт до ребута, как и transient-
+# юниты; cfg хранится в awgs_standalone_state.json и переживает ребут —
+# watchdog умеет автовосстановление по флагу restore_on_boot).
+AWGS_RELAY_ROOT: Path = Path("/run/chimera-kernel-relay")
+# Watchdog (канон AWGS_SPLIT_*): handshake старше N сек = флоу мёртв
+# (rekey ~2 мин + keepalive 25 с рецепта пилота освежают живой линк).
+AWGS_RELAY_STALE_SEC: int = 300
+AWGS_RELAY_FAIL_LIMIT: int = 3
+AWGS_RELAY_WATCHDOG_SEC: int = 60
+# Файлы watchdog (канон awg-split-direction: wrapper + svc + timer).
+AWGS_RELAY_SCRIPT: Path = Path("/usr/local/sbin/awg-kernel-relay-watchdog.sh")
+AWGS_RELAY_SVC:    Path = Path("/etc/systemd/system/awg-kernel-relay-watchdog.service")
+AWGS_RELAY_TIMER:  Path = Path("/etc/systemd/system/awg-kernel-relay-watchdog.timer")
+
 # ── Источники ru.zone для каскада ───────────────────────────────────────────
 AWGS_RU_ZONE_URL: str = "https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone"
 # Fallback — статический снимок ru.zone из репозитория АВТОРА amneziawg-installer

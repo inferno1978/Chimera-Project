@@ -2163,6 +2163,12 @@ def do_manage_awg_cascade() -> None:
                   "через одно плечо, входящий — через другое, раздельный "
                   "health-плечей, e2e-верификация, авто-откат на штатный "
                   "awg1. Внутри: зонд плеча (портрет поля + вердикт).")
+        _box_item("9", "AWG-релей: один туннель + UDP-релей (обход 16к)")
+        _box_desc("Кейс Виталия: ДВУСТОРОННИЙ кат 16к режет даже handshake'ы "
+                  "двух туннелей — split-direction бессилен. Релей НЕ добавляет "
+                  "второй туннель: kernel AWG говорит с релеем на localhost, "
+                  "релей сеет каждый флоу DNS-датаграммой (белый список DPI). "
+                  "Ставится на ОБЕИХ нодах линка awg1.")
         _box_item("Q", f"Назад")
         _box_bottom()
         ch = input(f"{CYAN}Выбор:{NC} ").strip().lower()
@@ -2213,6 +2219,10 @@ def do_manage_awg_cascade() -> None:
             # split-direction — пара однонаправленных туннелей
             from .awg_split_direction import do_manage_awg_split_direction
             do_manage_awg_split_direction()
+        elif ch == "9":
+            # kernel-relay — один туннель + UDP-релей (кейс Виталия, 16к)
+            from .awg_kernel_relay import do_manage_awg_kernel_relay
+            do_manage_awg_kernel_relay()
         elif ch in ("q", ""):
             break
 
