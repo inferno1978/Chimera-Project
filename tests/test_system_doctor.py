@@ -41,6 +41,16 @@ reboot-required) — модуль закрывает класс «гигиена
  25. chk_xray_version          — уровни: цель совпала ok / дрифт warn /
                                  цель не задана info (кейс chexit4) /
                                  бинаря нет — info-skip
+ 26. parse_logrotate_errors    — duplicate/skipped из `logrotate -d`
+                                 (кейс 26.11: cloud-init duplicate)
+ 27. is_compressed_magic / is_archive_or_compressed — big_logs
+                                 пропускает архивы (миграционные .tgz
+                                 обнулялись фиксом — магика/расширения)
+ 28. parse_dpkg_s_exact / parse_conffiles_obsolete — dpkg -S матчит
+                                 подстроки: точное поле пути; obsolete
+ 29. chk/fix_logrotate_duplicates — obsolete-хвост в карантин + dry-run
+                                 верификация; живые/бесхозные не трогаем
+ 30. chk_failed_units — причина logrotate.service в самой находке
 """
 from __future__ import annotations
 
@@ -1246,6 +1256,413 @@ class TestChkXrayVersionLevels(unittest.TestCase):
         rec = [f for f in ctx.findings if f["check"] == "xray_version"]
         self.assertEqual(rec[0]["level"], "info")
         self.assertIn("не найден", rec[0]["msg"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  logrotate-дубликаты (кейс 26.11: миграция ОС 24.04→26.04, флот)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestLogrotateErrorsParse(unittest.TestCase):
+    """parse_logrotate_errors: duplicate/skipped, шум не трогаем."""
+
+    def test_duplicate_line(self):
+        from chimera.modules.system_doctor import parse_logrotate_errors
+        out = parse_logrotate_errors(
+            "error: cloud-init-base:1 duplicate log entry for /var/log/cloud-init*.log")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["file"], "cloud-init-base")
+        self.assertEqual(out[0]["line"], 1)
+        self.assertEqual(out[0]["kind"], "duplicate")
+        self.assertEqual(out[0]["path"], "/var/log/cloud-init*.log")
+
+    def test_duplicate_specific_log(self):
+        from chimera.modules.system_doctor import parse_logrotate_errors
+        out = parse_logrotate_errors(
+            "error: cloud-init-base:1 duplicate log entry for /var/log/cloud-init-output.log")
+        self.assertEqual(out[0]["path"], "/var/log/cloud-init-output.log")
+
+    def test_skipped_line(self):
+        from chimera.modules.system_doctor import parse_logrotate_errors
+        out = parse_logrotate_errors(
+            "error: found error in file cloud-init-base, skipping")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["kind"], "skipped")
+        self.assertEqual(out[0]["file"], "cloud-init-base")
+        self.assertIsNone(out[0]["line"])
+
+    def test_noise_ignored(self):
+        from chimera.modules.system_doctor import parse_logrotate_errors
+        noise = ("\nerror: error opening state file /var/lib/logrotate/status; "
+                 "assuming empty state: Permission denied\n"
+                 "error: error switching euid from 1000 to 0: Operation not permitted\n"
+                 "warning: unknown\nconsidering log /var/log/apt\n")
+        self.assertEqual(parse_logrotate_errors(noise), [])
+
+    def test_empty(self):
+        from chimera.modules.system_doctor import parse_logrotate_errors
+        self.assertEqual(parse_logrotate_errors(""), [])
+        self.assertEqual(parse_logrotate_errors(None), [])
+
+    def test_both_kinds(self):
+        from chimera.modules.system_doctor import parse_logrotate_errors
+        out = parse_logrotate_errors(
+            "error: cloud-init-base:1 duplicate log entry for /var/log/cloud-init*.log\n"
+            "error: found error in file cloud-init-base, skipping")
+        kinds = sorted(x["kind"] for x in out)
+        self.assertEqual(kinds, ["duplicate", "skipped"])
+
+
+class TestCompressedMagic(unittest.TestCase):
+    """is_compressed_magic: магики архивных форматов."""
+
+    def test_gzip(self):
+        from chimera.modules.system_doctor import is_compressed_magic
+        self.assertTrue(is_compressed_magic(b"\x1f\x8b\x08\x00abcd"))
+
+    def test_xz_zstd_bzip2(self):
+        from chimera.modules.system_doctor import is_compressed_magic
+        self.assertTrue(is_compressed_magic(b"\xfd7zXZ\x00\x00"))
+        self.assertTrue(is_compressed_magic(b"\x28\xb5\x2f\xfd\x00\x00"))
+        self.assertTrue(is_compressed_magic(b"BZh9abcd"))
+
+    def test_zip_7z_rar(self):
+        from chimera.modules.system_doctor import is_compressed_magic
+        self.assertTrue(is_compressed_magic(b"PK\x03\x04abcd"))
+        self.assertTrue(is_compressed_magic(b"7z\xbc\xaf\x27\x1cab"))
+        self.assertTrue(is_compressed_magic(b"Rar!\x1a\x07\x00abcd"))
+
+    def test_plain_text(self):
+        from chimera.modules.system_doctor import is_compressed_magic
+        self.assertFalse(is_compressed_magic(b"2026-11-26 INFO line\n"))
+        self.assertFalse(is_compressed_magic(b"\x89PNG\r\n"))  # PNG — не наш формат
+
+    def test_short_empty(self):
+        from chimera.modules.system_doctor import is_compressed_magic
+        self.assertFalse(is_compressed_magic(b""))
+        self.assertFalse(is_compressed_magic(b"\x1f"))
+        self.assertFalse(is_compressed_magic(b"\x1f\x8b"))
+        self.assertFalse(is_compressed_magic(None))
+
+
+class TestBigLogsSkipsArchives(unittest.TestCase):
+    """_find_big_logs: архивы/сжатые пропускаются (кейс 26.11 —
+    миграционные .tgz обнулялись фиксом gzip+truncate)."""
+
+    def setUp(self):
+        import chimera.modules.system_doctor as sd
+        self.sd = sd
+        self.tmp = Path(tempfile.mkdtemp())
+        self.payload = b"x" * 120 * 1024   # 120KB > порога 0.05MB
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _ctx(self):
+        return self.sd.DoctorCtx(
+            cfg={"big_log_mb": 0.05, "big_log_dirs": [str(self.tmp)]})
+
+    def _mk(self, name, head=b""):
+        p = self.tmp / name
+        p.write_bytes(head + self.payload)
+        return p
+
+    def test_archives_skipped_plain_found(self):
+        self._mk("plain.log")
+        self._mk("a.tgz")                       # расширение
+        self._mk("b.tar")                       # расширение
+        self._mk("c.gz")                        # расширение
+        self._mk("d.old")                       # ротированный
+        self._mk("e.log.doctor-20261126-054001.gz")  # наша doctor-копия
+        found = self.sd._find_big_logs(self._ctx())
+        self.assertEqual([p for p, _ in found], [str(self.tmp / "plain.log")])
+
+    def test_magic_without_extension_skipped(self):
+        self._mk("plain.log")
+        self._mk("blob.bin", head=b"\x1f\x8b")  # gzip-магика без .gz
+        self._mk("slice.dat", head=b"PK\x03\x04")  # zip-магика
+        found = self.sd._find_big_logs(self._ctx())
+        self.assertEqual([p for p, _ in found], [str(self.tmp / "plain.log")])
+
+    def test_no_archives_all_found(self):
+        self._mk("one.log")
+        self._mk("two.log")
+        found = self.sd._find_big_logs(self._ctx())
+        self.assertEqual(len(found), 2)
+
+
+class TestDpkgSParse(unittest.TestCase):
+    """parse_dpkg_s_exact: dpkg -S матчит ПОДСТРОКИ — только точные."""
+
+    def test_substring_not_exact(self):
+        from chimera.modules.system_doctor import parse_dpkg_s_exact
+        text = "cloud-init: /etc/logrotate.d/cloud-init-base"
+        self.assertEqual(parse_dpkg_s_exact(text, "/etc/logrotate.d/cloud-init"), [])
+        self.assertEqual(parse_dpkg_s_exact(text, "/etc/logrotate.d/cloud-init-base"),
+                         ["cloud-init"])
+
+    def test_exact_line(self):
+        from chimera.modules.system_doctor import parse_dpkg_s_exact
+        text = "cloud-init: /etc/logrotate.d/cloud-init"
+        self.assertEqual(parse_dpkg_s_exact(text, "/etc/logrotate.d/cloud-init"),
+                         ["cloud-init"])
+
+    def test_diversion_ignored(self):
+        from chimera.modules.system_doctor import parse_dpkg_s_exact
+        text = ("local diversion of /etc/x to /etc/x.distrib\n"
+                "other: /etc/x")
+        self.assertEqual(parse_dpkg_s_exact(text, "/etc/x"), ["other"])
+
+    def test_no_path_found(self):
+        from chimera.modules.system_doctor import parse_dpkg_s_exact
+        self.assertEqual(parse_dpkg_s_exact("", "/etc/y"), [])
+        self.assertEqual(parse_dpkg_s_exact(None, "/etc/y"), [])
+
+    def test_multiple_owners(self):
+        from chimera.modules.system_doctor import parse_dpkg_s_exact
+        text = ("a-pkg: /etc/y\nb-pkg: /etc/y\nc-pkg: /etc/y.z")
+        self.assertEqual(parse_dpkg_s_exact(text, "/etc/y"), ["a-pkg", "b-pkg"])
+
+
+class TestConffilesObsolete(unittest.TestCase):
+    """parse_conffiles_obsolete: пометка obsolete у conffile."""
+
+    def test_obsolete_true(self):
+        from chimera.modules.system_doctor import parse_conffiles_obsolete
+        text = ("/etc/logrotate.d/cloud-init 1136c49642289d614837572cac18d9f6 obsolete\n"
+                "/etc/logrotate.d/cloud-init-base 1136c49642289d614837572cac18d9f6")
+        self.assertTrue(parse_conffiles_obsolete(text, "/etc/logrotate.d/cloud-init"))
+
+    def test_live_false(self):
+        from chimera.modules.system_doctor import parse_conffiles_obsolete
+        text = "/etc/logrotate.d/cloud-init-base 1136c49642289d614837572cac18d9f6"
+        self.assertFalse(parse_conffiles_obsolete(text, "/etc/logrotate.d/cloud-init-base"))
+
+    def test_missing_path_false(self):
+        from chimera.modules.system_doctor import parse_conffiles_obsolete
+        self.assertFalse(parse_conffiles_obsolete("", "/etc/logrotate.d/x"))
+        self.assertFalse(parse_conffiles_obsolete(None, "/etc/logrotate.d/x"))
+
+    def test_prefix_path_not_matched(self):
+        from chimera.modules.system_doctor import parse_conffiles_obsolete
+        text = "/etc/logrotate.d/cloud-init-base 1136c49642289d614837572cac18d9f6"
+        # путь-префикс НЕ равен токену строки — нельзя «угадать»
+        self.assertFalse(parse_conffiles_obsolete(text, "/etc/logrotate.d/cloud-init"))
+
+
+class TestCoveringConfigs(unittest.TestCase):
+    """_covering_configs: конфиг, содержащий путь ТОКЕНОМ."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_token_exact(self):
+        from chimera.modules.system_doctor import _covering_configs
+        c1 = self.tmp / "cloud-init"
+        c2 = self.tmp / "cloud-init-base"
+        c1.write_text("/var/log/cloud-init*.log {\n  weekly\n}\n")
+        c2.write_text("/var/log/cloud-init*.log {\n  daily\n}\n")
+        self.assertEqual(_covering_configs("/var/log/cloud-init*.log",
+                                          confs=[str(c1), str(c2)]),
+                         [str(c1), str(c2)])
+
+    def test_different_path_not_covering(self):
+        from chimera.modules.system_doctor import _covering_configs
+        c = self.tmp / "other"
+        c.write_text("/var/log/cloud-init-output.log {\n}\n")
+        # лексема-точно: cloud-init*.log ≠ cloud-init-output.log
+        self.assertEqual(_covering_configs("/var/log/cloud-init*.log",
+                                          confs=[str(c)]), [])
+
+    def test_unreadable_conf_skipped(self):
+        from chimera.modules.system_doctor import _covering_configs
+        self.assertEqual(_covering_configs("/var/log/x.log",
+                                          confs=[str(self.tmp / "no-such")]), [])
+
+
+class TestChkLogrotateDuplicates(unittest.TestCase):
+    """chk_logrotate_duplicates: классификация и вердикты."""
+
+    def _chk(self, errors, covers, status_map):
+        import chimera.modules.system_doctor as sd
+        ctx = sd.DoctorCtx(cfg={})
+        with patch.multiple(sd,
+                            _logrotate_dryrun_errors=MagicMock(return_value=errors),
+                            _covering_configs=MagicMock(side_effect=lambda p, **kw: covers),
+                            _config_owner_status=MagicMock(side_effect=lambda c: status_map[c])):
+            sd.chk_logrotate_duplicates(ctx)
+        return [f for f in ctx.findings if f["check"] == "logrotate_duplicates"]
+
+    def test_clean_ok(self):
+        rec = self._chk([], [], {})
+        self.assertEqual(len(rec), 1)
+        self.assertEqual(rec[0]["level"], "ok")
+        self.assertIn("дубликатов logrotate нет", rec[0]["msg"])
+
+    def test_obsolete_and_live(self):
+        dup = {"file": "cloud-init-base", "line": 1, "kind": "duplicate",
+               "path": "/var/log/cloud-init*.log"}
+        rec = self._chk([dup], ["/etc/logrotate.d/cloud-init",
+                                "/etc/logrotate.d/cloud-init-base"],
+                        {"/etc/logrotate.d/cloud-init": "obsolete-conffile",
+                         "/etc/logrotate.d/cloud-init-base": "live-conffile"})
+        self.assertEqual(rec[0]["level"], "warn")
+        self.assertIn("cloud-init=obsolete-conffile", rec[0]["msg"])
+        self.assertIn("cloud-init-base=live-conffile", rec[0]["msg"])
+        self.assertIn("карантин", rec[0]["msg"])
+
+    def test_live_only_no_autofix_hint(self):
+        dup = {"file": "x", "line": 2, "kind": "duplicate", "path": "/var/log/x.log"}
+        rec = self._chk([dup], ["/etc/logrotate.d/a", "/etc/logrotate.d/b"],
+                        {"/etc/logrotate.d/a": "live-conffile",
+                         "/etc/logrotate.d/b": "unowned"})
+        self.assertEqual(rec[0]["level"], "warn")
+        self.assertIn("авто-фикс не тронет", rec[0]["msg"])
+
+    def test_no_covering_configs_manual(self):
+        dup = {"file": "x", "line": 3, "kind": "duplicate", "path": "/var/log/x.log"}
+        rec = self._chk([dup], [], {})
+        self.assertIn("разбор вручную", rec[0]["msg"])
+
+
+class TestFixLogrotateDuplicates(unittest.TestCase):
+    """fix_logrotate_duplicates: obsolete → карантин, верификация."""
+
+    def setUp(self):
+        import chimera.modules.system_doctor as sd
+        self.sd = sd
+        self.tmp = Path(tempfile.mkdtemp())
+        self.bak = self.tmp / "backups"
+        self.old = self.tmp / "cloud-init"
+        self.new = self.tmp / "cloud-init-base"
+        self.old.write_text("/var/log/cloud-init*.log {\n}\n")
+        self.new.write_text("/var/log/cloud-init*.log {\n}\n")
+        self.ctx = sd.DoctorCtx(cfg={}, mode="fix", dry_run=False)
+        self.dup = {"file": "cloud-init-base", "line": 1,
+                    "kind": "duplicate", "path": "/var/log/cloud-init*.log"}
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fix(self, after_errors):
+        """Патчит IO: дубликат виден ДО фикса; after_errors — после."""
+        calls = {"n": 0}
+
+        def _dryrun():
+            calls["n"] += 1
+            return [self.dup] if calls["n"] == 1 else after_errors
+
+        with patch.multiple(self.sd,
+                            BACKUP_ROOT=self.bak,
+                            _logrotate_dryrun_errors=MagicMock(side_effect=_dryrun),
+                            _covering_configs=MagicMock(
+                                return_value=[str(self.old), str(self.new)]),
+                            _config_owner_status=MagicMock(side_effect=lambda c: (
+                                "obsolete-conffile" if c == str(self.old)
+                                else "live-conffile"))):
+            return self.sd.fix_logrotate_duplicates(self.ctx)
+
+    def test_obsolete_quarantined_live_kept(self):
+        ok, msg = self._fix(after_errors=[])
+        self.assertTrue(ok)
+        self.assertIn("obsolete-хвосты", msg)
+        self.assertIn("cloud-init", msg)
+        self.assertFalse(self.old.exists())            # уехал в карантин
+        self.assertTrue(self.new.exists())             # живой не тронут
+        quar = list(self.bak.rglob("cloud-init"))
+        self.assertEqual(len(quar), 1)
+        self.assertEqual(quar[0].read_text(),
+                         "/var/log/cloud-init*.log {\n}\n")
+
+    def test_leftover_duplicate_is_error(self):
+        ok, msg = self._fix(after_errors=[self.dup])
+        self.assertFalse(ok)
+        self.assertIn("дубликаты остались", msg)
+        self.assertFalse(self.old.exists())            # карантин был применён
+
+    def test_no_obsolete_noop(self):
+        calls = {"n": 0}
+
+        def _dryrun():
+            return [self.dup]
+
+        with patch.multiple(self.sd,
+                            BACKUP_ROOT=self.bak,
+                            _logrotate_dryrun_errors=MagicMock(side_effect=_dryrun),
+                            _covering_configs=MagicMock(
+                                return_value=[str(self.old), str(self.new)]),
+                            _config_owner_status=MagicMock(
+                                return_value="live-conffile")):
+            ok, msg = self.sd.fix_logrotate_duplicates(self.ctx)
+        self.assertIsNone(ok)
+        self.assertEqual(msg, "")
+        self.assertTrue(self.old.exists())              # никто не тронут
+        self.assertTrue(self.new.exists())
+
+    def test_no_duplicates_noop(self):
+        with patch.multiple(self.sd,
+                            _logrotate_dryrun_errors=MagicMock(return_value=[])):
+            ok, msg = self.sd.fix_logrotate_duplicates(self.ctx)
+        self.assertIsNone(ok)
+        self.assertEqual(msg, "")
+
+
+class TestFailedUnitsCause(unittest.TestCase):
+    """chk_failed_units: причина logrotate.service — в самой находке."""
+
+    def _chk(self, logrotate_stderr):
+        import chimera.modules.system_doctor as sd
+
+        def fake_run(cmd, timeout=120, **kw):
+            if cmd[:2] == ["systemctl", "--failed"]:
+                return MagicMock(returncode=0, stdout=(
+                    "logrotate.service loaded failed failed "
+                    "(Result: exit-code) since Thu 2026-11-26\n"))
+            if cmd[:2] == ["logrotate", "-d"]:
+                return MagicMock(returncode=0, stdout="", stderr=logrotate_stderr)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        ctx = sd.DoctorCtx(cfg={})
+        with patch("chimera.modules.system_doctor._run", side_effect=fake_run):
+            sd.chk_failed_units(ctx)
+        return [f for f in ctx.findings if f["check"] == "failed_units"]
+
+    def test_logrotate_cause_in_finding(self):
+        rec = self._chk(
+            "error: cloud-init-base:1 duplicate log entry for /var/log/cloud-init*.log\n"
+            "error: found error in file cloud-init-base, skipping\n")
+        self.assertEqual(len(rec), 1)
+        self.assertEqual(rec[0]["level"], "crit")
+        self.assertIn("failed: logrotate.service", rec[0]["msg"])
+        self.assertIn("duplicate log entry /var/log/cloud-init*.log", rec[0]["msg"])
+        self.assertIn("logrotate_duplicates", rec[0]["msg"])
+
+    def test_logrotate_no_dup_old_style(self):
+        rec = self._chk("")
+        self.assertEqual(len(rec), 1)
+        self.assertIn("journalctl", rec[0]["msg"])
+        self.assertNotIn("duplicate log entry", rec[0]["msg"])
+
+    def test_other_unit_untouched(self):
+        import chimera.modules.system_doctor as sd
+
+        def fake_run(cmd, timeout=120, **kw):
+            if cmd[:2] == ["systemctl", "--failed"]:
+                return MagicMock(returncode=0, stdout=(
+                    "hysteria-server.service loaded failed failed\n"))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        ctx = sd.DoctorCtx(cfg={})
+        with patch("chimera.modules.system_doctor._run", side_effect=fake_run):
+            sd.chk_failed_units(ctx)
+        rec = [f for f in ctx.findings if f["check"] == "failed_units"]
+        self.assertIn("failed: hysteria-server.service", rec[0]["msg"])
+        self.assertNotIn("duplicate", rec[0]["msg"])
 
 
 if __name__ == "__main__":

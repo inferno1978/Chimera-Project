@@ -27,10 +27,10 @@ apt-апдейтов без unattended-upgrades, pingtunnel-логи по 16MB/�
   • dry-run показывает команды/записи без применения;
   • всё идемпотентно: повторный проход по уже здоровой ноде = no-op.
 
-Состав (24 пункта, группы: journal/logs, boot/units, apt/kernel,
+Состав (25 пунктов, группы: journal/logs, boot/units, apt/kernel,
 services, security-audit, fleet):
-  journald_cap, big_logs, logrotate_coverage, unit_log_perms,
-  failed_units, rc_local, phantom_netplan, crash_loops,
+  journald_cap, big_logs, logrotate_coverage, logrotate_duplicates,
+  unit_log_perms, failed_units, rc_local, phantom_netplan, crash_loops,
   apt_cache, old_kernels, updates_pending, reboot_flag, unattended,
   timesync, fail2ban, disk_usage,
   xray_version, cert_expiry, steal_snapshot, vm_migration, tunnels,
@@ -64,7 +64,8 @@ parse_netplan_ifaces, classify_reboot_required, parse_nrestarts,
 parse_unit_log_rules, parse_journal_usage_mb, parse_kernel_pkgs,
 parse_listening_ports, parse_ufw_allowed, extract_cert_paths,
 parse_xray_version, parse_tsc_mhz, tsc_change_kind, human_mb,
-merge_cfg, build_logrotate_stanza.
+merge_cfg, build_logrotate_stanza, parse_logrotate_errors,
+parse_dpkg_s_exact, parse_conffiles_obsolete, is_compressed_magic.
 """
 from __future__ import annotations
 
@@ -104,6 +105,9 @@ CHECK_CATALOG: dict = {
                  "файлы >N MB вне logrotate: gzip-копия + truncate"),
     "logrotate_coverage": ("Логи без logrotate", 1, True, True, True,
                            "известные логи chimera/fleet: drop-in ротации"),
+    "logrotate_duplicates": ("Дубликаты logrotate", 1, True, True, True,
+                             "duplicate log entry (хвост миграции ОС): "
+                             "obsolete-конфиг в карантин, верификация"),
     "unit_log_perms": ("Права на логи юнитов", 1, True, True, True,
                        "StandardOutput=append: файл должен принадлежать User= юнита"),
     "failed_units": ("Failed-юниты", 1, True, True, True,
@@ -815,6 +819,42 @@ def in_quiet_hours(now_hhmm: str, quiet: dict) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _COMPRESSED_EXT = (".gz", ".xz", ".zst", ".bz2", ".zip", ".old", ".1", ".doctor-")
+_ARCHIVE_EXT = (".tar", ".tgz", ".txz", ".tbz2", ".tar.gz", ".tar.xz",
+                ".tar.bz2", ".tar.zst")
+_COMPRESSED_MAGIC = (
+    (b"\x1f\x8b", "gzip"),            # .gz/.tgz — весь gzip-семейство
+    (b"\xfd7zXZ\x00", "xz"),
+    (b"\x28\xb5\x2f\xfd", "zstd"),
+    (b"BZh", "bzip2"),
+    (b"PK\x03\x04", "zip"),
+    (b"7z\xbc\xaf\x27\x1c", "7z"),
+    (b"Rar!\x1a\x07", "rar"),
+)
+
+
+def is_compressed_magic(head: bytes) -> bool:
+    """Первые байты файла — магика архивного формата (gzip/xz/zstd/
+    bzip2/zip/7z/rar)? Пустые/короткие — False. Чистая функция."""
+    if not head or len(head) < 3:
+        return False
+    return any(head.startswith(m) for m, _ in _COMPRESSED_MAGIC)
+
+
+def is_archive_or_compressed(path) -> bool:
+    """Файл — архив/сжатый (расширение ИЛИ магика байт)? big_logs обязан
+    такие пропускать: gzip-копия поверх уже-сжатого не экономит ничего,
+    а truncate оригинала рушит данные (кейс 26.11: миграционные .tgz
+    255M/183M были обнулены фиксом — .tgz не попадал в _COMPRESSED_EXT;
+    восстановление — вручную из doctor-копий). Магика спасает и без
+    расширения: бинарный срез с gzip-заголовком не трогаем."""
+    p = str(path).lower()
+    if p.endswith(_COMPRESSED_EXT) or p.endswith(_ARCHIVE_EXT):
+        return True
+    try:
+        with open(p, "rb") as f:
+            return is_compressed_magic(f.read(8))
+    except OSError:
+        return False
 
 
 def chk_journald_cap(ctx: DoctorCtx) -> None:
@@ -844,7 +884,7 @@ def _find_big_logs(ctx: DoctorCtx) -> list:
             # journal — управляется journald сам, не трогаем
             dirs[:] = [x for x in dirs if os.path.join(root, x) != "/var/log/journal"]
             for f in files:
-                if f.endswith(_COMPRESSED_EXT):
+                if is_archive_or_compressed(os.path.join(root, f)):
                     continue
                 p = os.path.join(root, f)
                 try:
@@ -909,6 +949,141 @@ def chk_logrotate_coverage(ctx: DoctorCtx) -> None:
                    f"{p} без logrotate (фикс: drop-in chimera-doctor)")
 
 
+# ── logrotate-дубликаты: хвосты миграций ОС (кейс 26.11, флот) ────────────────
+# Два конфига покрывают один лог → «error: duplicate log entry» → logrotate
+# выходит rc=1 → logrotate.service failed каждую ночь + карточка doctor.
+# Живой кейс: ручная миграция 24.04→26.04 — пакет cloud-init сменил имя
+# logrotate-конфига (cloud-init → cloud-init-base), старый conffile остался
+# на диске с пометкой dpkg «obsolete», оба крутят один и тот же glob.
+
+_DUP_RE = re.compile(
+    r"^error:\s*(\S+?):(\d+)\s+duplicate log entry for\s+(\S+)",
+    re.IGNORECASE)
+_LR_SKIP_RE = re.compile(
+    r"^error:\s+found error in file\s+(\S+?),\s+skipping\s*$",
+    re.IGNORECASE)
+
+
+def parse_logrotate_errors(text: str) -> list:
+    """Разбор ошибок вывода `logrotate -d /etc/logrotate.conf`:
+    duplicate-строки («error: <файл>:<строка> duplicate log entry for
+    <путь>») и «error: found error in file <файл>, skipping». Прочий шум
+    (state-файл/euid от непривилегированного запуска, warning-и) не
+    трогаем. Возвращает [{'file', 'line', 'kind': 'duplicate'|'skipped',
+    'path'}]. Чистая функция."""
+    out = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        m = _DUP_RE.match(line)
+        if m:
+            out.append({"file": m.group(1), "line": int(m.group(2)),
+                        "kind": "duplicate", "path": m.group(3)})
+            continue
+        m = _LR_SKIP_RE.match(line)
+        if m:
+            out.append({"file": m.group(1), "line": None,
+                        "kind": "skipped", "path": ""})
+    return out
+
+
+def parse_dpkg_s_exact(text: str, path: str) -> list:
+    """Точные владельцы пути из вывода dpkg -S (строки «pkg: path»).
+    dpkg -S матчит ПОДСТРОКИ — запрос /etc/logrotate.d/cloud-init
+    находит и /etc/logrotate.d/cloud-init-base — принимаем только
+    строки, где поле пути равно запрошенному РОВНО. Возвращает список
+    пакетов. Чистая функция."""
+    owners = []
+    for raw in (text or "").splitlines():
+        pkg, sep, p = raw.rpartition(":")
+        if not sep or "diversion" in raw:
+            continue
+        if p.strip() == str(path) and pkg.strip():
+            owners.append(pkg.strip())
+    return owners
+
+
+def parse_conffiles_obsolete(text: str, path: str) -> bool:
+    """Пометка obsolete у conffile в выводе `dpkg-query -W
+    -f=${Conffiles}` (строки «path md5» или «path md5 obsolete»).
+    Чистая функция."""
+    for raw in (text or "").splitlines():
+        parts = raw.split()
+        if parts and parts[0] == str(path):
+            return "obsolete" in raw
+    return False
+
+
+def _logrotate_dryrun_errors() -> list:
+    """Ошибки dry-run logrotate: rc не важен (для -d он всегда 0),
+    ошибки живут в тексте stdout+stderr."""
+    r = _run(["logrotate", "-d", "/etc/logrotate.conf"], timeout=60)
+    return parse_logrotate_errors((r.stdout or "") + "\n" + (r.stderr or ""))
+
+
+def _covering_configs(path_pattern: str, confs: list = None) -> list:
+    """Конфиги, покрывающие путь/глоб (duplicate-пути стоят в конфигах
+    как лексемы-токены). По умолчанию — /etc/logrotate.conf +
+    /etc/logrotate.d/*; confs — для тестов/явного списка."""
+    covers = []
+    for conf in (confs if confs is not None
+                 else ["/etc/logrotate.conf"] + glob.glob("/etc/logrotate.d/*")):
+        try:
+            with open(conf, encoding="utf-8", errors="replace") as f:
+                tokens = f.read().split()
+        except OSError:
+            continue
+        if str(path_pattern) in tokens:
+            covers.append(conf)
+    return covers
+
+
+def _config_owner_status(conf_path: str) -> str:
+    """Классификация конфига logrotate для решения об авто-фиксе:
+    'obsolete-conffile' — путь числится за пакетом, но conffile-запись
+    помечена obsolete (хвост миграции/переименования: текущая версия
+    пакета файл больше не несёт → карантин перманентен, dpkg его не
+    вернёт); 'live-conffile' — живой conffile (конфликт двух живых
+    пакетов — разбор владельцем, авто-фикс не тронет); 'unowned' —
+    пакета-владельца нет (наши скриптовые chimera-*/чужие legacy —
+    ручной разбор)."""
+    r = _run(["dpkg", "-S", str(conf_path)], timeout=20)
+    owners = parse_dpkg_s_exact(r.stdout or "", conf_path)
+    if not owners:
+        return "unowned"
+    for pkg in owners:
+        q = _run(["dpkg-query", "-W", "-f=${Conffiles}", pkg], timeout=20)
+        if parse_conffiles_obsolete(q.stdout or "", conf_path):
+            return "obsolete-conffile"
+    return "live-conffile"
+
+
+def chk_logrotate_duplicates(ctx: DoctorCtx) -> None:
+    dups = [e for e in _logrotate_dryrun_errors()
+            if e["kind"] == "duplicate"]
+    if not dups:
+        ctx.record("logrotate_duplicates", "ok",
+                   "дубликатов logrotate нет (dry-run чист)")
+        return
+    for e in dups:
+        confs = _covering_configs(e["path"])
+        if not confs:
+            ctx.record("logrotate_duplicates", "warn",
+                       f"дубликат {e['path']} ({e['file']}:{e['line']}) — "
+                       f"покрывающих конфигов не найдено, разбор вручную")
+            continue
+        verdicts = {c: _config_owner_status(c) for c in confs}
+        obsolete = [c for c, v in verdicts.items()
+                    if v == "obsolete-conffile"]
+        msg = (f"дубликат {e['path']}: "
+               + ", ".join(f"{os.path.basename(c)}={verdicts[c]}"
+                           for c in confs))
+        if obsolete:
+            msg += " (фикс: obsolete-хвост в карантин)"
+        else:
+            msg += " — авто-фикс не тронет (живые/бесхозные)"
+        ctx.record("logrotate_duplicates", "warn", msg)
+
+
 def _unit_log_rules() -> list:
     r = _run(["systemctl", "show", "*.service", "-p", "Id", "-p", "User",
               "-p", "StandardOutput", "-p", "StandardError", "--no-legend",
@@ -961,9 +1136,19 @@ def chk_failed_units(ctx: DoctorCtx) -> None:
         return
     for l in lines:
         parts = l.split()
-        ctx.record("failed_units", "crit",
-                   f"failed: {parts[0]} ({' '.join(parts[1:3])}) "
-                   f"(фикс: reset-failed; причину смотреть journalctl -u {parts[0]})")
+        msg = (f"failed: {parts[0]} ({' '.join(parts[1:3])}) "
+               f"(фикс: reset-failed; причину смотреть journalctl -u {parts[0]})")
+        if parts[0] == "logrotate.service":
+            # слепота снята (кейс 26.11): карточка несла только «причину
+            # смотреть journalctl», а причина была механически известна —
+            # duplicate log entry; теперь она в самой находке
+            dups = [e for e in _logrotate_dryrun_errors()
+                    if e["kind"] == "duplicate"]
+            if dups:
+                msg += (f"; причина: duplicate log entry {dups[0]['path']} "
+                        f"({dups[0]['file']}:{dups[0]['line']}) — "
+                        f"фикс: logrotate_duplicates")
+        ctx.record("failed_units", "crit", msg)
 
 
 def chk_rc_local(ctx: DoctorCtx) -> None:
@@ -1577,6 +1762,35 @@ def fix_logrotate_coverage(ctx: DoctorCtx):
         return False, f"logrotate отверг конфиг: {r.stderr[:200]}"
     return True, (f"logrotate: drop-in на {len(uncovered)} лог(ов) "
                   f"({', '.join(os.path.basename(p) for p in uncovered[:5])})")
+
+
+def fix_logrotate_duplicates(ctx: DoctorCtx):
+    """Лечение duplicate log entry: obsolete-conffile-хвосты — в карантин
+    (move_to_backup: BACKUP_ROOT/<stamp>/quarantine, НЕ rm — обратимо);
+    живые/бесхозные конфиги не трогаем. После карантина — контрольный
+    dry-run: дубликаты обязаны исчезнуть, иначе честная ошибка."""
+    dups = [e for e in _logrotate_dryrun_errors()
+            if e["kind"] == "duplicate"]
+    if not dups:
+        return None, ""
+    quarantined = []
+    for e in dups:
+        for conf in _covering_configs(e["path"]):
+            if _config_owner_status(conf) != "obsolete-conffile":
+                continue
+            if not ctx.move_to_backup(conf):
+                return False, f"не удалось увести в карантин {conf}"
+            quarantined.append(conf)
+    if not quarantined:
+        return None, ""
+    left = [x for x in _logrotate_dryrun_errors()
+            if x["kind"] == "duplicate"]
+    if left:
+        return False, ("после карантина дубликаты остались: "
+                       + ", ".join(f"{x['file']} ({x['path']})"
+                                   for x in left[:3]))
+    return True, ("logrotate: obsolete-хвосты в карантине — "
+                   + ", ".join(os.path.basename(c) for c in quarantined))
 
 
 def fix_unit_log_perms(ctx: DoctorCtx):
