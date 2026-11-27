@@ -2371,7 +2371,7 @@ def do_traffic_watcher_menu() -> None:
     """Интерактивное меню наблюдателя (TUI)."""
     from chimera.modules.box_renderer import (
         _box_top, _box_row, _box_sep, _box_bottom, _box_item, _box_back,
-        _box_ok, _box_warn,
+        _box_ok, _box_warn, strip_html,
     )
     C = _colors()
 
@@ -2430,7 +2430,7 @@ def do_traffic_watcher_menu() -> None:
             _box_row(f"  {C['DIM']}Трафик по нодам "
                      f"(окно дайджеста / всего):{C['NC']}")
             for r in rows[:10]:
-                _box_row(f"  {r}")
+                _box_row(f"  {strip_html(r)}")
         elif names:
             _box_row(f"  {C['DIM']}Трафика через exit-ноды пока не было "
                      f"(или первый прогон){C['NC']}")
@@ -2498,7 +2498,7 @@ def do_traffic_watcher_menu() -> None:
             res = run_once(force=True)
             if res.get("events"):
                 for ev in res["events"]:
-                    _box_ok(f"Отправлено: {ev}")
+                    _box_ok(f"Отправлено: {strip_html(ev)}")
             if not res.get("stats_ok"):
                 _box_warn("Источники данных недоступны — событие "
                           "traffic_stats_error уйдёт после 3-го неудачного "
@@ -2903,7 +2903,7 @@ def _menu_aliases(cfg: dict) -> None:
                     key.split(" · ")[0]) or ""
                 shown = f"{C['GREEN']}{alias}{C['NC']}" if alias \
                     else f"{C['DIM']}—{C['NC']}"
-                _box_row(f"  {i}. <code>{key}</code> {C['DIM']}({hint})"
+                _box_row(f"  {i}. {key} {C['DIM']}({hint})"
                          f"{C['NC']} → {shown}")
         else:
             _box_row(f"  {C['DIM']}Ноды каскадов не найдены{C['NC']}")

@@ -773,7 +773,7 @@ def do_exit_watcher_menu() -> None:
     """Интерактивное меню наблюдателя (TUI)."""
     from chimera.modules.box_renderer import (
         _box_top, _box_row, _box_sep, _box_bottom, _box_item, _box_back,
-        _box_ok, _box_warn,
+        _box_ok, _box_warn, strip_html,
     )
     C = _colors()
 
@@ -807,7 +807,7 @@ def do_exit_watcher_menu() -> None:
         _box_sep()
         if eff_set:
             for k in in_set:
-                _box_row(f"  {C['GREEN']}✓{C['NC']} <code>{menu_labels.get(k) or k}")
+                _box_row(f"  {C['GREEN']}✓{C['NC']} {menu_labels.get(k) or k}")
             for k, v in excl:
                 why = ", ".join(v.get("reasons") or ["?"])
                 _box_row(f"  {C['DIM']}✗ {menu_labels.get(k) or k} — {why}{C['NC']}")
@@ -852,7 +852,7 @@ def do_exit_watcher_menu() -> None:
             res = run_once(force=True)
             if res.get("events"):
                 for ev in res["events"]:
-                    _box_ok(f"Отправлено: {ev}")
+                    _box_ok(f"Отправлено: {strip_html(ev)}")
             else:
                 _box_ok("Изменений нет (снапшот обновлён)")
             input(f"{C['CYAN']}Нажмите Enter...{C['NC']}")

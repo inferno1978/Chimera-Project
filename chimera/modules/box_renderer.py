@@ -87,6 +87,24 @@ def _plain(s: str) -> str:
     return _re.sub(r'\033\[[0-9;]*m', '', s)
 
 
+_TG_TAG_RE = _re.compile(r"</?(?:b|i|u|s|code|pre|a)\b[^>]*>",
+                         _re.IGNORECASE)
+
+
+def strip_html(text: str) -> str:
+    """TG-HTML → чистый текст для TUI: убрать теги (<b>/<i>/<u>/<s>/
+    <code>/<pre>/<a …>) и &-сущности. Для печати строк-«увед»
+    (дайджесты, события, ряды распределения) в терминале, где
+    HTML-разметка не рендерится и сырые теги выглядят «лишними»
+    (запрос владельца 27.11.2026)."""
+    s = str(text or "")
+    s = _TG_TAG_RE.sub("", s)
+    for ent, ch in (("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'),
+                    ("&#39;", "'"), ("&amp;", "&")):
+        s = s.replace(ent, ch)
+    return s
+
+
 def _wcslen(s: str) -> int:
     """
     Подсчёт видимой ширины строки в терминале с учётом:
