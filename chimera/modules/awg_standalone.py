@@ -508,7 +508,13 @@ def awgs_install_dkms() -> bool:
                     return _awgs_install_dkms_fallback()
 
                 tmp_path.chmod(0o644)
-                tmp_path.replace(keyring_file)
+                # copy, не replace: /tmp часто tmpfs — rename через
+                # устройства падает EXDEV (кейс EE 27.11.2026:
+                # fresh-установка exit без keyring роняла всю DKMS-ветку
+                # в userspace-фолбэк с нерабочим awg-quick)
+                import shutil
+                shutil.copyfile(tmp_path, keyring_file)
+                keyring_file.chmod(0o644)
                 core.info("GPG-ключ импортирован и проверен")
             finally:
                 tmp_path.unlink(missing_ok=True)
