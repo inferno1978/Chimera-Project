@@ -1705,7 +1705,7 @@ class TestParsersMultitransport(unittest.TestCase):
         self.assertEqual(tw._tw_awg_strategy_label(
             {"lb_mode": True, "lb_pinned": "pl1"}), "AWG Pinned (pl1)")
         self.assertEqual(tw._tw_awg_strategy_label(
-            {"lb_mode": False}), "AWG-каскад (failover)")
+            {"lb_mode": False}), "AWG Failover")
         self.assertEqual(tw._tw_awg_strategy_label({}), "AWG-каскад")
 
 
@@ -1885,7 +1885,7 @@ class TestSourcesMultitransport(unittest.TestCase):
         # failover: ротация = активный exit
         self.assertEqual(src["selector"], ["awg:pl1"])
         self.assertEqual(src["dead"], {"awg:de": True, "awg:nl1": True})
-        self.assertEqual(src["strategy"], "AWG-каскад (failover)")
+        self.assertEqual(src["strategy"], "AWG Failover")
         # счётчики ТОЛЬКО активному: awg1 принадлежит pl1, фантомных
         # байтов у неактивных (устаревшие слоты awg2/awg3) — нет
         self.assertEqual(src["counters"],
@@ -2284,7 +2284,7 @@ class TestRunOnceMultiCascade(unittest.TestCase):
         self.assertIn("traffic_dominant_change", res["events"])
         det = next(d for ev, d, _ in self._details
                    if ev == "traffic_dominant_change")
-        self.assertIn("AWG-каскад (failover): активная нода "
+        self.assertIn("AWG Failover: активная нода "
                       "<b><code>nl1 · 10.0.0.3:52831</code></b>", det)
         self.assertIn("Переключение ноды: <code>de · 10.0.0.2:52831</code> → "
                       "<b><code>nl1 · 10.0.0.3:52831</code></b>", det)

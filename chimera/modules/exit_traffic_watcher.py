@@ -1553,7 +1553,7 @@ def _tw_awg_strategy_label(st: dict) -> str:
         raw = str(st.get("lb_strategy") or "").strip()
         return _AWG_STRATEGY_PRETTY.get(raw, f"AWG {raw}" if raw
                                         else "AWG LB")
-    return "AWG-каскад (failover)"
+    return "AWG Failover"
 
 
 def _tw_mieru_source(bytes_source: str = "auto") -> dict | None:

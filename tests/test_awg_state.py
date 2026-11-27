@@ -21,6 +21,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -58,8 +59,21 @@ class TestStateLoadSave(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch_state_file(self):
-        return patch("chimera.modules.awg_state.AWGS_STATE_FILE",
-                     self._state_file)
+        # FIX 27.11.2026: гард awgs_state_save (16.11) отказывает записи
+        # state без installed при живом awg0.conf; на живой ноде реальный
+        # /etc/amnezia/amneziawg/awg0.conf существует (env-класс
+        # расхождений «живая нода vs чистый контейнер» — /etc/amnezia
+        # не входит в _env_isolation) и режет тестовые сейвы минимальных
+        # стейтов. Патчим и SERVER_CONF → несуществующий путь: гард в
+        # тестах всегда неактивен, поведение как в чистой среде.
+        stack = ExitStack()
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_STATE_FILE",
+            self._state_file))
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_SERVER_CONF",
+            Path(self._tmpdir) / "no-awg0.conf"))
+        return stack
 
     def test_load_returns_empty_dict_when_no_file(self):
         from chimera.modules import awg_state
@@ -121,8 +135,21 @@ class TestStateUpdate(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch_state_file(self):
-        return patch("chimera.modules.awg_state.AWGS_STATE_FILE",
-                     self._state_file)
+        # FIX 27.11.2026: гард awgs_state_save (16.11) отказывает записи
+        # state без installed при живом awg0.conf; на живой ноде реальный
+        # /etc/amnezia/amneziawg/awg0.conf существует (env-класс
+        # расхождений «живая нода vs чистый контейнер» — /etc/amnezia
+        # не входит в _env_isolation) и режет тестовые сейвы минимальных
+        # стейтов. Патчим и SERVER_CONF → несуществующий путь: гард в
+        # тестах всегда неактивен, поведение как в чистой среде.
+        stack = ExitStack()
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_STATE_FILE",
+            self._state_file))
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_SERVER_CONF",
+            Path(self._tmpdir) / "no-awg0.conf"))
+        return stack
 
     def test_merges_new_keys(self):
         from chimera.modules import awg_state
@@ -161,8 +188,21 @@ class TestStateInit(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch_state_file(self):
-        return patch("chimera.modules.awg_state.AWGS_STATE_FILE",
-                     self._state_file)
+        # FIX 27.11.2026: гард awgs_state_save (16.11) отказывает записи
+        # state без installed при живом awg0.conf; на живой ноде реальный
+        # /etc/amnezia/amneziawg/awg0.conf существует (env-класс
+        # расхождений «живая нода vs чистый контейнер» — /etc/amnezia
+        # не входит в _env_isolation) и режет тестовые сейвы минимальных
+        # стейтов. Патчим и SERVER_CONF → несуществующий путь: гард в
+        # тестах всегда неактивен, поведение как в чистой среде.
+        stack = ExitStack()
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_STATE_FILE",
+            self._state_file))
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_SERVER_CONF",
+            Path(self._tmpdir) / "no-awg0.conf"))
+        return stack
 
     def test_creates_full_state(self):
         from chimera.modules import awg_state
@@ -219,8 +259,21 @@ class TestPeersManagement(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch_state_file(self):
-        return patch("chimera.modules.awg_state.AWGS_STATE_FILE",
-                     self._state_file)
+        # FIX 27.11.2026: гард awgs_state_save (16.11) отказывает записи
+        # state без installed при живом awg0.conf; на живой ноде реальный
+        # /etc/amnezia/amneziawg/awg0.conf существует (env-класс
+        # расхождений «живая нода vs чистый контейнер» — /etc/amnezia
+        # не входит в _env_isolation) и режет тестовые сейвы минимальных
+        # стейтов. Патчим и SERVER_CONF → несуществующий путь: гард в
+        # тестах всегда неактивен, поведение как в чистой среде.
+        stack = ExitStack()
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_STATE_FILE",
+            self._state_file))
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_SERVER_CONF",
+            Path(self._tmpdir) / "no-awg0.conf"))
+        return stack
 
     def _init_state(self):
         from chimera.modules import awg_state
@@ -323,8 +376,21 @@ class TestEnsurePeerOwnerField(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch_state_file(self):
-        return patch("chimera.modules.awg_state.AWGS_STATE_FILE",
-                     self._state_file)
+        # FIX 27.11.2026: гард awgs_state_save (16.11) отказывает записи
+        # state без installed при живом awg0.conf; на живой ноде реальный
+        # /etc/amnezia/amneziawg/awg0.conf существует (env-класс
+        # расхождений «живая нода vs чистый контейнер» — /etc/amnezia
+        # не входит в _env_isolation) и режет тестовые сейвы минимальных
+        # стейтов. Патчим и SERVER_CONF → несуществующий путь: гард в
+        # тестах всегда неактивен, поведение как в чистой среде.
+        stack = ExitStack()
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_STATE_FILE",
+            self._state_file))
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_SERVER_CONF",
+            Path(self._tmpdir) / "no-awg0.conf"))
+        return stack
 
     def test_adds_owner_email_when_missing(self):
         from chimera.modules import awg_state
@@ -371,8 +437,21 @@ class TestIpAllocation(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch_state_file(self):
-        return patch("chimera.modules.awg_state.AWGS_STATE_FILE",
-                     self._state_file)
+        # FIX 27.11.2026: гард awgs_state_save (16.11) отказывает записи
+        # state без installed при живом awg0.conf; на живой ноде реальный
+        # /etc/amnezia/amneziawg/awg0.conf существует (env-класс
+        # расхождений «живая нода vs чистый контейнер» — /etc/amnezia
+        # не входит в _env_isolation) и режет тестовые сейвы минимальных
+        # стейтов. Патчим и SERVER_CONF → несуществующий путь: гард в
+        # тестах всегда неактивен, поведение как в чистой среде.
+        stack = ExitStack()
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_STATE_FILE",
+            self._state_file))
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_SERVER_CONF",
+            Path(self._tmpdir) / "no-awg0.conf"))
+        return stack
 
     def test_next_ip_returns_2_when_empty(self):
         from chimera.modules import awg_state
@@ -434,8 +513,21 @@ class TestCascadeRole(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch_state_file(self):
-        return patch("chimera.modules.awg_state.AWGS_STATE_FILE",
-                     self._state_file)
+        # FIX 27.11.2026: гард awgs_state_save (16.11) отказывает записи
+        # state без installed при живом awg0.conf; на живой ноде реальный
+        # /etc/amnezia/amneziawg/awg0.conf существует (env-класс
+        # расхождений «живая нода vs чистый контейнер» — /etc/amnezia
+        # не входит в _env_isolation) и режет тестовые сейвы минимальных
+        # стейтов. Патчим и SERVER_CONF → несуществующий путь: гард в
+        # тестах всегда неактивен, поведение как в чистой среде.
+        stack = ExitStack()
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_STATE_FILE",
+            self._state_file))
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_SERVER_CONF",
+            Path(self._tmpdir) / "no-awg0.conf"))
+        return stack
 
     def test_entry_role(self):
         from chimera.modules import awg_state
@@ -488,8 +580,21 @@ class TestHelpers(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _patch_state_file(self):
-        return patch("chimera.modules.awg_state.AWGS_STATE_FILE",
-                     self._state_file)
+        # FIX 27.11.2026: гард awgs_state_save (16.11) отказывает записи
+        # state без installed при живом awg0.conf; на живой ноде реальный
+        # /etc/amnezia/amneziawg/awg0.conf существует (env-класс
+        # расхождений «живая нода vs чистый контейнер» — /etc/amnezia
+        # не входит в _env_isolation) и режет тестовые сейвы минимальных
+        # стейтов. Патчим и SERVER_CONF → несуществующий путь: гард в
+        # тестах всегда неактивен, поведение как в чистой среде.
+        stack = ExitStack()
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_STATE_FILE",
+            self._state_file))
+        stack.enter_context(patch(
+            "chimera.modules.awg_state.AWGS_SERVER_CONF",
+            Path(self._tmpdir) / "no-awg0.conf"))
+        return stack
 
     def test_is_installed_false_when_no_state(self):
         from chimera.modules import awg_state

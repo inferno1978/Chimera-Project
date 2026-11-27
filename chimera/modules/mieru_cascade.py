@@ -1929,6 +1929,11 @@ def _write_units() -> None:
         "[Service]\n"
         "Type=oneshot\n"
         "RemainAfterExit=yes\n"
+        # IPAccounting: пер-exit байты для наблюдателя (exit_traffic_watcher,
+        # bytes_source=auto/ipaccounting: метрика «байты (IPAccounting)»
+        # вместо «соединений»). Живой кейс 27.11: юниты, стартовавшие до
+        # ручного патча шаблона, теряли учёт при первом рестарте.
+        "IPAccounting=yes\n"
         "Environment=HOME=/var/lib/mieru-cascade/%i\n"
         "Environment=XDG_CONFIG_HOME=/var/lib/mieru-cascade/%i/.config\n"
         f"ExecStart={m._MIERU_BIN} start\n"
