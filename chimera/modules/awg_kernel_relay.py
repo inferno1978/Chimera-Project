@@ -60,7 +60,11 @@ Kernel-relay: ОДИН туннель + userspace UDP-релей (обход д�
     отката: режим держится, relaunch продолжается каждую минуту,
     напарник вернётся — флоу оживёт сам.
   • Автовосстановление после ребута — ОПЦИЯ (default off, честные
-    границы канона: transient-юниты и /run-записи не переживают ребут).
+    границы канона: transient-юниты и /run-записи не переживают ребут);
+    при автоподъёме политика оператора (fail_action: rollback /
+    notify_only) переносится из state-бокса — выбор «только уведомить»
+    переживает ребут (BUG 27.11: cfg собирали без поля, relay_enable
+    нормализовал отсутствие в rollback).
 
 Уведомления (tg_notify_event, канон каскадных событий):
   awg_relay_on        — релей включён (endpoint → loop)
@@ -810,6 +814,14 @@ def relay_health_tick() -> str:
             refresh=box.get("refresh", 0),
             preset=box.get("preset", "dns-fixed"),
             restore_on_boot=True,
+            # BUG 27.11 (restore-on-boot): fail_action ОБЯЗАН пробрасываться
+            # из state-бокса — relay_enable нормализует отсутствующее поле
+            # в «rollback», и выбор оператора «ТОЛЬКО уведомить» молча
+            # терялся при каждом автоподъёме после ребута (restore_on_boot
+            # при этом передавался явно — потому выживал, а политика нет).
+            # Нормализация здесь = честная совместимость старых боксов:
+            # мусор/отсутствие → rollback, как и в relay_enable.
+            fail_action=_fail_action_norm(box.get("fail_action")),
         )
         ok, why = relay_enable(cfg)
         if not ok:

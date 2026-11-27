@@ -24,6 +24,9 @@ Unit-тесты kernel-relay — одного туннеля + userspace UDP-р�
      + hold-N (fail_action=notify_only — удержание без отката: фичареквест
      Виталия 26.11 «уведомлять, но не откатывать»; TG-срез по спаму —
      ОДНО hold на переходе предела; awg_relay_recovered при оживании)
+     + boot-restore сохраняет fail_action из state-бокса (BUG 27.11:
+     автоподъём после ребута сбрасывал «notify_only» в «rollback» —
+     cfg для relay_enable собирали без поля; дефолт для старых боксов)
   7. Интеграция: пункт 9 «AWG-релей» в меню каскада (текст-контракт +
      порядок пунктов), верхний уровень модуля без chimera-импортов
      (worker запускается python3 -I), меню выходит по Q
@@ -544,6 +547,69 @@ class TestHealthTick(_RelayTest):
         self.assertEqual(
             self._tick(self._box(restore_on_boot=True), False,
                        self._alive, self._alive), "relaunch:boot")
+
+    def test_boot_restore_preserves_fail_action(self):
+        # BUG-репорт 27.11 (restore-on-boot): при автовосстановлении после
+        # ребута cfg собирался БЕЗ fail_action — relay_enable нормализовал
+        # отсутствующее поле в «rollback», и выбор оператора «ТОЛЬКО
+        # уведомить» молча терялся при каждом автоподъёме (в то время как
+        # restore_on_boot передавался явно — и выживал). Перехватываем cfg,
+        # который watchdog отдаёт в relay_enable: политика обязана дойти
+        # из state-бокса нетронутой.
+        captured = {}
+
+        def _fake_enable(cfg):
+            captured.update(cfg)
+            return True, ""
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with ExitStack() as st:
+                st.enter_context(patch.object(
+                    self.awg_constants, "AWGS_RELAY_ROOT", root))
+                for p in [
+                    patch.object(self.mod, "relay_state_get",
+                                 return_value=self._box(
+                                     restore_on_boot=True,
+                                     fail_action="notify_only")),
+                    patch.object(self.mod, "relay_enable",
+                                 side_effect=_fake_enable),
+                ]:
+                    p.start()
+                    st.callback(p.stop)
+                res = self.mod.relay_health_tick()
+        self.assertEqual(res, "relaunch:boot")
+        self.assertEqual(captured.get("fail_action"), "notify_only")
+        self.assertTrue(captured.get("restore_on_boot"))
+
+    def test_boot_restore_normalizes_absent_fail_action(self):
+        # старые state-боксы без fail_action (до фичи 26.11) при
+        # автовосстановлении обязаны получать честный дефолт «rollback» —
+        # как и при обычном enable (обратная совместимость прежнего
+        # поведения отката), но ЯВНО, а не через дырявый словарь cfg
+        captured = {}
+
+        def _fake_enable(cfg):
+            captured.update(cfg)
+            return True, ""
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with ExitStack() as st:
+                st.enter_context(patch.object(
+                    self.awg_constants, "AWGS_RELAY_ROOT", root))
+                for p in [
+                    patch.object(self.mod, "relay_state_get",
+                                 return_value=self._box(
+                                     restore_on_boot=True)),
+                    patch.object(self.mod, "relay_enable",
+                                 side_effect=_fake_enable),
+                ]:
+                    p.start()
+                    st.callback(p.stop)
+                res = self.mod.relay_health_tick()
+        self.assertEqual(res, "relaunch:boot")
+        self.assertEqual(captured.get("fail_action"), "rollback")
 
 
 # ── 7. Интеграция: меню каскада + worker-режим ─────────────────────────────
